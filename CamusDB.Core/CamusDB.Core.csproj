@@ -106,7 +106,10 @@
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.14" />
     <PackageReference Include="System.IO.Hashing" Version="10.0.14" />
     <PackageReference Include="System.Formats.Cbor" Version="10.0.15" />
-    <PackageReference Include="YaccLexTools" Version="1.2.3" />
+    <!-- Build-time tools: Gppg.Modern generates the SQL parser and adds its runtime
+         (ShiftReduceParserCode.cs) to the build; YaccLexTools.Gplex generates the scanner. -->
+    <PackageReference Include="Gppg.Modern" Version="1.6.0" PrivateAssets="all" />
+    <PackageReference Include="YaccLexTools.Gplex" Version="1.2.3.1" PrivateAssets="all" />
     <PackageReference Include="Nito.AsyncEx" Version="5.1.2" />
     <PackageReference Include="YamlDotNet" Version="18.1.0" />
   </ItemGroup>

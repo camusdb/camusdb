@@ -2,9 +2,9 @@
 // Copyright (c) Wayne Kelly, John Gough, QUT 2005-2014
 // (see accompanying GPPGcopyright.rtf)
 
-// GPPG version 1.5.3
-// DateTime: 15/11/2026 2:41:06 PM
-// Input file <SQLParser/SQLParser.Language.grammar.y - 15/11/2026 2:41:04 PM>
+// GPPG version 1.6.0
+// DateTime: 15/11/2026 2:46:51 PM
+// Input file <SQLParser/SQLParser.Language.grammar.y - 15/11/2026 2:46:40 PM>
 
 // options: no-lines gplex
 
@@ -56,7 +56,7 @@ internal partial struct ValueType
         public string s;
 }
 // Abstract base class for GPLEX scanners
-[GeneratedCodeAttribute( "Gardens Point Parser Generator", "1.5.3")]
+[GeneratedCodeAttribute( "Gardens Point Parser Generator", "1.6.0")]
 internal abstract class ScanBase : AbstractScanner<ValueType,LexLocation> {
   private LexLocation __yylloc = new LexLocation();
   public override LexLocation yylloc { get { return __yylloc; } set { __yylloc = value; } }
@@ -64,7 +64,7 @@ internal abstract class ScanBase : AbstractScanner<ValueType,LexLocation> {
 }
 
 // Utility class for encapsulating token information
-[GeneratedCodeAttribute( "Gardens Point Parser Generator", "1.5.3")]
+[GeneratedCodeAttribute( "Gardens Point Parser Generator", "1.6.0")]
 internal class ScanObj {
   public int token;
   public ValueType yylval;
@@ -74,7 +74,7 @@ internal class ScanObj {
   }
 }
 
-[GeneratedCodeAttribute( "Gardens Point Parser Generator", "1.5.3")]
+[GeneratedCodeAttribute( "Gardens Point Parser Generator", "1.6.0")]
 internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
 {
 #pragma warning disable 649
@@ -2786,297 +2786,3397 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
     this.InitStates(states);
     this.InitRules(rules);
     this.InitNonTerminals(nonTerms);
+    this.InitLocationTracking(false);
   }
 
+#pragma warning disable 162, 1522
   protected override void DoAction(int action)
   {
-#pragma warning disable 162, 1522
     switch (action)
     {
       case 2: // list -> stat
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction2();
         break;
       case 3: // list -> stat, semicolons
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-2].n; }
+        YYAction3();
         break;
       case 6: // stat -> select_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction6();
         break;
       case 7: // stat -> select_stmt, locking_clause
-{ CurrentSemanticValue.n = RowLockingAst.Wrap(ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n); }
+        YYAction7();
         break;
       case 8: // stat -> explain_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction8();
         break;
       case 9: // stat -> update_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction9();
         break;
       case 10: // stat -> delete_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction10();
         break;
       case 11: // stat -> insert_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction11();
         break;
       case 12: // stat -> create_table_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction12();
         break;
       case 13: // stat -> drop_table_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction13();
         break;
       case 14: // stat -> truncate_table_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction14();
         break;
       case 15: // stat -> create_database_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction15();
         break;
       case 16: // stat -> drop_database_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction16();
         break;
       case 17: // stat -> rename_database_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction17();
         break;
       case 18: // stat -> alter_table_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction18();
         break;
       case 19: // stat -> show_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction19();
         break;
       case 20: // stat -> create_index_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction20();
         break;
       case 21: // stat -> drop_index_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction21();
         break;
       case 22: // stat -> begin_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction22();
         break;
       case 23: // stat -> commit_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction23();
         break;
       case 24: // stat -> rollback_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction24();
         break;
       case 25: // stat -> set_transaction_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction25();
         break;
       case 26: // stat -> set_cluster_setting_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction26();
         break;
       case 27: // stat -> reset_cluster_setting_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction27();
         break;
       case 28: // stat -> analyze_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction28();
         break;
       case 29: // stat -> evict_cache_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction29();
         break;
       case 30: // stat -> flush_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction30();
         break;
       case 31: // stat -> cancel_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction31();
         break;
       case 32: // stat -> comment_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction32();
         break;
       case 33: // stat -> create_user_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction33();
         break;
       case 34: // stat -> alter_user_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction34();
         break;
       case 35: // stat -> drop_user_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction35();
         break;
       case 36: // stat -> grant_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction36();
         break;
       case 37: // stat -> revoke_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction37();
         break;
       case 38: // stat -> create_view_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction38();
         break;
       case 39: // stat -> drop_view_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction39();
         break;
       case 40: // stat -> alter_view_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction40();
         break;
       case 41: // stat -> create_matview_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction41();
         break;
       case 42: // stat -> refresh_matview_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction42();
         break;
       case 43: // stat -> drop_matview_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction43();
         break;
       case 44: // stat -> alter_matview_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction44();
         break;
       case 45: // stat -> create_sequence_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction45();
         break;
       case 46: // stat -> drop_sequence_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction46();
         break;
       case 47: // stat -> alter_sequence_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction47();
         break;
       case 48: // stat -> create_trigger_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction48();
         break;
       case 49: // stat -> drop_trigger_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction49();
         break;
       case 50: // stat -> call_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction50();
         break;
       case 51: // stat -> create_extension_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction51();
         break;
       case 52: // stat -> alter_extension_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction52();
         break;
       case 53: // stat -> drop_extension_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction53();
         break;
       case 54: // stat -> create_function_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction54();
         break;
       case 55: // stat -> alter_function_stmt
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction55();
         break;
       case 56: // stat -> with_clause, update_stmt
-{ CurrentSemanticValue.n = CommonTableExpressions.With(ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n); }
+        YYAction56();
         break;
       case 57: // stat -> with_clause, delete_stmt
-{ CurrentSemanticValue.n = CommonTableExpressions.With(ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n); }
+        YYAction57();
         break;
       case 58: // stat -> with_clause, insert_stmt
-{ CurrentSemanticValue.n = CommonTableExpressions.With(ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n); }
+        YYAction58();
         break;
       case 59: // locking_clause -> TFOR, lock_strength, lock_options
-{ CurrentSemanticValue.n = RowLockingAst.Clause(ValueStack[ValueStack.Depth-1].n); }
+        YYAction59();
         break;
       case 60: // lock_strength -> TUPDATE
-{ CurrentSemanticValue.s = RowLockingAst.Strength(null, false, true); }
+        YYAction60();
         break;
       case 61: // lock_strength -> TIDENTIFIER, TKEY, TUPDATE
-{ CurrentSemanticValue.s = RowLockingAst.Strength(ValueStack[ValueStack.Depth-3].s, true, true); }
+        YYAction61();
         break;
       case 62: // lock_strength -> TIDENTIFIER
-{ CurrentSemanticValue.s = RowLockingAst.Strength(ValueStack[ValueStack.Depth-1].s, false, false); }
+        YYAction62();
         break;
       case 63: // lock_strength -> TKEY, TIDENTIFIER
-{ CurrentSemanticValue.s = RowLockingAst.Strength(ValueStack[ValueStack.Depth-1].s, true, false); }
+        YYAction63();
         break;
       case 64: // lock_options -> /* empty */
-{ CurrentSemanticValue.n = null; }
+        YYAction64();
         break;
       case 65: // lock_options -> lock_options, identifier
-{ CurrentSemanticValue.n = RowLockingAst.AppendWord(ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n); }
+        YYAction65();
         break;
       case 66: // lock_options -> lock_options, escaped_identifier
-{ CurrentSemanticValue.n = RowLockingAst.AppendWord(ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n); }
+        YYAction66();
         break;
       case 67: // opt_distinct -> TDISTINCT
-{ CurrentSemanticValue.s = "1"; }
+        YYAction67();
         break;
       case 68: // opt_distinct -> /* empty */
-{ CurrentSemanticValue.s = null; }
+        YYAction68();
         break;
       case 69: // select_stmt -> select_no_parens
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction69();
         break;
       case 70: // select_stmt -> select_with_parens
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction70();
         break;
       case 71: // select_with_parens -> LPAREN, select_no_parens, RPAREN
-{ CurrentSemanticValue.n = CommonTableExpressions.InlineNested(ValueStack[ValueStack.Depth-2].n); }
+        YYAction71();
         break;
       case 72: // select_no_parens -> simple_select
-{ CurrentSemanticValue.n = SetOperationAst.Finish(ValueStack[ValueStack.Depth-1].n, null, null, null); }
+        YYAction72();
         break;
       case 73: // select_no_parens -> select_clause, order_clause, opt_limit, opt_offset
-{ CurrentSemanticValue.n = SetOperationAst.Finish(ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n); }
+        YYAction73();
         break;
       case 74: // select_no_parens -> select_clause, limit_clause, opt_offset
-{ CurrentSemanticValue.n = SetOperationAst.Finish(ValueStack[ValueStack.Depth-3].n, null, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n); }
+        YYAction74();
         break;
       case 75: // select_no_parens -> select_clause, offset_clause
-{ CurrentSemanticValue.n = SetOperationAst.Finish(ValueStack[ValueStack.Depth-2].n, null, null, ValueStack[ValueStack.Depth-1].n); }
+        YYAction75();
         break;
       case 76: // select_no_parens -> with_clause, select_clause
-{ CurrentSemanticValue.n = CommonTableExpressions.With(ValueStack[ValueStack.Depth-2].n, SetOperationAst.Finish(ValueStack[ValueStack.Depth-1].n, null, null, null)); }
+        YYAction76();
         break;
       case 77: // select_no_parens -> with_clause, select_clause, order_clause, opt_limit, 
                //                     opt_offset
-{ CurrentSemanticValue.n = CommonTableExpressions.With(ValueStack[ValueStack.Depth-5].n, SetOperationAst.Finish(ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n)); }
+        YYAction77();
         break;
       case 78: // select_no_parens -> with_clause, select_clause, limit_clause, opt_offset
-{ CurrentSemanticValue.n = CommonTableExpressions.With(ValueStack[ValueStack.Depth-4].n, SetOperationAst.Finish(ValueStack[ValueStack.Depth-3].n, null, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n)); }
+        YYAction78();
         break;
       case 79: // select_no_parens -> with_clause, select_clause, offset_clause
-{ CurrentSemanticValue.n = CommonTableExpressions.With(ValueStack[ValueStack.Depth-3].n, SetOperationAst.Finish(ValueStack[ValueStack.Depth-2].n, null, null, ValueStack[ValueStack.Depth-1].n)); }
+        YYAction79();
         break;
       case 80: // with_clause -> TWITH, cte_list
-{ sawWith = true; CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+        YYAction80();
         break;
       case 81: // with_clause -> TWITH, TIDENTIFIER, cte_list
+        YYAction81();
+        break;
+      case 82: // cte_list -> cte_list, TCOMMA, common_table_expr
+        YYAction82();
+        break;
+      case 83: // cte_list -> common_table_expr
+        YYAction83();
+        break;
+      case 84: // common_table_expr -> any_identifier, opt_cte_columns, TAS, opt_cte_materialized, 
+               //                      select_with_parens
+        YYAction84();
+        break;
+      case 85: // opt_cte_columns -> LPAREN, table_function_column_list, RPAREN
+        YYAction85();
+        break;
+      case 86: // opt_cte_columns -> /* empty */
+        YYAction86();
+        break;
+      case 87: // opt_cte_materialized -> TMATERIALIZED
+        YYAction87();
+        break;
+      case 88: // opt_cte_materialized -> TNOT, TMATERIALIZED
+        YYAction88();
+        break;
+      case 89: // opt_cte_materialized -> /* empty */
+        YYAction89();
+        break;
+      case 90: // select_clause -> simple_select
+        YYAction90();
+        break;
+      case 91: // select_clause -> select_with_parens
+        YYAction91();
+        break;
+      case 92: // simple_select -> select_core
+        YYAction92();
+        break;
+      case 93: // simple_select -> select_clause, TUNION, set_quantifier, select_clause
+        YYAction93();
+        break;
+      case 94: // simple_select -> select_clause, TEXCEPT, set_quantifier, select_clause
+        YYAction94();
+        break;
+      case 95: // simple_select -> select_clause, TINTERSECT, set_quantifier, select_clause
+        YYAction95();
+        break;
+      case 96: // set_quantifier -> TIDENTIFIER
+        YYAction96();
+        break;
+      case 97: // set_quantifier -> TDISTINCT
+        YYAction97();
+        break;
+      case 98: // set_quantifier -> /* empty */
+        YYAction98();
+        break;
+      case 99: // select_core -> TSELECT, opt_distinct, select_field_list, TFROM, select_table, 
+               //                opt_as_of, opt_where, opt_group, opt_having
+        YYAction99();
+        break;
+      case 100: // select_core -> TSELECT, opt_distinct, select_field_list
+        YYAction100();
+        break;
+      case 101: // select_core -> TSELECT, opt_distinct, select_field_list, TWHERE, condition
+        YYAction101();
+        break;
+      case 102: // order_clause -> TORDER, TBY, order_list
+        YYAction102();
+        break;
+      case 103: // limit_clause -> TLIMIT, select_limit_offset
+        YYAction103();
+        break;
+      case 104: // offset_clause -> TOFFSET, select_limit_offset
+        YYAction104();
+        break;
+      case 105: // opt_as_of -> TASOFSYSTEMTIME, as_of_value
+        YYAction105();
+        break;
+      case 106: // opt_as_of -> /* empty */
+        YYAction106();
+        break;
+      case 107: // as_of_value -> string
+        YYAction107();
+        break;
+      case 108: // as_of_value -> int
+        YYAction108();
+        break;
+      case 109: // as_of_value -> placeholder
+        YYAction109();
+        break;
+      case 110: // explain_stmt -> TEXPLAIN, explain_target
+        YYAction110();
+        break;
+      case 111: // explain_stmt -> TEXPLAIN, LPAREN, TANALYZE, RPAREN, explain_target
+        YYAction111();
+        break;
+      case 112: // explain_stmt -> TEXPLAIN, LPAREN, TIDENTIFIER, RPAREN, explain_target
+        YYAction112();
+        break;
+      case 113: // explain_target -> select_stmt
+        YYAction113();
+        break;
+      case 114: // explain_target -> select_stmt, locking_clause
+        YYAction114();
+        break;
+      case 115: // opt_having -> THAVING, condition
+        YYAction115();
+        break;
+      case 116: // opt_having -> /* empty */
+        YYAction116();
+        break;
+      case 117: // query_expr -> select_with_parens
+        YYAction117();
+        break;
+      case 118: // opt_where -> TWHERE, condition
+        YYAction118();
+        break;
+      case 119: // opt_where -> /* empty */
+        YYAction119();
+        break;
+      case 120: // opt_group -> TGROUP, TBY, group_list
+        YYAction120();
+        break;
+      case 121: // opt_group -> /* empty */
+        YYAction121();
+        break;
+      case 122: // opt_limit -> TLIMIT, select_limit_offset
+        YYAction122();
+        break;
+      case 123: // opt_limit -> /* empty */
+        YYAction123();
+        break;
+      case 124: // opt_offset -> TOFFSET, select_limit_offset
+        YYAction124();
+        break;
+      case 125: // opt_offset -> /* empty */
+        YYAction125();
+        break;
+      case 126: // group_list -> group_list, TCOMMA, expr
+        YYAction126();
+        break;
+      case 127: // group_list -> expr
+        YYAction127();
+        break;
+      case 128: // insert_stmt -> TINSERT, TINTO, any_identifier, LPAREN, insert_field_list, 
+                //                RPAREN, TVALUES, insert_batch_list, opt_on_conflict, 
+                //                opt_returning
+        YYAction128();
+        break;
+      case 129: // insert_stmt -> TINSERT, TINTO, any_identifier, TVALUES, insert_batch_list, 
+                //                opt_on_conflict, opt_returning
+        YYAction129();
+        break;
+      case 130: // insert_stmt -> TINSERT, TINTO, any_identifier, LPAREN, insert_field_list, 
+                //                RPAREN, select_stmt, opt_on_conflict, opt_returning
+        YYAction130();
+        break;
+      case 131: // insert_stmt -> TINSERT, TINTO, any_identifier, select_stmt, opt_on_conflict, 
+                //                opt_returning
+        YYAction131();
+        break;
+      case 132: // insert_stmt -> TINSERT, TINTO, any_identifier, LPAREN, insert_field_list, 
+                //                RPAREN, overriding_clause, TVALUES, insert_batch_list, 
+                //                opt_on_conflict, opt_returning
+        YYAction132();
+        break;
+      case 133: // insert_stmt -> TINSERT, TINTO, any_identifier, overriding_clause, TVALUES, 
+                //                insert_batch_list, opt_on_conflict, opt_returning
+        YYAction133();
+        break;
+      case 134: // insert_stmt -> TINSERT, TINTO, any_identifier, LPAREN, insert_field_list, 
+                //                RPAREN, overriding_clause, select_stmt, opt_on_conflict, 
+                //                opt_returning
+        YYAction134();
+        break;
+      case 135: // insert_stmt -> TINSERT, TINTO, any_identifier, overriding_clause, select_stmt, 
+                //                opt_on_conflict, opt_returning
+        YYAction135();
+        break;
+      case 136: // insert_stmt -> TIDENTIFIER, TINTO, any_identifier, LPAREN, insert_field_list, 
+                //                RPAREN, TVALUES, insert_batch_list, opt_returning
+        YYAction136();
+        break;
+      case 137: // insert_stmt -> TIDENTIFIER, TINTO, any_identifier, TVALUES, insert_batch_list, 
+                //                opt_returning
+        YYAction137();
+        break;
+      case 138: // insert_stmt -> TIDENTIFIER, TINTO, any_identifier, LPAREN, insert_field_list, 
+                //                RPAREN, select_stmt, opt_returning
+        YYAction138();
+        break;
+      case 139: // insert_stmt -> TIDENTIFIER, TINTO, any_identifier, select_stmt, opt_returning
+        YYAction139();
+        break;
+      case 140: // opt_on_conflict -> TON, TIDENTIFIER, opt_conflict_target, conflict_action
+        YYAction140();
+        break;
+      case 141: // opt_on_conflict -> /* empty */
+        YYAction141();
+        break;
+      case 142: // opt_conflict_target -> LPAREN, insert_field_list, RPAREN
+        YYAction142();
+        break;
+      case 143: // opt_conflict_target -> TON, TCONSTRAINT, any_identifier
+        YYAction143();
+        break;
+      case 144: // opt_conflict_target -> /* empty */
+        YYAction144();
+        break;
+      case 145: // conflict_action -> TIDENTIFIER, TIDENTIFIER
+        YYAction145();
+        break;
+      case 146: // conflict_action -> TIDENTIFIER, TUPDATE, TSET, update_list, opt_where
+        YYAction146();
+        break;
+      case 147: // overriding_clause -> TIDENTIFIER, TIDENTIFIER, TIDENTIFIER
+        YYAction147();
+        break;
+      case 148: // overriding_clause -> TIDENTIFIER, TUSER, TIDENTIFIER
+        YYAction148();
+        break;
+      case 149: // opt_returning -> TRETURNING, select_field_list
+        YYAction149();
+        break;
+      case 150: // opt_returning -> /* empty */
+        YYAction150();
+        break;
+      case 151: // insert_batch_list -> insert_batch_list, TCOMMA, insert_values
+        YYAction151();
+        break;
+      case 152: // insert_batch_list -> insert_values
+        YYAction152();
+        break;
+      case 153: // insert_values -> LPAREN, values_list, RPAREN
+        YYAction153();
+        break;
+      case 154: // update_stmt -> TUPDATE, any_identifier, opt_dml_alias, TSET, update_list, 
+                //                opt_dml_from, TWHERE, condition, opt_limit, opt_returning
+        YYAction154();
+        break;
+      case 155: // update_stmt -> TUPDATE, any_identifier, opt_dml_alias, TSET, update_list, 
+                //                opt_dml_from, opt_limit, opt_returning
+        YYAction155();
+        break;
+      case 156: // delete_stmt -> TDELETE, TFROM, any_identifier, opt_dml_alias, opt_dml_using, 
+                //                TWHERE, condition, opt_limit, opt_returning
+        YYAction156();
+        break;
+      case 157: // delete_stmt -> TDELETE, TFROM, any_identifier, opt_dml_alias, opt_dml_using, 
+                //                opt_limit, opt_returning
+        YYAction157();
+        break;
+      case 158: // opt_dml_alias -> TAS, any_identifier
+        YYAction158();
+        break;
+      case 159: // opt_dml_alias -> identifier
+        YYAction159();
+        break;
+      case 160: // opt_dml_alias -> escaped_identifier
+        YYAction160();
+        break;
+      case 161: // opt_dml_alias -> /* empty */
+        YYAction161();
+        break;
+      case 162: // opt_dml_from -> TFROM, select_table
+        YYAction162();
+        break;
+      case 163: // opt_dml_from -> /* empty */
+        YYAction163();
+        break;
+      case 164: // opt_dml_using -> TUSING, select_table
+        YYAction164();
+        break;
+      case 165: // opt_dml_using -> /* empty */
+        YYAction165();
+        break;
+      case 166: // begin_stmt -> TBEGIN
+        YYAction166();
+        break;
+      case 167: // begin_stmt -> TSTART, TTRANSACTION
+        YYAction167();
+        break;
+      case 168: // commit_stmt -> TCOMMIT
+        YYAction168();
+        break;
+      case 169: // rollback_stmt -> TROLLBACK
+        YYAction169();
+        break;
+      case 170: // set_transaction_stmt -> TSET, TTRANSACTION, TIDENTIFIER, TIDENTIFIER, 
+                //                         TIDENTIFIER
+        YYAction170();
+        break;
+      case 171: // set_transaction_stmt -> TSET, TTRANSACTION, TIDENTIFIER, TIDENTIFIER, 
+                //                         TIDENTIFIER, TIDENTIFIER
+        YYAction171();
+        break;
+      case 172: // set_transaction_stmt -> TSET, TTRANSACTION, TIDENTIFIER, TIDENTIFIER
+        YYAction172();
+        break;
+      case 173: // set_transaction_stmt -> TSET, TTRANSACTION, TIDENTIFIER, TIDENTIFIER, 
+                //                         TIDENTIFIER, TIDENTIFIER, TIDENTIFIER
+        YYAction173();
+        break;
+      case 174: // set_cluster_setting_stmt -> TSET, TIDENTIFIER, TIDENTIFIER, any_identifier, 
+                //                             TEQUALS, cluster_setting_value
+        YYAction174();
+        break;
+      case 175: // reset_cluster_setting_stmt -> TRESET, TIDENTIFIER, TIDENTIFIER, any_identifier
+        YYAction175();
+        break;
+      case 176: // cluster_setting_value -> string
+        YYAction176();
+        break;
+      case 177: // cluster_setting_value -> int
+        YYAction177();
+        break;
+      case 178: // cluster_setting_value -> float
+        YYAction178();
+        break;
+      case 179: // cluster_setting_value -> bool
+        YYAction179();
+        break;
+      case 180: // cluster_setting_value -> identifier
+        YYAction180();
+        break;
+      case 181: // cluster_setting_value -> TMINUS, TDIGIT
+        YYAction181();
+        break;
+      case 182: // cluster_setting_value -> TMINUS, TFLOAT
+        YYAction182();
+        break;
+      case 183: // create_table_stmt -> TCREATE, TTABLE, any_identifier, TRELINK, TTO, string
+        YYAction183();
+        break;
+      case 184: // create_table_stmt -> TCREATE, TTABLE, any_identifier, LPAREN, 
+                //                      create_table_item_list, RPAREN, opt_table_comment, 
+                //                      opt_table_settings
+        YYAction184();
+        break;
+      case 185: // create_table_stmt -> TCREATE, TTABLE, TIF, TNOT, TEXISTS, any_identifier, 
+                //                      LPAREN, create_table_item_list, RPAREN, opt_table_comment, 
+                //                      opt_table_settings
+        YYAction185();
+        break;
+      case 186: // create_table_stmt -> TCREATE, TTABLE, any_identifier, LPAREN, 
+                //                      create_table_item_list, RPAREN, 
+                //                      create_table_constraint_list, opt_table_comment, 
+                //                      opt_table_settings
+        YYAction186();
+        break;
+      case 187: // create_table_stmt -> TCREATE, TTABLE, TIF, TNOT, TEXISTS, any_identifier, 
+                //                      LPAREN, create_table_item_list, RPAREN, 
+                //                      create_table_constraint_list, opt_table_comment, 
+                //                      opt_table_settings
+        YYAction187();
+        break;
+      case 188: // create_table_stmt -> TCREATE, TTABLE, any_identifier, TAS, select_stmt, 
+                //                      opt_with_data
+        YYAction188();
+        break;
+      case 189: // create_table_stmt -> TCREATE, TTABLE, TIF, TNOT, TEXISTS, any_identifier, TAS, 
+                //                      select_stmt, opt_with_data
+        YYAction189();
+        break;
+      case 190: // opt_with_data -> TWITH, TIDENTIFIER
+        YYAction190();
+        break;
+      case 191: // opt_with_data -> TWITH, TIDENTIFIER, TIDENTIFIER
+        YYAction191();
+        break;
+      case 192: // opt_with_data -> /* empty */
+        YYAction192();
+        break;
+      case 193: // truncate_table_stmt -> TTRUNCATE, TTABLE, any_identifier, opt_identity_action
+        YYAction193();
+        break;
+      case 194: // truncate_table_stmt -> TTRUNCATE, any_identifier, opt_identity_action
+        YYAction194();
+        break;
+      case 195: // opt_identity_action -> TIDENTIFIER, TIDENTIFIER
+        YYAction195();
+        break;
+      case 196: // opt_identity_action -> /* empty */
+        YYAction196();
+        break;
+      case 197: // drop_table_stmt -> TDROP, TTABLE, any_identifier
+        YYAction197();
+        break;
+      case 198: // drop_table_stmt -> TDROP, TTABLE, any_identifier, TFORCE
+        YYAction198();
+        break;
+      case 199: // drop_table_stmt -> TDROP, TTABLE, TIF, TEXISTS, any_identifier
+        YYAction199();
+        break;
+      case 200: // drop_table_stmt -> TDROP, TTABLE, TIF, TEXISTS, any_identifier, TFORCE
+        YYAction200();
+        break;
+      case 201: // create_view_stmt -> TCREATE, TVIEW, any_identifier, opt_view_column_list, TAS, 
+                //                     select_stmt, opt_check_option
+        YYAction201();
+        break;
+      case 202: // create_view_stmt -> TCREATE, TOR, TIDENTIFIER, TVIEW, any_identifier, 
+                //                     opt_view_column_list, TAS, select_stmt, opt_check_option
+        YYAction202();
+        break;
+      case 203: // opt_view_column_list -> LPAREN, view_column_list, RPAREN
+        YYAction203();
+        break;
+      case 204: // opt_view_column_list -> /* empty */
+        YYAction204();
+        break;
+      case 205: // view_column_list -> view_column_list, TCOMMA, any_identifier
+        YYAction205();
+        break;
+      case 206: // view_column_list -> any_identifier
+        YYAction206();
+        break;
+      case 207: // opt_check_option -> TWITH, TCHECK, TIDENTIFIER
+        YYAction207();
+        break;
+      case 208: // opt_check_option -> TWITH, TIDENTIFIER, TCHECK, TIDENTIFIER
+        YYAction208();
+        break;
+      case 209: // opt_check_option -> /* empty */
+        YYAction209();
+        break;
+      case 210: // opt_drop_behavior -> TIDENTIFIER
+        YYAction210();
+        break;
+      case 211: // opt_drop_behavior -> /* empty */
+        YYAction211();
+        break;
+      case 212: // drop_view_stmt -> TDROP, TVIEW, view_name_list, opt_drop_behavior
+        YYAction212();
+        break;
+      case 213: // drop_view_stmt -> TDROP, TVIEW, TIF, TEXISTS, view_name_list, opt_drop_behavior
+        YYAction213();
+        break;
+      case 214: // view_name_list -> view_name_list, TCOMMA, any_identifier
+        YYAction214();
+        break;
+      case 215: // view_name_list -> any_identifier
+        YYAction215();
+        break;
+      case 216: // alter_view_stmt -> TALTER, TVIEW, any_identifier, TRENAME, TTO, any_identifier
+        YYAction216();
+        break;
+      case 217: // alter_view_stmt -> TALTER, TVIEW, any_identifier, TIDENTIFIER, TTO, 
+                //                    any_identifier
+        YYAction217();
+        break;
+      case 218: // create_matview_stmt -> TCREATE, TMATERIALIZED, TVIEW, any_identifier, 
+                //                        opt_view_column_list, TAS, select_stmt, opt_with_data
+        YYAction218();
+        break;
+      case 219: // create_matview_stmt -> TCREATE, TMATERIALIZED, TVIEW, TIF, TNOT, TEXISTS, 
+                //                        any_identifier, opt_view_column_list, TAS, select_stmt, 
+                //                        opt_with_data
+        YYAction219();
+        break;
+      case 220: // refresh_matview_stmt -> TREFRESH, TMATERIALIZED, TVIEW, any_identifier, 
+                //                         opt_with_data
+        YYAction220();
+        break;
+      case 221: // refresh_matview_stmt -> TREFRESH, TMATERIALIZED, TVIEW, TIDENTIFIER, 
+                //                         any_identifier, opt_with_data
+        YYAction221();
+        break;
+      case 222: // drop_matview_stmt -> TDROP, TMATERIALIZED, TVIEW, view_name_list, 
+                //                      opt_drop_behavior
+        YYAction222();
+        break;
+      case 223: // drop_matview_stmt -> TDROP, TMATERIALIZED, TVIEW, TIF, TEXISTS, view_name_list, 
+                //                      opt_drop_behavior
+        YYAction223();
+        break;
+      case 224: // alter_matview_stmt -> TALTER, TMATERIALIZED, TVIEW, any_identifier, TRENAME, 
+                //                       TTO, any_identifier
+        YYAction224();
+        break;
+      case 225: // create_sequence_stmt -> TCREATE, TSEQUENCE, any_identifier, 
+                //                         opt_sequence_option_list
+        YYAction225();
+        break;
+      case 226: // create_sequence_stmt -> TCREATE, TSEQUENCE, TIF, TNOT, TEXISTS, any_identifier, 
+                //                         opt_sequence_option_list
+        YYAction226();
+        break;
+      case 227: // drop_sequence_stmt -> TDROP, TSEQUENCE, any_identifier
+        YYAction227();
+        break;
+      case 228: // drop_sequence_stmt -> TDROP, TSEQUENCE, TIF, TEXISTS, any_identifier
+        YYAction228();
+        break;
+      case 229: // alter_sequence_stmt -> TALTER, TSEQUENCE, any_identifier, TRENAME, TTO, 
+                //                        any_identifier
+        YYAction229();
+        break;
+      case 230: // alter_sequence_stmt -> TALTER, TSEQUENCE, any_identifier, sequence_option_list
+        YYAction230();
+        break;
+      case 231: // opt_sequence_option_list -> sequence_option_list
+        YYAction231();
+        break;
+      case 232: // opt_sequence_option_list -> /* empty */
+        YYAction232();
+        break;
+      case 233: // sequence_option_list -> sequence_option_list, sequence_option_word
+        YYAction233();
+        break;
+      case 234: // sequence_option_list -> sequence_option_word
+        YYAction234();
+        break;
+      case 235: // sequence_option_word -> TIDENTIFIER
+        YYAction235();
+        break;
+      case 236: // sequence_option_word -> TSTART
+        YYAction236();
+        break;
+      case 237: // sequence_option_word -> TWITH
+        YYAction237();
+        break;
+      case 238: // sequence_option_word -> TBY
+        YYAction238();
+        break;
+      case 239: // sequence_option_word -> int
+        YYAction239();
+        break;
+      case 240: // sequence_option_word -> TMINUS, int
+        YYAction240();
+        break;
+      case 241: // create_database_stmt -> TCREATE, TDATABASE, any_identifier, TRELINK, TTO, 
+                //                         string
+        YYAction241();
+        break;
+      case 242: // create_database_stmt -> TCREATE, TDATABASE, any_identifier
+        YYAction242();
+        break;
+      case 243: // create_database_stmt -> TCREATE, TDATABASE, TIF, TNOT, TEXISTS, any_identifier
+        YYAction243();
+        break;
+      case 244: // create_database_stmt -> TCREATE, TDATABASE, any_identifier, TBRANCH, TFROM, 
+                //                         any_identifier
+        YYAction244();
+        break;
+      case 245: // create_database_stmt -> TCREATE, TDATABASE, TIF, TNOT, TEXISTS, any_identifier, 
+                //                         TBRANCH, TFROM, any_identifier
+        YYAction245();
+        break;
+      case 246: // drop_database_stmt -> TDROP, TDATABASE, any_identifier
+        YYAction246();
+        break;
+      case 247: // drop_database_stmt -> TDROP, TDATABASE, any_identifier, TFORCE
+        YYAction247();
+        break;
+      case 248: // drop_database_stmt -> TDROP, TDATABASE, TIF, TEXISTS, any_identifier
+        YYAction248();
+        break;
+      case 249: // drop_database_stmt -> TDROP, TDATABASE, TIF, TEXISTS, any_identifier, TFORCE
+        YYAction249();
+        break;
+      case 250: // rename_database_stmt -> TRENAME, TDATABASE, any_identifier, TTO, any_identifier
+        YYAction250();
+        break;
+      case 251: // rename_database_stmt -> TALTER, TDATABASE, any_identifier, TRENAME, TTO, 
+                //                         any_identifier
+        YYAction251();
+        break;
+      case 252: // comment_stmt -> TCOMMENT, TON, TTABLE, any_identifier, TIS, comment_value
+        YYAction252();
+        break;
+      case 253: // comment_stmt -> TCOMMENT, TON, TCOLUMN, any_identifier, TIS, comment_value
+        YYAction253();
+        break;
+      case 254: // comment_stmt -> TCOMMENT, TON, TINDEX, any_identifier, TIS, comment_value
+        YYAction254();
+        break;
+      case 255: // comment_stmt -> TCOMMENT, TON, TDATABASE, any_identifier, TIS, comment_value
+        YYAction255();
+        break;
+      case 256: // comment_stmt -> TCOMMENT, TON, TSEQUENCE, any_identifier, TIS, comment_value
+        YYAction256();
+        break;
+      case 257: // comment_value -> string
+        YYAction257();
+        break;
+      case 258: // comment_value -> TNULL
+        YYAction258();
+        break;
+      case 259: // create_user_stmt -> TCREATE, TUSER, any_identifier
+        YYAction259();
+        break;
+      case 260: // create_user_stmt -> TCREATE, TUSER, any_identifier, TIDENTIFIED, TWITH, 
+                //                     any_identifier, TBY, auth_secret
+        YYAction260();
+        break;
+      case 261: // create_user_stmt -> TCREATE, TUSER, any_identifier, TIDENTIFIED, TBY, 
+                //                     auth_secret
+        YYAction261();
+        break;
+      case 262: // create_user_stmt -> TCREATE, TUSER, TIF, TNOT, TEXISTS, any_identifier
+        YYAction262();
+        break;
+      case 263: // create_user_stmt -> TCREATE, TUSER, TIF, TNOT, TEXISTS, any_identifier, 
+                //                     TIDENTIFIED, TWITH, any_identifier, TBY, auth_secret
+        YYAction263();
+        break;
+      case 264: // create_user_stmt -> TCREATE, TUSER, TIF, TNOT, TEXISTS, any_identifier, 
+                //                     TIDENTIFIED, TBY, auth_secret
+        YYAction264();
+        break;
+      case 265: // alter_user_stmt -> TALTER, TUSER, any_identifier, TIDENTIFIED, TWITH, 
+                //                    any_identifier, TBY, auth_secret
+        YYAction265();
+        break;
+      case 266: // alter_user_stmt -> TALTER, TUSER, any_identifier, TIDENTIFIED, TBY, auth_secret
+        YYAction266();
+        break;
+      case 267: // alter_user_stmt -> TALTER, TUSER, any_identifier, TIDENTIFIED, TWITH, 
+                //                    any_identifier, TBY, auth_secret, TIDENTIFIER, auth_secret
+        YYAction267();
+        break;
+      case 268: // alter_user_stmt -> TALTER, TUSER, any_identifier, TIDENTIFIED, TBY, auth_secret, 
+                //                    TIDENTIFIER, auth_secret
+        YYAction268();
+        break;
+      case 269: // drop_user_stmt -> TDROP, TUSER, any_identifier
+        YYAction269();
+        break;
+      case 270: // drop_user_stmt -> TDROP, TUSER, TIF, TEXISTS, any_identifier
+        YYAction270();
+        break;
+      case 271: // grant_stmt -> TGRANT, privilege_list, TON, TMULT, TDOT, TMULT, TTO, 
+                //               any_identifier
+        YYAction271();
+        break;
+      case 272: // grant_stmt -> TGRANT, privilege_list, TON, any_identifier, TDOT, TMULT, TTO, 
+                //               any_identifier
+        YYAction272();
+        break;
+      case 273: // grant_stmt -> TGRANT, privilege_list, TON, any_identifier, TTO, any_identifier
+        YYAction273();
+        break;
+      case 274: // revoke_stmt -> TREVOKE, privilege_list, TON, TMULT, TDOT, TMULT, TFROM, 
+                //                any_identifier
+        YYAction274();
+        break;
+      case 275: // revoke_stmt -> TREVOKE, privilege_list, TON, any_identifier, TDOT, TMULT, TFROM, 
+                //                any_identifier
+        YYAction275();
+        break;
+      case 276: // revoke_stmt -> TREVOKE, privilege_list, TON, any_identifier, TFROM, 
+                //                any_identifier
+        YYAction276();
+        break;
+      case 277: // privilege_list -> privilege_list, TCOMMA, privilege
+        YYAction277();
+        break;
+      case 278: // privilege_list -> privilege
+        YYAction278();
+        break;
+      case 279: // privilege -> TSELECT
+        YYAction279();
+        break;
+      case 280: // privilege -> TINSERT
+        YYAction280();
+        break;
+      case 281: // privilege -> TUPDATE
+        YYAction281();
+        break;
+      case 282: // privilege -> TDELETE
+        YYAction282();
+        break;
+      case 283: // privilege -> TCREATE, TTABLE
+        YYAction283();
+        break;
+      case 284: // privilege -> TDROP
+        YYAction284();
+        break;
+      case 285: // privilege -> TALTER
+        YYAction285();
+        break;
+      case 286: // privilege -> TINDEX
+        YYAction286();
+        break;
+      case 287: // privilege -> TCREATE
+        YYAction287();
+        break;
+      case 288: // privilege -> TIDENTIFIER, TPRIVILEGES
+        YYAction288();
+        break;
+      case 289: // privilege -> TIDENTIFIER
+        YYAction289();
+        break;
+      case 290: // auth_secret -> string
+        YYAction290();
+        break;
+      case 291: // auth_secret -> placeholder
+        YYAction291();
+        break;
+      case 292: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, any_identifier, 
+                //                     field_type
+        YYAction292();
+        break;
+      case 293: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, any_identifier, 
+                //                     field_type, create_table_field_constraint_list
+        YYAction293();
+        break;
+      case 294: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TCOLUMN, 
+                //                     any_identifier, field_type
+        YYAction294();
+        break;
+      case 295: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TCOLUMN, 
+                //                     any_identifier, field_type, 
+                //                     create_table_field_constraint_list
+        YYAction295();
+        break;
+      case 296: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, any_identifier, 
+                //                     TIDENTIFIER
+        YYAction296();
+        break;
+      case 297: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, any_identifier, 
+                //                     TIDENTIFIER, create_table_field_constraint_list
+        YYAction297();
+        break;
+      case 298: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TCOLUMN, 
+                //                     any_identifier, TIDENTIFIER
+        YYAction298();
+        break;
+      case 299: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TCOLUMN, 
+                //                     any_identifier, TIDENTIFIER, 
+                //                     create_table_field_constraint_list
+        YYAction299();
+        break;
+      case 300: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TDROP, any_identifier
+        YYAction300();
+        break;
+      case 301: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TDROP, TCOLUMN, 
+                //                     any_identifier
+        YYAction301();
+        break;
+      case 302: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TINDEX, 
+                //                     any_identifier, LPAREN, identifier_index_list, RPAREN, 
+                //                     index_include_clause
+        YYAction302();
+        break;
+      case 303: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TINDEX, 
+                //                     any_identifier, TON, LPAREN, identifier_index_list, RPAREN, 
+                //                     index_include_clause
+        YYAction303();
+        break;
+      case 304: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TUNIQUE, 
+                //                     any_identifier, LPAREN, identifier_index_list, RPAREN, 
+                //                     index_include_clause
+        YYAction304();
+        break;
+      case 305: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TUNIQUE, 
+                //                     any_identifier, TON, LPAREN, identifier_index_list, RPAREN, 
+                //                     index_include_clause
+        YYAction305();
+        break;
+      case 306: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TUNIQUE, TINDEX, 
+                //                     any_identifier, LPAREN, identifier_index_list, RPAREN, 
+                //                     index_include_clause
+        YYAction306();
+        break;
+      case 307: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TUNIQUE, TINDEX, 
+                //                     any_identifier, TON, LPAREN, identifier_index_list, RPAREN, 
+                //                     index_include_clause
+        YYAction307();
+        break;
+      case 308: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TDROP, TINDEX, 
+                //                     any_identifier
+        YYAction308();
+        break;
+      case 309: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TDROP, TINDEX, TIF, TEXISTS, 
+                //                     any_identifier
+        YYAction309();
+        break;
+      case 310: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TPRIMARY, TKEY, 
+                //                     LPAREN, identifier_index_list, RPAREN
+        YYAction310();
+        break;
+      case 311: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TDROP, TPRIMARY, TKEY
+        YYAction311();
+        break;
+      case 312: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TRENAME, TTO, 
+                //                     any_identifier
+        YYAction312();
+        break;
+      case 313: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TRENAME, TCOLUMN, 
+                //                     any_identifier, TTO, any_identifier
+        YYAction313();
+        break;
+      case 314: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TRENAME, TINDEX, 
+                //                     any_identifier, TTO, any_identifier
+        YYAction314();
+        break;
+      case 315: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TCONSTRAINT, 
+                //                     any_identifier, TCHECK, LPAREN, condition, RPAREN
+        YYAction315();
+        break;
+      case 316: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, fk_table_constraint
+        YYAction316();
+        break;
+      case 317: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TCONSTRAINT, 
+                //                     any_identifier, fk_table_constraint
+        YYAction317();
+        break;
+      case 318: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TDROP, TCONSTRAINT, 
+                //                     any_identifier
+        YYAction318();
+        break;
+      case 319: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TALTER, any_identifier, 
+                //                     TSET, TNOT, TNULL
+        YYAction319();
+        break;
+      case 320: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TALTER, TCOLUMN, 
+                //                     any_identifier, TSET, TNOT, TNULL
+        YYAction320();
+        break;
+      case 321: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TALTER, any_identifier, 
+                //                     TDROP, TNOT, TNULL
+        YYAction321();
+        break;
+      case 322: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TALTER, any_identifier, 
+                //                     TSET, TIDENTIFIER, TIDENTIFIER
+        YYAction322();
+        break;
+      case 323: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TALTER, TCOLUMN, 
+                //                     any_identifier, TSET, TIDENTIFIER, TIDENTIFIER
+        YYAction323();
+        break;
+      case 324: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TIDENTIFIER, TIDENTIFIER
+        YYAction324();
+        break;
+      case 325: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TIDENTIFIER, TIDENTIFIER, 
+                //                     TIDENTIFIER
+        YYAction325();
+        break;
+      case 326: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TALTER, TCOLUMN, 
+                //                     any_identifier, TDROP, TNOT, TNULL
+        YYAction326();
+        break;
+      case 327: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TSET, LPAREN, 
+                //                     table_setting_list, RPAREN
+        YYAction327();
+        break;
+      case 328: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TRESET, LPAREN, 
+                //                     table_setting_key_list, RPAREN
+        YYAction328();
+        break;
+      case 329: // table_setting_list -> table_setting_list, TCOMMA, table_setting
+        YYAction329();
+        break;
+      case 330: // table_setting_list -> table_setting
+        YYAction330();
+        break;
+      case 331: // table_setting -> any_identifier, TEQUALS, bool
+        YYAction331();
+        break;
+      case 332: // table_setting -> any_identifier, TEQUALS, string
+        YYAction332();
+        break;
+      case 333: // table_setting -> any_identifier, TEQUALS, int
+        YYAction333();
+        break;
+      case 334: // table_setting_key_list -> table_setting_key_list, TCOMMA, any_identifier
+        YYAction334();
+        break;
+      case 335: // table_setting_key_list -> any_identifier
+        YYAction335();
+        break;
+      case 336: // create_index_stmt -> TCREATE, TINDEX, any_identifier, TON, any_identifier, 
+                //                      LPAREN, identifier_index_list, RPAREN, 
+                //                      index_include_clause
+        YYAction336();
+        break;
+      case 337: // create_index_stmt -> TCREATE, TINDEX, TIF, TNOT, TEXISTS, any_identifier, TON, 
+                //                      any_identifier, LPAREN, identifier_index_list, RPAREN, 
+                //                      index_include_clause
+        YYAction337();
+        break;
+      case 338: // create_index_stmt -> TCREATE, TUNIQUE, TINDEX, any_identifier, TON, 
+                //                      any_identifier, LPAREN, identifier_index_list, RPAREN, 
+                //                      index_include_clause
+        YYAction338();
+        break;
+      case 339: // create_index_stmt -> TCREATE, TUNIQUE, TINDEX, TIF, TNOT, TEXISTS, 
+                //                      any_identifier, TON, any_identifier, LPAREN, 
+                //                      identifier_index_list, RPAREN, index_include_clause
+        YYAction339();
+        break;
+      case 340: // create_index_stmt -> TCREATE, TINDEX, any_identifier, TON, any_identifier, 
+                //                      TUSING, TIDENTIFIER, LPAREN, method_index_list, RPAREN
+        YYAction340();
+        break;
+      case 341: // create_index_stmt -> TCREATE, TINDEX, TIF, TNOT, TEXISTS, any_identifier, TON, 
+                //                      any_identifier, TUSING, TIDENTIFIER, LPAREN, 
+                //                      method_index_list, RPAREN
+        YYAction341();
+        break;
+      case 342: // create_index_stmt -> TCREATE, TIDENTIFIER, TINDEX, any_identifier, TON, 
+                //                      any_identifier, LPAREN, identifier_index_list, RPAREN
+        YYAction342();
+        break;
+      case 343: // create_index_stmt -> TCREATE, TIDENTIFIER, TINDEX, TIF, TNOT, TEXISTS, 
+                //                      any_identifier, TON, any_identifier, LPAREN, 
+                //                      identifier_index_list, RPAREN
+        YYAction343();
+        break;
+      case 344: // method_index_list -> method_index_list, TCOMMA, method_index_item
+        YYAction344();
+        break;
+      case 345: // method_index_list -> method_index_item
+        YYAction345();
+        break;
+      case 346: // method_index_item -> identifier_index
+        YYAction346();
+        break;
+      case 347: // method_index_item -> any_identifier, TIDENTIFIER
+        YYAction347();
+        break;
+      case 348: // drop_index_stmt -> TDROP, TINDEX, any_identifier, TON, any_identifier
+        YYAction348();
+        break;
+      case 349: // drop_index_stmt -> TDROP, TINDEX, TIF, TEXISTS, any_identifier, TON, 
+                //                    any_identifier
+        YYAction349();
+        break;
+      case 350: // drop_index_stmt -> TDROP, TINDEX, any_identifier
+        YYAction350();
+        break;
+      case 351: // drop_index_stmt -> TDROP, TINDEX, TIF, TEXISTS, any_identifier
+        YYAction351();
+        break;
+      case 352: // index_include_clause -> /* empty */
+        YYAction352();
+        break;
+      case 353: // index_include_clause -> TINCLUDE, LPAREN, identifier_index_list, RPAREN
+        YYAction353();
+        break;
+      case 354: // opt_inline_comment -> /* empty */
+        YYAction354();
+        break;
+      case 355: // opt_inline_comment -> TCOMMENT, string
+        YYAction355();
+        break;
+      case 356: // opt_table_comment -> /* empty */
+        YYAction356();
+        break;
+      case 357: // opt_table_comment -> TCOMMENT, string
+        YYAction357();
+        break;
+      case 358: // opt_table_settings -> /* empty */
+        YYAction358();
+        break;
+      case 359: // opt_table_settings -> TWITH, LPAREN, table_setting_list, RPAREN
+        YYAction359();
+        break;
+      case 360: // show_stmt -> TSHOW, TCOLUMNS, TFROM, any_identifier
+        YYAction360();
+        break;
+      case 361: // show_stmt -> TSHOW, TTABLES
+        YYAction361();
+        break;
+      case 362: // show_stmt -> TSHOW, TTABLES, TLIKE, string
+        YYAction362();
+        break;
+      case 363: // show_stmt -> TSHOW, TTABLES, TFROM, any_identifier
+        YYAction363();
+        break;
+      case 364: // show_stmt -> TSHOW, TTABLES, TIN, any_identifier
+        YYAction364();
+        break;
+      case 365: // show_stmt -> TSHOW, TTABLES, TFROM, any_identifier, TLIKE, string
+        YYAction365();
+        break;
+      case 366: // show_stmt -> TSHOW, TTABLES, TIN, any_identifier, TLIKE, string
+        YYAction366();
+        break;
+      case 367: // show_stmt -> TDESCRIBE, any_identifier
+        YYAction367();
+        break;
+      case 368: // show_stmt -> TDESC, any_identifier
+        YYAction368();
+        break;
+      case 369: // show_stmt -> TSHOW, TCREATE, TTABLE, any_identifier
+        YYAction369();
+        break;
+      case 370: // show_stmt -> TSHOW, TCREATE, TTABLE, any_identifier, TWITHOUT, TINDEXES
+        YYAction370();
+        break;
+      case 371: // show_stmt -> TSHOW, TVIEWS
+        YYAction371();
+        break;
+      case 372: // show_stmt -> TSHOW, TVIEWS, TLIKE, string
+        YYAction372();
+        break;
+      case 373: // show_stmt -> TSHOW, TMATERIALIZED, TVIEWS
+        YYAction373();
+        break;
+      case 374: // show_stmt -> TSHOW, TMATERIALIZED, TVIEWS, TLIKE, string
+        YYAction374();
+        break;
+      case 375: // show_stmt -> TSHOW, TCREATE, TVIEW, any_identifier
+        YYAction375();
+        break;
+      case 376: // show_stmt -> TSHOW, TCREATE, TMATERIALIZED, TVIEW, any_identifier
+        YYAction376();
+        break;
+      case 377: // show_stmt -> TSHOW, TSEQUENCES
+        YYAction377();
+        break;
+      case 378: // show_stmt -> TSHOW, TSEQUENCES, TLIKE, string
+        YYAction378();
+        break;
+      case 379: // show_stmt -> TSHOW, TCREATE, TSEQUENCE, any_identifier
+        YYAction379();
+        break;
+      case 380: // show_stmt -> TSHOW, TCREATE, TIDENTIFIER, any_identifier
+        YYAction380();
+        break;
+      case 381: // show_stmt -> TSHOW, TCREATE, TIDENTIFIER, any_identifier, TON, any_identifier
+        YYAction381();
+        break;
+      case 382: // show_stmt -> TSHOW, TDATABASE
+        YYAction382();
+        break;
+      case 383: // show_stmt -> TSHOW, TDATABASES
+        YYAction383();
+        break;
+      case 384: // show_stmt -> TSHOW, TDATABASES, TLIKE, string
+        YYAction384();
+        break;
+      case 385: // show_stmt -> TSHOW, TINDEXES, TFROM, any_identifier
+        YYAction385();
+        break;
+      case 386: // show_stmt -> TSHOW, TINDEX, TFROM, any_identifier
+        YYAction386();
+        break;
+      case 387: // show_stmt -> TSHOW, TINDEX, TIDENTIFIER
+        YYAction387();
+        break;
+      case 388: // show_stmt -> TSHOW, TINDEX, TIDENTIFIER, TFROM, any_identifier
+        YYAction388();
+        break;
+      case 389: // show_stmt -> TSHOW, TBRANCHES, TFROM, any_identifier
+        YYAction389();
+        break;
+      case 390: // show_stmt -> TSHOW, TANCESTORS, TFROM, any_identifier
+        YYAction390();
+        break;
+      case 391: // show_stmt -> TSHOW, TORPHAN, TTABLES
+        YYAction391();
+        break;
+      case 392: // show_stmt -> TSHOW, TORPHAN, TDATABASES
+        YYAction392();
+        break;
+      case 393: // show_stmt -> TSHOW, TGRANTS
+        YYAction393();
+        break;
+      case 394: // show_stmt -> TSHOW, TGRANTS, TFOR, any_identifier
+        YYAction394();
+        break;
+      case 395: // show_stmt -> TSHOW, TGRANTS, TFOR, TMULT
+        YYAction395();
+        break;
+      case 396: // show_stmt -> TSHOW, TIDENTIFIER, TFOR, any_identifier
+        YYAction396();
+        break;
+      case 397: // show_stmt -> TSHOW, TIDENTIFIER, TFOR, TTABLE, any_identifier
+        YYAction397();
+        break;
+      case 398: // show_stmt -> TSHOW, TIDENTIFIER, TIDENTIFIER
+        YYAction398();
+        break;
+      case 399: // show_stmt -> TSHOW, TIDENTIFIER, TIDENTIFIER, TLIKE, string
+        YYAction399();
+        break;
+      case 400: // show_stmt -> TSHOW, TIDENTIFIER
+        YYAction400();
+        break;
+      case 401: // show_stmt -> TSHOW, TIDENTIFIER, TON, any_identifier
+        YYAction401();
+        break;
+      case 402: // show_stmt -> TSHOW, TIDENTIFIER, TLIKE, string
+        YYAction402();
+        break;
+      case 403: // show_stmt -> TSHOW, TIDENTIFIER, TFROM, TTABLE, any_identifier
+        YYAction403();
+        break;
+      case 404: // show_stmt -> TSHOW, TIDENTIFIER, TFROM, TINDEX, TQUALIFIED_INDEX
+        YYAction404();
+        break;
+      case 405: // show_stmt -> TSHOW, TIDENTIFIER, TFROM, TTABLE, any_identifier, TFOR, 
+                //              TIDENTIFIER, LPAREN, in_value_list, RPAREN
+        YYAction405();
+        break;
+      case 406: // show_stmt -> TSHOW, TIDENTIFIER, TFROM, TINDEX, TQUALIFIED_INDEX, TFOR, 
+                //              TIDENTIFIER, LPAREN, in_value_list, RPAREN
+        YYAction406();
+        break;
+      case 407: // analyze_stmt -> TANALYZE, any_identifier
+        YYAction407();
+        break;
+      case 408: // analyze_stmt -> TANALYZE, TTABLE, any_identifier
+        YYAction408();
+        break;
+      case 409: // evict_cache_stmt -> TEVICT, TIDENTIFIER, TSTRING
+        YYAction409();
+        break;
+      case 410: // evict_cache_stmt -> TEVICT, TIDENTIFIER, TIDENTIFIER
+        YYAction410();
+        break;
+      case 411: // flush_stmt -> TIDENTIFIER, TPRIVILEGES
+        YYAction411();
+        break;
+      case 412: // flush_stmt -> TIDENTIFIER, TIDENTIFIER
+        YYAction412();
+        break;
+      case 413: // cancel_stmt -> TIDENTIFIER, TIDENTIFIER, string
+        YYAction413();
+        break;
+      case 414: // create_trigger_stmt -> TCREATE, TIDENTIFIER, any_identifier, TON, 
+                //                        any_identifier, TIDENTIFIER, trigger_event_list, 
+                //                        TIDENTIFIER, TIDENTIFIER, string
+        YYAction414();
+        break;
+      case 415: // create_trigger_stmt -> TCREATE, TIDENTIFIER, any_identifier, TON, 
+                //                        any_identifier, TIDENTIFIER, trigger_event_list, 
+                //                        TIDENTIFIER, TIDENTIFIER, TAS, TDOLLARQUOTED
+        YYAction415();
+        break;
+      case 416: // drop_trigger_stmt -> TDROP, TIDENTIFIER, any_identifier, TON, any_identifier
+        YYAction416();
+        break;
+      case 417: // trigger_event_list -> trigger_event_list, TCOMMA, trigger_event
+        YYAction417();
+        break;
+      case 418: // trigger_event_list -> trigger_event
+        YYAction418();
+        break;
+      case 419: // trigger_event -> TINSERT
+        YYAction419();
+        break;
+      case 420: // trigger_event -> TUPDATE
+        YYAction420();
+        break;
+      case 421: // trigger_event -> TDELETE
+        YYAction421();
+        break;
+      case 422: // create_extension_stmt -> TCREATE, TIDENTIFIER, any_identifier
+        YYAction422();
+        break;
+      case 423: // create_extension_stmt -> TCREATE, TIDENTIFIER, any_identifier, TIDENTIFIER, 
+                //                          string
+        YYAction423();
+        break;
+      case 424: // create_extension_stmt -> TCREATE, TIDENTIFIER, TIF, TNOT, TEXISTS, 
+                //                          any_identifier
+        YYAction424();
+        break;
+      case 425: // create_extension_stmt -> TCREATE, TIDENTIFIER, TIF, TNOT, TEXISTS, 
+                //                          any_identifier, TIDENTIFIER, string
+        YYAction425();
+        break;
+      case 426: // alter_extension_stmt -> TALTER, TIDENTIFIER, any_identifier, TUPDATE
+        YYAction426();
+        break;
+      case 427: // alter_extension_stmt -> TALTER, TIDENTIFIER, any_identifier, TUPDATE, TTO, 
+                //                         string
+        YYAction427();
+        break;
+      case 428: // drop_extension_stmt -> TDROP, TIDENTIFIER, any_identifier
+        YYAction428();
+        break;
+      case 429: // drop_extension_stmt -> TDROP, TIDENTIFIER, TIF, TEXISTS, any_identifier
+        YYAction429();
+        break;
+      case 430: // create_function_stmt -> TCREATE, TIDENTIFIER, any_identifier, LPAREN, 
+                //                         function_params, RPAREN, function_returns, TAS, 
+                //                         TDOLLARQUOTED
+        YYAction430();
+        break;
+      case 431: // create_function_stmt -> TCREATE, TOR, TIDENTIFIER, TIDENTIFIER, any_identifier, 
+                //                         LPAREN, function_params, RPAREN, function_returns, TAS, 
+                //                         TDOLLARQUOTED
+        YYAction431();
+        break;
+      case 432: // function_params -> function_param_list
+        YYAction432();
+        break;
+      case 433: // function_params -> /* empty */
+        YYAction433();
+        break;
+      case 434: // function_param_list -> function_param_list, TCOMMA, function_param
+        YYAction434();
+        break;
+      case 435: // function_param_list -> function_param
+        YYAction435();
+        break;
+      case 436: // function_param -> identifier, field_type
+        YYAction436();
+        break;
+      case 437: // function_param -> escaped_identifier, field_type
+        YYAction437();
+        break;
+      case 438: // function_returns -> TIDENTIFIER, field_type, TIDENTIFIER, TIDENTIFIER
+        YYAction438();
+        break;
+      case 439: // function_returns -> TIDENTIFIER, field_type, TIDENTIFIER, TNULL, TON, TNULL, 
+                //                     TIDENTIFIER, TIDENTIFIER, TIDENTIFIER
+        YYAction439();
+        break;
+      case 440: // function_returns -> TIDENTIFIER, field_type, TIDENTIFIER, TON, TNULL, 
+                //                     TIDENTIFIER, TIDENTIFIER, TIDENTIFIER
+        YYAction440();
+        break;
+      case 441: // alter_function_stmt -> TALTER, TIDENTIFIER, any_identifier, TIDENTIFIER, TTO, 
+                //                        any_identifier
+        YYAction441();
+        break;
+      case 442: // call_stmt -> TIDENTIFIER, TIDENTIFIER, LPAREN, RPAREN
+        YYAction442();
+        break;
+      case 443: // call_stmt -> TIDENTIFIER, TIDENTIFIER, LPAREN, fcall_argument_list, RPAREN
+        YYAction443();
+        break;
+      case 444: // identifier_index_list -> identifier_index_list, TCOMMA, identifier_index
+        YYAction444();
+        break;
+      case 445: // identifier_index_list -> identifier_index
+        YYAction445();
+        break;
+      case 446: // identifier_index -> any_identifier
+        YYAction446();
+        break;
+      case 447: // identifier_index -> any_identifier, TASC
+        YYAction447();
+        break;
+      case 448: // identifier_index -> any_identifier, TDESC
+        YYAction448();
+        break;
+      case 449: // select_table -> from_clause
+        YYAction449();
+        break;
+      case 452: // from_clause -> table_reference
+        YYAction452();
+        break;
+      case 453: // explicit_join_from -> table_reference, TJOIN, table_reference, TON, condition
+        YYAction453();
+        break;
+      case 454: // explicit_join_from -> table_reference, join_op, table_reference, TON, condition
+        YYAction454();
+        break;
+      case 455: // explicit_join_from -> explicit_join_from, TJOIN, table_reference, TON, 
+                //                       condition
+        YYAction455();
+        break;
+      case 456: // explicit_join_from -> explicit_join_from, join_op, table_reference, TON, 
+                //                       condition
+        YYAction456();
+        break;
+      case 457: // explicit_join_from -> table_reference, TCROSS, TJOIN, table_reference
+        YYAction457();
+        break;
+      case 458: // explicit_join_from -> explicit_join_from, TCROSS, TJOIN, table_reference
+        YYAction458();
+        break;
+      case 459: // explicit_join_from -> table_reference, TOUTER, TJOIN, table_reference, TON, 
+                //                       condition
+        YYAction459();
+        break;
+      case 460: // comma_join_from -> table_reference, TCOMMA, comma_table_list
+        YYAction460();
+        break;
+      case 461: // comma_table_list -> comma_table_list, TCOMMA, table_reference
+        YYAction461();
+        break;
+      case 462: // comma_table_list -> table_reference
+        YYAction462();
+        break;
+      case 463: // join_op -> TINNER, TJOIN
+        YYAction463();
+        break;
+      case 464: // join_op -> TLEFT, TJOIN
+        YYAction464();
+        break;
+      case 465: // join_op -> TLEFT, TOUTER, TJOIN
+        YYAction465();
+        break;
+      case 466: // join_op -> TRIGHT, TJOIN
+        YYAction466();
+        break;
+      case 467: // join_op -> TRIGHT, TOUTER, TJOIN
+        YYAction467();
+        break;
+      case 468: // table_reference -> table_name, opt_table_alias, opt_table_hint
+        YYAction468();
+        break;
+      case 469: // table_reference -> table_function_reference
+        YYAction469();
+        break;
+      case 470: // table_reference -> derived_table_reference
+        YYAction470();
+        break;
+      case 471: // table_function_reference -> identifier, LPAREN, fcall_argument_list, RPAREN, 
+                //                             table_function_alias
+        YYAction471();
+        break;
+      case 472: // table_function_reference -> identifier, LPAREN, RPAREN, table_function_alias
+        YYAction472();
+        break;
+      case 473: // table_function_alias -> opt_table_alias
+        YYAction473();
+        break;
+      case 474: // table_function_alias -> TAS, any_identifier, LPAREN, table_function_column_list, 
+                //                         RPAREN
+        YYAction474();
+        break;
+      case 475: // table_function_alias -> identifier, LPAREN, table_function_column_list, RPAREN
+        YYAction475();
+        break;
+      case 476: // table_function_column_list -> table_function_column_list, TCOMMA, 
+                //                               any_identifier
+        YYAction476();
+        break;
+      case 477: // table_function_column_list -> any_identifier
+        YYAction477();
+        break;
+      case 478: // derived_table_reference -> query_expr, derived_table_alias
+        YYAction478();
+        break;
+      case 479: // derived_table_reference -> query_expr, TAS, any_identifier, LPAREN, 
+                //                            table_function_column_list, RPAREN
+        YYAction479();
+        break;
+      case 480: // derived_table_reference -> query_expr, identifier, LPAREN, 
+                //                            table_function_column_list, RPAREN
+        YYAction480();
+        break;
+      case 481: // derived_table_alias -> TAS, any_identifier
+        YYAction481();
+        break;
+      case 482: // derived_table_alias -> identifier
+        YYAction482();
+        break;
+      case 483: // derived_table_alias -> escaped_identifier
+        YYAction483();
+        break;
+      case 484: // derived_table_alias -> qualified_identifier
+        YYAction484();
+        break;
+      case 485: // table_name -> any_identifier
+        YYAction485();
+        break;
+      case 486: // opt_table_alias -> TAS, any_identifier
+        YYAction486();
+        break;
+      case 487: // opt_table_alias -> identifier
+        YYAction487();
+        break;
+      case 488: // opt_table_alias -> escaped_identifier
+        YYAction488();
+        break;
+      case 489: // opt_table_alias -> qualified_identifier
+        YYAction489();
+        break;
+      case 490: // opt_table_alias -> /* empty */
+        YYAction490();
+        break;
+      case 491: // opt_table_hint -> TAT, LBRACE, identifier, TEQUALS, identifier, RBRACE
+        YYAction491();
+        break;
+      case 492: // opt_table_hint -> TAT, LBRACE, identifier, TEQUALS, identifier, TCOMMA, 
+                //                   cache_hint_options, RBRACE
+        YYAction492();
+        break;
+      case 493: // opt_table_hint -> LBRACE, cache_hint_spec, RBRACE
+        YYAction493();
+        break;
+      case 494: // opt_table_hint -> /* empty */
+        YYAction494();
+        break;
+      case 495: // cache_hint_spec -> TIDENTIFIER, TEQUALS, identifier
+        YYAction495();
+        break;
+      case 496: // cache_hint_spec -> TIDENTIFIER, TEQUALS, identifier, TCOMMA, cache_hint_options
+        YYAction496();
+        break;
+      case 497: // cache_hint_options -> cache_hint_option
+        YYAction497();
+        break;
+      case 498: // cache_hint_options -> cache_hint_options, TCOMMA, cache_hint_option
+        YYAction498();
+        break;
+      case 499: // cache_hint_option -> TIDENTIFIER
+        YYAction499();
+        break;
+      case 500: // cache_hint_option -> TIDENTIFIER, TEQUALS, TDIGIT
+        YYAction500();
+        break;
+      case 501: // cache_hint_option -> TIDENTIFIER, TEQUALS, TDIGIT, TIDENTIFIER
+        YYAction501();
+        break;
+      case 502: // cache_hint_option -> TIDENTIFIER, TEQUALS, identifier
+        YYAction502();
+        break;
+      case 503: // create_table_item_list -> create_table_item_list, TCOMMA, create_table_item
+        YYAction503();
+        break;
+      case 504: // create_table_item_list -> create_table_item_list, TCOMMA, 
+                //                           create_table_inline_constraint
+        YYAction504();
+        break;
+      case 505: // create_table_item_list -> create_table_item
+        YYAction505();
+        break;
+      case 506: // create_table_inline_constraint -> TCONSTRAINT, any_identifier, TPRIMARY, TKEY, 
+                //                                   LPAREN, identifier_index_list, RPAREN
+        YYAction506();
+        break;
+      case 507: // create_table_inline_constraint -> TCONSTRAINT, TSTRING, TPRIMARY, TKEY, LPAREN, 
+                //                                   identifier_index_list, RPAREN
+        YYAction507();
+        break;
+      case 508: // create_table_inline_constraint -> TPRIMARY, TKEY, LPAREN, identifier_index_list, 
+                //                                   RPAREN
+        YYAction508();
+        break;
+      case 509: // create_table_inline_constraint -> TKEY, any_identifier, LPAREN, 
+                //                                   identifier_index_list, RPAREN, 
+                //                                   index_include_clause, opt_inline_comment
+        YYAction509();
+        break;
+      case 510: // create_table_inline_constraint -> TIDENTIFIER, TINDEX, any_identifier, LPAREN, 
+                //                                   identifier_index_list, RPAREN, 
+                //                                   opt_inline_comment
+        YYAction510();
+        break;
+      case 511: // create_table_inline_constraint -> TUNIQUE, TKEY, any_identifier, LPAREN, 
+                //                                   identifier_index_list, RPAREN, 
+                //                                   index_include_clause, opt_inline_comment
+        YYAction511();
+        break;
+      case 512: // create_table_inline_constraint -> TCONSTRAINT, any_identifier, TCHECK, LPAREN, 
+                //                                   condition, RPAREN
+        YYAction512();
+        break;
+      case 513: // create_table_inline_constraint -> TCHECK, LPAREN, condition, RPAREN
+        YYAction513();
+        break;
+      case 514: // create_table_inline_constraint -> fk_table_constraint
+        YYAction514();
+        break;
+      case 515: // create_table_inline_constraint -> TCONSTRAINT, any_identifier, 
+                //                                   fk_table_constraint
+        YYAction515();
+        break;
+      case 516: // fk_table_constraint -> TFOREIGN, TKEY, LPAREN, fk_column_list, RPAREN, 
+                //                        TREFERENCES, any_identifier, opt_fk_ref_columns, 
+                //                        opt_fk_clauses
+        YYAction516();
+        break;
+      case 517: // fk_column_list -> fk_column_list, TCOMMA, any_identifier
+        YYAction517();
+        break;
+      case 518: // fk_column_list -> any_identifier
+        YYAction518();
+        break;
+      case 519: // opt_fk_ref_columns -> LPAREN, fk_column_list, RPAREN
+        YYAction519();
+        break;
+      case 520: // opt_fk_ref_columns -> /* empty */
+        YYAction520();
+        break;
+      case 521: // opt_fk_clauses -> fk_clause_list
+        YYAction521();
+        break;
+      case 522: // opt_fk_clauses -> /* empty */
+        YYAction522();
+        break;
+      case 523: // fk_clause_list -> fk_clause_list, fk_clause
+        YYAction523();
+        break;
+      case 524: // fk_clause_list -> fk_clause
+        YYAction524();
+        break;
+      case 525: // fk_clause -> fk_option
+        YYAction525();
+        break;
+      case 526: // fk_clause -> TIDENTIFIER, TIDENTIFIER
+        YYAction526();
+        break;
+      case 527: // fk_option -> TON, TDELETE, fk_action
+        YYAction527();
+        break;
+      case 528: // fk_option -> TON, TUPDATE, fk_action
+        YYAction528();
+        break;
+      case 529: // fk_option -> TDEFERRABLE
+        YYAction529();
+        break;
+      case 530: // fk_option -> TNOT, TDEFERRABLE
+        YYAction530();
+        break;
+      case 531: // fk_option -> TINITIALLY, TIDENTIFIER
+        YYAction531();
+        break;
+      case 532: // fk_action -> TIDENTIFIER
+        YYAction532();
+        break;
+      case 533: // fk_action -> TNOACTION
+        YYAction533();
+        break;
+      case 534: // fk_action -> TSET, TNULL
+        YYAction534();
+        break;
+      case 535: // fk_action -> TSET, TDEFAULT
+        YYAction535();
+        break;
+      case 536: // create_table_item -> any_identifier, field_type
+        YYAction536();
+        break;
+      case 537: // create_table_item -> any_identifier, field_type, 
+                //                      create_table_field_constraint_list
+        YYAction537();
+        break;
+      case 538: // create_table_item -> any_identifier, TIDENTIFIER
+        YYAction538();
+        break;
+      case 539: // create_table_item -> any_identifier, TIDENTIFIER, 
+                //                      create_table_field_constraint_list
+        YYAction539();
+        break;
+      case 540: // create_table_constraint_list -> TPRIMARY, TKEY, LPAREN, identifier_index_list, 
+                //                                 RPAREN
+        YYAction540();
+        break;
+      case 541: // create_table_field_constraint_list -> create_table_field_constraint_list, 
+                //                                       create_table_field_constraint
+        YYAction541();
+        break;
+      case 542: // create_table_field_constraint_list -> create_table_field_constraint
+        YYAction542();
+        break;
+      case 543: // create_table_field_constraint -> TNULL
+        YYAction543();
+        break;
+      case 544: // create_table_field_constraint -> TNOT, TNULL
+        YYAction544();
+        break;
+      case 545: // create_table_field_constraint -> TCONSTRAINT, any_identifier, TNOT, TNULL
+        YYAction545();
+        break;
+      case 546: // create_table_field_constraint -> TPRIMARY, TKEY
+        YYAction546();
+        break;
+      case 547: // create_table_field_constraint -> TUNIQUE
+        YYAction547();
+        break;
+      case 548: // create_table_field_constraint -> TDEFAULT, LPAREN, default_expr, RPAREN
+        YYAction548();
+        break;
+      case 549: // create_table_field_constraint -> TCHECK, LPAREN, condition, RPAREN
+        YYAction549();
+        break;
+      case 550: // create_table_field_constraint -> TCOMMENT, string
+        YYAction550();
+        break;
+      case 551: // create_table_field_constraint -> TREFERENCES, any_identifier, 
+                //                                  opt_fk_ref_columns
+        YYAction551();
+        break;
+      case 552: // create_table_field_constraint -> TCONSTRAINT, any_identifier, TREFERENCES, 
+                //                                  any_identifier, opt_fk_ref_columns
+        YYAction552();
+        break;
+      case 553: // create_table_field_constraint -> fk_option
+        YYAction553();
+        break;
+      case 554: // create_table_field_constraint -> TIDENTIFIER, TIDENTIFIER, opt_as_identity
+        YYAction554();
+        break;
+      case 555: // create_table_field_constraint -> TIDENTIFIER, TBY, TDEFAULT, TAS, TIDENTIFIER
+        YYAction555();
+        break;
+      case 556: // opt_as_identity -> TAS, TIDENTIFIER
+        YYAction556();
+        break;
+      case 557: // opt_as_identity -> /* empty */
+        YYAction557();
+        break;
+      case 558: // default_expr -> int
+        YYAction558();
+        break;
+      case 559: // default_expr -> float
+        YYAction559();
+        break;
+      case 560: // default_expr -> bytes
+        YYAction560();
+        break;
+      case 561: // default_expr -> string
+        YYAction561();
+        break;
+      case 562: // default_expr -> bool
+        YYAction562();
+        break;
+      case 563: // default_expr -> null
+        YYAction563();
+        break;
+      case 564: // default_expr -> fcall_expr
+        YYAction564();
+        break;
+      case 565: // default_expr -> numeric_literal
+        YYAction565();
+        break;
+      case 566: // default_expr -> temporal_literal
+        YYAction566();
+        break;
+      case 567: // default_expr -> identifier_typed_literal
+        YYAction567();
+        break;
+      case 568: // field_type -> TTYPE_OBJECT_ID
+        YYAction568();
+        break;
+      case 569: // field_type -> TTYPE_STRING
+        YYAction569();
+        break;
+      case 570: // field_type -> TTYPE_STRING, LPAREN, TDIGIT, RPAREN
+        YYAction570();
+        break;
+      case 571: // field_type -> TTYPE_INT64
+        YYAction571();
+        break;
+      case 572: // field_type -> TTYPE_INT16
+        YYAction572();
+        break;
+      case 573: // field_type -> TTYPE_INT32
+        YYAction573();
+        break;
+      case 574: // field_type -> TINTEGER
+        YYAction574();
+        break;
+      case 575: // field_type -> TTYPE_FLOAT64
+        YYAction575();
+        break;
+      case 576: // field_type -> TTYPE_BOOL
+        YYAction576();
+        break;
+      case 577: // field_type -> TTYPE_FLOAT32
+        YYAction577();
+        break;
+      case 578: // field_type -> TTYPE_BYTES
+        YYAction578();
+        break;
+      case 579: // field_type -> TTYPE_BYTES, LPAREN, TDIGIT, RPAREN
+        YYAction579();
+        break;
+      case 580: // field_type -> TTYPE_DATE
+        YYAction580();
+        break;
+      case 581: // field_type -> TTYPE_DATETIME
+        YYAction581();
+        break;
+      case 582: // field_type -> TTYPE_UUID
+        YYAction582();
+        break;
+      case 583: // field_type -> TTYPE_NUMERIC
+        YYAction583();
+        break;
+      case 584: // field_type -> TTYPE_NUMERIC, LPAREN, TDIGIT, RPAREN
+        YYAction584();
+        break;
+      case 585: // field_type -> TTYPE_NUMERIC, LPAREN, TDIGIT, TCOMMA, TDIGIT, RPAREN
+        YYAction585();
+        break;
+      case 586: // field_type -> TTYPE_ARRAY, LPAREN, field_type, RPAREN
+        YYAction586();
+        break;
+      case 587: // field_type -> TTYPE_ARRAY, LPAREN, TIDENTIFIER, RPAREN
+        YYAction587();
+        break;
+      case 588: // cast_target_type -> field_type
+        YYAction588();
+        break;
+      case 589: // cast_target_type -> TDOUBLE
+        YYAction589();
+        break;
+      case 590: // cast_target_type -> TIDENTIFIER
+        YYAction590();
+        break;
+      case 591: // update_list -> update_list, TCOMMA, update_item
+        YYAction591();
+        break;
+      case 592: // update_list -> update_item
+        YYAction592();
+        break;
+      case 593: // update_item -> any_identifier, TEQUALS, expr
+        YYAction593();
+        break;
+      case 594: // select_field_list -> select_field_list, TCOMMA, select_field_item
+        YYAction594();
+        break;
+      case 595: // select_field_list -> select_field_item
+        YYAction595();
+        break;
+      case 596: // select_field_item -> expr
+        YYAction596();
+        break;
+      case 597: // select_field_item -> expr, TAS, any_identifier
+        YYAction597();
+        break;
+      case 598: // select_limit_offset -> int
+        YYAction598();
+        break;
+      case 599: // select_limit_offset -> placeholder
+        YYAction599();
+        break;
+      case 600: // insert_field_list -> insert_field_list, TCOMMA, insert_field_item
+        YYAction600();
+        break;
+      case 601: // insert_field_list -> insert_field_item
+        YYAction601();
+        break;
+      case 602: // insert_field_item -> any_identifier
+        YYAction602();
+        break;
+      case 603: // values_list -> values_list, TCOMMA, values_item
+        YYAction603();
+        break;
+      case 604: // values_list -> values_item
+        YYAction604();
+        break;
+      case 605: // values_item -> expr
+        YYAction605();
+        break;
+      case 606: // order_list -> order_list, TCOMMA, order_item
+        YYAction606();
+        break;
+      case 607: // order_list -> order_item
+        YYAction607();
+        break;
+      case 608: // order_item -> expr
+        YYAction608();
+        break;
+      case 609: // order_item -> expr, TASC
+        YYAction609();
+        break;
+      case 610: // order_item -> expr, TDESC
+        YYAction610();
+        break;
+      case 611: // condition -> expr
+        YYAction611();
+        break;
+      case 612: // expr -> equals_expr
+        YYAction612();
+        break;
+      case 613: // expr -> not_equals_expr
+        YYAction613();
+        break;
+      case 614: // expr -> less_than_expr
+        YYAction614();
+        break;
+      case 615: // expr -> greater_than_expr
+        YYAction615();
+        break;
+      case 616: // expr -> less_equals_than_expr
+        YYAction616();
+        break;
+      case 617: // expr -> greater_equals_than_expr
+        YYAction617();
+        break;
+      case 618: // expr -> between_expr
+        YYAction618();
+        break;
+      case 619: // expr -> and_expr
+        YYAction619();
+        break;
+      case 620: // expr -> or_expr
+        YYAction620();
+        break;
+      case 621: // expr -> not_expr
+        YYAction621();
+        break;
+      case 622: // expr -> negate_expr
+        YYAction622();
+        break;
+      case 623: // expr -> not_between_expr
+        YYAction623();
+        break;
+      case 624: // expr -> not_like_expr
+        YYAction624();
+        break;
+      case 625: // expr -> not_ilike_expr
+        YYAction625();
+        break;
+      case 626: // expr -> add_expr
+        YYAction626();
+        break;
+      case 627: // expr -> sub_expr
+        YYAction627();
+        break;
+      case 628: // expr -> mult_expr
+        YYAction628();
+        break;
+      case 629: // expr -> div_expr
+        YYAction629();
+        break;
+      case 630: // expr -> mod_expr
+        YYAction630();
+        break;
+      case 631: // expr -> power_expr
+        YYAction631();
+        break;
+      case 632: // expr -> concat_expr
+        YYAction632();
+        break;
+      case 633: // expr -> bitwise_expr
+        YYAction633();
+        break;
+      case 634: // expr -> json_op_expr
+        YYAction634();
+        break;
+      case 635: // expr -> bit_not_expr
+        YYAction635();
+        break;
+      case 636: // expr -> postfix_cast_expr
+        YYAction636();
+        break;
+      case 637: // expr -> subscript_expr
+        YYAction637();
+        break;
+      case 638: // expr -> like_expr
+        YYAction638();
+        break;
+      case 639: // expr -> ilike_expr
+        YYAction639();
+        break;
+      case 640: // expr -> regex_match_expr
+        YYAction640();
+        break;
+      case 641: // expr -> regex_imatch_expr
+        YYAction641();
+        break;
+      case 642: // expr -> regex_not_match_expr
+        YYAction642();
+        break;
+      case 643: // expr -> regex_not_imatch_expr
+        YYAction643();
+        break;
+      case 644: // expr -> simple_expr
+        YYAction644();
+        break;
+      case 645: // expr -> group_paren_expr
+        YYAction645();
+        break;
+      case 646: // expr -> fcall_expr
+        YYAction646();
+        break;
+      case 647: // expr -> window_call_expr
+        YYAction647();
+        break;
+      case 648: // expr -> cast_expr
+        YYAction648();
+        break;
+      case 649: // expr -> extract_expr
+        YYAction649();
+        break;
+      case 650: // expr -> position_expr
+        YYAction650();
+        break;
+      case 651: // expr -> case_expr
+        YYAction651();
+        break;
+      case 652: // expr -> projection_all
+        YYAction652();
+        break;
+      case 653: // expr -> use_default_expr
+        YYAction653();
+        break;
+      case 654: // expr -> is_null_expr
+        YYAction654();
+        break;
+      case 655: // expr -> is_not_null_expr
+        YYAction655();
+        break;
+      case 656: // expr -> is_true_expr
+        YYAction656();
+        break;
+      case 657: // expr -> is_not_true_expr
+        YYAction657();
+        break;
+      case 658: // expr -> is_false_expr
+        YYAction658();
+        break;
+      case 659: // expr -> is_not_false_expr
+        YYAction659();
+        break;
+      case 660: // expr -> in_subquery_expr
+        YYAction660();
+        break;
+      case 661: // expr -> not_in_subquery_expr
+        YYAction661();
+        break;
+      case 662: // expr -> exists_subquery_expr
+        YYAction662();
+        break;
+      case 663: // expr -> scalar_subquery_expr
+        YYAction663();
+        break;
+      case 664: // between_expr -> condition, TBETWEEN, between_bound, TAND, between_bound
+        YYAction664();
+        break;
+      case 665: // not_between_expr -> condition, TNOT, TBETWEEN, between_bound, TAND, 
+                //                     between_bound
+        YYAction665();
+        break;
+      case 666: // between_bound -> simple_expr
+        YYAction666();
+        break;
+      case 667: // between_bound -> group_paren_expr
+        YYAction667();
+        break;
+      case 668: // between_bound -> fcall_expr
+        YYAction668();
+        break;
+      case 669: // between_bound -> cast_expr
+        YYAction669();
+        break;
+      case 670: // between_bound -> case_expr
+        YYAction670();
+        break;
+      case 671: // between_bound -> scalar_subquery_expr
+        YYAction671();
+        break;
+      case 672: // between_bound -> between_bound, TADD, between_bound
+        YYAction672();
+        break;
+      case 673: // between_bound -> between_bound, TMINUS, between_bound
+        YYAction673();
+        break;
+      case 674: // between_bound -> between_bound, TMULT, between_bound
+        YYAction674();
+        break;
+      case 675: // between_bound -> between_bound, TDIV, between_bound
+        YYAction675();
+        break;
+      case 676: // between_bound -> between_bound, TMOD, between_bound
+        YYAction676();
+        break;
+      case 677: // between_bound -> between_bound, TCARET, between_bound
+        YYAction677();
+        break;
+      case 678: // between_bound -> between_bound, TCONCAT, between_bound
+        YYAction678();
+        break;
+      case 679: // between_bound -> between_bound, TBITAND, between_bound
+        YYAction679();
+        break;
+      case 680: // between_bound -> between_bound, TBITOR, between_bound
+        YYAction680();
+        break;
+      case 681: // between_bound -> between_bound, TBITXOR, between_bound
+        YYAction681();
+        break;
+      case 682: // between_bound -> between_bound, TSHIFTLEFT, between_bound
+        YYAction682();
+        break;
+      case 683: // between_bound -> between_bound, TSHIFTRIGHT, between_bound
+        YYAction683();
+        break;
+      case 684: // between_bound -> between_bound, TREGEXMATCH, between_bound
+        YYAction684();
+        break;
+      case 685: // between_bound -> between_bound, TREGEXIMATCH, between_bound
+        YYAction685();
+        break;
+      case 686: // between_bound -> between_bound, TREGEXNOTMATCH, between_bound
+        YYAction686();
+        break;
+      case 687: // between_bound -> between_bound, TREGEXNOTIMATCH, between_bound
+        YYAction687();
+        break;
+      case 688: // between_bound -> between_bound, TJSONFIELD, between_bound
+        YYAction688();
+        break;
+      case 689: // between_bound -> between_bound, TJSONFIELDTEXT, between_bound
+        YYAction689();
+        break;
+      case 690: // between_bound -> between_bound, TJSONPATH, between_bound
+        YYAction690();
+        break;
+      case 691: // between_bound -> between_bound, TJSONPATHTEXT, between_bound
+        YYAction691();
+        break;
+      case 692: // between_bound -> between_bound, TJSONCONTAINS, between_bound
+        YYAction692();
+        break;
+      case 693: // between_bound -> between_bound, TJSONCONTAINEDBY, between_bound
+        YYAction693();
+        break;
+      case 694: // between_bound -> between_bound, TJSONEXISTS, between_bound
+        YYAction694();
+        break;
+      case 695: // between_bound -> between_bound, TJSONEXISTSANY, between_bound
+        YYAction695();
+        break;
+      case 696: // between_bound -> between_bound, TJSONEXISTSALL, between_bound
+        YYAction696();
+        break;
+      case 697: // between_bound -> between_bound, TJSONDELETEPATH, between_bound
+        YYAction697();
+        break;
+      case 698: // between_bound -> TMINUS, between_bound
+        YYAction698();
+        break;
+      case 699: // between_bound -> TREGEXMATCH, between_bound
+        YYAction699();
+        break;
+      case 700: // between_bound -> between_bound, TCOLONCOLON, cast_target_type
+        YYAction700();
+        break;
+      case 701: // between_bound -> between_bound, LBRACKET, condition, RBRACKET
+        YYAction701();
+        break;
+      case 702: // and_expr -> condition, TAND, condition
+        YYAction702();
+        break;
+      case 703: // or_expr -> condition, TOR, condition
+        YYAction703();
+        break;
+      case 704: // not_expr -> TNOT, condition
+        YYAction704();
+        break;
+      case 705: // negate_expr -> TMINUS, condition
+        YYAction705();
+        break;
+      case 706: // equals_expr -> condition, TEQUALS, condition
+        YYAction706();
+        break;
+      case 707: // not_equals_expr -> condition, TNOTEQUALS, condition
+        YYAction707();
+        break;
+      case 708: // less_than_expr -> condition, TLESSTHAN, condition
+        YYAction708();
+        break;
+      case 709: // greater_than_expr -> condition, TGREATERTHAN, condition
+        YYAction709();
+        break;
+      case 710: // greater_equals_than_expr -> condition, TGREATERTHANEQUALS, condition
+        YYAction710();
+        break;
+      case 711: // less_equals_than_expr -> condition, TLESSTHANEQUALS, condition
+        YYAction711();
+        break;
+      case 712: // add_expr -> condition, TADD, condition
+        YYAction712();
+        break;
+      case 713: // sub_expr -> condition, TMINUS, condition
+        YYAction713();
+        break;
+      case 714: // mult_expr -> condition, TMULT, condition
+        YYAction714();
+        break;
+      case 715: // div_expr -> condition, TDIV, condition
+        YYAction715();
+        break;
+      case 716: // mod_expr -> condition, TMOD, condition
+        YYAction716();
+        break;
+      case 717: // concat_expr -> condition, TCONCAT, condition
+        YYAction717();
+        break;
+      case 718: // json_op_expr -> condition, TJSONFIELD, condition
+        YYAction718();
+        break;
+      case 719: // json_op_expr -> condition, TJSONFIELDTEXT, condition
+        YYAction719();
+        break;
+      case 720: // json_op_expr -> condition, TJSONPATH, condition
+        YYAction720();
+        break;
+      case 721: // json_op_expr -> condition, TJSONPATHTEXT, condition
+        YYAction721();
+        break;
+      case 722: // json_op_expr -> condition, TJSONCONTAINS, condition
+        YYAction722();
+        break;
+      case 723: // json_op_expr -> condition, TJSONCONTAINEDBY, condition
+        YYAction723();
+        break;
+      case 724: // json_op_expr -> condition, TJSONEXISTS, condition
+        YYAction724();
+        break;
+      case 725: // json_op_expr -> condition, TJSONEXISTSANY, condition
+        YYAction725();
+        break;
+      case 726: // json_op_expr -> condition, TJSONEXISTSALL, condition
+        YYAction726();
+        break;
+      case 727: // json_op_expr -> condition, TJSONDELETEPATH, condition
+        YYAction727();
+        break;
+      case 728: // power_expr -> condition, TCARET, condition
+        YYAction728();
+        break;
+      case 729: // bitwise_expr -> condition, TBITAND, condition
+        YYAction729();
+        break;
+      case 730: // bitwise_expr -> condition, TBITOR, condition
+        YYAction730();
+        break;
+      case 731: // bitwise_expr -> condition, TBITXOR, condition
+        YYAction731();
+        break;
+      case 732: // bitwise_expr -> condition, TSHIFTLEFT, condition
+        YYAction732();
+        break;
+      case 733: // bitwise_expr -> condition, TSHIFTRIGHT, condition
+        YYAction733();
+        break;
+      case 734: // bit_not_expr -> TREGEXMATCH, condition
+        YYAction734();
+        break;
+      case 735: // postfix_cast_expr -> condition, TCOLONCOLON, cast_target_type
+        YYAction735();
+        break;
+      case 736: // subscript_expr -> condition, LBRACKET, condition, RBRACKET
+        YYAction736();
+        break;
+      case 737: // like_expr -> condition, TLIKE, condition
+        YYAction737();
+        break;
+      case 738: // like_expr -> condition, TLIKE, condition, TESCAPE, condition
+        YYAction738();
+        break;
+      case 739: // ilike_expr -> condition, TILIKE, condition
+        YYAction739();
+        break;
+      case 740: // ilike_expr -> condition, TILIKE, condition, TESCAPE, condition
+        YYAction740();
+        break;
+      case 741: // not_like_expr -> condition, TNOT, TLIKE, condition
+        YYAction741();
+        break;
+      case 742: // not_like_expr -> condition, TNOT, TLIKE, condition, TESCAPE, condition
+        YYAction742();
+        break;
+      case 743: // not_ilike_expr -> condition, TNOT, TILIKE, condition
+        YYAction743();
+        break;
+      case 744: // not_ilike_expr -> condition, TNOT, TILIKE, condition, TESCAPE, condition
+        YYAction744();
+        break;
+      case 745: // regex_match_expr -> condition, TREGEXMATCH, condition
+        YYAction745();
+        break;
+      case 746: // regex_imatch_expr -> condition, TREGEXIMATCH, condition
+        YYAction746();
+        break;
+      case 747: // regex_not_match_expr -> condition, TREGEXNOTMATCH, condition
+        YYAction747();
+        break;
+      case 748: // regex_not_imatch_expr -> condition, TREGEXNOTIMATCH, condition
+        YYAction748();
+        break;
+      case 749: // is_null_expr -> condition, TIS, TNULL
+        YYAction749();
+        break;
+      case 750: // is_not_null_expr -> condition, TIS, TNOT, TNULL
+        YYAction750();
+        break;
+      case 751: // is_true_expr -> condition, TIS, TTRUE
+        YYAction751();
+        break;
+      case 752: // is_not_true_expr -> condition, TIS, TNOT, TTRUE
+        YYAction752();
+        break;
+      case 753: // is_false_expr -> condition, TIS, TFALSE
+        YYAction753();
+        break;
+      case 754: // is_not_false_expr -> condition, TIS, TNOT, TFALSE
+        YYAction754();
+        break;
+      case 755: // in_subquery_expr -> condition, TIN, query_expr
+        YYAction755();
+        break;
+      case 756: // in_subquery_expr -> condition, TIN, LPAREN, in_value_list, RPAREN
+        YYAction756();
+        break;
+      case 757: // not_in_subquery_expr -> condition, TNOT, TIN, query_expr
+        YYAction757();
+        break;
+      case 758: // not_in_subquery_expr -> condition, TNOT, TIN, LPAREN, in_value_list, RPAREN
+        YYAction758();
+        break;
+      case 759: // in_value_list -> in_value_list, TCOMMA, in_value_item
+        YYAction759();
+        break;
+      case 760: // in_value_list -> in_value_item
+        YYAction760();
+        break;
+      case 761: // in_value_item -> simple_expr
+        YYAction761();
+        break;
+      case 762: // exists_subquery_expr -> TEXISTS, query_expr
+        YYAction762();
+        break;
+      case 763: // scalar_subquery_expr -> query_expr
+        YYAction763();
+        break;
+      case 764: // fcall_expr -> identifier, LPAREN, RPAREN
+        YYAction764();
+        break;
+      case 765: // fcall_expr -> identifier, LPAREN, fcall_argument_list, RPAREN
+        YYAction765();
+        break;
+      case 766: // fcall_expr -> qualified_identifier, LPAREN, RPAREN
+        YYAction766();
+        break;
+      case 767: // fcall_expr -> qualified_identifier, LPAREN, fcall_argument_list, RPAREN
+        YYAction767();
+        break;
+      case 768: // fcall_expr -> identifier, query_expr
+        YYAction768();
+        break;
+      case 769: // window_call_expr -> fcall_expr, TOVER, LPAREN, RPAREN
+        YYAction769();
+        break;
+      case 770: // window_call_expr -> fcall_expr, TOVER, LPAREN, window_spec, RPAREN
+        YYAction770();
+        break;
+      case 771: // window_call_expr -> fcall_expr, TOVER, identifier
+        YYAction771();
+        break;
+      case 772: // window_spec -> window_partition
+        YYAction772();
+        break;
+      case 773: // window_spec -> window_partition, window_order
+        YYAction773();
+        break;
+      case 774: // window_spec -> window_partition, window_order, window_frame
+        YYAction774();
+        break;
+      case 775: // window_spec -> window_partition, window_frame
+        YYAction775();
+        break;
+      case 776: // window_spec -> window_order
+        YYAction776();
+        break;
+      case 777: // window_spec -> window_order, window_frame
+        YYAction777();
+        break;
+      case 778: // window_spec -> window_frame
+        YYAction778();
+        break;
+      case 779: // window_partition -> TIDENTIFIER, TBY, window_partition_list
+        YYAction779();
+        break;
+      case 780: // window_partition_list -> window_partition_list, TCOMMA, expr
+        YYAction780();
+        break;
+      case 781: // window_partition_list -> expr
+        YYAction781();
+        break;
+      case 782: // window_order -> TORDER, TBY, order_list
+        YYAction782();
+        break;
+      case 783: // window_frame -> TIDENTIFIER, window_frame_bound
+        YYAction783();
+        break;
+      case 784: // window_frame -> TIDENTIFIER, TBETWEEN, window_frame_bound, TAND, 
+                //                 window_frame_bound
+        YYAction784();
+        break;
+      case 785: // window_frame -> window_frame, TIDENTIFIER, TIDENTIFIER
+        YYAction785();
+        break;
+      case 786: // window_frame -> window_frame, TIDENTIFIER, TGROUP
+        YYAction786();
+        break;
+      case 787: // window_frame_bound -> TIDENTIFIER, TIDENTIFIER
+        YYAction787();
+        break;
+      case 788: // window_frame_bound -> int, TIDENTIFIER
+        YYAction788();
+        break;
+      case 789: // window_frame_bound -> placeholder, TIDENTIFIER
+        YYAction789();
+        break;
+      case 790: // window_frame_bound -> float, TIDENTIFIER
+        YYAction790();
+        break;
+      case 791: // window_frame_bound -> string, TIDENTIFIER
+        YYAction791();
+        break;
+      case 792: // extract_expr -> identifier, LPAREN, identifier, TFROM, condition, RPAREN
+        YYAction792();
+        break;
+      case 793: // extract_expr -> identifier, LPAREN, string, TFROM, condition, RPAREN
+        YYAction793();
+        break;
+      case 794: // position_expr -> identifier, LPAREN, condition, TIN, position_operand, RPAREN
+        YYAction794();
+        break;
+      case 795: // position_operand -> simple_expr
+        YYAction795();
+        break;
+      case 796: // position_operand -> fcall_expr
+        YYAction796();
+        break;
+      case 797: // position_operand -> cast_expr
+        YYAction797();
+        break;
+      case 798: // position_operand -> case_expr
+        YYAction798();
+        break;
+      case 799: // cast_expr -> TCAST, LPAREN, condition, TAS, cast_target_type, RPAREN
+        YYAction799();
+        break;
+      case 800: // case_expr -> TCASE, case_when_list, case_else_opt, TEND
+        YYAction800();
+        break;
+      case 801: // case_expr -> TCASE, condition, case_when_list, case_else_opt, TEND
+        YYAction801();
+        break;
+      case 802: // case_expr -> TIF, LPAREN, condition, TCOMMA, condition, TCOMMA, condition, 
+                //              RPAREN
+        YYAction802();
+        break;
+      case 803: // case_when_list -> case_when_list, case_when_clause
+        YYAction803();
+        break;
+      case 804: // case_when_list -> case_when_clause
+        YYAction804();
+        break;
+      case 805: // case_when_clause -> TWHEN, condition, TTHEN, condition
+        YYAction805();
+        break;
+      case 806: // case_else_opt -> TELSE, condition
+        YYAction806();
+        break;
+      case 807: // case_else_opt -> /* empty */
+        YYAction807();
+        break;
+      case 808: // fcall_argument_list -> fcall_argument_list, TCOMMA, fcall_argument_item
+        YYAction808();
+        break;
+      case 809: // fcall_argument_list -> fcall_argument_item
+        YYAction809();
+        break;
+      case 810: // fcall_argument_item -> expr
+        YYAction810();
+        break;
+      case 811: // group_paren_expr -> LPAREN, condition, RPAREN
+        YYAction811();
+        break;
+      case 812: // simple_expr -> any_identifier
+        YYAction812();
+        break;
+      case 813: // simple_expr -> TKEY
+        YYAction813();
+        break;
+      case 814: // simple_expr -> int
+        YYAction814();
+        break;
+      case 815: // simple_expr -> bytes
+        YYAction815();
+        break;
+      case 816: // simple_expr -> array_literal
+        YYAction816();
+        break;
+      case 817: // simple_expr -> float
+        YYAction817();
+        break;
+      case 818: // simple_expr -> string
+        YYAction818();
+        break;
+      case 819: // simple_expr -> bool
+        YYAction819();
+        break;
+      case 820: // simple_expr -> null
+        YYAction820();
+        break;
+      case 821: // simple_expr -> placeholder
+        YYAction821();
+        break;
+      case 822: // simple_expr -> numeric_literal
+        YYAction822();
+        break;
+      case 823: // simple_expr -> temporal_literal
+        YYAction823();
+        break;
+      case 824: // simple_expr -> identifier_typed_literal
+        YYAction824();
+        break;
+      case 825: // simple_expr -> interval_literal
+        YYAction825();
+        break;
+      case 826: // identifier_typed_literal -> TIDENTIFIER, string
+        YYAction826();
+        break;
+      case 827: // interval_literal -> TINTERVAL, string
+        YYAction827();
+        break;
+      case 828: // interval_literal -> TINTERVAL, string, TIDENTIFIER
+        YYAction828();
+        break;
+      case 829: // interval_literal -> TINTERVAL, int, TIDENTIFIER
+        YYAction829();
+        break;
+      case 830: // interval_literal -> TINTERVAL, float, TIDENTIFIER
+        YYAction830();
+        break;
+      case 831: // interval_literal -> TINTERVAL, placeholder, TIDENTIFIER
+        YYAction831();
+        break;
+      case 832: // numeric_literal -> TTYPE_NUMERIC, string
+        YYAction832();
+        break;
+      case 833: // temporal_literal -> TTYPE_DATE, string
+        YYAction833();
+        break;
+      case 834: // temporal_literal -> TTYPE_DATETIME, string
+        YYAction834();
+        break;
+      case 835: // use_default_expr -> TDEFAULT
+        YYAction835();
+        break;
+      case 836: // projection_all -> TMULT
+        YYAction836();
+        break;
+      case 837: // any_identifier -> qualified_identifier
+        YYAction837();
+        break;
+      case 838: // any_identifier -> identifier
+        YYAction838();
+        break;
+      case 839: // any_identifier -> escaped_identifier
+        YYAction839();
+        break;
+      case 840: // qualified_identifier -> any_identifier, TDOT, any_identifier
+        YYAction840();
+        break;
+      case 841: // qualified_identifier -> any_identifier, TDOT, TKEY
+        YYAction841();
+        break;
+      case 842: // identifier -> TIDENTIFIER
+        YYAction842();
+        break;
+      case 843: // identifier -> TESCAPE
+        YYAction843();
+        break;
+      case 844: // escaped_identifier -> TESCAPED_IDENTIFIER
+        YYAction844();
+        break;
+      case 845: // int -> TDIGIT
+        YYAction845();
+        break;
+      case 846: // float -> TFLOAT
+        YYAction846();
+        break;
+      case 847: // string -> TSTRING
+        YYAction847();
+        break;
+      case 848: // bytes -> TBYTESLIT
+        YYAction848();
+        break;
+      case 849: // array_literal -> TTYPE_ARRAY, LBRACKET, RBRACKET
+        YYAction849();
+        break;
+      case 850: // array_literal -> TTYPE_ARRAY, LBRACKET, array_element_list, RBRACKET
+        YYAction850();
+        break;
+      case 851: // array_element_list -> array_element_list, TCOMMA, expr
+        YYAction851();
+        break;
+      case 852: // array_element_list -> expr
+        YYAction852();
+        break;
+      case 853: // bool -> TTRUE
+        YYAction853();
+        break;
+      case 854: // bool -> TFALSE
+        YYAction854();
+        break;
+      case 855: // null -> TNULL
+        YYAction855();
+        break;
+      case 856: // placeholder -> TPLACEHOLDER
+        YYAction856();
+        break;
+    }
+  }
+
+  // list -> stat
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction2()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // list -> stat, semicolons
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction3()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-2].n; }
+  }
+
+  // stat -> select_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction6()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> select_stmt, locking_clause
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction7()
+  {
+{ CurrentSemanticValue.n = RowLockingAst.Wrap(ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // stat -> explain_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction8()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> update_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction9()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> delete_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction10()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> insert_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction11()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> create_table_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction12()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> drop_table_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction13()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> truncate_table_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction14()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> create_database_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction15()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> drop_database_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction16()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> rename_database_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction17()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> alter_table_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction18()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> show_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction19()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> create_index_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction20()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> drop_index_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction21()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> begin_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction22()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> commit_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction23()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> rollback_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction24()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> set_transaction_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction25()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> set_cluster_setting_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction26()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> reset_cluster_setting_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction27()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> analyze_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction28()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> evict_cache_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction29()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> flush_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction30()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> cancel_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction31()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> comment_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction32()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> create_user_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction33()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> alter_user_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction34()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> drop_user_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction35()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> grant_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction36()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> revoke_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction37()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> create_view_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction38()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> drop_view_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction39()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> alter_view_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction40()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> create_matview_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction41()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> refresh_matview_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction42()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> drop_matview_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction43()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> alter_matview_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction44()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> create_sequence_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction45()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> drop_sequence_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction46()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> alter_sequence_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction47()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> create_trigger_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction48()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> drop_trigger_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction49()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> call_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction50()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> create_extension_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction51()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> alter_extension_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction52()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> drop_extension_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction53()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> create_function_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction54()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> alter_function_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction55()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // stat -> with_clause, update_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction56()
+  {
+{ CurrentSemanticValue.n = CommonTableExpressions.With(ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // stat -> with_clause, delete_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction57()
+  {
+{ CurrentSemanticValue.n = CommonTableExpressions.With(ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // stat -> with_clause, insert_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction58()
+  {
+{ CurrentSemanticValue.n = CommonTableExpressions.With(ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // locking_clause -> TFOR, lock_strength, lock_options
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction59()
+  {
+{ CurrentSemanticValue.n = RowLockingAst.Clause(ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // lock_strength -> TUPDATE
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction60()
+  {
+{ CurrentSemanticValue.s = RowLockingAst.Strength(null, false, true); }
+  }
+
+  // lock_strength -> TIDENTIFIER, TKEY, TUPDATE
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction61()
+  {
+{ CurrentSemanticValue.s = RowLockingAst.Strength(ValueStack[ValueStack.Depth-3].s, true, true); }
+  }
+
+  // lock_strength -> TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction62()
+  {
+{ CurrentSemanticValue.s = RowLockingAst.Strength(ValueStack[ValueStack.Depth-1].s, false, false); }
+  }
+
+  // lock_strength -> TKEY, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction63()
+  {
+{ CurrentSemanticValue.s = RowLockingAst.Strength(ValueStack[ValueStack.Depth-1].s, true, false); }
+  }
+
+  // lock_options -> /* empty */
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction64()
+  {
+{ CurrentSemanticValue.n = null; }
+  }
+
+  // lock_options -> lock_options, identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction65()
+  {
+{ CurrentSemanticValue.n = RowLockingAst.AppendWord(ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // lock_options -> lock_options, escaped_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction66()
+  {
+{ CurrentSemanticValue.n = RowLockingAst.AppendWord(ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // opt_distinct -> TDISTINCT
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction67()
+  {
+{ CurrentSemanticValue.s = "1"; }
+  }
+
+  // opt_distinct -> /* empty */
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction68()
+  {
+{ CurrentSemanticValue.s = null; }
+  }
+
+  // select_stmt -> select_no_parens
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction69()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // select_stmt -> select_with_parens
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction70()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // select_with_parens -> LPAREN, select_no_parens, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction71()
+  {
+{ CurrentSemanticValue.n = CommonTableExpressions.InlineNested(ValueStack[ValueStack.Depth-2].n); }
+  }
+
+  // select_no_parens -> simple_select
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction72()
+  {
+{ CurrentSemanticValue.n = SetOperationAst.Finish(ValueStack[ValueStack.Depth-1].n, null, null, null); }
+  }
+
+  // select_no_parens -> select_clause, order_clause, opt_limit, opt_offset
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction73()
+  {
+{ CurrentSemanticValue.n = SetOperationAst.Finish(ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // select_no_parens -> select_clause, limit_clause, opt_offset
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction74()
+  {
+{ CurrentSemanticValue.n = SetOperationAst.Finish(ValueStack[ValueStack.Depth-3].n, null, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // select_no_parens -> select_clause, offset_clause
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction75()
+  {
+{ CurrentSemanticValue.n = SetOperationAst.Finish(ValueStack[ValueStack.Depth-2].n, null, null, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // select_no_parens -> with_clause, select_clause
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction76()
+  {
+{ CurrentSemanticValue.n = CommonTableExpressions.With(ValueStack[ValueStack.Depth-2].n, SetOperationAst.Finish(ValueStack[ValueStack.Depth-1].n, null, null, null)); }
+  }
+
+  // select_no_parens -> with_clause, select_clause, order_clause, opt_limit, 
+  //                     opt_offset
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction77()
+  {
+{ CurrentSemanticValue.n = CommonTableExpressions.With(ValueStack[ValueStack.Depth-5].n, SetOperationAst.Finish(ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n)); }
+  }
+
+  // select_no_parens -> with_clause, select_clause, limit_clause, opt_offset
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction78()
+  {
+{ CurrentSemanticValue.n = CommonTableExpressions.With(ValueStack[ValueStack.Depth-4].n, SetOperationAst.Finish(ValueStack[ValueStack.Depth-3].n, null, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n)); }
+  }
+
+  // select_no_parens -> with_clause, select_clause, offset_clause
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction79()
+  {
+{ CurrentSemanticValue.n = CommonTableExpressions.With(ValueStack[ValueStack.Depth-3].n, SetOperationAst.Finish(ValueStack[ValueStack.Depth-2].n, null, null, ValueStack[ValueStack.Depth-1].n)); }
+  }
+
+  // with_clause -> TWITH, cte_list
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction80()
+  {
+{ sawWith = true; CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // with_clause -> TWITH, TIDENTIFIER, cte_list
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction81()
+  {
 {
                 if (!string.Equals(ValueStack[ValueStack.Depth-2].s, "recursive", System.StringComparison.OrdinalIgnoreCase))
                     throw new CamusDBException(CamusDBErrorCodes.SqlSyntaxError, "syntax error, unexpected '" + ValueStack[ValueStack.Depth-2].s + "' after WITH");
                 sawWith = true;
                 CurrentSemanticValue.n = CommonTableExpressions.Recursive(ValueStack[ValueStack.Depth-1].n);
             }
-        break;
-      case 82: // cte_list -> cte_list, TCOMMA, common_table_expr
+  }
+
+  // cte_list -> cte_list, TCOMMA, common_table_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction82()
+  {
 { CurrentSemanticValue.n = new(NodeType.CommonTableExpressionList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 83: // cte_list -> common_table_expr
+  }
+
+  // cte_list -> common_table_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction83()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 84: // common_table_expr -> any_identifier, opt_cte_columns, TAS, opt_cte_materialized, 
-               //                      select_with_parens
+  }
+
+  // common_table_expr -> any_identifier, opt_cte_columns, TAS, opt_cte_materialized, 
+  //                      select_with_parens
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction84()
+  {
 { CurrentSemanticValue.n = CommonTableExpressions.Definition(ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].s, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 85: // opt_cte_columns -> LPAREN, table_function_column_list, RPAREN
+  }
+
+  // opt_cte_columns -> LPAREN, table_function_column_list, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction85()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-2].n; }
-        break;
-      case 86: // opt_cte_columns -> /* empty */
+  }
+
+  // opt_cte_columns -> /* empty */
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction86()
+  {
 { CurrentSemanticValue.n = null; }
-        break;
-      case 87: // opt_cte_materialized -> TMATERIALIZED
+  }
+
+  // opt_cte_materialized -> TMATERIALIZED
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction87()
+  {
 { CurrentSemanticValue.s = CommonTableExpressions.Materialized; }
-        break;
-      case 88: // opt_cte_materialized -> TNOT, TMATERIALIZED
+  }
+
+  // opt_cte_materialized -> TNOT, TMATERIALIZED
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction88()
+  {
 { CurrentSemanticValue.s = CommonTableExpressions.NotMaterialized; }
-        break;
-      case 89: // opt_cte_materialized -> /* empty */
+  }
+
+  // opt_cte_materialized -> /* empty */
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction89()
+  {
 { CurrentSemanticValue.s = null; }
-        break;
-      case 90: // select_clause -> simple_select
+  }
+
+  // select_clause -> simple_select
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction90()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 91: // select_clause -> select_with_parens
+  }
+
+  // select_clause -> select_with_parens
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction91()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 92: // simple_select -> select_core
+  }
+
+  // simple_select -> select_core
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction92()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 93: // simple_select -> select_clause, TUNION, set_quantifier, select_clause
+  }
+
+  // simple_select -> select_clause, TUNION, set_quantifier, select_clause
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction93()
+  {
 { CurrentSemanticValue.n = SetOperationAst.Combine(SetOperationAst.Union, ValueStack[ValueStack.Depth-2].s, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 94: // simple_select -> select_clause, TEXCEPT, set_quantifier, select_clause
+  }
+
+  // simple_select -> select_clause, TEXCEPT, set_quantifier, select_clause
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction94()
+  {
 { CurrentSemanticValue.n = SetOperationAst.Combine(SetOperationAst.Except, ValueStack[ValueStack.Depth-2].s, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 95: // simple_select -> select_clause, TINTERSECT, set_quantifier, select_clause
+  }
+
+  // simple_select -> select_clause, TINTERSECT, set_quantifier, select_clause
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction95()
+  {
 { CurrentSemanticValue.n = SetOperationAst.Combine(SetOperationAst.Intersect, ValueStack[ValueStack.Depth-2].s, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 96: // set_quantifier -> TIDENTIFIER
+  }
+
+  // set_quantifier -> TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction96()
+  {
 {
                    if (!string.Equals(ValueStack[ValueStack.Depth-1].s, "all", System.StringComparison.OrdinalIgnoreCase))
                        throw new CamusDB.Core.CamusDBException(
@@ -3084,54 +6184,118 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                            "Expected ALL or DISTINCT after UNION, INTERSECT or EXCEPT, got '" + ValueStack[ValueStack.Depth-1].s + "'");
                    CurrentSemanticValue.s = "ALL";
                  }
-        break;
-      case 97: // set_quantifier -> TDISTINCT
+  }
+
+  // set_quantifier -> TDISTINCT
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction97()
+  {
 { CurrentSemanticValue.s = null; }
-        break;
-      case 98: // set_quantifier -> /* empty */
+  }
+
+  // set_quantifier -> /* empty */
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction98()
+  {
 { CurrentSemanticValue.s = null; }
-        break;
-      case 99: // select_core -> TSELECT, opt_distinct, select_field_list, TFROM, select_table, 
-               //                opt_as_of, opt_where, opt_group, opt_having
+  }
+
+  // select_core -> TSELECT, opt_distinct, select_field_list, TFROM, select_table, 
+  //                opt_as_of, opt_where, opt_group, opt_having
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction99()
+  {
 { CurrentSemanticValue.n = new(NodeType.Select, ValueStack[ValueStack.Depth-7].n, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-3].n, null, null, null, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-8].s, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-4].n); }
-        break;
-      case 100: // select_core -> TSELECT, opt_distinct, select_field_list
+  }
+
+  // select_core -> TSELECT, opt_distinct, select_field_list
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction100()
+  {
 { CurrentSemanticValue.n = new(NodeType.Select, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].s, null); }
-        break;
-      case 101: // select_core -> TSELECT, opt_distinct, select_field_list, TWHERE, condition
+  }
+
+  // select_core -> TSELECT, opt_distinct, select_field_list, TWHERE, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction101()
+  {
 { CurrentSemanticValue.n = new(NodeType.Select, ValueStack[ValueStack.Depth-3].n, null, ValueStack[ValueStack.Depth-1].n, null, null, null, null, ValueStack[ValueStack.Depth-4].s, null); }
-        break;
-      case 102: // order_clause -> TORDER, TBY, order_list
+  }
+
+  // order_clause -> TORDER, TBY, order_list
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction102()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 103: // limit_clause -> TLIMIT, select_limit_offset
+  }
+
+  // limit_clause -> TLIMIT, select_limit_offset
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction103()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 104: // offset_clause -> TOFFSET, select_limit_offset
+  }
+
+  // offset_clause -> TOFFSET, select_limit_offset
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction104()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 105: // opt_as_of -> TASOFSYSTEMTIME, as_of_value
+  }
+
+  // opt_as_of -> TASOFSYSTEMTIME, as_of_value
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction105()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 106: // opt_as_of -> /* empty */
+  }
+
+  // opt_as_of -> /* empty */
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction106()
+  {
 { CurrentSemanticValue.n = null; }
-        break;
-      case 107: // as_of_value -> string
+  }
+
+  // as_of_value -> string
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction107()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 108: // as_of_value -> int
+  }
+
+  // as_of_value -> int
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction108()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 109: // as_of_value -> placeholder
+  }
+
+  // as_of_value -> placeholder
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction109()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 110: // explain_stmt -> TEXPLAIN, explain_target
+  }
+
+  // explain_stmt -> TEXPLAIN, explain_target
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction110()
+  {
 { CurrentSemanticValue.n = new(NodeType.Explain, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 111: // explain_stmt -> TEXPLAIN, LPAREN, TANALYZE, RPAREN, explain_target
+  }
+
+  // explain_stmt -> TEXPLAIN, LPAREN, TANALYZE, RPAREN, explain_target
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction111()
+  {
 { CurrentSemanticValue.n = new(RowLockingAst.ExplainAnalyzeTypeOf(ValueStack[ValueStack.Depth-1].n), ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 112: // explain_stmt -> TEXPLAIN, LPAREN, TIDENTIFIER, RPAREN, explain_target
+  }
+
+  // explain_stmt -> TEXPLAIN, LPAREN, TIDENTIFIER, RPAREN, explain_target
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction112()
+  {
 {
                string opt = ValueStack[ValueStack.Depth-3].s.ToUpperInvariant();
                if (opt == "LOGICAL")
@@ -3143,124 +6307,264 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                        CamusDB.Core.CamusDBErrorCodes.InvalidInput,
                        "Unknown EXPLAIN option '" + ValueStack[ValueStack.Depth-3].s + "'. Valid options are: LOGICAL, PHYSICAL, ANALYZE.");
              }
-        break;
-      case 113: // explain_target -> select_stmt
+  }
+
+  // explain_target -> select_stmt
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction113()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 114: // explain_target -> select_stmt, locking_clause
+  }
+
+  // explain_target -> select_stmt, locking_clause
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction114()
+  {
 { CurrentSemanticValue.n = RowLockingAst.Wrap(ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 115: // opt_having -> THAVING, condition
+  }
+
+  // opt_having -> THAVING, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction115()
+  {
 { CurrentSemanticValue.n = new(NodeType.Having, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 116: // opt_having -> /* empty */
+  }
+
+  // opt_having -> /* empty */
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction116()
+  {
 { CurrentSemanticValue.n = null; }
-        break;
-      case 117: // query_expr -> select_with_parens
+  }
+
+  // query_expr -> select_with_parens
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction117()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 118: // opt_where -> TWHERE, condition
+  }
+
+  // opt_where -> TWHERE, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction118()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 119: // opt_where -> /* empty */
+  }
+
+  // opt_where -> /* empty */
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction119()
+  {
 { CurrentSemanticValue.n = null; }
-        break;
-      case 120: // opt_group -> TGROUP, TBY, group_list
+  }
+
+  // opt_group -> TGROUP, TBY, group_list
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction120()
+  {
 { CurrentSemanticValue.n = new(NodeType.GroupBy, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 121: // opt_group -> /* empty */
+  }
+
+  // opt_group -> /* empty */
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction121()
+  {
 { CurrentSemanticValue.n = null; }
-        break;
-      case 122: // opt_limit -> TLIMIT, select_limit_offset
+  }
+
+  // opt_limit -> TLIMIT, select_limit_offset
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction122()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 123: // opt_limit -> /* empty */
+  }
+
+  // opt_limit -> /* empty */
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction123()
+  {
 { CurrentSemanticValue.n = null; }
-        break;
-      case 124: // opt_offset -> TOFFSET, select_limit_offset
+  }
+
+  // opt_offset -> TOFFSET, select_limit_offset
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction124()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 125: // opt_offset -> /* empty */
+  }
+
+  // opt_offset -> /* empty */
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction125()
+  {
 { CurrentSemanticValue.n = null; }
-        break;
-      case 126: // group_list -> group_list, TCOMMA, expr
+  }
+
+  // group_list -> group_list, TCOMMA, expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction126()
+  {
 { CurrentSemanticValue.n = new(NodeType.ExprList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 127: // group_list -> expr
+  }
+
+  // group_list -> expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction127()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 128: // insert_stmt -> TINSERT, TINTO, any_identifier, LPAREN, insert_field_list, 
-                //                RPAREN, TVALUES, insert_batch_list, opt_on_conflict, 
-                //                opt_returning
+  }
+
+  // insert_stmt -> TINSERT, TINTO, any_identifier, LPAREN, insert_field_list, 
+  //                RPAREN, TVALUES, insert_batch_list, opt_on_conflict, 
+  //                opt_returning
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction128()
+  {
 { CurrentSemanticValue.n = new(NodeType.Insert, ValueStack[ValueStack.Depth-8].n, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-2].n, null, null, null); }
-        break;
-      case 129: // insert_stmt -> TINSERT, TINTO, any_identifier, TVALUES, insert_batch_list, 
-                //                opt_on_conflict, opt_returning
+  }
+
+  // insert_stmt -> TINSERT, TINTO, any_identifier, TVALUES, insert_batch_list, 
+  //                opt_on_conflict, opt_returning
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction129()
+  {
 { CurrentSemanticValue.n = new(NodeType.Insert, ValueStack[ValueStack.Depth-5].n, null, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-2].n, null, null, null); }
-        break;
-      case 130: // insert_stmt -> TINSERT, TINTO, any_identifier, LPAREN, insert_field_list, 
-                //                RPAREN, select_stmt, opt_on_conflict, opt_returning
+  }
+
+  // insert_stmt -> TINSERT, TINTO, any_identifier, LPAREN, insert_field_list, 
+  //                RPAREN, select_stmt, opt_on_conflict, opt_returning
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction130()
+  {
 { CurrentSemanticValue.n = new(NodeType.InsertSelect, ValueStack[ValueStack.Depth-7].n, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-2].n, null, null, null); }
-        break;
-      case 131: // insert_stmt -> TINSERT, TINTO, any_identifier, select_stmt, opt_on_conflict, 
-                //                opt_returning
+  }
+
+  // insert_stmt -> TINSERT, TINTO, any_identifier, select_stmt, opt_on_conflict, 
+  //                opt_returning
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction131()
+  {
 { CurrentSemanticValue.n = new(NodeType.InsertSelect, ValueStack[ValueStack.Depth-4].n, null, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-2].n, null, null, null); }
-        break;
-      case 132: // insert_stmt -> TINSERT, TINTO, any_identifier, LPAREN, insert_field_list, 
-                //                RPAREN, overriding_clause, TVALUES, insert_batch_list, 
-                //                opt_on_conflict, opt_returning
+  }
+
+  // insert_stmt -> TINSERT, TINTO, any_identifier, LPAREN, insert_field_list, 
+  //                RPAREN, overriding_clause, TVALUES, insert_batch_list, 
+  //                opt_on_conflict, opt_returning
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction132()
+  {
 { CurrentSemanticValue.n = new(NodeType.Insert, ValueStack[ValueStack.Depth-9].n, ValueStack[ValueStack.Depth-7].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-2].n, null, null, ValueStack[ValueStack.Depth-5].s); }
-        break;
-      case 133: // insert_stmt -> TINSERT, TINTO, any_identifier, overriding_clause, TVALUES, 
-                //                insert_batch_list, opt_on_conflict, opt_returning
+  }
+
+  // insert_stmt -> TINSERT, TINTO, any_identifier, overriding_clause, TVALUES, 
+  //                insert_batch_list, opt_on_conflict, opt_returning
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction133()
+  {
 { CurrentSemanticValue.n = new(NodeType.Insert, ValueStack[ValueStack.Depth-6].n, null, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-2].n, null, null, ValueStack[ValueStack.Depth-5].s); }
-        break;
-      case 134: // insert_stmt -> TINSERT, TINTO, any_identifier, LPAREN, insert_field_list, 
-                //                RPAREN, overriding_clause, select_stmt, opt_on_conflict, 
-                //                opt_returning
+  }
+
+  // insert_stmt -> TINSERT, TINTO, any_identifier, LPAREN, insert_field_list, 
+  //                RPAREN, overriding_clause, select_stmt, opt_on_conflict, 
+  //                opt_returning
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction134()
+  {
 { CurrentSemanticValue.n = new(NodeType.InsertSelect, ValueStack[ValueStack.Depth-8].n, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-2].n, null, null, ValueStack[ValueStack.Depth-4].s); }
-        break;
-      case 135: // insert_stmt -> TINSERT, TINTO, any_identifier, overriding_clause, select_stmt, 
-                //                opt_on_conflict, opt_returning
+  }
+
+  // insert_stmt -> TINSERT, TINTO, any_identifier, overriding_clause, select_stmt, 
+  //                opt_on_conflict, opt_returning
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction135()
+  {
 { CurrentSemanticValue.n = new(NodeType.InsertSelect, ValueStack[ValueStack.Depth-5].n, null, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-2].n, null, null, ValueStack[ValueStack.Depth-4].s); }
-        break;
-      case 136: // insert_stmt -> TIDENTIFIER, TINTO, any_identifier, LPAREN, insert_field_list, 
-                //                RPAREN, TVALUES, insert_batch_list, opt_returning
+  }
+
+  // insert_stmt -> TIDENTIFIER, TINTO, any_identifier, LPAREN, insert_field_list, 
+  //                RPAREN, TVALUES, insert_batch_list, opt_returning
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction136()
+  {
 { CurrentSemanticValue.n = new(NodeType.Insert, ValueStack[ValueStack.Depth-7].n, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, UpsertClause(ValueStack[ValueStack.Depth-9].s), null, null, null); }
-        break;
-      case 137: // insert_stmt -> TIDENTIFIER, TINTO, any_identifier, TVALUES, insert_batch_list, 
-                //                opt_returning
+  }
+
+  // insert_stmt -> TIDENTIFIER, TINTO, any_identifier, TVALUES, insert_batch_list, 
+  //                opt_returning
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction137()
+  {
 { CurrentSemanticValue.n = new(NodeType.Insert, ValueStack[ValueStack.Depth-4].n, null, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, UpsertClause(ValueStack[ValueStack.Depth-6].s), null, null, null); }
-        break;
-      case 138: // insert_stmt -> TIDENTIFIER, TINTO, any_identifier, LPAREN, insert_field_list, 
-                //                RPAREN, select_stmt, opt_returning
+  }
+
+  // insert_stmt -> TIDENTIFIER, TINTO, any_identifier, LPAREN, insert_field_list, 
+  //                RPAREN, select_stmt, opt_returning
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction138()
+  {
 { CurrentSemanticValue.n = new(NodeType.InsertSelect, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, UpsertClause(ValueStack[ValueStack.Depth-8].s), null, null, null); }
-        break;
-      case 139: // insert_stmt -> TIDENTIFIER, TINTO, any_identifier, select_stmt, opt_returning
+  }
+
+  // insert_stmt -> TIDENTIFIER, TINTO, any_identifier, select_stmt, opt_returning
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction139()
+  {
 { CurrentSemanticValue.n = new(NodeType.InsertSelect, ValueStack[ValueStack.Depth-3].n, null, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, UpsertClause(ValueStack[ValueStack.Depth-5].s), null, null, null); }
-        break;
-      case 140: // opt_on_conflict -> TON, TIDENTIFIER, opt_conflict_target, conflict_action
+  }
+
+  // opt_on_conflict -> TON, TIDENTIFIER, opt_conflict_target, conflict_action
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction140()
+  {
 { CurrentSemanticValue.n = OnConflictClause(ValueStack[ValueStack.Depth-3].s, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 141: // opt_on_conflict -> /* empty */
+  }
+
+  // opt_on_conflict -> /* empty */
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction141()
+  {
 { CurrentSemanticValue.n = null; }
-        break;
-      case 142: // opt_conflict_target -> LPAREN, insert_field_list, RPAREN
+  }
+
+  // opt_conflict_target -> LPAREN, insert_field_list, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction142()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-2].n; }
-        break;
-      case 143: // opt_conflict_target -> TON, TCONSTRAINT, any_identifier
+  }
+
+  // opt_conflict_target -> TON, TCONSTRAINT, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction143()
+  {
 { CurrentSemanticValue.n = new(NodeType.OnConflictConstraint, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].n.yytext); }
-        break;
-      case 144: // opt_conflict_target -> /* empty */
+  }
+
+  // opt_conflict_target -> /* empty */
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction144()
+  {
 { CurrentSemanticValue.n = null; }
-        break;
-      case 145: // conflict_action -> TIDENTIFIER, TIDENTIFIER
+  }
+
+  // conflict_action -> TIDENTIFIER, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction145()
+  {
 { CurrentSemanticValue.n = ConflictDoNothing(ValueStack[ValueStack.Depth-2].s, ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 146: // conflict_action -> TIDENTIFIER, TUPDATE, TSET, update_list, opt_where
+  }
+
+  // conflict_action -> TIDENTIFIER, TUPDATE, TSET, update_list, opt_where
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction146()
+  {
 { CurrentSemanticValue.n = ConflictDoUpdate(ValueStack[ValueStack.Depth-5].s, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 147: // overriding_clause -> TIDENTIFIER, TIDENTIFIER, TIDENTIFIER
+  }
+
+  // overriding_clause -> TIDENTIFIER, TIDENTIFIER, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction147()
+  {
 {
                       if (!string.Equals(ValueStack[ValueStack.Depth-3].s, "overriding", System.StringComparison.OrdinalIgnoreCase) ||
                           !string.Equals(ValueStack[ValueStack.Depth-2].s, "system", System.StringComparison.OrdinalIgnoreCase) ||
@@ -3270,8 +6574,12 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                               "Expected: OVERRIDING { SYSTEM | USER } VALUE, got '" + ValueStack[ValueStack.Depth-3].s + " " + ValueStack[ValueStack.Depth-2].s + " " + ValueStack[ValueStack.Depth-1].s + "'");
                       CurrentSemanticValue.s = "system";
                     }
-        break;
-      case 148: // overriding_clause -> TIDENTIFIER, TUSER, TIDENTIFIER
+  }
+
+  // overriding_clause -> TIDENTIFIER, TUSER, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction148()
+  {
 {
                       if (!string.Equals(ValueStack[ValueStack.Depth-3].s, "overriding", System.StringComparison.OrdinalIgnoreCase) ||
                           !string.Equals(ValueStack[ValueStack.Depth-1].s, "value", System.StringComparison.OrdinalIgnoreCase))
@@ -3280,86 +6588,174 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                               "Expected: OVERRIDING { SYSTEM | USER } VALUE, got '" + ValueStack[ValueStack.Depth-3].s + " USER " + ValueStack[ValueStack.Depth-1].s + "'");
                       CurrentSemanticValue.s = "user";
                     }
-        break;
-      case 149: // opt_returning -> TRETURNING, select_field_list
+  }
+
+  // opt_returning -> TRETURNING, select_field_list
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction149()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 150: // opt_returning -> /* empty */
+  }
+
+  // opt_returning -> /* empty */
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction150()
+  {
 { CurrentSemanticValue.n = null; }
-        break;
-      case 151: // insert_batch_list -> insert_batch_list, TCOMMA, insert_values
+  }
+
+  // insert_batch_list -> insert_batch_list, TCOMMA, insert_values
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction151()
+  {
 { CurrentSemanticValue.n = new(NodeType.InsertBatchList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 152: // insert_batch_list -> insert_values
+  }
+
+  // insert_batch_list -> insert_values
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction152()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 153: // insert_values -> LPAREN, values_list, RPAREN
+  }
+
+  // insert_values -> LPAREN, values_list, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction153()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-2].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-2].s; }
-        break;
-      case 154: // update_stmt -> TUPDATE, any_identifier, opt_dml_alias, TSET, update_list, 
-                //                opt_dml_from, TWHERE, condition, opt_limit, opt_returning
+  }
+
+  // update_stmt -> TUPDATE, any_identifier, opt_dml_alias, TSET, update_list, 
+  //                opt_dml_from, TWHERE, condition, opt_limit, opt_returning
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction154()
+  {
 { CurrentSemanticValue.n = new(NodeType.Update, ValueStack[ValueStack.Depth-9].n, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-8].n, null); }
-        break;
-      case 155: // update_stmt -> TUPDATE, any_identifier, opt_dml_alias, TSET, update_list, 
-                //                opt_dml_from, opt_limit, opt_returning
+  }
+
+  // update_stmt -> TUPDATE, any_identifier, opt_dml_alias, TSET, update_list, 
+  //                opt_dml_from, opt_limit, opt_returning
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction155()
+  {
 {
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInput,
                     "UPDATE requires a WHERE clause, so that one statement cannot change every row by accident. " +
                     "To update every row, write WHERE TRUE");
             }
-        break;
-      case 156: // delete_stmt -> TDELETE, TFROM, any_identifier, opt_dml_alias, opt_dml_using, 
-                //                TWHERE, condition, opt_limit, opt_returning
+  }
+
+  // delete_stmt -> TDELETE, TFROM, any_identifier, opt_dml_alias, opt_dml_using, 
+  //                TWHERE, condition, opt_limit, opt_returning
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction156()
+  {
 { CurrentSemanticValue.n = new(NodeType.Delete, ValueStack[ValueStack.Depth-7].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-6].n, null, null); }
-        break;
-      case 157: // delete_stmt -> TDELETE, TFROM, any_identifier, opt_dml_alias, opt_dml_using, 
-                //                opt_limit, opt_returning
+  }
+
+  // delete_stmt -> TDELETE, TFROM, any_identifier, opt_dml_alias, opt_dml_using, 
+  //                opt_limit, opt_returning
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction157()
+  {
 {
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInput,
                     "DELETE requires a WHERE clause, so that one statement cannot delete every row by accident. " +
                     "To delete every row, write WHERE TRUE");
             }
-        break;
-      case 158: // opt_dml_alias -> TAS, any_identifier
+  }
+
+  // opt_dml_alias -> TAS, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction158()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 159: // opt_dml_alias -> identifier
+  }
+
+  // opt_dml_alias -> identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction159()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 160: // opt_dml_alias -> escaped_identifier
+  }
+
+  // opt_dml_alias -> escaped_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction160()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 161: // opt_dml_alias -> /* empty */
+  }
+
+  // opt_dml_alias -> /* empty */
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction161()
+  {
 { CurrentSemanticValue.n = null; }
-        break;
-      case 162: // opt_dml_from -> TFROM, select_table
+  }
+
+  // opt_dml_from -> TFROM, select_table
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction162()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 163: // opt_dml_from -> /* empty */
+  }
+
+  // opt_dml_from -> /* empty */
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction163()
+  {
 { CurrentSemanticValue.n = null; }
-        break;
-      case 164: // opt_dml_using -> TUSING, select_table
+  }
+
+  // opt_dml_using -> TUSING, select_table
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction164()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 165: // opt_dml_using -> /* empty */
+  }
+
+  // opt_dml_using -> /* empty */
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction165()
+  {
 { CurrentSemanticValue.n = null; }
-        break;
-      case 166: // begin_stmt -> TBEGIN
+  }
+
+  // begin_stmt -> TBEGIN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction166()
+  {
 { CurrentSemanticValue.n = NodeAst.Begin; }
-        break;
-      case 167: // begin_stmt -> TSTART, TTRANSACTION
+  }
+
+  // begin_stmt -> TSTART, TTRANSACTION
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction167()
+  {
 { CurrentSemanticValue.n = NodeAst.Begin; }
-        break;
-      case 168: // commit_stmt -> TCOMMIT
+  }
+
+  // commit_stmt -> TCOMMIT
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction168()
+  {
 { CurrentSemanticValue.n = NodeAst.Commit; }
-        break;
-      case 169: // rollback_stmt -> TROLLBACK
+  }
+
+  // rollback_stmt -> TROLLBACK
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction169()
+  {
 { CurrentSemanticValue.n = NodeAst.Rollback; }
-        break;
-      case 170: // set_transaction_stmt -> TSET, TTRANSACTION, TIDENTIFIER, TIDENTIFIER, 
-                //                         TIDENTIFIER
+  }
+
+  // set_transaction_stmt -> TSET, TTRANSACTION, TIDENTIFIER, TIDENTIFIER, 
+  //                         TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction170()
+  {
 {
           if (!string.Equals(ValueStack[ValueStack.Depth-3].s, "isolation", StringComparison.OrdinalIgnoreCase) ||
               !string.Equals(ValueStack[ValueStack.Depth-2].s, "level", StringComparison.OrdinalIgnoreCase))
@@ -3376,9 +6772,13 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                      NodeAst.TransactionModeReadWrite,
                      null, null, null, null, null, null, level);
       }
-        break;
-      case 171: // set_transaction_stmt -> TSET, TTRANSACTION, TIDENTIFIER, TIDENTIFIER, 
-                //                         TIDENTIFIER, TIDENTIFIER
+  }
+
+  // set_transaction_stmt -> TSET, TTRANSACTION, TIDENTIFIER, TIDENTIFIER, 
+  //                         TIDENTIFIER, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction171()
+  {
 {
           // SET TRANSACTION ISOLATION LEVEL READ COMMITTED — the two-word level opts down from
           // the Serializable default. Read Committed is read-write; there is no READ ONLY|WRITE variant.
@@ -3393,8 +6793,12 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                      NodeAst.TransactionModeReadWrite,
                      null, null, null, null, null, null, "ReadCommitted");
       }
-        break;
-      case 172: // set_transaction_stmt -> TSET, TTRANSACTION, TIDENTIFIER, TIDENTIFIER
+  }
+
+  // set_transaction_stmt -> TSET, TTRANSACTION, TIDENTIFIER, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction172()
+  {
 {
           // SET TRANSACTION LOCKING  { PESSIMISTIC | OPTIMISTIC }
           // SET TRANSACTION PRIORITY { BACKGROUND | LOW | NORMAL | HIGH | CRITICAL }
@@ -3440,9 +6844,13 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                   "Expected: SET TRANSACTION LOCKING { PESSIMISTIC | OPTIMISTIC } or " +
                   "SET TRANSACTION PRIORITY { BACKGROUND | LOW | NORMAL | HIGH | CRITICAL }");
       }
-        break;
-      case 173: // set_transaction_stmt -> TSET, TTRANSACTION, TIDENTIFIER, TIDENTIFIER, 
-                //                         TIDENTIFIER, TIDENTIFIER, TIDENTIFIER
+  }
+
+  // set_transaction_stmt -> TSET, TTRANSACTION, TIDENTIFIER, TIDENTIFIER, 
+  //                         TIDENTIFIER, TIDENTIFIER, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction173()
+  {
 {
           if (!string.Equals(ValueStack[ValueStack.Depth-5].s, "isolation", StringComparison.OrdinalIgnoreCase) ||
               !string.Equals(ValueStack[ValueStack.Depth-4].s, "level", StringComparison.OrdinalIgnoreCase) ||
@@ -3468,9 +6876,13 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                      modeAst,
                      null, null, null, null, null, null, "Serializable");
       }
-        break;
-      case 174: // set_cluster_setting_stmt -> TSET, TIDENTIFIER, TIDENTIFIER, any_identifier, 
-                //                             TEQUALS, cluster_setting_value
+  }
+
+  // set_cluster_setting_stmt -> TSET, TIDENTIFIER, TIDENTIFIER, any_identifier, 
+  //                             TEQUALS, cluster_setting_value
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction174()
+  {
 {
           if (!string.Equals(ValueStack[ValueStack.Depth-5].s, "cluster", System.StringComparison.OrdinalIgnoreCase) ||
               !string.Equals(ValueStack[ValueStack.Depth-4].s, "setting", System.StringComparison.OrdinalIgnoreCase))
@@ -3479,8 +6891,12 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                   "Expected: SET CLUSTER SETTING <name> = <value>");
           CurrentSemanticValue.n = new(NodeType.SetClusterSetting, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null);
       }
-        break;
-      case 175: // reset_cluster_setting_stmt -> TRESET, TIDENTIFIER, TIDENTIFIER, any_identifier
+  }
+
+  // reset_cluster_setting_stmt -> TRESET, TIDENTIFIER, TIDENTIFIER, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction175()
+  {
 {
           if (!string.Equals(ValueStack[ValueStack.Depth-3].s, "cluster", System.StringComparison.OrdinalIgnoreCase) ||
               !string.Equals(ValueStack[ValueStack.Depth-2].s, "setting", System.StringComparison.OrdinalIgnoreCase))
@@ -3489,62 +6905,122 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                   "Expected: RESET CLUSTER SETTING <name>");
           CurrentSemanticValue.n = new(NodeType.ResetClusterSetting, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null);
       }
-        break;
-      case 176: // cluster_setting_value -> string
+  }
+
+  // cluster_setting_value -> string
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction176()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 177: // cluster_setting_value -> int
+  }
+
+  // cluster_setting_value -> int
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction177()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 178: // cluster_setting_value -> float
+  }
+
+  // cluster_setting_value -> float
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction178()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 179: // cluster_setting_value -> bool
+  }
+
+  // cluster_setting_value -> bool
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction179()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 180: // cluster_setting_value -> identifier
+  }
+
+  // cluster_setting_value -> identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction180()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 181: // cluster_setting_value -> TMINUS, TDIGIT
+  }
+
+  // cluster_setting_value -> TMINUS, TDIGIT
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction181()
+  {
 { CurrentSemanticValue.n = new(NodeType.Integer, null, null, null, null, null, null, null, string.Concat("-", ValueStack[ValueStack.Depth-1].s)); }
-        break;
-      case 182: // cluster_setting_value -> TMINUS, TFLOAT
+  }
+
+  // cluster_setting_value -> TMINUS, TFLOAT
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction182()
+  {
 { CurrentSemanticValue.n = new(NodeType.Float, null, null, null, null, null, null, null, string.Concat("-", ValueStack[ValueStack.Depth-1].s)); }
-        break;
-      case 183: // create_table_stmt -> TCREATE, TTABLE, any_identifier, TRELINK, TTO, string
+  }
+
+  // create_table_stmt -> TCREATE, TTABLE, any_identifier, TRELINK, TTO, string
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction183()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateTableRelink, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 184: // create_table_stmt -> TCREATE, TTABLE, any_identifier, LPAREN, 
-                //                      create_table_item_list, RPAREN, opt_table_comment, 
-                //                      opt_table_settings
+  }
+
+  // create_table_stmt -> TCREATE, TTABLE, any_identifier, LPAREN, 
+  //                      create_table_item_list, RPAREN, opt_table_comment, 
+  //                      opt_table_settings
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction184()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateTable, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-4].n, null, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null); }
-        break;
-      case 185: // create_table_stmt -> TCREATE, TTABLE, TIF, TNOT, TEXISTS, any_identifier, 
-                //                      LPAREN, create_table_item_list, RPAREN, opt_table_comment, 
-                //                      opt_table_settings
+  }
+
+  // create_table_stmt -> TCREATE, TTABLE, TIF, TNOT, TEXISTS, any_identifier, 
+  //                      LPAREN, create_table_item_list, RPAREN, opt_table_comment, 
+  //                      opt_table_settings
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction185()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateTableIfNotExists, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-4].n, null, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null); }
-        break;
-      case 186: // create_table_stmt -> TCREATE, TTABLE, any_identifier, LPAREN, 
-                //                      create_table_item_list, RPAREN, 
-                //                      create_table_constraint_list, opt_table_comment, 
-                //                      opt_table_settings
+  }
+
+  // create_table_stmt -> TCREATE, TTABLE, any_identifier, LPAREN, 
+  //                      create_table_item_list, RPAREN, 
+  //                      create_table_constraint_list, opt_table_comment, 
+  //                      opt_table_settings
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction186()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateTable, ValueStack[ValueStack.Depth-7].n, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null); }
-        break;
-      case 187: // create_table_stmt -> TCREATE, TTABLE, TIF, TNOT, TEXISTS, any_identifier, 
-                //                      LPAREN, create_table_item_list, RPAREN, 
-                //                      create_table_constraint_list, opt_table_comment, 
-                //                      opt_table_settings
+  }
+
+  // create_table_stmt -> TCREATE, TTABLE, TIF, TNOT, TEXISTS, any_identifier, 
+  //                      LPAREN, create_table_item_list, RPAREN, 
+  //                      create_table_constraint_list, opt_table_comment, 
+  //                      opt_table_settings
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction187()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateTableIfNotExists, ValueStack[ValueStack.Depth-7].n, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null); }
-        break;
-      case 188: // create_table_stmt -> TCREATE, TTABLE, any_identifier, TAS, select_stmt, 
-                //                      opt_with_data
+  }
+
+  // create_table_stmt -> TCREATE, TTABLE, any_identifier, TAS, select_stmt, 
+  //                      opt_with_data
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction188()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateTableAsSelect, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 189: // create_table_stmt -> TCREATE, TTABLE, TIF, TNOT, TEXISTS, any_identifier, TAS, 
-                //                      select_stmt, opt_with_data
+  }
+
+  // create_table_stmt -> TCREATE, TTABLE, TIF, TNOT, TEXISTS, any_identifier, TAS, 
+  //                      select_stmt, opt_with_data
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction189()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateTableAsSelectIfNotExists, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 190: // opt_with_data -> TWITH, TIDENTIFIER
+  }
+
+  // opt_with_data -> TWITH, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction190()
+  {
 {
                   if (!string.Equals(ValueStack[ValueStack.Depth-1].s, "data", StringComparison.OrdinalIgnoreCase))
                       throw new CamusDBException(
@@ -3552,8 +7028,12 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                           "Expected WITH DATA or WITH NO DATA, got 'WITH " + ValueStack[ValueStack.Depth-1].s + "'");
                   CurrentSemanticValue.s = "data";
                 }
-        break;
-      case 191: // opt_with_data -> TWITH, TIDENTIFIER, TIDENTIFIER
+  }
+
+  // opt_with_data -> TWITH, TIDENTIFIER, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction191()
+  {
 {
                   if (!string.Equals(ValueStack[ValueStack.Depth-2].s, "no", StringComparison.OrdinalIgnoreCase) ||
                       !string.Equals(ValueStack[ValueStack.Depth-1].s, "data", StringComparison.OrdinalIgnoreCase))
@@ -3562,17 +7042,33 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                           "Expected WITH DATA or WITH NO DATA, got 'WITH " + ValueStack[ValueStack.Depth-2].s + " " + ValueStack[ValueStack.Depth-1].s + "'");
                   CurrentSemanticValue.s = "no data";
                 }
-        break;
-      case 192: // opt_with_data -> /* empty */
+  }
+
+  // opt_with_data -> /* empty */
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction192()
+  {
 { CurrentSemanticValue.s = null; }
-        break;
-      case 193: // truncate_table_stmt -> TTRUNCATE, TTABLE, any_identifier, opt_identity_action
+  }
+
+  // truncate_table_stmt -> TTRUNCATE, TTABLE, any_identifier, opt_identity_action
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction193()
+  {
 { CurrentSemanticValue.n = new(NodeType.TruncateTable, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 194: // truncate_table_stmt -> TTRUNCATE, any_identifier, opt_identity_action
+  }
+
+  // truncate_table_stmt -> TTRUNCATE, any_identifier, opt_identity_action
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction194()
+  {
 { CurrentSemanticValue.n = new(NodeType.TruncateTable, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 195: // opt_identity_action -> TIDENTIFIER, TIDENTIFIER
+  }
+
+  // opt_identity_action -> TIDENTIFIER, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction195()
+  {
 {
                         if (!string.Equals(ValueStack[ValueStack.Depth-1].s, "identity", System.StringComparison.OrdinalIgnoreCase))
                             throw new CamusDB.Core.CamusDBException(
@@ -3587,28 +7083,56 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                                 CamusDB.Core.CamusDBErrorCodes.InvalidInput,
                                 "Expected RESTART IDENTITY or CONTINUE IDENTITY, got '" + ValueStack[ValueStack.Depth-2].s + " " + ValueStack[ValueStack.Depth-1].s + "'");
                       }
-        break;
-      case 196: // opt_identity_action -> /* empty */
+  }
+
+  // opt_identity_action -> /* empty */
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction196()
+  {
 { CurrentSemanticValue.s = null; }
-        break;
-      case 197: // drop_table_stmt -> TDROP, TTABLE, any_identifier
+  }
+
+  // drop_table_stmt -> TDROP, TTABLE, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction197()
+  {
 { CurrentSemanticValue.n = new(NodeType.DropTable, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 198: // drop_table_stmt -> TDROP, TTABLE, any_identifier, TFORCE
+  }
+
+  // drop_table_stmt -> TDROP, TTABLE, any_identifier, TFORCE
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction198()
+  {
 { CurrentSemanticValue.n = new(NodeType.DropTable, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, "force"); }
-        break;
-      case 199: // drop_table_stmt -> TDROP, TTABLE, TIF, TEXISTS, any_identifier
+  }
+
+  // drop_table_stmt -> TDROP, TTABLE, TIF, TEXISTS, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction199()
+  {
 { CurrentSemanticValue.n = new(NodeType.DropTableIfExists, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 200: // drop_table_stmt -> TDROP, TTABLE, TIF, TEXISTS, any_identifier, TFORCE
+  }
+
+  // drop_table_stmt -> TDROP, TTABLE, TIF, TEXISTS, any_identifier, TFORCE
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction200()
+  {
 { CurrentSemanticValue.n = new(NodeType.DropTableIfExists, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, "force"); }
-        break;
-      case 201: // create_view_stmt -> TCREATE, TVIEW, any_identifier, opt_view_column_list, TAS, 
-                //                     select_stmt, opt_check_option
+  }
+
+  // create_view_stmt -> TCREATE, TVIEW, any_identifier, opt_view_column_list, TAS, 
+  //                     select_stmt, opt_check_option
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction201()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateView, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-4].n, null, null, null, null, ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 202: // create_view_stmt -> TCREATE, TOR, TIDENTIFIER, TVIEW, any_identifier, 
-                //                     opt_view_column_list, TAS, select_stmt, opt_check_option
+  }
+
+  // create_view_stmt -> TCREATE, TOR, TIDENTIFIER, TVIEW, any_identifier, 
+  //                     opt_view_column_list, TAS, select_stmt, opt_check_option
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction202()
+  {
 {
                      if (!string.Equals(ValueStack[ValueStack.Depth-7].s, "replace", System.StringComparison.OrdinalIgnoreCase))
                          throw new CamusDB.Core.CamusDBException(
@@ -3616,20 +7140,40 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                              "Expected: CREATE OR REPLACE VIEW, got 'CREATE OR " + ValueStack[ValueStack.Depth-7].s + "'");
                      CurrentSemanticValue.n = new(NodeType.CreateOrReplaceView, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-4].n, null, null, null, null, ValueStack[ValueStack.Depth-1].s);
                    }
-        break;
-      case 203: // opt_view_column_list -> LPAREN, view_column_list, RPAREN
+  }
+
+  // opt_view_column_list -> LPAREN, view_column_list, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction203()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-2].n; }
-        break;
-      case 204: // opt_view_column_list -> /* empty */
+  }
+
+  // opt_view_column_list -> /* empty */
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction204()
+  {
 { CurrentSemanticValue.n = null; }
-        break;
-      case 205: // view_column_list -> view_column_list, TCOMMA, any_identifier
+  }
+
+  // view_column_list -> view_column_list, TCOMMA, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction205()
+  {
 { CurrentSemanticValue.n = new(NodeType.IdentifierList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 206: // view_column_list -> any_identifier
+  }
+
+  // view_column_list -> any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction206()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 207: // opt_check_option -> TWITH, TCHECK, TIDENTIFIER
+  }
+
+  // opt_check_option -> TWITH, TCHECK, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction207()
+  {
 {
                      if (!string.Equals(ValueStack[ValueStack.Depth-1].s, "option", System.StringComparison.OrdinalIgnoreCase))
                          throw new CamusDB.Core.CamusDBException(
@@ -3637,8 +7181,12 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                              "Expected: WITH [LOCAL | CASCADED] CHECK OPTION, got 'WITH CHECK " + ValueStack[ValueStack.Depth-1].s + "'");
                      CurrentSemanticValue.s = "cascaded";
                    }
-        break;
-      case 208: // opt_check_option -> TWITH, TIDENTIFIER, TCHECK, TIDENTIFIER
+  }
+
+  // opt_check_option -> TWITH, TIDENTIFIER, TCHECK, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction208()
+  {
 {
                      if (!string.Equals(ValueStack[ValueStack.Depth-1].s, "option", System.StringComparison.OrdinalIgnoreCase))
                          throw new CamusDB.Core.CamusDBException(
@@ -3653,11 +7201,19 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                              CamusDB.Core.CamusDBErrorCodes.InvalidInput,
                              "Expected: WITH [LOCAL | CASCADED] CHECK OPTION, got 'WITH " + ValueStack[ValueStack.Depth-3].s + " CHECK OPTION'");
                    }
-        break;
-      case 209: // opt_check_option -> /* empty */
+  }
+
+  // opt_check_option -> /* empty */
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction209()
+  {
 { CurrentSemanticValue.s = null; }
-        break;
-      case 210: // opt_drop_behavior -> TIDENTIFIER
+  }
+
+  // opt_drop_behavior -> TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction210()
+  {
 {
                       if (string.Equals(ValueStack[ValueStack.Depth-1].s, "cascade", System.StringComparison.OrdinalIgnoreCase))
                           CurrentSemanticValue.s = "cascade";
@@ -3668,27 +7224,55 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                               CamusDB.Core.CamusDBErrorCodes.InvalidInput,
                               "Expected CASCADE or RESTRICT, got '" + ValueStack[ValueStack.Depth-1].s + "'");
                     }
-        break;
-      case 211: // opt_drop_behavior -> /* empty */
+  }
+
+  // opt_drop_behavior -> /* empty */
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction211()
+  {
 { CurrentSemanticValue.s = null; }
-        break;
-      case 212: // drop_view_stmt -> TDROP, TVIEW, view_name_list, opt_drop_behavior
+  }
+
+  // drop_view_stmt -> TDROP, TVIEW, view_name_list, opt_drop_behavior
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction212()
+  {
 { CurrentSemanticValue.n = new(NodeType.DropView, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 213: // drop_view_stmt -> TDROP, TVIEW, TIF, TEXISTS, view_name_list, opt_drop_behavior
+  }
+
+  // drop_view_stmt -> TDROP, TVIEW, TIF, TEXISTS, view_name_list, opt_drop_behavior
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction213()
+  {
 { CurrentSemanticValue.n = new(NodeType.DropViewIfExists, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 214: // view_name_list -> view_name_list, TCOMMA, any_identifier
+  }
+
+  // view_name_list -> view_name_list, TCOMMA, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction214()
+  {
 { CurrentSemanticValue.n = new(NodeType.IdentifierList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 215: // view_name_list -> any_identifier
+  }
+
+  // view_name_list -> any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction215()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 216: // alter_view_stmt -> TALTER, TVIEW, any_identifier, TRENAME, TTO, any_identifier
+  }
+
+  // alter_view_stmt -> TALTER, TVIEW, any_identifier, TRENAME, TTO, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction216()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterViewRenameTo, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 217: // alter_view_stmt -> TALTER, TVIEW, any_identifier, TIDENTIFIER, TTO, 
-                //                    any_identifier
+  }
+
+  // alter_view_stmt -> TALTER, TVIEW, any_identifier, TIDENTIFIER, TTO, 
+  //                    any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction217()
+  {
 {
                     if (!string.Equals(ValueStack[ValueStack.Depth-3].s, "owner", System.StringComparison.OrdinalIgnoreCase))
                         throw new CamusDB.Core.CamusDBException(
@@ -3696,22 +7280,38 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                             "Expected: ALTER VIEW <name> OWNER TO <user>, got '" + ValueStack[ValueStack.Depth-3].s + " TO'");
                     CurrentSemanticValue.n = new(NodeType.AlterViewOwnerTo, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null);
                   }
-        break;
-      case 218: // create_matview_stmt -> TCREATE, TMATERIALIZED, TVIEW, any_identifier, 
-                //                        opt_view_column_list, TAS, select_stmt, opt_with_data
+  }
+
+  // create_matview_stmt -> TCREATE, TMATERIALIZED, TVIEW, any_identifier, 
+  //                        opt_view_column_list, TAS, select_stmt, opt_with_data
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction218()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateMaterializedView, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-4].n, null, null, null, null, ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 219: // create_matview_stmt -> TCREATE, TMATERIALIZED, TVIEW, TIF, TNOT, TEXISTS, 
-                //                        any_identifier, opt_view_column_list, TAS, select_stmt, 
-                //                        opt_with_data
+  }
+
+  // create_matview_stmt -> TCREATE, TMATERIALIZED, TVIEW, TIF, TNOT, TEXISTS, 
+  //                        any_identifier, opt_view_column_list, TAS, select_stmt, 
+  //                        opt_with_data
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction219()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateMaterializedViewIfNotExists, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-4].n, null, null, null, null, ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 220: // refresh_matview_stmt -> TREFRESH, TMATERIALIZED, TVIEW, any_identifier, 
-                //                         opt_with_data
+  }
+
+  // refresh_matview_stmt -> TREFRESH, TMATERIALIZED, TVIEW, any_identifier, 
+  //                         opt_with_data
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction220()
+  {
 { CurrentSemanticValue.n = new(NodeType.RefreshMaterializedView, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 221: // refresh_matview_stmt -> TREFRESH, TMATERIALIZED, TVIEW, TIDENTIFIER, 
-                //                         any_identifier, opt_with_data
+  }
+
+  // refresh_matview_stmt -> TREFRESH, TMATERIALIZED, TVIEW, TIDENTIFIER, 
+  //                         any_identifier, opt_with_data
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction221()
+  {
 {
                          if (!string.Equals(ValueStack[ValueStack.Depth-3].s, "concurrently", System.StringComparison.OrdinalIgnoreCase))
                              throw new CamusDB.Core.CamusDBException(
@@ -3719,159 +7319,343 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                                  "Expected: REFRESH MATERIALIZED VIEW [CONCURRENTLY] <name>, got '" + ValueStack[ValueStack.Depth-3].s + "'");
                          CurrentSemanticValue.n = new(NodeType.RefreshMaterializedView, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].s == null ? "concurrently" : "concurrently," + ValueStack[ValueStack.Depth-1].s);
                        }
-        break;
-      case 222: // drop_matview_stmt -> TDROP, TMATERIALIZED, TVIEW, view_name_list, 
-                //                      opt_drop_behavior
+  }
+
+  // drop_matview_stmt -> TDROP, TMATERIALIZED, TVIEW, view_name_list, 
+  //                      opt_drop_behavior
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction222()
+  {
 { CurrentSemanticValue.n = new(NodeType.DropMaterializedView, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 223: // drop_matview_stmt -> TDROP, TMATERIALIZED, TVIEW, TIF, TEXISTS, view_name_list, 
-                //                      opt_drop_behavior
+  }
+
+  // drop_matview_stmt -> TDROP, TMATERIALIZED, TVIEW, TIF, TEXISTS, view_name_list, 
+  //                      opt_drop_behavior
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction223()
+  {
 { CurrentSemanticValue.n = new(NodeType.DropMaterializedViewIfExists, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 224: // alter_matview_stmt -> TALTER, TMATERIALIZED, TVIEW, any_identifier, TRENAME, 
-                //                       TTO, any_identifier
+  }
+
+  // alter_matview_stmt -> TALTER, TMATERIALIZED, TVIEW, any_identifier, TRENAME, 
+  //                       TTO, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction224()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterMaterializedViewRenameTo, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 225: // create_sequence_stmt -> TCREATE, TSEQUENCE, any_identifier, 
-                //                         opt_sequence_option_list
+  }
+
+  // create_sequence_stmt -> TCREATE, TSEQUENCE, any_identifier, 
+  //                         opt_sequence_option_list
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction225()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateSequence, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 226: // create_sequence_stmt -> TCREATE, TSEQUENCE, TIF, TNOT, TEXISTS, any_identifier, 
-                //                         opt_sequence_option_list
+  }
+
+  // create_sequence_stmt -> TCREATE, TSEQUENCE, TIF, TNOT, TEXISTS, any_identifier, 
+  //                         opt_sequence_option_list
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction226()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateSequenceIfNotExists, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 227: // drop_sequence_stmt -> TDROP, TSEQUENCE, any_identifier
+  }
+
+  // drop_sequence_stmt -> TDROP, TSEQUENCE, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction227()
+  {
 { CurrentSemanticValue.n = new(NodeType.DropSequence, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 228: // drop_sequence_stmt -> TDROP, TSEQUENCE, TIF, TEXISTS, any_identifier
+  }
+
+  // drop_sequence_stmt -> TDROP, TSEQUENCE, TIF, TEXISTS, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction228()
+  {
 { CurrentSemanticValue.n = new(NodeType.DropSequenceIfExists, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 229: // alter_sequence_stmt -> TALTER, TSEQUENCE, any_identifier, TRENAME, TTO, 
-                //                        any_identifier
+  }
+
+  // alter_sequence_stmt -> TALTER, TSEQUENCE, any_identifier, TRENAME, TTO, 
+  //                        any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction229()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterSequenceRenameTo, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 230: // alter_sequence_stmt -> TALTER, TSEQUENCE, any_identifier, sequence_option_list
+  }
+
+  // alter_sequence_stmt -> TALTER, TSEQUENCE, any_identifier, sequence_option_list
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction230()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterSequence, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 231: // opt_sequence_option_list -> sequence_option_list
+  }
+
+  // opt_sequence_option_list -> sequence_option_list
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction231()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 232: // opt_sequence_option_list -> /* empty */
+  }
+
+  // opt_sequence_option_list -> /* empty */
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction232()
+  {
 { CurrentSemanticValue.n = null; }
-        break;
-      case 233: // sequence_option_list -> sequence_option_list, sequence_option_word
+  }
+
+  // sequence_option_list -> sequence_option_list, sequence_option_word
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction233()
+  {
 { CurrentSemanticValue.n = new(NodeType.SequenceOptionList, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 234: // sequence_option_list -> sequence_option_word
+  }
+
+  // sequence_option_list -> sequence_option_word
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction234()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 235: // sequence_option_word -> TIDENTIFIER
+  }
+
+  // sequence_option_word -> TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction235()
+  {
 { CurrentSemanticValue.n = new(NodeType.SequenceOptionWord, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 236: // sequence_option_word -> TSTART
+  }
+
+  // sequence_option_word -> TSTART
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction236()
+  {
 { CurrentSemanticValue.n = new(NodeType.SequenceOptionWord, null, null, null, null, null, null, null, "start"); }
-        break;
-      case 237: // sequence_option_word -> TWITH
+  }
+
+  // sequence_option_word -> TWITH
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction237()
+  {
 { CurrentSemanticValue.n = new(NodeType.SequenceOptionWord, null, null, null, null, null, null, null, "with"); }
-        break;
-      case 238: // sequence_option_word -> TBY
+  }
+
+  // sequence_option_word -> TBY
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction238()
+  {
 { CurrentSemanticValue.n = new(NodeType.SequenceOptionWord, null, null, null, null, null, null, null, "by"); }
-        break;
-      case 239: // sequence_option_word -> int
+  }
+
+  // sequence_option_word -> int
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction239()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 240: // sequence_option_word -> TMINUS, int
+  }
+
+  // sequence_option_word -> TMINUS, int
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction240()
+  {
 { CurrentSemanticValue.n = new(NodeType.Integer, null, null, null, null, null, null, null, "-" + ValueStack[ValueStack.Depth-1].n.yytext); }
-        break;
-      case 241: // create_database_stmt -> TCREATE, TDATABASE, any_identifier, TRELINK, TTO, 
-                //                         string
+  }
+
+  // create_database_stmt -> TCREATE, TDATABASE, any_identifier, TRELINK, TTO, 
+  //                         string
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction241()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateDatabaseRelink, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 242: // create_database_stmt -> TCREATE, TDATABASE, any_identifier
+  }
+
+  // create_database_stmt -> TCREATE, TDATABASE, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction242()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateDatabase, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 243: // create_database_stmt -> TCREATE, TDATABASE, TIF, TNOT, TEXISTS, any_identifier
+  }
+
+  // create_database_stmt -> TCREATE, TDATABASE, TIF, TNOT, TEXISTS, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction243()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateDatabaseIfNotExists, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 244: // create_database_stmt -> TCREATE, TDATABASE, any_identifier, TBRANCH, TFROM, 
-                //                         any_identifier
+  }
+
+  // create_database_stmt -> TCREATE, TDATABASE, any_identifier, TBRANCH, TFROM, 
+  //                         any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction244()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateDatabaseBranch, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 245: // create_database_stmt -> TCREATE, TDATABASE, TIF, TNOT, TEXISTS, any_identifier, 
-                //                         TBRANCH, TFROM, any_identifier
+  }
+
+  // create_database_stmt -> TCREATE, TDATABASE, TIF, TNOT, TEXISTS, any_identifier, 
+  //                         TBRANCH, TFROM, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction245()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateDatabaseBranchIfNotExists, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 246: // drop_database_stmt -> TDROP, TDATABASE, any_identifier
+  }
+
+  // drop_database_stmt -> TDROP, TDATABASE, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction246()
+  {
 { CurrentSemanticValue.n = new(NodeType.DropDatabase, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 247: // drop_database_stmt -> TDROP, TDATABASE, any_identifier, TFORCE
+  }
+
+  // drop_database_stmt -> TDROP, TDATABASE, any_identifier, TFORCE
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction247()
+  {
 { CurrentSemanticValue.n = new(NodeType.DropDatabase, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, "force"); }
-        break;
-      case 248: // drop_database_stmt -> TDROP, TDATABASE, TIF, TEXISTS, any_identifier
+  }
+
+  // drop_database_stmt -> TDROP, TDATABASE, TIF, TEXISTS, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction248()
+  {
 { CurrentSemanticValue.n = new(NodeType.DropDatabaseIfExists, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 249: // drop_database_stmt -> TDROP, TDATABASE, TIF, TEXISTS, any_identifier, TFORCE
+  }
+
+  // drop_database_stmt -> TDROP, TDATABASE, TIF, TEXISTS, any_identifier, TFORCE
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction249()
+  {
 { CurrentSemanticValue.n = new(NodeType.DropDatabaseIfExists, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, "force"); }
-        break;
-      case 250: // rename_database_stmt -> TRENAME, TDATABASE, any_identifier, TTO, any_identifier
+  }
+
+  // rename_database_stmt -> TRENAME, TDATABASE, any_identifier, TTO, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction250()
+  {
 { CurrentSemanticValue.n = new(NodeType.RenameDatabase, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 251: // rename_database_stmt -> TALTER, TDATABASE, any_identifier, TRENAME, TTO, 
-                //                         any_identifier
+  }
+
+  // rename_database_stmt -> TALTER, TDATABASE, any_identifier, TRENAME, TTO, 
+  //                         any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction251()
+  {
 { CurrentSemanticValue.n = new(NodeType.RenameDatabase, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 252: // comment_stmt -> TCOMMENT, TON, TTABLE, any_identifier, TIS, comment_value
+  }
+
+  // comment_stmt -> TCOMMENT, TON, TTABLE, any_identifier, TIS, comment_value
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction252()
+  {
 { CurrentSemanticValue.n = new(NodeType.CommentOnTable, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 253: // comment_stmt -> TCOMMENT, TON, TCOLUMN, any_identifier, TIS, comment_value
+  }
+
+  // comment_stmt -> TCOMMENT, TON, TCOLUMN, any_identifier, TIS, comment_value
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction253()
+  {
 { CurrentSemanticValue.n = new(NodeType.CommentOnColumn, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 254: // comment_stmt -> TCOMMENT, TON, TINDEX, any_identifier, TIS, comment_value
+  }
+
+  // comment_stmt -> TCOMMENT, TON, TINDEX, any_identifier, TIS, comment_value
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction254()
+  {
 { CurrentSemanticValue.n = new(NodeType.CommentOnIndex, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 255: // comment_stmt -> TCOMMENT, TON, TDATABASE, any_identifier, TIS, comment_value
+  }
+
+  // comment_stmt -> TCOMMENT, TON, TDATABASE, any_identifier, TIS, comment_value
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction255()
+  {
 { CurrentSemanticValue.n = new(NodeType.CommentOnDatabase, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 256: // comment_stmt -> TCOMMENT, TON, TSEQUENCE, any_identifier, TIS, comment_value
+  }
+
+  // comment_stmt -> TCOMMENT, TON, TSEQUENCE, any_identifier, TIS, comment_value
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction256()
+  {
 { CurrentSemanticValue.n = new(NodeType.CommentOnSequence, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 257: // comment_value -> string
+  }
+
+  // comment_value -> string
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction257()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 258: // comment_value -> TNULL
+  }
+
+  // comment_value -> TNULL
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction258()
+  {
 { CurrentSemanticValue.n = null; }
-        break;
-      case 259: // create_user_stmt -> TCREATE, TUSER, any_identifier
+  }
+
+  // create_user_stmt -> TCREATE, TUSER, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction259()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateUser, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 260: // create_user_stmt -> TCREATE, TUSER, any_identifier, TIDENTIFIED, TWITH, 
-                //                     any_identifier, TBY, auth_secret
+  }
+
+  // create_user_stmt -> TCREATE, TUSER, any_identifier, TIDENTIFIED, TWITH, 
+  //                     any_identifier, TBY, auth_secret
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction260()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateUser, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-3].n, null, null, null, null, null); }
-        break;
-      case 261: // create_user_stmt -> TCREATE, TUSER, any_identifier, TIDENTIFIED, TBY, 
-                //                     auth_secret
+  }
+
+  // create_user_stmt -> TCREATE, TUSER, any_identifier, TIDENTIFIED, TBY, 
+  //                     auth_secret
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction261()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateUser, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 262: // create_user_stmt -> TCREATE, TUSER, TIF, TNOT, TEXISTS, any_identifier
+  }
+
+  // create_user_stmt -> TCREATE, TUSER, TIF, TNOT, TEXISTS, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction262()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateUserIfNotExists, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 263: // create_user_stmt -> TCREATE, TUSER, TIF, TNOT, TEXISTS, any_identifier, 
-                //                     TIDENTIFIED, TWITH, any_identifier, TBY, auth_secret
+  }
+
+  // create_user_stmt -> TCREATE, TUSER, TIF, TNOT, TEXISTS, any_identifier, 
+  //                     TIDENTIFIED, TWITH, any_identifier, TBY, auth_secret
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction263()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateUserIfNotExists, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-3].n, null, null, null, null, null); }
-        break;
-      case 264: // create_user_stmt -> TCREATE, TUSER, TIF, TNOT, TEXISTS, any_identifier, 
-                //                     TIDENTIFIED, TBY, auth_secret
+  }
+
+  // create_user_stmt -> TCREATE, TUSER, TIF, TNOT, TEXISTS, any_identifier, 
+  //                     TIDENTIFIED, TBY, auth_secret
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction264()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateUserIfNotExists, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 265: // alter_user_stmt -> TALTER, TUSER, any_identifier, TIDENTIFIED, TWITH, 
-                //                    any_identifier, TBY, auth_secret
+  }
+
+  // alter_user_stmt -> TALTER, TUSER, any_identifier, TIDENTIFIED, TWITH, 
+  //                    any_identifier, TBY, auth_secret
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction265()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterUser, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-3].n, null, null, null, null, null); }
-        break;
-      case 266: // alter_user_stmt -> TALTER, TUSER, any_identifier, TIDENTIFIED, TBY, auth_secret
+  }
+
+  // alter_user_stmt -> TALTER, TUSER, any_identifier, TIDENTIFIED, TBY, auth_secret
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction266()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterUser, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 267: // alter_user_stmt -> TALTER, TUSER, any_identifier, TIDENTIFIED, TWITH, 
-                //                    any_identifier, TBY, auth_secret, TIDENTIFIER, auth_secret
+  }
+
+  // alter_user_stmt -> TALTER, TUSER, any_identifier, TIDENTIFIED, TWITH, 
+  //                    any_identifier, TBY, auth_secret, TIDENTIFIER, auth_secret
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction267()
+  {
 {
                     if (!string.Equals(ValueStack[ValueStack.Depth-2].s, "replace", System.StringComparison.OrdinalIgnoreCase))
                         throw new CamusDB.Core.CamusDBException(
@@ -3879,9 +7663,13 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                             "Expected: ALTER USER ... IDENTIFIED BY ... REPLACE ..., got '" + ValueStack[ValueStack.Depth-2].s + "'");
                     CurrentSemanticValue.n = new(NodeType.AlterUser, ValueStack[ValueStack.Depth-8].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null);
                   }
-        break;
-      case 268: // alter_user_stmt -> TALTER, TUSER, any_identifier, TIDENTIFIED, TBY, auth_secret, 
-                //                    TIDENTIFIER, auth_secret
+  }
+
+  // alter_user_stmt -> TALTER, TUSER, any_identifier, TIDENTIFIED, TBY, auth_secret, 
+  //                    TIDENTIFIER, auth_secret
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction268()
+  {
 {
                     if (!string.Equals(ValueStack[ValueStack.Depth-2].s, "replace", System.StringComparison.OrdinalIgnoreCase))
                         throw new CamusDB.Core.CamusDBException(
@@ -3889,208 +7677,424 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                             "Expected: ALTER USER ... IDENTIFIED BY ... REPLACE ..., got '" + ValueStack[ValueStack.Depth-2].s + "'");
                     CurrentSemanticValue.n = new(NodeType.AlterUser, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-3].n, null, ValueStack[ValueStack.Depth-1].n, null, null, null, null);
                   }
-        break;
-      case 269: // drop_user_stmt -> TDROP, TUSER, any_identifier
+  }
+
+  // drop_user_stmt -> TDROP, TUSER, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction269()
+  {
 { CurrentSemanticValue.n = new(NodeType.DropUser, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 270: // drop_user_stmt -> TDROP, TUSER, TIF, TEXISTS, any_identifier
+  }
+
+  // drop_user_stmt -> TDROP, TUSER, TIF, TEXISTS, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction270()
+  {
 { CurrentSemanticValue.n = new(NodeType.DropUserIfExists, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 271: // grant_stmt -> TGRANT, privilege_list, TON, TMULT, TDOT, TMULT, TTO, 
-                //               any_identifier
+  }
+
+  // grant_stmt -> TGRANT, privilege_list, TON, TMULT, TDOT, TMULT, TTO, 
+  //               any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction271()
+  {
 { CurrentSemanticValue.n = new(NodeType.Grant, ValueStack[ValueStack.Depth-7].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, "global"); }
-        break;
-      case 272: // grant_stmt -> TGRANT, privilege_list, TON, any_identifier, TDOT, TMULT, TTO, 
-                //               any_identifier
+  }
+
+  // grant_stmt -> TGRANT, privilege_list, TON, any_identifier, TDOT, TMULT, TTO, 
+  //               any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction272()
+  {
 { CurrentSemanticValue.n = new(NodeType.Grant, ValueStack[ValueStack.Depth-7].n, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-5].n, null, null, null, null, "database"); }
-        break;
-      case 273: // grant_stmt -> TGRANT, privilege_list, TON, any_identifier, TTO, any_identifier
+  }
+
+  // grant_stmt -> TGRANT, privilege_list, TON, any_identifier, TTO, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction273()
+  {
 { CurrentSemanticValue.n = new(NodeType.Grant, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-3].n, null, null, null, null, "table"); }
-        break;
-      case 274: // revoke_stmt -> TREVOKE, privilege_list, TON, TMULT, TDOT, TMULT, TFROM, 
-                //                any_identifier
+  }
+
+  // revoke_stmt -> TREVOKE, privilege_list, TON, TMULT, TDOT, TMULT, TFROM, 
+  //                any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction274()
+  {
 { CurrentSemanticValue.n = new(NodeType.Revoke, ValueStack[ValueStack.Depth-7].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, "global"); }
-        break;
-      case 275: // revoke_stmt -> TREVOKE, privilege_list, TON, any_identifier, TDOT, TMULT, TFROM, 
-                //                any_identifier
+  }
+
+  // revoke_stmt -> TREVOKE, privilege_list, TON, any_identifier, TDOT, TMULT, TFROM, 
+  //                any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction275()
+  {
 { CurrentSemanticValue.n = new(NodeType.Revoke, ValueStack[ValueStack.Depth-7].n, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-5].n, null, null, null, null, "database"); }
-        break;
-      case 276: // revoke_stmt -> TREVOKE, privilege_list, TON, any_identifier, TFROM, 
-                //                any_identifier
+  }
+
+  // revoke_stmt -> TREVOKE, privilege_list, TON, any_identifier, TFROM, 
+  //                any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction276()
+  {
 { CurrentSemanticValue.n = new(NodeType.Revoke, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-3].n, null, null, null, null, "table"); }
-        break;
-      case 277: // privilege_list -> privilege_list, TCOMMA, privilege
+  }
+
+  // privilege_list -> privilege_list, TCOMMA, privilege
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction277()
+  {
 { CurrentSemanticValue.n = new(NodeType.GrantPrivilegeList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 278: // privilege_list -> privilege
+  }
+
+  // privilege_list -> privilege
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction278()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 279: // privilege -> TSELECT
+  }
+
+  // privilege -> TSELECT
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction279()
+  {
 { CurrentSemanticValue.n = new(NodeType.GrantPrivilege, null, null, null, null, null, null, null, "select"); }
-        break;
-      case 280: // privilege -> TINSERT
+  }
+
+  // privilege -> TINSERT
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction280()
+  {
 { CurrentSemanticValue.n = new(NodeType.GrantPrivilege, null, null, null, null, null, null, null, "insert"); }
-        break;
-      case 281: // privilege -> TUPDATE
+  }
+
+  // privilege -> TUPDATE
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction281()
+  {
 { CurrentSemanticValue.n = new(NodeType.GrantPrivilege, null, null, null, null, null, null, null, "update"); }
-        break;
-      case 282: // privilege -> TDELETE
+  }
+
+  // privilege -> TDELETE
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction282()
+  {
 { CurrentSemanticValue.n = new(NodeType.GrantPrivilege, null, null, null, null, null, null, null, "delete"); }
-        break;
-      case 283: // privilege -> TCREATE, TTABLE
+  }
+
+  // privilege -> TCREATE, TTABLE
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction283()
+  {
 { CurrentSemanticValue.n = new(NodeType.GrantPrivilege, null, null, null, null, null, null, null, "create table"); }
-        break;
-      case 284: // privilege -> TDROP
+  }
+
+  // privilege -> TDROP
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction284()
+  {
 { CurrentSemanticValue.n = new(NodeType.GrantPrivilege, null, null, null, null, null, null, null, "drop"); }
-        break;
-      case 285: // privilege -> TALTER
+  }
+
+  // privilege -> TALTER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction285()
+  {
 { CurrentSemanticValue.n = new(NodeType.GrantPrivilege, null, null, null, null, null, null, null, "alter"); }
-        break;
-      case 286: // privilege -> TINDEX
+  }
+
+  // privilege -> TINDEX
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction286()
+  {
 { CurrentSemanticValue.n = new(NodeType.GrantPrivilege, null, null, null, null, null, null, null, "index"); }
-        break;
-      case 287: // privilege -> TCREATE
+  }
+
+  // privilege -> TCREATE
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction287()
+  {
 { CurrentSemanticValue.n = new(NodeType.GrantPrivilege, null, null, null, null, null, null, null, "create"); }
-        break;
-      case 288: // privilege -> TIDENTIFIER, TPRIVILEGES
+  }
+
+  // privilege -> TIDENTIFIER, TPRIVILEGES
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction288()
+  {
 { CurrentSemanticValue.n = new(NodeType.GrantPrivilege, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].s); }
-        break;
-      case 289: // privilege -> TIDENTIFIER
+  }
+
+  // privilege -> TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction289()
+  {
 { CurrentSemanticValue.n = new(NodeType.GrantPrivilege, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 290: // auth_secret -> string
+  }
+
+  // auth_secret -> string
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction290()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 291: // auth_secret -> placeholder
+  }
+
+  // auth_secret -> placeholder
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction291()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 292: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, any_identifier, 
-                //                     field_type
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, any_identifier, 
+  //                     field_type
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction292()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableAddColumn, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null); }
-        break;
-      case 293: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, any_identifier, 
-                //                     field_type, create_table_field_constraint_list
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, any_identifier, 
+  //                     field_type, create_table_field_constraint_list
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction293()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableAddColumn, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null); }
-        break;
-      case 294: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TCOLUMN, 
-                //                     any_identifier, field_type
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TCOLUMN, 
+  //                     any_identifier, field_type
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction294()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableAddColumn, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null); }
-        break;
-      case 295: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TCOLUMN, 
-                //                     any_identifier, field_type, 
-                //                     create_table_field_constraint_list
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TCOLUMN, 
+  //                     any_identifier, field_type, 
+  //                     create_table_field_constraint_list
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction295()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableAddColumn, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null); }
-        break;
-      case 296: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, any_identifier, 
-                //                     TIDENTIFIER
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, any_identifier, 
+  //                     TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction296()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableAddColumn, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, TypeFromWord(ValueStack[ValueStack.Depth-1].s), null, null, null, null, null); }
-        break;
-      case 297: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, any_identifier, 
-                //                     TIDENTIFIER, create_table_field_constraint_list
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, any_identifier, 
+  //                     TIDENTIFIER, create_table_field_constraint_list
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction297()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableAddColumn, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-3].n, TypeFromWord(ValueStack[ValueStack.Depth-2].s), ValueStack[ValueStack.Depth-1].n, null, null, null, null); }
-        break;
-      case 298: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TCOLUMN, 
-                //                     any_identifier, TIDENTIFIER
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TCOLUMN, 
+  //                     any_identifier, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction298()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableAddColumn, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-2].n, TypeFromWord(ValueStack[ValueStack.Depth-1].s), null, null, null, null, null); }
-        break;
-      case 299: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TCOLUMN, 
-                //                     any_identifier, TIDENTIFIER, 
-                //                     create_table_field_constraint_list
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TCOLUMN, 
+  //                     any_identifier, TIDENTIFIER, 
+  //                     create_table_field_constraint_list
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction299()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableAddColumn, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-3].n, TypeFromWord(ValueStack[ValueStack.Depth-2].s), ValueStack[ValueStack.Depth-1].n, null, null, null, null); }
-        break;
-      case 300: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TDROP, any_identifier
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TDROP, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction300()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableDropColumn, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 301: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TDROP, TCOLUMN, 
-                //                     any_identifier
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TDROP, TCOLUMN, 
+  //                     any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction301()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableDropColumn, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 302: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TINDEX, 
-                //                     any_identifier, LPAREN, identifier_index_list, RPAREN, 
-                //                     index_include_clause
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TINDEX, 
+  //                     any_identifier, LPAREN, identifier_index_list, RPAREN, 
+  //                     index_include_clause
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction302()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableAddIndex, ValueStack[ValueStack.Depth-8].n, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null); }
-        break;
-      case 303: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TINDEX, 
-                //                     any_identifier, TON, LPAREN, identifier_index_list, RPAREN, 
-                //                     index_include_clause
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TINDEX, 
+  //                     any_identifier, TON, LPAREN, identifier_index_list, RPAREN, 
+  //                     index_include_clause
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction303()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableAddIndex, ValueStack[ValueStack.Depth-9].n, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null); }
-        break;
-      case 304: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TUNIQUE, 
-                //                     any_identifier, LPAREN, identifier_index_list, RPAREN, 
-                //                     index_include_clause
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TUNIQUE, 
+  //                     any_identifier, LPAREN, identifier_index_list, RPAREN, 
+  //                     index_include_clause
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction304()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableAddUniqueIndex, ValueStack[ValueStack.Depth-8].n, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null); }
-        break;
-      case 305: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TUNIQUE, 
-                //                     any_identifier, TON, LPAREN, identifier_index_list, RPAREN, 
-                //                     index_include_clause
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TUNIQUE, 
+  //                     any_identifier, TON, LPAREN, identifier_index_list, RPAREN, 
+  //                     index_include_clause
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction305()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableAddUniqueIndex, ValueStack[ValueStack.Depth-9].n, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null); }
-        break;
-      case 306: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TUNIQUE, TINDEX, 
-                //                     any_identifier, LPAREN, identifier_index_list, RPAREN, 
-                //                     index_include_clause
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TUNIQUE, TINDEX, 
+  //                     any_identifier, LPAREN, identifier_index_list, RPAREN, 
+  //                     index_include_clause
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction306()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableAddUniqueIndex, ValueStack[ValueStack.Depth-9].n, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null); }
-        break;
-      case 307: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TUNIQUE, TINDEX, 
-                //                     any_identifier, TON, LPAREN, identifier_index_list, RPAREN, 
-                //                     index_include_clause
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TUNIQUE, TINDEX, 
+  //                     any_identifier, TON, LPAREN, identifier_index_list, RPAREN, 
+  //                     index_include_clause
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction307()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableAddUniqueIndex, ValueStack[ValueStack.Depth-10].n, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null); }
-        break;
-      case 308: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TDROP, TINDEX, 
-                //                     any_identifier
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TDROP, TINDEX, 
+  //                     any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction308()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableDropIndex, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 309: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TDROP, TINDEX, TIF, TEXISTS, 
-                //                     any_identifier
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TDROP, TINDEX, TIF, TEXISTS, 
+  //                     any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction309()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableDropIndexIfExists, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 310: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TPRIMARY, TKEY, 
-                //                     LPAREN, identifier_index_list, RPAREN
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TPRIMARY, TKEY, 
+  //                     LPAREN, identifier_index_list, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction310()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableAddPrimaryKey, ValueStack[ValueStack.Depth-7].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null); }
-        break;
-      case 311: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TDROP, TPRIMARY, TKEY
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TDROP, TPRIMARY, TKEY
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction311()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableDropPrimaryKey, ValueStack[ValueStack.Depth-4].n, null, null, null, null, null, null, null); }
-        break;
-      case 312: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TRENAME, TTO, 
-                //                     any_identifier
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TRENAME, TTO, 
+  //                     any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction312()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableRenameTo, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 313: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TRENAME, TCOLUMN, 
-                //                     any_identifier, TTO, any_identifier
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TRENAME, TCOLUMN, 
+  //                     any_identifier, TTO, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction313()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableRenameColumn, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null); }
-        break;
-      case 314: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TRENAME, TINDEX, 
-                //                     any_identifier, TTO, any_identifier
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TRENAME, TINDEX, 
+  //                     any_identifier, TTO, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction314()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableRenameIndex, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null); }
-        break;
-      case 315: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TCONSTRAINT, 
-                //                     any_identifier, TCHECK, LPAREN, condition, RPAREN
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TCONSTRAINT, 
+  //                     any_identifier, TCHECK, LPAREN, condition, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction315()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableAddConstraintCheck, ValueStack[ValueStack.Depth-8].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, ValueStack[ValueStack.Depth-5].n.yytext); }
-        break;
-      case 316: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, fk_table_constraint
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, fk_table_constraint
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction316()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableAddConstraintForeignKey, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 317: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TCONSTRAINT, 
-                //                     any_identifier, fk_table_constraint
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TCONSTRAINT, 
+  //                     any_identifier, fk_table_constraint
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction317()
+  {
 { ValueStack[ValueStack.Depth-1].n.yytext = ValueStack[ValueStack.Depth-2].n.yytext; CurrentSemanticValue.n = new(NodeType.AlterTableAddConstraintForeignKey, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 318: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TDROP, TCONSTRAINT, 
-                //                     any_identifier
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TDROP, TCONSTRAINT, 
+  //                     any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction318()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableDropConstraint, ValueStack[ValueStack.Depth-4].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].n.yytext); }
-        break;
-      case 319: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TALTER, any_identifier, 
-                //                     TSET, TNOT, TNULL
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TALTER, any_identifier, 
+  //                     TSET, TNOT, TNULL
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction319()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableSetNotNull, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-4].n, null, null, null, null, null, null); }
-        break;
-      case 320: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TALTER, TCOLUMN, 
-                //                     any_identifier, TSET, TNOT, TNULL
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TALTER, TCOLUMN, 
+  //                     any_identifier, TSET, TNOT, TNULL
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction320()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableSetNotNull, ValueStack[ValueStack.Depth-7].n, ValueStack[ValueStack.Depth-4].n, null, null, null, null, null, null); }
-        break;
-      case 321: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TALTER, any_identifier, 
-                //                     TDROP, TNOT, TNULL
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TALTER, any_identifier, 
+  //                     TDROP, TNOT, TNULL
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction321()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableDropNotNull, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-4].n, null, null, null, null, null, null); }
-        break;
-      case 322: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TALTER, any_identifier, 
-                //                     TSET, TIDENTIFIER, TIDENTIFIER
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TALTER, any_identifier, 
+  //                     TSET, TIDENTIFIER, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction322()
+  {
 {
                      if (!string.Equals(ValueStack[ValueStack.Depth-2].s, "storage", System.StringComparison.OrdinalIgnoreCase))
                          throw new CamusDB.Core.CamusDBException(
@@ -4098,9 +8102,13 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                              "Expected: ALTER TABLE <table> ALTER [COLUMN] <column> SET STORAGE <strategy>, got 'SET " + ValueStack[ValueStack.Depth-2].s + "'");
                      CurrentSemanticValue.n = new(NodeType.AlterTableSetColumnStorage, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-4].n, null, null, null, null, null, ValueStack[ValueStack.Depth-1].s);
                    }
-        break;
-      case 323: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TALTER, TCOLUMN, 
-                //                     any_identifier, TSET, TIDENTIFIER, TIDENTIFIER
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TALTER, TCOLUMN, 
+  //                     any_identifier, TSET, TIDENTIFIER, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction323()
+  {
 {
                      if (!string.Equals(ValueStack[ValueStack.Depth-2].s, "storage", System.StringComparison.OrdinalIgnoreCase))
                          throw new CamusDB.Core.CamusDBException(
@@ -4108,8 +8116,12 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                              "Expected: ALTER TABLE <table> ALTER [COLUMN] <column> SET STORAGE <strategy>, got 'SET " + ValueStack[ValueStack.Depth-2].s + "'");
                      CurrentSemanticValue.n = new(NodeType.AlterTableSetColumnStorage, ValueStack[ValueStack.Depth-7].n, ValueStack[ValueStack.Depth-4].n, null, null, null, null, null, ValueStack[ValueStack.Depth-1].s);
                    }
-        break;
-      case 324: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TIDENTIFIER, TIDENTIFIER
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TIDENTIFIER, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction324()
+  {
 {
                      if (!string.Equals(ValueStack[ValueStack.Depth-2].s, "rewrite", System.StringComparison.OrdinalIgnoreCase) ||
                          !string.Equals(ValueStack[ValueStack.Depth-1].s, "storage", System.StringComparison.OrdinalIgnoreCase))
@@ -4118,9 +8130,13 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                              "Expected: ALTER TABLE <table> REWRITE STORAGE [INLINE], got '" + ValueStack[ValueStack.Depth-2].s + " " + ValueStack[ValueStack.Depth-1].s + "'");
                      CurrentSemanticValue.n = new(NodeType.AlterTableRewriteStorage, ValueStack[ValueStack.Depth-3].n, null, null, null, null, null, null, null);
                    }
-        break;
-      case 325: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TIDENTIFIER, TIDENTIFIER, 
-                //                     TIDENTIFIER
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TIDENTIFIER, TIDENTIFIER, 
+  //                     TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction325()
+  {
 {
                      if (!string.Equals(ValueStack[ValueStack.Depth-3].s, "rewrite", System.StringComparison.OrdinalIgnoreCase) ||
                          !string.Equals(ValueStack[ValueStack.Depth-2].s, "storage", System.StringComparison.OrdinalIgnoreCase) ||
@@ -4130,242 +8146,526 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                              "Expected: ALTER TABLE <table> REWRITE STORAGE [INLINE], got '" + ValueStack[ValueStack.Depth-3].s + " " + ValueStack[ValueStack.Depth-2].s + " " + ValueStack[ValueStack.Depth-1].s + "'");
                      CurrentSemanticValue.n = new(NodeType.AlterTableRewriteStorage, ValueStack[ValueStack.Depth-4].n, null, null, null, null, null, null, "inline");
                    }
-        break;
-      case 326: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TALTER, TCOLUMN, 
-                //                     any_identifier, TDROP, TNOT, TNULL
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TALTER, TCOLUMN, 
+  //                     any_identifier, TDROP, TNOT, TNULL
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction326()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableDropNotNull, ValueStack[ValueStack.Depth-7].n, ValueStack[ValueStack.Depth-4].n, null, null, null, null, null, null); }
-        break;
-      case 327: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TSET, LPAREN, 
-                //                     table_setting_list, RPAREN
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TSET, LPAREN, 
+  //                     table_setting_list, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction327()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableSetSetting, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null); }
-        break;
-      case 328: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TRESET, LPAREN, 
-                //                     table_setting_key_list, RPAREN
+  }
+
+  // alter_table_stmt -> TALTER, TTABLE, any_identifier, TRESET, LPAREN, 
+  //                     table_setting_key_list, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction328()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableResetSetting, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null); }
-        break;
-      case 329: // table_setting_list -> table_setting_list, TCOMMA, table_setting
+  }
+
+  // table_setting_list -> table_setting_list, TCOMMA, table_setting
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction329()
+  {
 { CurrentSemanticValue.n = new(NodeType.UpdateList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 330: // table_setting_list -> table_setting
+  }
+
+  // table_setting_list -> table_setting
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction330()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 331: // table_setting -> any_identifier, TEQUALS, bool
+  }
+
+  // table_setting -> any_identifier, TEQUALS, bool
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction331()
+  {
 { CurrentSemanticValue.n = new(NodeType.UpdateItem, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 332: // table_setting -> any_identifier, TEQUALS, string
+  }
+
+  // table_setting -> any_identifier, TEQUALS, string
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction332()
+  {
 { CurrentSemanticValue.n = new(NodeType.UpdateItem, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 333: // table_setting -> any_identifier, TEQUALS, int
+  }
+
+  // table_setting -> any_identifier, TEQUALS, int
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction333()
+  {
 { CurrentSemanticValue.n = new(NodeType.UpdateItem, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 334: // table_setting_key_list -> table_setting_key_list, TCOMMA, any_identifier
+  }
+
+  // table_setting_key_list -> table_setting_key_list, TCOMMA, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction334()
+  {
 { CurrentSemanticValue.n = new(NodeType.IdentifierList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 335: // table_setting_key_list -> any_identifier
+  }
+
+  // table_setting_key_list -> any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction335()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 336: // create_index_stmt -> TCREATE, TINDEX, any_identifier, TON, any_identifier, 
-                //                      LPAREN, identifier_index_list, RPAREN, 
-                //                      index_include_clause
+  }
+
+  // create_index_stmt -> TCREATE, TINDEX, any_identifier, TON, any_identifier, 
+  //                      LPAREN, identifier_index_list, RPAREN, 
+  //                      index_include_clause
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction336()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableAddIndex, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-7].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null); }
-        break;
-      case 337: // create_index_stmt -> TCREATE, TINDEX, TIF, TNOT, TEXISTS, any_identifier, TON, 
-                //                      any_identifier, LPAREN, identifier_index_list, RPAREN, 
-                //                      index_include_clause
+  }
+
+  // create_index_stmt -> TCREATE, TINDEX, TIF, TNOT, TEXISTS, any_identifier, TON, 
+  //                      any_identifier, LPAREN, identifier_index_list, RPAREN, 
+  //                      index_include_clause
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction337()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableAddIndexIfNotExists, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-7].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null); }
-        break;
-      case 338: // create_index_stmt -> TCREATE, TUNIQUE, TINDEX, any_identifier, TON, 
-                //                      any_identifier, LPAREN, identifier_index_list, RPAREN, 
-                //                      index_include_clause
+  }
+
+  // create_index_stmt -> TCREATE, TUNIQUE, TINDEX, any_identifier, TON, 
+  //                      any_identifier, LPAREN, identifier_index_list, RPAREN, 
+  //                      index_include_clause
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction338()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableAddUniqueIndex, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-7].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null); }
-        break;
-      case 339: // create_index_stmt -> TCREATE, TUNIQUE, TINDEX, TIF, TNOT, TEXISTS, 
-                //                      any_identifier, TON, any_identifier, LPAREN, 
-                //                      identifier_index_list, RPAREN, index_include_clause
+  }
+
+  // create_index_stmt -> TCREATE, TUNIQUE, TINDEX, TIF, TNOT, TEXISTS, 
+  //                      any_identifier, TON, any_identifier, LPAREN, 
+  //                      identifier_index_list, RPAREN, index_include_clause
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction339()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableAddUniqueIndexIfNotExists, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-7].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null); }
-        break;
-      case 340: // create_index_stmt -> TCREATE, TINDEX, any_identifier, TON, any_identifier, 
-                //                      TUSING, TIDENTIFIER, LPAREN, method_index_list, RPAREN
+  }
+
+  // create_index_stmt -> TCREATE, TINDEX, any_identifier, TON, any_identifier, 
+  //                      TUSING, TIDENTIFIER, LPAREN, method_index_list, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction340()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableAddIndex, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-8].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, IndexMethod(ValueStack[ValueStack.Depth-4].s, ValueStack[ValueStack.Depth-2].n)); }
-        break;
-      case 341: // create_index_stmt -> TCREATE, TINDEX, TIF, TNOT, TEXISTS, any_identifier, TON, 
-                //                      any_identifier, TUSING, TIDENTIFIER, LPAREN, 
-                //                      method_index_list, RPAREN
+  }
+
+  // create_index_stmt -> TCREATE, TINDEX, TIF, TNOT, TEXISTS, any_identifier, TON, 
+  //                      any_identifier, TUSING, TIDENTIFIER, LPAREN, 
+  //                      method_index_list, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction341()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableAddIndexIfNotExists, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-8].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, IndexMethod(ValueStack[ValueStack.Depth-4].s, ValueStack[ValueStack.Depth-2].n)); }
-        break;
-      case 342: // create_index_stmt -> TCREATE, TIDENTIFIER, TINDEX, any_identifier, TON, 
-                //                      any_identifier, LPAREN, identifier_index_list, RPAREN
+  }
+
+  // create_index_stmt -> TCREATE, TIDENTIFIER, TINDEX, any_identifier, TON, 
+  //                      any_identifier, LPAREN, identifier_index_list, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction342()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableAddIndex, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, InvertedIndexWord(ValueStack[ValueStack.Depth-8].s)); }
-        break;
-      case 343: // create_index_stmt -> TCREATE, TIDENTIFIER, TINDEX, TIF, TNOT, TEXISTS, 
-                //                      any_identifier, TON, any_identifier, LPAREN, 
-                //                      identifier_index_list, RPAREN
+  }
+
+  // create_index_stmt -> TCREATE, TIDENTIFIER, TINDEX, TIF, TNOT, TEXISTS, 
+  //                      any_identifier, TON, any_identifier, LPAREN, 
+  //                      identifier_index_list, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction343()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableAddIndexIfNotExists, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, InvertedIndexWord(ValueStack[ValueStack.Depth-11].s)); }
-        break;
-      case 344: // method_index_list -> method_index_list, TCOMMA, method_index_item
+  }
+
+  // method_index_list -> method_index_list, TCOMMA, method_index_item
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction344()
+  {
 { CurrentSemanticValue.n = new(NodeType.IndexIdentifierList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 345: // method_index_list -> method_index_item
+  }
+
+  // method_index_list -> method_index_item
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction345()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 346: // method_index_item -> identifier_index
+  }
+
+  // method_index_item -> identifier_index
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction346()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 347: // method_index_item -> any_identifier, TIDENTIFIER
+  }
+
+  // method_index_item -> any_identifier, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction347()
+  {
 { CurrentSemanticValue.n = OperatorClassColumn(ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 348: // drop_index_stmt -> TDROP, TINDEX, any_identifier, TON, any_identifier
+  }
+
+  // drop_index_stmt -> TDROP, TINDEX, any_identifier, TON, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction348()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableDropIndex, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-3].n, null, null, null, null, null, null); }
-        break;
-      case 349: // drop_index_stmt -> TDROP, TINDEX, TIF, TEXISTS, any_identifier, TON, 
-                //                    any_identifier
+  }
+
+  // drop_index_stmt -> TDROP, TINDEX, TIF, TEXISTS, any_identifier, TON, 
+  //                    any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction349()
+  {
 { CurrentSemanticValue.n = new(NodeType.AlterTableDropIndexIfExists, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-3].n, null, null, null, null, null, null); }
-        break;
-      case 350: // drop_index_stmt -> TDROP, TINDEX, any_identifier
+  }
+
+  // drop_index_stmt -> TDROP, TINDEX, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction350()
+  {
 { CurrentSemanticValue.n = DropIndexQualified(NodeType.AlterTableDropIndex, ValueStack[ValueStack.Depth-1].n.yytext); }
-        break;
-      case 351: // drop_index_stmt -> TDROP, TINDEX, TIF, TEXISTS, any_identifier
+  }
+
+  // drop_index_stmt -> TDROP, TINDEX, TIF, TEXISTS, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction351()
+  {
 { CurrentSemanticValue.n = DropIndexQualified(NodeType.AlterTableDropIndexIfExists, ValueStack[ValueStack.Depth-1].n.yytext); }
-        break;
-      case 352: // index_include_clause -> /* empty */
+  }
+
+  // index_include_clause -> /* empty */
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction352()
+  {
 { CurrentSemanticValue.n = null; }
-        break;
-      case 353: // index_include_clause -> TINCLUDE, LPAREN, identifier_index_list, RPAREN
+  }
+
+  // index_include_clause -> TINCLUDE, LPAREN, identifier_index_list, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction353()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-2].n; }
-        break;
-      case 354: // opt_inline_comment -> /* empty */
+  }
+
+  // opt_inline_comment -> /* empty */
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction354()
+  {
 { CurrentSemanticValue.n = null; }
-        break;
-      case 355: // opt_inline_comment -> TCOMMENT, string
+  }
+
+  // opt_inline_comment -> TCOMMENT, string
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction355()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 356: // opt_table_comment -> /* empty */
+  }
+
+  // opt_table_comment -> /* empty */
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction356()
+  {
 { CurrentSemanticValue.n = null; }
-        break;
-      case 357: // opt_table_comment -> TCOMMENT, string
+  }
+
+  // opt_table_comment -> TCOMMENT, string
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction357()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 358: // opt_table_settings -> /* empty */
+  }
+
+  // opt_table_settings -> /* empty */
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction358()
+  {
 { CurrentSemanticValue.n = null; }
-        break;
-      case 359: // opt_table_settings -> TWITH, LPAREN, table_setting_list, RPAREN
+  }
+
+  // opt_table_settings -> TWITH, LPAREN, table_setting_list, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction359()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-2].n; }
-        break;
-      case 360: // show_stmt -> TSHOW, TCOLUMNS, TFROM, any_identifier
+  }
+
+  // show_stmt -> TSHOW, TCOLUMNS, TFROM, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction360()
+  {
 { CurrentSemanticValue.n = new(NodeType.ShowColumns, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 361: // show_stmt -> TSHOW, TTABLES
+  }
+
+  // show_stmt -> TSHOW, TTABLES
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction361()
+  {
 { CurrentSemanticValue.n = NodeAst.ShowTables; }
-        break;
-      case 362: // show_stmt -> TSHOW, TTABLES, TLIKE, string
+  }
+
+  // show_stmt -> TSHOW, TTABLES, TLIKE, string
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction362()
+  {
 { CurrentSemanticValue.n = new(NodeType.ShowTables, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 363: // show_stmt -> TSHOW, TTABLES, TFROM, any_identifier
+  }
+
+  // show_stmt -> TSHOW, TTABLES, TFROM, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction363()
+  {
 { CurrentSemanticValue.n = new(NodeType.ShowTablesFrom, null, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 364: // show_stmt -> TSHOW, TTABLES, TIN, any_identifier
+  }
+
+  // show_stmt -> TSHOW, TTABLES, TIN, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction364()
+  {
 { CurrentSemanticValue.n = new(NodeType.ShowTablesFrom, null, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 365: // show_stmt -> TSHOW, TTABLES, TFROM, any_identifier, TLIKE, string
+  }
+
+  // show_stmt -> TSHOW, TTABLES, TFROM, any_identifier, TLIKE, string
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction365()
+  {
 { CurrentSemanticValue.n = new(NodeType.ShowTablesFrom, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-3].n, null, null, null, null, null, null); }
-        break;
-      case 366: // show_stmt -> TSHOW, TTABLES, TIN, any_identifier, TLIKE, string
+  }
+
+  // show_stmt -> TSHOW, TTABLES, TIN, any_identifier, TLIKE, string
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction366()
+  {
 { CurrentSemanticValue.n = new(NodeType.ShowTablesFrom, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-3].n, null, null, null, null, null, null); }
-        break;
-      case 367: // show_stmt -> TDESCRIBE, any_identifier
+  }
+
+  // show_stmt -> TDESCRIBE, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction367()
+  {
 { CurrentSemanticValue.n = new(NodeType.ShowColumns, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 368: // show_stmt -> TDESC, any_identifier
+  }
+
+  // show_stmt -> TDESC, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction368()
+  {
 { CurrentSemanticValue.n = new(NodeType.ShowColumns, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 369: // show_stmt -> TSHOW, TCREATE, TTABLE, any_identifier
+  }
+
+  // show_stmt -> TSHOW, TCREATE, TTABLE, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction369()
+  {
 { CurrentSemanticValue.n = new(NodeType.ShowCreateTable, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 370: // show_stmt -> TSHOW, TCREATE, TTABLE, any_identifier, TWITHOUT, TINDEXES
+  }
+
+  // show_stmt -> TSHOW, TCREATE, TTABLE, any_identifier, TWITHOUT, TINDEXES
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction370()
+  {
 { CurrentSemanticValue.n = new(NodeType.ShowCreateTable, ValueStack[ValueStack.Depth-3].n, NodeAst.WithoutIndexes, null, null, null, null, null, null); }
-        break;
-      case 371: // show_stmt -> TSHOW, TVIEWS
+  }
+
+  // show_stmt -> TSHOW, TVIEWS
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction371()
+  {
 { CurrentSemanticValue.n = new(NodeType.ShowViews, null, null, null, null, null, null, null, null); }
-        break;
-      case 372: // show_stmt -> TSHOW, TVIEWS, TLIKE, string
+  }
+
+  // show_stmt -> TSHOW, TVIEWS, TLIKE, string
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction372()
+  {
 { CurrentSemanticValue.n = new(NodeType.ShowViews, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 373: // show_stmt -> TSHOW, TMATERIALIZED, TVIEWS
+  }
+
+  // show_stmt -> TSHOW, TMATERIALIZED, TVIEWS
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction373()
+  {
 { CurrentSemanticValue.n = new(NodeType.ShowMaterializedViews, null, null, null, null, null, null, null, null); }
-        break;
-      case 374: // show_stmt -> TSHOW, TMATERIALIZED, TVIEWS, TLIKE, string
+  }
+
+  // show_stmt -> TSHOW, TMATERIALIZED, TVIEWS, TLIKE, string
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction374()
+  {
 { CurrentSemanticValue.n = new(NodeType.ShowMaterializedViews, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 375: // show_stmt -> TSHOW, TCREATE, TVIEW, any_identifier
+  }
+
+  // show_stmt -> TSHOW, TCREATE, TVIEW, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction375()
+  {
 { CurrentSemanticValue.n = new(NodeType.ShowCreateView, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 376: // show_stmt -> TSHOW, TCREATE, TMATERIALIZED, TVIEW, any_identifier
+  }
+
+  // show_stmt -> TSHOW, TCREATE, TMATERIALIZED, TVIEW, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction376()
+  {
 { CurrentSemanticValue.n = new(NodeType.ShowCreateMaterializedView, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 377: // show_stmt -> TSHOW, TSEQUENCES
+  }
+
+  // show_stmt -> TSHOW, TSEQUENCES
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction377()
+  {
 { CurrentSemanticValue.n = new(NodeType.ShowSequences, null, null, null, null, null, null, null, null); }
-        break;
-      case 378: // show_stmt -> TSHOW, TSEQUENCES, TLIKE, string
+  }
+
+  // show_stmt -> TSHOW, TSEQUENCES, TLIKE, string
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction378()
+  {
 { CurrentSemanticValue.n = new(NodeType.ShowSequences, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 379: // show_stmt -> TSHOW, TCREATE, TSEQUENCE, any_identifier
+  }
+
+  // show_stmt -> TSHOW, TCREATE, TSEQUENCE, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction379()
+  {
 { CurrentSemanticValue.n = new(NodeType.ShowCreateSequence, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 380: // show_stmt -> TSHOW, TCREATE, TIDENTIFIER, any_identifier
+  }
+
+  // show_stmt -> TSHOW, TCREATE, TIDENTIFIER, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction380()
+  {
 { CurrentSemanticValue.n = ShowCreateFunctionStatement(ValueStack[ValueStack.Depth-2].s, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 381: // show_stmt -> TSHOW, TCREATE, TIDENTIFIER, any_identifier, TON, any_identifier
+  }
+
+  // show_stmt -> TSHOW, TCREATE, TIDENTIFIER, any_identifier, TON, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction381()
+  {
 { CurrentSemanticValue.n = ShowCreateTriggerStatement(ValueStack[ValueStack.Depth-4].s, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 382: // show_stmt -> TSHOW, TDATABASE
+  }
+
+  // show_stmt -> TSHOW, TDATABASE
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction382()
+  {
 { CurrentSemanticValue.n = NodeAst.ShowDatabase; }
-        break;
-      case 383: // show_stmt -> TSHOW, TDATABASES
+  }
+
+  // show_stmt -> TSHOW, TDATABASES
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction383()
+  {
 { CurrentSemanticValue.n = NodeAst.ShowDatabases; }
-        break;
-      case 384: // show_stmt -> TSHOW, TDATABASES, TLIKE, string
+  }
+
+  // show_stmt -> TSHOW, TDATABASES, TLIKE, string
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction384()
+  {
 { CurrentSemanticValue.n = new(NodeType.ShowDatabases, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 385: // show_stmt -> TSHOW, TINDEXES, TFROM, any_identifier
+  }
+
+  // show_stmt -> TSHOW, TINDEXES, TFROM, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction385()
+  {
 { CurrentSemanticValue.n = new(NodeType.ShowIndexes, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 386: // show_stmt -> TSHOW, TINDEX, TFROM, any_identifier
+  }
+
+  // show_stmt -> TSHOW, TINDEX, TFROM, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction386()
+  {
 { CurrentSemanticValue.n = new(NodeType.ShowIndexes, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 387: // show_stmt -> TSHOW, TINDEX, TIDENTIFIER
+  }
+
+  // show_stmt -> TSHOW, TINDEX, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction387()
+  {
 {
             RequireIndexUsageWord(ValueStack[ValueStack.Depth-1].s);
             CurrentSemanticValue.n = new(NodeType.ShowIndexUsage, null, null, null, null, null, null, null, null);
           }
-        break;
-      case 388: // show_stmt -> TSHOW, TINDEX, TIDENTIFIER, TFROM, any_identifier
+  }
+
+  // show_stmt -> TSHOW, TINDEX, TIDENTIFIER, TFROM, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction388()
+  {
 {
             RequireIndexUsageWord(ValueStack[ValueStack.Depth-3].s);
             CurrentSemanticValue.n = new(NodeType.ShowIndexUsage, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null);
           }
-        break;
-      case 389: // show_stmt -> TSHOW, TBRANCHES, TFROM, any_identifier
+  }
+
+  // show_stmt -> TSHOW, TBRANCHES, TFROM, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction389()
+  {
 { CurrentSemanticValue.n = new(NodeType.ShowBranches, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 390: // show_stmt -> TSHOW, TANCESTORS, TFROM, any_identifier
+  }
+
+  // show_stmt -> TSHOW, TANCESTORS, TFROM, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction390()
+  {
 { CurrentSemanticValue.n = new(NodeType.ShowAncestors, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 391: // show_stmt -> TSHOW, TORPHAN, TTABLES
+  }
+
+  // show_stmt -> TSHOW, TORPHAN, TTABLES
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction391()
+  {
 { CurrentSemanticValue.n = new(NodeType.ShowOrphanTables, null, null, null, null, null, null, null, null); }
-        break;
-      case 392: // show_stmt -> TSHOW, TORPHAN, TDATABASES
+  }
+
+  // show_stmt -> TSHOW, TORPHAN, TDATABASES
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction392()
+  {
 { CurrentSemanticValue.n = new(NodeType.ShowOrphanDatabases, null, null, null, null, null, null, null, null); }
-        break;
-      case 393: // show_stmt -> TSHOW, TGRANTS
+  }
+
+  // show_stmt -> TSHOW, TGRANTS
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction393()
+  {
 { CurrentSemanticValue.n = new(NodeType.ShowGrants, null, null, null, null, null, null, null, null); }
-        break;
-      case 394: // show_stmt -> TSHOW, TGRANTS, TFOR, any_identifier
+  }
+
+  // show_stmt -> TSHOW, TGRANTS, TFOR, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction394()
+  {
 { CurrentSemanticValue.n = new(NodeType.ShowGrants, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 395: // show_stmt -> TSHOW, TGRANTS, TFOR, TMULT
+  }
+
+  // show_stmt -> TSHOW, TGRANTS, TFOR, TMULT
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction395()
+  {
 { CurrentSemanticValue.n = new(NodeType.ShowAllGrants, null, null, null, null, null, null, null, null); }
-        break;
-      case 396: // show_stmt -> TSHOW, TIDENTIFIER, TFOR, any_identifier
+  }
+
+  // show_stmt -> TSHOW, TIDENTIFIER, TFOR, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction396()
+  {
 {
             if (!string.Equals(ValueStack[ValueStack.Depth-3].s, "statistics", System.StringComparison.OrdinalIgnoreCase))
                 throw new CamusDB.Core.CamusDBException(
@@ -4373,8 +8673,12 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                     "Expected: SHOW STATISTICS FOR [TABLE] <table>");
             CurrentSemanticValue.n = new(NodeType.ShowStatistics, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null);
           }
-        break;
-      case 397: // show_stmt -> TSHOW, TIDENTIFIER, TFOR, TTABLE, any_identifier
+  }
+
+  // show_stmt -> TSHOW, TIDENTIFIER, TFOR, TTABLE, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction397()
+  {
 {
             if (!string.Equals(ValueStack[ValueStack.Depth-4].s, "statistics", System.StringComparison.OrdinalIgnoreCase))
                 throw new CamusDB.Core.CamusDBException(
@@ -4382,8 +8686,12 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                     "Expected: SHOW STATISTICS FOR [TABLE] <table>");
             CurrentSemanticValue.n = new(NodeType.ShowStatistics, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null);
           }
-        break;
-      case 398: // show_stmt -> TSHOW, TIDENTIFIER, TIDENTIFIER
+  }
+
+  // show_stmt -> TSHOW, TIDENTIFIER, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction398()
+  {
 {
             if (string.Equals(ValueStack[ValueStack.Depth-2].s, "engine", System.StringComparison.OrdinalIgnoreCase) &&
                 string.Equals(ValueStack[ValueStack.Depth-1].s, "stats", System.StringComparison.OrdinalIgnoreCase))
@@ -4408,8 +8716,12 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                     CamusDB.Core.CamusDBErrorCodes.InvalidInput,
                     "Expected: SHOW ENGINE STATS [LIKE '<pattern>'], SHOW CLUSTER SETTINGS [LIKE '<pattern>'], SHOW SLOW QUERIES [LIKE '<pattern>'], SHOW STATEMENT STATS [LIKE '<pattern>'], SHOW CLUSTER QUERIES [LIKE '<pattern>'] or SHOW CLUSTER CONNECTIONS");
           }
-        break;
-      case 399: // show_stmt -> TSHOW, TIDENTIFIER, TIDENTIFIER, TLIKE, string
+  }
+
+  // show_stmt -> TSHOW, TIDENTIFIER, TIDENTIFIER, TLIKE, string
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction399()
+  {
 {
             if (string.Equals(ValueStack[ValueStack.Depth-4].s, "engine", System.StringComparison.OrdinalIgnoreCase) &&
                 string.Equals(ValueStack[ValueStack.Depth-3].s, "stats", System.StringComparison.OrdinalIgnoreCase))
@@ -4431,8 +8743,12 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                     CamusDB.Core.CamusDBErrorCodes.InvalidInput,
                     "Expected: SHOW ENGINE STATS [LIKE '<pattern>'], SHOW CLUSTER SETTINGS [LIKE '<pattern>'], SHOW SLOW QUERIES [LIKE '<pattern>'], SHOW STATEMENT STATS [LIKE '<pattern>'], SHOW CLUSTER QUERIES [LIKE '<pattern>'] or SHOW CLUSTER CONNECTIONS");
           }
-        break;
-      case 400: // show_stmt -> TSHOW, TIDENTIFIER
+  }
+
+  // show_stmt -> TSHOW, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction400()
+  {
 {
             if (string.Equals(ValueStack[ValueStack.Depth-1].s, "variables", System.StringComparison.OrdinalIgnoreCase))
                 CurrentSemanticValue.n = new(NodeType.ShowVariables, null, null, null, null, null, null, null, null);
@@ -4453,11 +8769,19 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                     CamusDB.Core.CamusDBErrorCodes.InvalidInput,
                     "Expected: SHOW VARIABLES [LIKE '<pattern>'], SHOW USERS [LIKE '<pattern>'], SHOW QUERIES [LIKE '<pattern>'], SHOW CONNECTIONS, SHOW EXTENSIONS, SHOW FUNCTIONS or SHOW TRIGGERS [ON <table>]");
           }
-        break;
-      case 401: // show_stmt -> TSHOW, TIDENTIFIER, TON, any_identifier
+  }
+
+  // show_stmt -> TSHOW, TIDENTIFIER, TON, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction401()
+  {
 { CurrentSemanticValue.n = ShowTriggersOnStatement(ValueStack[ValueStack.Depth-3].s, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 402: // show_stmt -> TSHOW, TIDENTIFIER, TLIKE, string
+  }
+
+  // show_stmt -> TSHOW, TIDENTIFIER, TLIKE, string
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction402()
+  {
 {
             if (string.Equals(ValueStack[ValueStack.Depth-3].s, "variables", System.StringComparison.OrdinalIgnoreCase))
                 CurrentSemanticValue.n = new(NodeType.ShowVariables, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null);
@@ -4470,42 +8794,70 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                     CamusDB.Core.CamusDBErrorCodes.InvalidInput,
                     "Expected: SHOW VARIABLES [LIKE '<pattern>'], SHOW USERS [LIKE '<pattern>'], SHOW QUERIES [LIKE '<pattern>'] or SHOW CONNECTIONS");
           }
-        break;
-      case 403: // show_stmt -> TSHOW, TIDENTIFIER, TFROM, TTABLE, any_identifier
+  }
+
+  // show_stmt -> TSHOW, TIDENTIFIER, TFROM, TTABLE, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction403()
+  {
 {
             RequireShowRangesWord(ValueStack[ValueStack.Depth-4].s, plural: true);
             CurrentSemanticValue.n = new(NodeType.ShowRanges, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null);
           }
-        break;
-      case 404: // show_stmt -> TSHOW, TIDENTIFIER, TFROM, TINDEX, TQUALIFIED_INDEX
+  }
+
+  // show_stmt -> TSHOW, TIDENTIFIER, TFROM, TINDEX, TQUALIFIED_INDEX
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction404()
+  {
 {
             RequireShowRangesWord(ValueStack[ValueStack.Depth-4].s, plural: true);
             CurrentSemanticValue.n = QualifiedIndexRanges(ValueStack[ValueStack.Depth-1].s, null);
           }
-        break;
-      case 405: // show_stmt -> TSHOW, TIDENTIFIER, TFROM, TTABLE, any_identifier, TFOR, 
-                //              TIDENTIFIER, LPAREN, in_value_list, RPAREN
+  }
+
+  // show_stmt -> TSHOW, TIDENTIFIER, TFROM, TTABLE, any_identifier, TFOR, 
+  //              TIDENTIFIER, LPAREN, in_value_list, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction405()
+  {
 {
             RequireShowRangesWord(ValueStack[ValueStack.Depth-9].s, plural: false);
             RequireRowWord(ValueStack[ValueStack.Depth-4].s);
             CurrentSemanticValue.n = new(NodeType.ShowRanges, ValueStack[ValueStack.Depth-6].n, null, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null);
           }
-        break;
-      case 406: // show_stmt -> TSHOW, TIDENTIFIER, TFROM, TINDEX, TQUALIFIED_INDEX, TFOR, 
-                //              TIDENTIFIER, LPAREN, in_value_list, RPAREN
+  }
+
+  // show_stmt -> TSHOW, TIDENTIFIER, TFROM, TINDEX, TQUALIFIED_INDEX, TFOR, 
+  //              TIDENTIFIER, LPAREN, in_value_list, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction406()
+  {
 {
             RequireShowRangesWord(ValueStack[ValueStack.Depth-9].s, plural: false);
             RequireRowWord(ValueStack[ValueStack.Depth-4].s);
             CurrentSemanticValue.n = QualifiedIndexRanges(ValueStack[ValueStack.Depth-6].s, ValueStack[ValueStack.Depth-2].n);
           }
-        break;
-      case 407: // analyze_stmt -> TANALYZE, any_identifier
+  }
+
+  // analyze_stmt -> TANALYZE, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction407()
+  {
 { CurrentSemanticValue.n = new(NodeType.AnalyzeTable, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 408: // analyze_stmt -> TANALYZE, TTABLE, any_identifier
+  }
+
+  // analyze_stmt -> TANALYZE, TTABLE, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction408()
+  {
 { CurrentSemanticValue.n = new(NodeType.AnalyzeTable, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 409: // evict_cache_stmt -> TEVICT, TIDENTIFIER, TSTRING
+  }
+
+  // evict_cache_stmt -> TEVICT, TIDENTIFIER, TSTRING
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction409()
+  {
 {
                    if (!string.Equals(ValueStack[ValueStack.Depth-2].s, "cache", System.StringComparison.OrdinalIgnoreCase))
                        throw new CamusDB.Core.CamusDBException(
@@ -4513,8 +8865,12 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                            "Expected: EVICT CACHE '<name>' or EVICT CACHE ALL");
                    CurrentSemanticValue.n = new(NodeType.EvictCache, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].s);
                  }
-        break;
-      case 410: // evict_cache_stmt -> TEVICT, TIDENTIFIER, TIDENTIFIER
+  }
+
+  // evict_cache_stmt -> TEVICT, TIDENTIFIER, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction410()
+  {
 {
                    if (!string.Equals(ValueStack[ValueStack.Depth-2].s, "cache", System.StringComparison.OrdinalIgnoreCase) ||
                        !string.Equals(ValueStack[ValueStack.Depth-1].s, "all", System.StringComparison.OrdinalIgnoreCase))
@@ -4523,14 +8879,22 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                            "Expected: EVICT CACHE '<name>' or EVICT CACHE ALL");
                    CurrentSemanticValue.n = new(NodeType.EvictCacheAll, null, null, null, null, null, null, null, null);
                  }
-        break;
-      case 411: // flush_stmt -> TIDENTIFIER, TPRIVILEGES
+  }
+
+  // flush_stmt -> TIDENTIFIER, TPRIVILEGES
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction411()
+  {
 {
              RequireFlushWord(ValueStack[ValueStack.Depth-2].s);
              CurrentSemanticValue.n = new(NodeType.FlushPrivileges, null, null, null, null, null, null, null, null);
            }
-        break;
-      case 412: // flush_stmt -> TIDENTIFIER, TIDENTIFIER
+  }
+
+  // flush_stmt -> TIDENTIFIER, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction412()
+  {
 {
              RequireFlushWord(ValueStack[ValueStack.Depth-2].s);
              if (!string.Equals(ValueStack[ValueStack.Depth-1].s, "sessions", System.StringComparison.OrdinalIgnoreCase))
@@ -4539,8 +8903,12 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                      "Expected: FLUSH PRIVILEGES or FLUSH SESSIONS");
              CurrentSemanticValue.n = new(NodeType.FlushSessions, null, null, null, null, null, null, null, null);
            }
-        break;
-      case 413: // cancel_stmt -> TIDENTIFIER, TIDENTIFIER, string
+  }
+
+  // cancel_stmt -> TIDENTIFIER, TIDENTIFIER, string
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction413()
+  {
 {
               if (!string.Equals(ValueStack[ValueStack.Depth-3].s, "cancel", System.StringComparison.OrdinalIgnoreCase) ||
                   !string.Equals(ValueStack[ValueStack.Depth-2].s, "query", System.StringComparison.OrdinalIgnoreCase))
@@ -4549,256 +8917,560 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                       "Expected: CANCEL QUERY '<query_id>'");
               CurrentSemanticValue.n = new(NodeType.CancelQuery, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null);
             }
-        break;
-      case 414: // create_trigger_stmt -> TCREATE, TIDENTIFIER, any_identifier, TON, 
-                //                        any_identifier, TIDENTIFIER, trigger_event_list, 
-                //                        TIDENTIFIER, TIDENTIFIER, string
+  }
+
+  // create_trigger_stmt -> TCREATE, TIDENTIFIER, any_identifier, TON, 
+  //                        any_identifier, TIDENTIFIER, trigger_event_list, 
+  //                        TIDENTIFIER, TIDENTIFIER, string
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction414()
+  {
 { CurrentSemanticValue.n = CreateTriggerStatement(ValueStack[ValueStack.Depth-9].s, ValueStack[ValueStack.Depth-8].n, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-5].s, ValueStack[ValueStack.Depth-4].s, ValueStack[ValueStack.Depth-3].s, ValueStack[ValueStack.Depth-2].s, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 415: // create_trigger_stmt -> TCREATE, TIDENTIFIER, any_identifier, TON, 
-                //                        any_identifier, TIDENTIFIER, trigger_event_list, 
-                //                        TIDENTIFIER, TIDENTIFIER, TAS, TDOLLARQUOTED
+  }
+
+  // create_trigger_stmt -> TCREATE, TIDENTIFIER, any_identifier, TON, 
+  //                        any_identifier, TIDENTIFIER, trigger_event_list, 
+  //                        TIDENTIFIER, TIDENTIFIER, TAS, TDOLLARQUOTED
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction415()
+  {
 { CurrentSemanticValue.n = CreateInlineTriggerStatement(ValueStack[ValueStack.Depth-10].s, ValueStack[ValueStack.Depth-9].n, ValueStack[ValueStack.Depth-7].n, ValueStack[ValueStack.Depth-6].s, ValueStack[ValueStack.Depth-5].s, ValueStack[ValueStack.Depth-4].s, ValueStack[ValueStack.Depth-3].s, ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 416: // drop_trigger_stmt -> TDROP, TIDENTIFIER, any_identifier, TON, any_identifier
+  }
+
+  // drop_trigger_stmt -> TDROP, TIDENTIFIER, any_identifier, TON, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction416()
+  {
 { CurrentSemanticValue.n = DropTriggerStatement(ValueStack[ValueStack.Depth-4].s, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 417: // trigger_event_list -> trigger_event_list, TCOMMA, trigger_event
+  }
+
+  // trigger_event_list -> trigger_event_list, TCOMMA, trigger_event
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction417()
+  {
 { CurrentSemanticValue.s = ValueStack[ValueStack.Depth-3].s + "," + ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 418: // trigger_event_list -> trigger_event
+  }
+
+  // trigger_event_list -> trigger_event
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction418()
+  {
 { CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 419: // trigger_event -> TINSERT
+  }
+
+  // trigger_event -> TINSERT
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction419()
+  {
 { CurrentSemanticValue.s = "insert"; }
-        break;
-      case 420: // trigger_event -> TUPDATE
+  }
+
+  // trigger_event -> TUPDATE
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction420()
+  {
 { CurrentSemanticValue.s = "update"; }
-        break;
-      case 421: // trigger_event -> TDELETE
+  }
+
+  // trigger_event -> TDELETE
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction421()
+  {
 { CurrentSemanticValue.s = "delete"; }
-        break;
-      case 422: // create_extension_stmt -> TCREATE, TIDENTIFIER, any_identifier
+  }
+
+  // create_extension_stmt -> TCREATE, TIDENTIFIER, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction422()
+  {
 { CurrentSemanticValue.n = CreateExtensionStatement(ValueStack[ValueStack.Depth-2].s, ValueStack[ValueStack.Depth-1].n, null, null, false); }
-        break;
-      case 423: // create_extension_stmt -> TCREATE, TIDENTIFIER, any_identifier, TIDENTIFIER, 
-                //                          string
+  }
+
+  // create_extension_stmt -> TCREATE, TIDENTIFIER, any_identifier, TIDENTIFIER, 
+  //                          string
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction423()
+  {
 { CurrentSemanticValue.n = CreateExtensionStatement(ValueStack[ValueStack.Depth-4].s, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-2].s, ValueStack[ValueStack.Depth-1].n, false); }
-        break;
-      case 424: // create_extension_stmt -> TCREATE, TIDENTIFIER, TIF, TNOT, TEXISTS, 
-                //                          any_identifier
+  }
+
+  // create_extension_stmt -> TCREATE, TIDENTIFIER, TIF, TNOT, TEXISTS, 
+  //                          any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction424()
+  {
 { CurrentSemanticValue.n = CreateExtensionStatement(ValueStack[ValueStack.Depth-5].s, ValueStack[ValueStack.Depth-1].n, null, null, true); }
-        break;
-      case 425: // create_extension_stmt -> TCREATE, TIDENTIFIER, TIF, TNOT, TEXISTS, 
-                //                          any_identifier, TIDENTIFIER, string
+  }
+
+  // create_extension_stmt -> TCREATE, TIDENTIFIER, TIF, TNOT, TEXISTS, 
+  //                          any_identifier, TIDENTIFIER, string
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction425()
+  {
 { CurrentSemanticValue.n = CreateExtensionStatement(ValueStack[ValueStack.Depth-7].s, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-2].s, ValueStack[ValueStack.Depth-1].n, true); }
-        break;
-      case 426: // alter_extension_stmt -> TALTER, TIDENTIFIER, any_identifier, TUPDATE
+  }
+
+  // alter_extension_stmt -> TALTER, TIDENTIFIER, any_identifier, TUPDATE
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction426()
+  {
 { CurrentSemanticValue.n = AlterExtensionStatement(ValueStack[ValueStack.Depth-3].s, ValueStack[ValueStack.Depth-2].n, null); }
-        break;
-      case 427: // alter_extension_stmt -> TALTER, TIDENTIFIER, any_identifier, TUPDATE, TTO, 
-                //                         string
+  }
+
+  // alter_extension_stmt -> TALTER, TIDENTIFIER, any_identifier, TUPDATE, TTO, 
+  //                         string
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction427()
+  {
 { CurrentSemanticValue.n = AlterExtensionStatement(ValueStack[ValueStack.Depth-5].s, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 428: // drop_extension_stmt -> TDROP, TIDENTIFIER, any_identifier
+  }
+
+  // drop_extension_stmt -> TDROP, TIDENTIFIER, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction428()
+  {
 { CurrentSemanticValue.n = DropExtensionStatement(ValueStack[ValueStack.Depth-2].s, ValueStack[ValueStack.Depth-1].n, false); }
-        break;
-      case 429: // drop_extension_stmt -> TDROP, TIDENTIFIER, TIF, TEXISTS, any_identifier
+  }
+
+  // drop_extension_stmt -> TDROP, TIDENTIFIER, TIF, TEXISTS, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction429()
+  {
 { CurrentSemanticValue.n = DropExtensionStatement(ValueStack[ValueStack.Depth-4].s, ValueStack[ValueStack.Depth-1].n, true); }
-        break;
-      case 430: // create_function_stmt -> TCREATE, TIDENTIFIER, any_identifier, LPAREN, 
-                //                         function_params, RPAREN, function_returns, TAS, 
-                //                         TDOLLARQUOTED
+  }
+
+  // create_function_stmt -> TCREATE, TIDENTIFIER, any_identifier, LPAREN, 
+  //                         function_params, RPAREN, function_returns, TAS, 
+  //                         TDOLLARQUOTED
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction430()
+  {
 { CurrentSemanticValue.n = CreateFunctionStatement(ValueStack[ValueStack.Depth-8].s, null, ValueStack[ValueStack.Depth-7].n, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 431: // create_function_stmt -> TCREATE, TOR, TIDENTIFIER, TIDENTIFIER, any_identifier, 
-                //                         LPAREN, function_params, RPAREN, function_returns, TAS, 
-                //                         TDOLLARQUOTED
+  }
+
+  // create_function_stmt -> TCREATE, TOR, TIDENTIFIER, TIDENTIFIER, any_identifier, 
+  //                         LPAREN, function_params, RPAREN, function_returns, TAS, 
+  //                         TDOLLARQUOTED
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction431()
+  {
 { CurrentSemanticValue.n = CreateFunctionStatement(ValueStack[ValueStack.Depth-8].s, ValueStack[ValueStack.Depth-9].s, ValueStack[ValueStack.Depth-7].n, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 432: // function_params -> function_param_list
+  }
+
+  // function_params -> function_param_list
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction432()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 433: // function_params -> /* empty */
+  }
+
+  // function_params -> /* empty */
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction433()
+  {
 { CurrentSemanticValue.n = null; }
-        break;
-      case 434: // function_param_list -> function_param_list, TCOMMA, function_param
+  }
+
+  // function_param_list -> function_param_list, TCOMMA, function_param
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction434()
+  {
 { CurrentSemanticValue.n = new(NodeType.FunctionParameterList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 435: // function_param_list -> function_param
+  }
+
+  // function_param_list -> function_param
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction435()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 436: // function_param -> identifier, field_type
+  }
+
+  // function_param -> identifier, field_type
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction436()
+  {
 { CurrentSemanticValue.n = new(NodeType.FunctionParameter, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 437: // function_param -> escaped_identifier, field_type
+  }
+
+  // function_param -> escaped_identifier, field_type
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction437()
+  {
 { CurrentSemanticValue.n = new(NodeType.FunctionParameter, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 438: // function_returns -> TIDENTIFIER, field_type, TIDENTIFIER, TIDENTIFIER
+  }
+
+  // function_returns -> TIDENTIFIER, field_type, TIDENTIFIER, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction438()
+  {
 { CurrentSemanticValue.n = FunctionReturns(ValueStack[ValueStack.Depth-4].s, ValueStack[ValueStack.Depth-3].n, null, null, ValueStack[ValueStack.Depth-2].s, ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 439: // function_returns -> TIDENTIFIER, field_type, TIDENTIFIER, TNULL, TON, TNULL, 
-                //                     TIDENTIFIER, TIDENTIFIER, TIDENTIFIER
+  }
+
+  // function_returns -> TIDENTIFIER, field_type, TIDENTIFIER, TNULL, TON, TNULL, 
+  //                     TIDENTIFIER, TIDENTIFIER, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction439()
+  {
 { CurrentSemanticValue.n = FunctionReturns(ValueStack[ValueStack.Depth-9].s, ValueStack[ValueStack.Depth-8].n, ValueStack[ValueStack.Depth-7].s, ValueStack[ValueStack.Depth-3].s, ValueStack[ValueStack.Depth-2].s, ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 440: // function_returns -> TIDENTIFIER, field_type, TIDENTIFIER, TON, TNULL, 
-                //                     TIDENTIFIER, TIDENTIFIER, TIDENTIFIER
+  }
+
+  // function_returns -> TIDENTIFIER, field_type, TIDENTIFIER, TON, TNULL, 
+  //                     TIDENTIFIER, TIDENTIFIER, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction440()
+  {
 { CurrentSemanticValue.n = FunctionReturns(ValueStack[ValueStack.Depth-8].s, ValueStack[ValueStack.Depth-7].n, ValueStack[ValueStack.Depth-6].s, ValueStack[ValueStack.Depth-3].s, ValueStack[ValueStack.Depth-2].s, ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 441: // alter_function_stmt -> TALTER, TIDENTIFIER, any_identifier, TIDENTIFIER, TTO, 
-                //                        any_identifier
+  }
+
+  // alter_function_stmt -> TALTER, TIDENTIFIER, any_identifier, TIDENTIFIER, TTO, 
+  //                        any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction441()
+  {
 { CurrentSemanticValue.n = AlterFunctionOwnerStatement(ValueStack[ValueStack.Depth-5].s, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-3].s, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 442: // call_stmt -> TIDENTIFIER, TIDENTIFIER, LPAREN, RPAREN
+  }
+
+  // call_stmt -> TIDENTIFIER, TIDENTIFIER, LPAREN, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction442()
+  {
 { CurrentSemanticValue.n = CallStatement(ValueStack[ValueStack.Depth-4].s, ValueStack[ValueStack.Depth-3].s, null); }
-        break;
-      case 443: // call_stmt -> TIDENTIFIER, TIDENTIFIER, LPAREN, fcall_argument_list, RPAREN
+  }
+
+  // call_stmt -> TIDENTIFIER, TIDENTIFIER, LPAREN, fcall_argument_list, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction443()
+  {
 { CurrentSemanticValue.n = CallStatement(ValueStack[ValueStack.Depth-5].s, ValueStack[ValueStack.Depth-4].s, ValueStack[ValueStack.Depth-2].n); }
-        break;
-      case 444: // identifier_index_list -> identifier_index_list, TCOMMA, identifier_index
+  }
+
+  // identifier_index_list -> identifier_index_list, TCOMMA, identifier_index
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction444()
+  {
 { CurrentSemanticValue.n = new(NodeType.IndexIdentifierList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 445: // identifier_index_list -> identifier_index
+  }
+
+  // identifier_index_list -> identifier_index
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction445()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 446: // identifier_index -> any_identifier
+  }
+
+  // identifier_index -> any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction446()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 447: // identifier_index -> any_identifier, TASC
+  }
+
+  // identifier_index -> any_identifier, TASC
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction447()
+  {
 { CurrentSemanticValue.n = new(NodeType.IndexIdentifierAsc, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, null); }
-        break;
-      case 448: // identifier_index -> any_identifier, TDESC
+  }
+
+  // identifier_index -> any_identifier, TDESC
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction448()
+  {
 { CurrentSemanticValue.n = new(NodeType.IndexIdentifierDesc, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, null); }
-        break;
-      case 449: // select_table -> from_clause
+  }
+
+  // select_table -> from_clause
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction449()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 452: // from_clause -> table_reference
+  }
+
+  // from_clause -> table_reference
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction452()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 453: // explicit_join_from -> table_reference, TJOIN, table_reference, TON, condition
+  }
+
+  // explicit_join_from -> table_reference, TJOIN, table_reference, TON, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction453()
+  {
 { JoinAstKind.RejectFullJoin(ValueStack[ValueStack.Depth-5].s); CurrentSemanticValue.n = new(NodeType.Join, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, JoinAstKind.Write(JoinAstKind.Kind.Inner)); CurrentSemanticValue.s = ValueStack[ValueStack.Depth-3].s; }
-        break;
-      case 454: // explicit_join_from -> table_reference, join_op, table_reference, TON, condition
+  }
+
+  // explicit_join_from -> table_reference, join_op, table_reference, TON, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction454()
+  {
 { CurrentSemanticValue.n = new(NodeType.Join, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, ValueStack[ValueStack.Depth-4].s); CurrentSemanticValue.s = ValueStack[ValueStack.Depth-3].s; }
-        break;
-      case 455: // explicit_join_from -> explicit_join_from, TJOIN, table_reference, TON, 
-                //                       condition
+  }
+
+  // explicit_join_from -> explicit_join_from, TJOIN, table_reference, TON, 
+  //                       condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction455()
+  {
 { JoinAstKind.RejectFullJoin(ValueStack[ValueStack.Depth-5].s); CurrentSemanticValue.n = new(NodeType.Join, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, JoinAstKind.Write(JoinAstKind.Kind.Inner)); CurrentSemanticValue.s = ValueStack[ValueStack.Depth-3].s; }
-        break;
-      case 456: // explicit_join_from -> explicit_join_from, join_op, table_reference, TON, 
-                //                       condition
+  }
+
+  // explicit_join_from -> explicit_join_from, join_op, table_reference, TON, 
+  //                       condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction456()
+  {
 { CurrentSemanticValue.n = new(NodeType.Join, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, ValueStack[ValueStack.Depth-4].s); CurrentSemanticValue.s = ValueStack[ValueStack.Depth-3].s; }
-        break;
-      case 457: // explicit_join_from -> table_reference, TCROSS, TJOIN, table_reference
+  }
+
+  // explicit_join_from -> table_reference, TCROSS, TJOIN, table_reference
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction457()
+  {
 { CurrentSemanticValue.n = new(NodeType.Join, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, JoinAstKind.Write(JoinAstKind.Kind.Cross)); CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 458: // explicit_join_from -> explicit_join_from, TCROSS, TJOIN, table_reference
+  }
+
+  // explicit_join_from -> explicit_join_from, TCROSS, TJOIN, table_reference
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction458()
+  {
 { CurrentSemanticValue.n = new(NodeType.Join, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, JoinAstKind.Write(JoinAstKind.Kind.Cross)); CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 459: // explicit_join_from -> table_reference, TOUTER, TJOIN, table_reference, TON, 
-                //                       condition
+  }
+
+  // explicit_join_from -> table_reference, TOUTER, TJOIN, table_reference, TON, 
+  //                       condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction459()
+  {
 { JoinAstKind.RejectOuterJoinWithoutSide(ValueStack[ValueStack.Depth-6].s); }
-        break;
-      case 460: // comma_join_from -> table_reference, TCOMMA, comma_table_list
+  }
+
+  // comma_join_from -> table_reference, TCOMMA, comma_table_list
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction460()
+  {
 { CurrentSemanticValue.n = new(NodeType.CommaJoin, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 461: // comma_table_list -> comma_table_list, TCOMMA, table_reference
+  }
+
+  // comma_table_list -> comma_table_list, TCOMMA, table_reference
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction461()
+  {
 { CurrentSemanticValue.n = new(NodeType.CommaJoinTableList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 462: // comma_table_list -> table_reference
+  }
+
+  // comma_table_list -> table_reference
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction462()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 463: // join_op -> TINNER, TJOIN
+  }
+
+  // join_op -> TINNER, TJOIN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction463()
+  {
 { CurrentSemanticValue.s = JoinAstKind.Write(JoinAstKind.Kind.Inner); }
-        break;
-      case 464: // join_op -> TLEFT, TJOIN
+  }
+
+  // join_op -> TLEFT, TJOIN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction464()
+  {
 { CurrentSemanticValue.s = JoinAstKind.Write(JoinAstKind.Kind.Left); }
-        break;
-      case 465: // join_op -> TLEFT, TOUTER, TJOIN
+  }
+
+  // join_op -> TLEFT, TOUTER, TJOIN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction465()
+  {
 { CurrentSemanticValue.s = JoinAstKind.Write(JoinAstKind.Kind.Left); }
-        break;
-      case 466: // join_op -> TRIGHT, TJOIN
+  }
+
+  // join_op -> TRIGHT, TJOIN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction466()
+  {
 { CurrentSemanticValue.s = JoinAstKind.Write(JoinAstKind.Kind.Right); }
-        break;
-      case 467: // join_op -> TRIGHT, TOUTER, TJOIN
+  }
+
+  // join_op -> TRIGHT, TOUTER, TJOIN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction467()
+  {
 { CurrentSemanticValue.s = JoinAstKind.Write(JoinAstKind.Kind.Right); }
-        break;
-      case 468: // table_reference -> table_name, opt_table_alias, opt_table_hint
+  }
+
+  // table_reference -> table_name, opt_table_alias, opt_table_hint
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction468()
+  {
 { CurrentSemanticValue.n = new(NodeType.TableReference, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null); CurrentSemanticValue.s = ValueStack[ValueStack.Depth-2].s; }
-        break;
-      case 469: // table_reference -> table_function_reference
+  }
+
+  // table_reference -> table_function_reference
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction469()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 470: // table_reference -> derived_table_reference
+  }
+
+  // table_reference -> derived_table_reference
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction470()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 471: // table_function_reference -> identifier, LPAREN, fcall_argument_list, RPAREN, 
-                //                             table_function_alias
+  }
+
+  // table_function_reference -> identifier, LPAREN, fcall_argument_list, RPAREN, 
+  //                             table_function_alias
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction471()
+  {
 { CurrentSemanticValue.n = new(NodeType.TableFunctionReference, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-1].n?.leftAst, null, null, null, null); CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 472: // table_function_reference -> identifier, LPAREN, RPAREN, table_function_alias
+  }
+
+  // table_function_reference -> identifier, LPAREN, RPAREN, table_function_alias
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction472()
+  {
 { CurrentSemanticValue.n = new(NodeType.TableFunctionReference, ValueStack[ValueStack.Depth-4].n, null, ValueStack[ValueStack.Depth-1].n, ValueStack[ValueStack.Depth-1].n?.leftAst, null, null, null, null); CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 473: // table_function_alias -> opt_table_alias
+  }
+
+  // table_function_alias -> opt_table_alias
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction473()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 474: // table_function_alias -> TAS, any_identifier, LPAREN, table_function_column_list, 
-                //                         RPAREN
+  }
+
+  // table_function_alias -> TAS, any_identifier, LPAREN, table_function_column_list, 
+  //                         RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction474()
+  {
 { CurrentSemanticValue.n = new(NodeType.Identifier, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-4].n.yytext); CurrentSemanticValue.s = null; }
-        break;
-      case 475: // table_function_alias -> identifier, LPAREN, table_function_column_list, RPAREN
+  }
+
+  // table_function_alias -> identifier, LPAREN, table_function_column_list, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction475()
+  {
 { CurrentSemanticValue.n = new(NodeType.Identifier, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-4].n.yytext); CurrentSemanticValue.s = ValueStack[ValueStack.Depth-4].n.yytext; }
-        break;
-      case 476: // table_function_column_list -> table_function_column_list, TCOMMA, 
-                //                               any_identifier
+  }
+
+  // table_function_column_list -> table_function_column_list, TCOMMA, 
+  //                               any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction476()
+  {
 { CurrentSemanticValue.n = new(NodeType.IdentifierList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 477: // table_function_column_list -> any_identifier
+  }
+
+  // table_function_column_list -> any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction477()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 478: // derived_table_reference -> query_expr, derived_table_alias
+  }
+
+  // derived_table_reference -> query_expr, derived_table_alias
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction478()
+  {
 { CurrentSemanticValue.n = new(NodeType.DerivedTableReference, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 479: // derived_table_reference -> query_expr, TAS, any_identifier, LPAREN, 
-                //                            table_function_column_list, RPAREN
+  }
+
+  // derived_table_reference -> query_expr, TAS, any_identifier, LPAREN, 
+  //                            table_function_column_list, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction479()
+  {
 { CurrentSemanticValue.n = new(NodeType.DerivedTableReference, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-4].n, null, null, ValueStack[ValueStack.Depth-2].n, null, null, null); CurrentSemanticValue.s = null; }
-        break;
-      case 480: // derived_table_reference -> query_expr, identifier, LPAREN, 
-                //                            table_function_column_list, RPAREN
+  }
+
+  // derived_table_reference -> query_expr, identifier, LPAREN, 
+  //                            table_function_column_list, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction480()
+  {
 { CurrentSemanticValue.n = new(NodeType.DerivedTableReference, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-4].n, null, null, ValueStack[ValueStack.Depth-2].n, null, null, null); CurrentSemanticValue.s = ValueStack[ValueStack.Depth-4].n.yytext; }
-        break;
-      case 481: // derived_table_alias -> TAS, any_identifier
+  }
+
+  // derived_table_alias -> TAS, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction481()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = null; }
-        break;
-      case 482: // derived_table_alias -> identifier
+  }
+
+  // derived_table_alias -> identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction482()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].n.yytext; }
-        break;
-      case 483: // derived_table_alias -> escaped_identifier
+  }
+
+  // derived_table_alias -> escaped_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction483()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = null; }
-        break;
-      case 484: // derived_table_alias -> qualified_identifier
+  }
+
+  // derived_table_alias -> qualified_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction484()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = null; }
-        break;
-      case 485: // table_name -> any_identifier
+  }
+
+  // table_name -> any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction485()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 486: // opt_table_alias -> TAS, any_identifier
+  }
+
+  // opt_table_alias -> TAS, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction486()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = null; }
-        break;
-      case 487: // opt_table_alias -> identifier
+  }
+
+  // opt_table_alias -> identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction487()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].n.yytext; }
-        break;
-      case 488: // opt_table_alias -> escaped_identifier
+  }
+
+  // opt_table_alias -> escaped_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction488()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = null; }
-        break;
-      case 489: // opt_table_alias -> qualified_identifier
+  }
+
+  // opt_table_alias -> qualified_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction489()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = null; }
-        break;
-      case 490: // opt_table_alias -> /* empty */
+  }
+
+  // opt_table_alias -> /* empty */
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction490()
+  {
 { CurrentSemanticValue.n = null; CurrentSemanticValue.s = null; }
-        break;
-      case 491: // opt_table_hint -> TAT, LBRACE, identifier, TEQUALS, identifier, RBRACE
+  }
+
+  // opt_table_hint -> TAT, LBRACE, identifier, TEQUALS, identifier, RBRACE
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction491()
+  {
 {
                  // The at-brace hint with a cache key is an accepted alias of the bare cache hint;
                  // any other key (e.g. FORCE_INDEX) stays an index-style table hint resolved later.
@@ -4807,9 +9479,13 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                  else
                      CurrentSemanticValue.n = new(NodeType.IdentifierWithOpts, null, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null);
                }
-        break;
-      case 492: // opt_table_hint -> TAT, LBRACE, identifier, TEQUALS, identifier, TCOMMA, 
-                //                   cache_hint_options, RBRACE
+  }
+
+  // opt_table_hint -> TAT, LBRACE, identifier, TEQUALS, identifier, TCOMMA, 
+  //                   cache_hint_options, RBRACE
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction492()
+  {
 {
                  // ttl/strict options are only meaningful for the cache hint, never for FORCE_INDEX.
                  if (!ValueStack[ValueStack.Depth-6].n.yytext!.Equals("cache", System.StringComparison.OrdinalIgnoreCase))
@@ -4818,14 +9494,26 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                          "Table hint options (ttl, strict) are only valid for the cache hint; got '" + ValueStack[ValueStack.Depth-6].n.yytext + "'");
                  CurrentSemanticValue.n = new(NodeType.CacheHint, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-4].n.yytext);
                }
-        break;
-      case 493: // opt_table_hint -> LBRACE, cache_hint_spec, RBRACE
+  }
+
+  // opt_table_hint -> LBRACE, cache_hint_spec, RBRACE
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction493()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-2].n; }
-        break;
-      case 494: // opt_table_hint -> /* empty */
+  }
+
+  // opt_table_hint -> /* empty */
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction494()
+  {
 { CurrentSemanticValue.n = null; }
-        break;
-      case 495: // cache_hint_spec -> TIDENTIFIER, TEQUALS, identifier
+  }
+
+  // cache_hint_spec -> TIDENTIFIER, TEQUALS, identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction495()
+  {
 {
                  if (!ValueStack[ValueStack.Depth-3].s.Equals("cache", System.StringComparison.OrdinalIgnoreCase))
                      throw new CamusDB.Core.CamusDBException(
@@ -4833,8 +9521,12 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                          "Unknown table hint '" + ValueStack[ValueStack.Depth-3].s + "'. Supported: {cache=name}");
                  CurrentSemanticValue.n = new(NodeType.CacheHint, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].n.yytext);
                }
-        break;
-      case 496: // cache_hint_spec -> TIDENTIFIER, TEQUALS, identifier, TCOMMA, cache_hint_options
+  }
+
+  // cache_hint_spec -> TIDENTIFIER, TEQUALS, identifier, TCOMMA, cache_hint_options
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction496()
+  {
 {
                  if (!ValueStack[ValueStack.Depth-5].s.Equals("cache", System.StringComparison.OrdinalIgnoreCase))
                      throw new CamusDB.Core.CamusDBException(
@@ -4842,14 +9534,26 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                          "Unknown table hint '" + ValueStack[ValueStack.Depth-5].s + "'. Supported: {cache=name}");
                  CurrentSemanticValue.n = new(NodeType.CacheHint, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-3].n.yytext);
                }
-        break;
-      case 497: // cache_hint_options -> cache_hint_option
+  }
+
+  // cache_hint_options -> cache_hint_option
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction497()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 498: // cache_hint_options -> cache_hint_options, TCOMMA, cache_hint_option
+  }
+
+  // cache_hint_options -> cache_hint_options, TCOMMA, cache_hint_option
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction498()
+  {
 { CurrentSemanticValue.n = new(NodeType.ExprList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 499: // cache_hint_option -> TIDENTIFIER
+  }
+
+  // cache_hint_option -> TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction499()
+  {
 {
                     if (!ValueStack[ValueStack.Depth-1].s.Equals("strict", System.StringComparison.OrdinalIgnoreCase))
                         throw new CamusDB.Core.CamusDBException(
@@ -4857,8 +9561,12 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                             "Unknown cache hint option '" + ValueStack[ValueStack.Depth-1].s + "'. Supported: ttl=<value><unit>, strict");
                     CurrentSemanticValue.n = new(NodeType.String, null, null, null, null, null, null, null, "strict");
                   }
-        break;
-      case 500: // cache_hint_option -> TIDENTIFIER, TEQUALS, TDIGIT
+  }
+
+  // cache_hint_option -> TIDENTIFIER, TEQUALS, TDIGIT
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction500()
+  {
 {
                     if (!ValueStack[ValueStack.Depth-3].s.Equals("ttl", System.StringComparison.OrdinalIgnoreCase))
                         throw new CamusDB.Core.CamusDBException(
@@ -4870,8 +9578,12 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                             "ttl value must be between 1 and " + int.MaxValue + " (milliseconds); got: " + ValueStack[ValueStack.Depth-1].s);
                     CurrentSemanticValue.n = new(NodeType.Integer, null, null, null, null, null, null, null, ttlBareMs.ToString());
                   }
-        break;
-      case 501: // cache_hint_option -> TIDENTIFIER, TEQUALS, TDIGIT, TIDENTIFIER
+  }
+
+  // cache_hint_option -> TIDENTIFIER, TEQUALS, TDIGIT, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction501()
+  {
 {
                     if (!ValueStack[ValueStack.Depth-4].s.Equals("ttl", System.StringComparison.OrdinalIgnoreCase))
                         throw new CamusDB.Core.CamusDBException(
@@ -4899,8 +9611,12 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                             "ttl value exceeds maximum (" + int.MaxValue + " ms); got: " + ValueStack[ValueStack.Depth-2].s + ValueStack[ValueStack.Depth-1].s);
                     CurrentSemanticValue.n = new(NodeType.Integer, null, null, null, null, null, null, null, ttlUnitMs.ToString());
                   }
-        break;
-      case 502: // cache_hint_option -> TIDENTIFIER, TEQUALS, identifier
+  }
+
+  // cache_hint_option -> TIDENTIFIER, TEQUALS, identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction502()
+  {
 {
                     if (ValueStack[ValueStack.Depth-3].s.Equals("ttl", System.StringComparison.OrdinalIgnoreCase))
                         throw new CamusDB.Core.CamusDBException(
@@ -4910,185 +9626,393 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                         CamusDB.Core.CamusDBErrorCodes.InvalidInput,
                         "Unknown cache hint option '" + ValueStack[ValueStack.Depth-3].s + "'. Supported: ttl=<value><unit>, strict");
                   }
-        break;
-      case 503: // create_table_item_list -> create_table_item_list, TCOMMA, create_table_item
+  }
+
+  // create_table_item_list -> create_table_item_list, TCOMMA, create_table_item
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction503()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateTableItemList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 504: // create_table_item_list -> create_table_item_list, TCOMMA, 
-                //                           create_table_inline_constraint
+  }
+
+  // create_table_item_list -> create_table_item_list, TCOMMA, 
+  //                           create_table_inline_constraint
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction504()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateTableItemList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 505: // create_table_item_list -> create_table_item
+  }
+
+  // create_table_item_list -> create_table_item
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction505()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 506: // create_table_inline_constraint -> TCONSTRAINT, any_identifier, TPRIMARY, TKEY, 
-                //                                   LPAREN, identifier_index_list, RPAREN
+  }
+
+  // create_table_inline_constraint -> TCONSTRAINT, any_identifier, TPRIMARY, TKEY, 
+  //                                   LPAREN, identifier_index_list, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction506()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateTableConstraintPrimaryKey, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, null); }
-        break;
-      case 507: // create_table_inline_constraint -> TCONSTRAINT, TSTRING, TPRIMARY, TKEY, LPAREN, 
-                //                                   identifier_index_list, RPAREN
+  }
+
+  // create_table_inline_constraint -> TCONSTRAINT, TSTRING, TPRIMARY, TKEY, LPAREN, 
+  //                                   identifier_index_list, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction507()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateTableConstraintPrimaryKey, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, null); }
-        break;
-      case 508: // create_table_inline_constraint -> TPRIMARY, TKEY, LPAREN, identifier_index_list, 
-                //                                   RPAREN
+  }
+
+  // create_table_inline_constraint -> TPRIMARY, TKEY, LPAREN, identifier_index_list, 
+  //                                   RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction508()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateTableConstraintPrimaryKey, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, null); }
-        break;
-      case 509: // create_table_inline_constraint -> TKEY, any_identifier, LPAREN, 
-                //                                   identifier_index_list, RPAREN, 
-                //                                   index_include_clause, opt_inline_comment
+  }
+
+  // create_table_inline_constraint -> TKEY, any_identifier, LPAREN, 
+  //                                   identifier_index_list, RPAREN, 
+  //                                   index_include_clause, opt_inline_comment
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction509()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateTableConstraintMultiIndex, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null); }
-        break;
-      case 510: // create_table_inline_constraint -> TIDENTIFIER, TINDEX, any_identifier, LPAREN, 
-                //                                   identifier_index_list, RPAREN, 
-                //                                   opt_inline_comment
+  }
+
+  // create_table_inline_constraint -> TIDENTIFIER, TINDEX, any_identifier, LPAREN, 
+  //                                   identifier_index_list, RPAREN, 
+  //                                   opt_inline_comment
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction510()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateTableConstraintMultiIndex, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-3].n, null, ValueStack[ValueStack.Depth-1].n, null, null, null, InvertedIndexWord(ValueStack[ValueStack.Depth-7].s)); }
-        break;
-      case 511: // create_table_inline_constraint -> TUNIQUE, TKEY, any_identifier, LPAREN, 
-                //                                   identifier_index_list, RPAREN, 
-                //                                   index_include_clause, opt_inline_comment
+  }
+
+  // create_table_inline_constraint -> TUNIQUE, TKEY, any_identifier, LPAREN, 
+  //                                   identifier_index_list, RPAREN, 
+  //                                   index_include_clause, opt_inline_comment
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction511()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateTableConstraintUniqueIndex, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null); }
-        break;
-      case 512: // create_table_inline_constraint -> TCONSTRAINT, any_identifier, TCHECK, LPAREN, 
-                //                                   condition, RPAREN
+  }
+
+  // create_table_inline_constraint -> TCONSTRAINT, any_identifier, TCHECK, LPAREN, 
+  //                                   condition, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction512()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateTableConstraintCheck, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-5].n.yytext); }
-        break;
-      case 513: // create_table_inline_constraint -> TCHECK, LPAREN, condition, RPAREN
+  }
+
+  // create_table_inline_constraint -> TCHECK, LPAREN, condition, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction513()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateTableConstraintCheck, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, null); }
-        break;
-      case 514: // create_table_inline_constraint -> fk_table_constraint
+  }
+
+  // create_table_inline_constraint -> fk_table_constraint
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction514()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 515: // create_table_inline_constraint -> TCONSTRAINT, any_identifier, 
-                //                                   fk_table_constraint
+  }
+
+  // create_table_inline_constraint -> TCONSTRAINT, any_identifier, 
+  //                                   fk_table_constraint
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction515()
+  {
 { ValueStack[ValueStack.Depth-1].n.yytext = ValueStack[ValueStack.Depth-2].n.yytext; CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 516: // fk_table_constraint -> TFOREIGN, TKEY, LPAREN, fk_column_list, RPAREN, 
-                //                        TREFERENCES, any_identifier, opt_fk_ref_columns, 
-                //                        opt_fk_clauses
+  }
+
+  // fk_table_constraint -> TFOREIGN, TKEY, LPAREN, fk_column_list, RPAREN, 
+  //                        TREFERENCES, any_identifier, opt_fk_ref_columns, 
+  //                        opt_fk_clauses
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction516()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateTableConstraintForeignKey, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null); }
-        break;
-      case 517: // fk_column_list -> fk_column_list, TCOMMA, any_identifier
+  }
+
+  // fk_column_list -> fk_column_list, TCOMMA, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction517()
+  {
 { CurrentSemanticValue.n = new(NodeType.IndexIdentifierList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 518: // fk_column_list -> any_identifier
+  }
+
+  // fk_column_list -> any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction518()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 519: // opt_fk_ref_columns -> LPAREN, fk_column_list, RPAREN
+  }
+
+  // opt_fk_ref_columns -> LPAREN, fk_column_list, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction519()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-2].n; }
-        break;
-      case 520: // opt_fk_ref_columns -> /* empty */
+  }
+
+  // opt_fk_ref_columns -> /* empty */
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction520()
+  {
 { CurrentSemanticValue.n = null; }
-        break;
-      case 521: // opt_fk_clauses -> fk_clause_list
+  }
+
+  // opt_fk_clauses -> fk_clause_list
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction521()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 522: // opt_fk_clauses -> /* empty */
+  }
+
+  // opt_fk_clauses -> /* empty */
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction522()
+  {
 { CurrentSemanticValue.n = null; }
-        break;
-      case 523: // fk_clause_list -> fk_clause_list, fk_clause
+  }
+
+  // fk_clause_list -> fk_clause_list, fk_clause
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction523()
+  {
 { CurrentSemanticValue.n = new(NodeType.ForeignKeyOptionList, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 524: // fk_clause_list -> fk_clause
+  }
+
+  // fk_clause_list -> fk_clause
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction524()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 525: // fk_clause -> fk_option
+  }
+
+  // fk_clause -> fk_option
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction525()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 526: // fk_clause -> TIDENTIFIER, TIDENTIFIER
+  }
+
+  // fk_clause -> TIDENTIFIER, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction526()
+  {
 { CurrentSemanticValue.n = ForeignKeyMatchOption(ValueStack[ValueStack.Depth-2].s, ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 527: // fk_option -> TON, TDELETE, fk_action
+  }
+
+  // fk_option -> TON, TDELETE, fk_action
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction527()
+  {
 { CurrentSemanticValue.n = ForeignKeyOption("on_delete", ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 528: // fk_option -> TON, TUPDATE, fk_action
+  }
+
+  // fk_option -> TON, TUPDATE, fk_action
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction528()
+  {
 { CurrentSemanticValue.n = ForeignKeyOption("on_update", ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 529: // fk_option -> TDEFERRABLE
+  }
+
+  // fk_option -> TDEFERRABLE
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction529()
+  {
 { CurrentSemanticValue.n = ForeignKeyOption("deferrable", "true"); }
-        break;
-      case 530: // fk_option -> TNOT, TDEFERRABLE
+  }
+
+  // fk_option -> TNOT, TDEFERRABLE
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction530()
+  {
 { CurrentSemanticValue.n = ForeignKeyOption("deferrable", "false"); }
-        break;
-      case 531: // fk_option -> TINITIALLY, TIDENTIFIER
+  }
+
+  // fk_option -> TINITIALLY, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction531()
+  {
 { CurrentSemanticValue.n = ForeignKeyInitiallyOption(ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 532: // fk_action -> TIDENTIFIER
+  }
+
+  // fk_action -> TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction532()
+  {
 { CurrentSemanticValue.s = ForeignKeyActionWord(ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 533: // fk_action -> TNOACTION
+  }
+
+  // fk_action -> TNOACTION
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction533()
+  {
 { CurrentSemanticValue.s = "no_action"; }
-        break;
-      case 534: // fk_action -> TSET, TNULL
+  }
+
+  // fk_action -> TSET, TNULL
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction534()
+  {
 { CurrentSemanticValue.s = "set_null"; }
-        break;
-      case 535: // fk_action -> TSET, TDEFAULT
+  }
+
+  // fk_action -> TSET, TDEFAULT
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction535()
+  {
 { CurrentSemanticValue.s = "set_default"; }
-        break;
-      case 536: // create_table_item -> any_identifier, field_type
+  }
+
+  // create_table_item -> any_identifier, field_type
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction536()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateTableItem, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 537: // create_table_item -> any_identifier, field_type, 
-                //                      create_table_field_constraint_list
+  }
+
+  // create_table_item -> any_identifier, field_type, 
+  //                      create_table_field_constraint_list
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction537()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateTableItem, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null); }
-        break;
-      case 538: // create_table_item -> any_identifier, TIDENTIFIER
+  }
+
+  // create_table_item -> any_identifier, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction538()
+  {
 {
                       CurrentSemanticValue.n = ColumnFromTypeWord(ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].s, null);
                     }
-        break;
-      case 539: // create_table_item -> any_identifier, TIDENTIFIER, 
-                //                      create_table_field_constraint_list
+  }
+
+  // create_table_item -> any_identifier, TIDENTIFIER, 
+  //                      create_table_field_constraint_list
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction539()
+  {
 {
                       CurrentSemanticValue.n = ColumnFromTypeWord(ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-2].s, ValueStack[ValueStack.Depth-1].n);
                     }
-        break;
-      case 540: // create_table_constraint_list -> TPRIMARY, TKEY, LPAREN, identifier_index_list, 
-                //                                 RPAREN
+  }
+
+  // create_table_constraint_list -> TPRIMARY, TKEY, LPAREN, identifier_index_list, 
+  //                                 RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction540()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateTableConstraintPrimaryKey, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, null); }
-        break;
-      case 541: // create_table_field_constraint_list -> create_table_field_constraint_list, 
-                //                                       create_table_field_constraint
+  }
+
+  // create_table_field_constraint_list -> create_table_field_constraint_list, 
+  //                                       create_table_field_constraint
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction541()
+  {
 { CurrentSemanticValue.n = new(NodeType.CreateTableFieldConstraintList, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 542: // create_table_field_constraint_list -> create_table_field_constraint
+  }
+
+  // create_table_field_constraint_list -> create_table_field_constraint
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction542()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 543: // create_table_field_constraint -> TNULL
+  }
+
+  // create_table_field_constraint -> TNULL
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction543()
+  {
 { CurrentSemanticValue.n = NodeAst.ConstraintNull; }
-        break;
-      case 544: // create_table_field_constraint -> TNOT, TNULL
+  }
+
+  // create_table_field_constraint -> TNOT, TNULL
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction544()
+  {
 { CurrentSemanticValue.n = NodeAst.ConstraintNotNull; }
-        break;
-      case 545: // create_table_field_constraint -> TCONSTRAINT, any_identifier, TNOT, TNULL
+  }
+
+  // create_table_field_constraint -> TCONSTRAINT, any_identifier, TNOT, TNULL
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction545()
+  {
 { CurrentSemanticValue.n = new(NodeType.ConstraintNotNullNamed, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-3].n.yytext); }
-        break;
-      case 546: // create_table_field_constraint -> TPRIMARY, TKEY
+  }
+
+  // create_table_field_constraint -> TPRIMARY, TKEY
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction546()
+  {
 { CurrentSemanticValue.n = NodeAst.ConstraintPrimaryKey; }
-        break;
-      case 547: // create_table_field_constraint -> TUNIQUE
+  }
+
+  // create_table_field_constraint -> TUNIQUE
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction547()
+  {
 { CurrentSemanticValue.n = NodeAst.ConstraintUnique; }
-        break;
-      case 548: // create_table_field_constraint -> TDEFAULT, LPAREN, default_expr, RPAREN
+  }
+
+  // create_table_field_constraint -> TDEFAULT, LPAREN, default_expr, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction548()
+  {
 { CurrentSemanticValue.n = new(NodeType.ConstraintDefault, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, null); }
-        break;
-      case 549: // create_table_field_constraint -> TCHECK, LPAREN, condition, RPAREN
+  }
+
+  // create_table_field_constraint -> TCHECK, LPAREN, condition, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction549()
+  {
 { CurrentSemanticValue.n = new(NodeType.ConstraintCheck, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, null); }
-        break;
-      case 550: // create_table_field_constraint -> TCOMMENT, string
+  }
+
+  // create_table_field_constraint -> TCOMMENT, string
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction550()
+  {
 { CurrentSemanticValue.n = new(NodeType.ConstraintComment, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 551: // create_table_field_constraint -> TREFERENCES, any_identifier, 
-                //                                  opt_fk_ref_columns
+  }
+
+  // create_table_field_constraint -> TREFERENCES, any_identifier, 
+  //                                  opt_fk_ref_columns
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction551()
+  {
 { CurrentSemanticValue.n = new(NodeType.ConstraintForeignKey, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 552: // create_table_field_constraint -> TCONSTRAINT, any_identifier, TREFERENCES, 
-                //                                  any_identifier, opt_fk_ref_columns
+  }
+
+  // create_table_field_constraint -> TCONSTRAINT, any_identifier, TREFERENCES, 
+  //                                  any_identifier, opt_fk_ref_columns
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction552()
+  {
 { CurrentSemanticValue.n = new(NodeType.ConstraintForeignKey, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-4].n.yytext); }
-        break;
-      case 553: // create_table_field_constraint -> fk_option
+  }
+
+  // create_table_field_constraint -> fk_option
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction553()
+  {
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 554: // create_table_field_constraint -> TIDENTIFIER, TIDENTIFIER, opt_as_identity
+  }
+
+  // create_table_field_constraint -> TIDENTIFIER, TIDENTIFIER, opt_as_identity
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction554()
+  {
 {
                             if (ValueStack[ValueStack.Depth-1].s is not null)
                             {
@@ -5112,8 +10036,12 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                                 CurrentSemanticValue.n = new(NodeType.ConstraintStorage, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].s);
                             }
                           }
-        break;
-      case 555: // create_table_field_constraint -> TIDENTIFIER, TBY, TDEFAULT, TAS, TIDENTIFIER
+  }
+
+  // create_table_field_constraint -> TIDENTIFIER, TBY, TDEFAULT, TAS, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction555()
+  {
 {
                             if (!string.Equals(ValueStack[ValueStack.Depth-5].s, "generated", System.StringComparison.OrdinalIgnoreCase) ||
                                 !string.Equals(ValueStack[ValueStack.Depth-1].s, "identity", System.StringComparison.OrdinalIgnoreCase))
@@ -5122,8 +10050,12 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                                     "Expected: GENERATED BY DEFAULT AS IDENTITY, got '" + ValueStack[ValueStack.Depth-5].s + " BY DEFAULT AS " + ValueStack[ValueStack.Depth-1].s + "'");
                             CurrentSemanticValue.n = NodeAst.ConstraintIdentityByDefault;
                           }
-        break;
-      case 556: // opt_as_identity -> TAS, TIDENTIFIER
+  }
+
+  // opt_as_identity -> TAS, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction556()
+  {
 {
                     if (!string.Equals(ValueStack[ValueStack.Depth-1].s, "identity", System.StringComparison.OrdinalIgnoreCase))
                         throw new CamusDB.Core.CamusDBException(
@@ -5131,913 +10063,2112 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                             "Expected: GENERATED ALWAYS AS IDENTITY, got 'AS " + ValueStack[ValueStack.Depth-1].s + "'");
                     CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s;
                   }
-        break;
-      case 557: // opt_as_identity -> /* empty */
-{ CurrentSemanticValue.s = null; }
-        break;
-      case 558: // default_expr -> int
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 559: // default_expr -> float
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 560: // default_expr -> bytes
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 561: // default_expr -> string
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 562: // default_expr -> bool
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 563: // default_expr -> null
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 564: // default_expr -> fcall_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 565: // default_expr -> numeric_literal
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 566: // default_expr -> temporal_literal
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 567: // default_expr -> identifier_typed_literal
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 568: // field_type -> TTYPE_OBJECT_ID
-{ CurrentSemanticValue.n = NodeAst.TypeObjectId; }
-        break;
-      case 569: // field_type -> TTYPE_STRING
-{ CurrentSemanticValue.n = NodeAst.TypeString; }
-        break;
-      case 570: // field_type -> TTYPE_STRING, LPAREN, TDIGIT, RPAREN
-{ CurrentSemanticValue.n = new(NodeType.TypeStringSized, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].s); }
-        break;
-      case 571: // field_type -> TTYPE_INT64
-{ CurrentSemanticValue.n = NodeAst.TypeInteger64; }
-        break;
-      case 572: // field_type -> TTYPE_INT16
-{ CurrentSemanticValue.n = NodeAst.TypeInteger16; }
-        break;
-      case 573: // field_type -> TTYPE_INT32
-{ CurrentSemanticValue.n = NodeAst.TypeInteger32; }
-        break;
-      case 574: // field_type -> TINTEGER
-{ CurrentSemanticValue.n = NodeAst.TypeInteger32; }
-        break;
-      case 575: // field_type -> TTYPE_FLOAT64
-{ CurrentSemanticValue.n = NodeAst.TypeFloat64; }
-        break;
-      case 576: // field_type -> TTYPE_BOOL
-{ CurrentSemanticValue.n = NodeAst.TypeBool; }
-        break;
-      case 577: // field_type -> TTYPE_FLOAT32
-{ CurrentSemanticValue.n = NodeAst.TypeFloat32; }
-        break;
-      case 578: // field_type -> TTYPE_BYTES
-{ CurrentSemanticValue.n = NodeAst.TypeBytes; }
-        break;
-      case 579: // field_type -> TTYPE_BYTES, LPAREN, TDIGIT, RPAREN
-{ CurrentSemanticValue.n = new(NodeType.TypeBytesSized, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].s); }
-        break;
-      case 580: // field_type -> TTYPE_DATE
-{ CurrentSemanticValue.n = NodeAst.TypeDate; }
-        break;
-      case 581: // field_type -> TTYPE_DATETIME
-{ CurrentSemanticValue.n = NodeAst.TypeDateTime; }
-        break;
-      case 582: // field_type -> TTYPE_UUID
-{ CurrentSemanticValue.n = NodeAst.TypeUuid; }
-        break;
-      case 583: // field_type -> TTYPE_NUMERIC
-{ CurrentSemanticValue.n = NodeAst.TypeNumeric; }
-        break;
-      case 584: // field_type -> TTYPE_NUMERIC, LPAREN, TDIGIT, RPAREN
-{ CurrentSemanticValue.n = NodeAst.RejectParameterizedNumeric(); }
-        break;
-      case 585: // field_type -> TTYPE_NUMERIC, LPAREN, TDIGIT, TCOMMA, TDIGIT, RPAREN
-{ CurrentSemanticValue.n = NodeAst.RejectParameterizedNumeric(); }
-        break;
-      case 586: // field_type -> TTYPE_ARRAY, LPAREN, field_type, RPAREN
-{ CurrentSemanticValue.n = new(NodeType.TypeArray, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, null); }
-        break;
-      case 587: // field_type -> TTYPE_ARRAY, LPAREN, TIDENTIFIER, RPAREN
-{ CurrentSemanticValue.n = new(NodeType.TypeArray, ArrayElementTypeFromWord(ValueStack[ValueStack.Depth-2].s), null, null, null, null, null, null, null); }
-        break;
-      case 588: // cast_target_type -> field_type
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 589: // cast_target_type -> TDOUBLE
-{ CurrentSemanticValue.n = NodeAst.TypeFloat64; }
-        break;
-      case 590: // cast_target_type -> TIDENTIFIER
-{ CurrentSemanticValue.n = new(NodeType.Identifier, null, null, null, null, null, null, null, CurrentSemanticValue.s.ToLowerInvariant()); }
-        break;
-      case 591: // update_list -> update_list, TCOMMA, update_item
-{ CurrentSemanticValue.n = new(NodeType.UpdateList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 592: // update_list -> update_item
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 593: // update_item -> any_identifier, TEQUALS, expr
-{ CurrentSemanticValue.n = new(NodeType.UpdateItem, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 594: // select_field_list -> select_field_list, TCOMMA, select_field_item
-{ CurrentSemanticValue.n = new(NodeType.IdentifierList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 595: // select_field_list -> select_field_item
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 596: // select_field_item -> expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 597: // select_field_item -> expr, TAS, any_identifier
-{ CurrentSemanticValue.n = new(NodeType.ExprAlias, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 598: // select_limit_offset -> int
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 599: // select_limit_offset -> placeholder
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 600: // insert_field_list -> insert_field_list, TCOMMA, insert_field_item
-{ CurrentSemanticValue.n = new(NodeType.IdentifierList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 601: // insert_field_list -> insert_field_item
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 602: // insert_field_item -> any_identifier
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 603: // values_list -> values_list, TCOMMA, values_item
-{ CurrentSemanticValue.n = new(NodeType.ExprList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 604: // values_list -> values_item
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 605: // values_item -> expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 606: // order_list -> order_list, TCOMMA, order_item
-{ CurrentSemanticValue.n = new(NodeType.IdentifierList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 607: // order_list -> order_item
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 608: // order_item -> expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 609: // order_item -> expr, TASC
-{ CurrentSemanticValue.n = new(NodeType.SortAsc, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 610: // order_item -> expr, TDESC
-{ CurrentSemanticValue.n = new(NodeType.SortDesc, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 611: // condition -> expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 612: // expr -> equals_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 613: // expr -> not_equals_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 614: // expr -> less_than_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 615: // expr -> greater_than_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 616: // expr -> less_equals_than_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 617: // expr -> greater_equals_than_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 618: // expr -> between_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 619: // expr -> and_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 620: // expr -> or_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 621: // expr -> not_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 622: // expr -> negate_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 623: // expr -> not_between_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 624: // expr -> not_like_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 625: // expr -> not_ilike_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 626: // expr -> add_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 627: // expr -> sub_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 628: // expr -> mult_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 629: // expr -> div_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 630: // expr -> mod_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 631: // expr -> power_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 632: // expr -> concat_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 633: // expr -> bitwise_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 634: // expr -> json_op_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 635: // expr -> bit_not_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 636: // expr -> postfix_cast_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 637: // expr -> subscript_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 638: // expr -> like_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 639: // expr -> ilike_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 640: // expr -> regex_match_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 641: // expr -> regex_imatch_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 642: // expr -> regex_not_match_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 643: // expr -> regex_not_imatch_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 644: // expr -> simple_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 645: // expr -> group_paren_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 646: // expr -> fcall_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 647: // expr -> window_call_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 648: // expr -> cast_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 649: // expr -> extract_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 650: // expr -> position_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 651: // expr -> case_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 652: // expr -> projection_all
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 653: // expr -> use_default_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 654: // expr -> is_null_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 655: // expr -> is_not_null_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 656: // expr -> is_true_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 657: // expr -> is_not_true_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 658: // expr -> is_false_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 659: // expr -> is_not_false_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 660: // expr -> in_subquery_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 661: // expr -> not_in_subquery_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 662: // expr -> exists_subquery_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 663: // expr -> scalar_subquery_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 664: // between_expr -> condition, TBETWEEN, between_bound, TAND, between_bound
-{ CurrentSemanticValue.n = new(NodeType.ExprBetween, ValueStack[ValueStack.Depth-5].n, null, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null); }
-        break;
-      case 665: // not_between_expr -> condition, TNOT, TBETWEEN, between_bound, TAND, 
-                //                     between_bound
-{ CurrentSemanticValue.n = NodeAst.Not(new(NodeType.ExprBetween, ValueStack[ValueStack.Depth-6].n, null, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null)); }
-        break;
-      case 666: // between_bound -> simple_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 667: // between_bound -> group_paren_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 668: // between_bound -> fcall_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 669: // between_bound -> cast_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 670: // between_bound -> case_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 671: // between_bound -> scalar_subquery_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 672: // between_bound -> between_bound, TADD, between_bound
-{ CurrentSemanticValue.n = new(NodeType.ExprAdd, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 673: // between_bound -> between_bound, TMINUS, between_bound
-{ CurrentSemanticValue.n = new(NodeType.ExprSub, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 674: // between_bound -> between_bound, TMULT, between_bound
-{ CurrentSemanticValue.n = new(NodeType.ExprMult, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 675: // between_bound -> between_bound, TDIV, between_bound
-{ CurrentSemanticValue.n = new(NodeType.ExprDiv, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 676: // between_bound -> between_bound, TMOD, between_bound
-{ CurrentSemanticValue.n = NodeAst.ModCall(ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 677: // between_bound -> between_bound, TCARET, between_bound
-{ CurrentSemanticValue.n = NodeAst.FunctionCall("pow", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 678: // between_bound -> between_bound, TCONCAT, between_bound
-{ CurrentSemanticValue.n = new(NodeType.ExprConcat, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 679: // between_bound -> between_bound, TBITAND, between_bound
-{ CurrentSemanticValue.n = new(NodeType.ExprBitAnd, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 680: // between_bound -> between_bound, TBITOR, between_bound
-{ CurrentSemanticValue.n = new(NodeType.ExprBitOr, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 681: // between_bound -> between_bound, TBITXOR, between_bound
-{ CurrentSemanticValue.n = new(NodeType.ExprBitXor, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 682: // between_bound -> between_bound, TSHIFTLEFT, between_bound
-{ CurrentSemanticValue.n = new(NodeType.ExprShiftLeft, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 683: // between_bound -> between_bound, TSHIFTRIGHT, between_bound
-{ CurrentSemanticValue.n = new(NodeType.ExprShiftRight, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 684: // between_bound -> between_bound, TREGEXMATCH, between_bound
-{ CurrentSemanticValue.n = new(NodeType.ExprRegexMatch, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 685: // between_bound -> between_bound, TREGEXIMATCH, between_bound
-{ CurrentSemanticValue.n = new(NodeType.ExprRegexMatchCi, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 686: // between_bound -> between_bound, TREGEXNOTMATCH, between_bound
-{ CurrentSemanticValue.n = new(NodeType.ExprRegexNotMatch, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 687: // between_bound -> between_bound, TREGEXNOTIMATCH, between_bound
-{ CurrentSemanticValue.n = new(NodeType.ExprRegexNotMatchCi, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 688: // between_bound -> between_bound, TJSONFIELD, between_bound
-{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_object_field", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 689: // between_bound -> between_bound, TJSONFIELDTEXT, between_bound
-{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_object_field_text", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 690: // between_bound -> between_bound, TJSONPATH, between_bound
-{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_path_get", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 691: // between_bound -> between_bound, TJSONPATHTEXT, between_bound
-{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_path_get_text", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 692: // between_bound -> between_bound, TJSONCONTAINS, between_bound
-{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_contains", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 693: // between_bound -> between_bound, TJSONCONTAINEDBY, between_bound
-{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_contained", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 694: // between_bound -> between_bound, TJSONEXISTS, between_bound
-{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_exists", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 695: // between_bound -> between_bound, TJSONEXISTSANY, between_bound
-{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_exists_any", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 696: // between_bound -> between_bound, TJSONEXISTSALL, between_bound
-{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_exists_all", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 697: // between_bound -> between_bound, TJSONDELETEPATH, between_bound
-{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_delete_path", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 698: // between_bound -> TMINUS, between_bound
-{ CurrentSemanticValue.n = NodeAst.Negate(ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 699: // between_bound -> TREGEXMATCH, between_bound
-{ CurrentSemanticValue.n = new(NodeType.ExprBitNot, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 700: // between_bound -> between_bound, TCOLONCOLON, cast_target_type
-{ CurrentSemanticValue.n = new(NodeType.ExprCast, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 701: // between_bound -> between_bound, LBRACKET, condition, RBRACKET
-{ CurrentSemanticValue.n = new(NodeType.ExprSubscript, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null); }
-        break;
-      case 702: // and_expr -> condition, TAND, condition
-{ CurrentSemanticValue.n = new(NodeType.ExprAnd, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 703: // or_expr -> condition, TOR, condition
-{ CurrentSemanticValue.n = new(NodeType.ExprOr, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 704: // not_expr -> TNOT, condition
-{ CurrentSemanticValue.n = new(NodeType.ExprNot, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 705: // negate_expr -> TMINUS, condition
-{ CurrentSemanticValue.n = NodeAst.Negate(ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 706: // equals_expr -> condition, TEQUALS, condition
-{ CurrentSemanticValue.n = NodeAst.Comparison(NodeType.ExprEquals, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 707: // not_equals_expr -> condition, TNOTEQUALS, condition
-{ CurrentSemanticValue.n = NodeAst.Comparison(NodeType.ExprNotEquals, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 708: // less_than_expr -> condition, TLESSTHAN, condition
-{ CurrentSemanticValue.n = NodeAst.Comparison(NodeType.ExprLessThan, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 709: // greater_than_expr -> condition, TGREATERTHAN, condition
-{ CurrentSemanticValue.n = NodeAst.Comparison(NodeType.ExprGreaterThan, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 710: // greater_equals_than_expr -> condition, TGREATERTHANEQUALS, condition
-{ CurrentSemanticValue.n = NodeAst.Comparison(NodeType.ExprGreaterEqualsThan, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 711: // less_equals_than_expr -> condition, TLESSTHANEQUALS, condition
-{ CurrentSemanticValue.n = NodeAst.Comparison(NodeType.ExprLessEqualsThan, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 712: // add_expr -> condition, TADD, condition
-{ CurrentSemanticValue.n = new(NodeType.ExprAdd, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 713: // sub_expr -> condition, TMINUS, condition
-{ CurrentSemanticValue.n = new(NodeType.ExprSub, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 714: // mult_expr -> condition, TMULT, condition
-{ CurrentSemanticValue.n = new(NodeType.ExprMult, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 715: // div_expr -> condition, TDIV, condition
-{ CurrentSemanticValue.n = new(NodeType.ExprDiv,  ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 716: // mod_expr -> condition, TMOD, condition
-{ CurrentSemanticValue.n = NodeAst.ModCall(ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 717: // concat_expr -> condition, TCONCAT, condition
-{ CurrentSemanticValue.n = new(NodeType.ExprConcat, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 718: // json_op_expr -> condition, TJSONFIELD, condition
-{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_object_field", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 719: // json_op_expr -> condition, TJSONFIELDTEXT, condition
-{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_object_field_text", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 720: // json_op_expr -> condition, TJSONPATH, condition
-{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_path_get", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 721: // json_op_expr -> condition, TJSONPATHTEXT, condition
-{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_path_get_text", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 722: // json_op_expr -> condition, TJSONCONTAINS, condition
-{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_contains", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 723: // json_op_expr -> condition, TJSONCONTAINEDBY, condition
-{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_contained", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 724: // json_op_expr -> condition, TJSONEXISTS, condition
-{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_exists", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 725: // json_op_expr -> condition, TJSONEXISTSANY, condition
-{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_exists_any", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 726: // json_op_expr -> condition, TJSONEXISTSALL, condition
-{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_exists_all", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 727: // json_op_expr -> condition, TJSONDELETEPATH, condition
-{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_delete_path", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 728: // power_expr -> condition, TCARET, condition
-{ CurrentSemanticValue.n = NodeAst.FunctionCall("pow", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 729: // bitwise_expr -> condition, TBITAND, condition
-{ CurrentSemanticValue.n = new(NodeType.ExprBitAnd, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 730: // bitwise_expr -> condition, TBITOR, condition
-{ CurrentSemanticValue.n = new(NodeType.ExprBitOr, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 731: // bitwise_expr -> condition, TBITXOR, condition
-{ CurrentSemanticValue.n = new(NodeType.ExprBitXor, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 732: // bitwise_expr -> condition, TSHIFTLEFT, condition
-{ CurrentSemanticValue.n = new(NodeType.ExprShiftLeft, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 733: // bitwise_expr -> condition, TSHIFTRIGHT, condition
-{ CurrentSemanticValue.n = new(NodeType.ExprShiftRight, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 734: // bit_not_expr -> TREGEXMATCH, condition
-{ CurrentSemanticValue.n = new(NodeType.ExprBitNot, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 735: // postfix_cast_expr -> condition, TCOLONCOLON, cast_target_type
-{ CurrentSemanticValue.n = new(NodeType.ExprCast, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 736: // subscript_expr -> condition, LBRACKET, condition, RBRACKET
-{ CurrentSemanticValue.n = new(NodeType.ExprSubscript, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null); }
-        break;
-      case 737: // like_expr -> condition, TLIKE, condition
-{ CurrentSemanticValue.n = new(NodeType.ExprLike, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 738: // like_expr -> condition, TLIKE, condition, TESCAPE, condition
-{ CurrentSemanticValue.n = new(NodeType.ExprLike, ValueStack[ValueStack.Depth-5].n, NodeAst.FunctionCall("like_escape", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n), null, null, null, null, null, null); }
-        break;
-      case 739: // ilike_expr -> condition, TILIKE, condition
-{ CurrentSemanticValue.n = new(NodeType.ExprILike, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 740: // ilike_expr -> condition, TILIKE, condition, TESCAPE, condition
-{ CurrentSemanticValue.n = new(NodeType.ExprILike, ValueStack[ValueStack.Depth-5].n, NodeAst.FunctionCall("like_escape", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n), null, null, null, null, null, null); }
-        break;
-      case 741: // not_like_expr -> condition, TNOT, TLIKE, condition
-{ CurrentSemanticValue.n = NodeAst.Not(new(NodeType.ExprLike, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null)); }
-        break;
-      case 742: // not_like_expr -> condition, TNOT, TLIKE, condition, TESCAPE, condition
-{ CurrentSemanticValue.n = NodeAst.Not(new(NodeType.ExprLike, ValueStack[ValueStack.Depth-6].n, NodeAst.FunctionCall("like_escape", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n), null, null, null, null, null, null)); }
-        break;
-      case 743: // not_ilike_expr -> condition, TNOT, TILIKE, condition
-{ CurrentSemanticValue.n = NodeAst.Not(new(NodeType.ExprILike, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null)); }
-        break;
-      case 744: // not_ilike_expr -> condition, TNOT, TILIKE, condition, TESCAPE, condition
-{ CurrentSemanticValue.n = NodeAst.Not(new(NodeType.ExprILike, ValueStack[ValueStack.Depth-6].n, NodeAst.FunctionCall("like_escape", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n), null, null, null, null, null, null)); }
-        break;
-      case 745: // regex_match_expr -> condition, TREGEXMATCH, condition
-{ CurrentSemanticValue.n = new(NodeType.ExprRegexMatch,      ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 746: // regex_imatch_expr -> condition, TREGEXIMATCH, condition
-{ CurrentSemanticValue.n = new(NodeType.ExprRegexMatchCi,    ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 747: // regex_not_match_expr -> condition, TREGEXNOTMATCH, condition
-{ CurrentSemanticValue.n = new(NodeType.ExprRegexNotMatch,   ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 748: // regex_not_imatch_expr -> condition, TREGEXNOTIMATCH, condition
-{ CurrentSemanticValue.n = new(NodeType.ExprRegexNotMatchCi, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 749: // is_null_expr -> condition, TIS, TNULL
-{ CurrentSemanticValue.n = new(NodeType.ExprIsNull, ValueStack[ValueStack.Depth-3].n, NodeAst.Null, null, null, null, null, null, null); }
-        break;
-      case 750: // is_not_null_expr -> condition, TIS, TNOT, TNULL
-{ CurrentSemanticValue.n = new(NodeType.ExprIsNotNull, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null); }
-        break;
-      case 751: // is_true_expr -> condition, TIS, TTRUE
-{ CurrentSemanticValue.n = new(NodeType.ExprIsTrue, ValueStack[ValueStack.Depth-3].n, null, null, null, null, null, null, null); }
-        break;
-      case 752: // is_not_true_expr -> condition, TIS, TNOT, TTRUE
-{ CurrentSemanticValue.n = new(NodeType.ExprIsNotTrue, ValueStack[ValueStack.Depth-4].n, null, null, null, null, null, null, null); }
-        break;
-      case 753: // is_false_expr -> condition, TIS, TFALSE
-{ CurrentSemanticValue.n = new(NodeType.ExprIsFalse, ValueStack[ValueStack.Depth-3].n, null, null, null, null, null, null, null); }
-        break;
-      case 754: // is_not_false_expr -> condition, TIS, TNOT, TFALSE
-{ CurrentSemanticValue.n = new(NodeType.ExprIsNotFalse, ValueStack[ValueStack.Depth-4].n, null, null, null, null, null, null, null); }
-        break;
-      case 755: // in_subquery_expr -> condition, TIN, query_expr
-{ CurrentSemanticValue.n = new(NodeType.ExprInSubquery, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 756: // in_subquery_expr -> condition, TIN, LPAREN, in_value_list, RPAREN
-{ CurrentSemanticValue.n = new(NodeType.ExprInMembership, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null); }
-        break;
-      case 757: // not_in_subquery_expr -> condition, TNOT, TIN, query_expr
-{ CurrentSemanticValue.n = new(NodeType.ExprNotInSubquery, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 758: // not_in_subquery_expr -> condition, TNOT, TIN, LPAREN, in_value_list, RPAREN
-{ CurrentSemanticValue.n = new(NodeType.ExprNotInMembership, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null); }
-        break;
-      case 759: // in_value_list -> in_value_list, TCOMMA, in_value_item
-{ CurrentSemanticValue.n = new(NodeType.ExprList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 760: // in_value_list -> in_value_item
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 761: // in_value_item -> simple_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 762: // exists_subquery_expr -> TEXISTS, query_expr
-{ CurrentSemanticValue.n = new(NodeType.ExprExistsSubquery, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 763: // scalar_subquery_expr -> query_expr
-{ CurrentSemanticValue.n = new(NodeType.ExprScalarSubquery, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
-        break;
-      case 764: // fcall_expr -> identifier, LPAREN, RPAREN
-{ CurrentSemanticValue.n = new(NodeType.ExprFuncCall, ValueStack[ValueStack.Depth-3].n, null, null, null, null, null, null, null); }
-        break;
-      case 765: // fcall_expr -> identifier, LPAREN, fcall_argument_list, RPAREN
-{ CurrentSemanticValue.n = new(NodeType.ExprFuncCall, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null); }
-        break;
-      case 766: // fcall_expr -> qualified_identifier, LPAREN, RPAREN
-{ CurrentSemanticValue.n = new(NodeType.ExprFuncCall, ValueStack[ValueStack.Depth-3].n, null, null, null, null, null, null, null); }
-        break;
-      case 767: // fcall_expr -> qualified_identifier, LPAREN, fcall_argument_list, RPAREN
-{ CurrentSemanticValue.n = new(NodeType.ExprFuncCall, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null); }
-        break;
-      case 768: // fcall_expr -> identifier, query_expr
-{ CurrentSemanticValue.n = new(NodeType.ExprFuncCall, ValueStack[ValueStack.Depth-2].n, new NodeAst(NodeType.ExprScalarSubquery, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null), null, null, null, null, null, null); }
-        break;
-      case 769: // window_call_expr -> fcall_expr, TOVER, LPAREN, RPAREN
-{ CurrentSemanticValue.n = WindowAst.Call(ValueStack[ValueStack.Depth-4].n, null); }
-        break;
-      case 770: // window_call_expr -> fcall_expr, TOVER, LPAREN, window_spec, RPAREN
-{ CurrentSemanticValue.n = WindowAst.Call(ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-2].n); }
-        break;
-      case 771: // window_call_expr -> fcall_expr, TOVER, identifier
-{ CurrentSemanticValue.n = WindowAst.RefuseNamedWindow(ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 772: // window_spec -> window_partition
-{ CurrentSemanticValue.n = WindowAst.Spec(ValueStack[ValueStack.Depth-1].n, null, null); }
-        break;
-      case 773: // window_spec -> window_partition, window_order
-{ CurrentSemanticValue.n = WindowAst.Spec(ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null); }
-        break;
-      case 774: // window_spec -> window_partition, window_order, window_frame
-{ CurrentSemanticValue.n = WindowAst.Spec(ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 775: // window_spec -> window_partition, window_frame
-{ CurrentSemanticValue.n = WindowAst.Spec(ValueStack[ValueStack.Depth-2].n, null, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 776: // window_spec -> window_order
-{ CurrentSemanticValue.n = WindowAst.Spec(null, ValueStack[ValueStack.Depth-1].n, null); }
-        break;
-      case 777: // window_spec -> window_order, window_frame
-{ CurrentSemanticValue.n = WindowAst.Spec(null, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 778: // window_spec -> window_frame
-{ CurrentSemanticValue.n = WindowAst.Spec(null, null, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 779: // window_partition -> TIDENTIFIER, TBY, window_partition_list
-{ CurrentSemanticValue.n = WindowAst.Partition(ValueStack[ValueStack.Depth-3].s, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 780: // window_partition_list -> window_partition_list, TCOMMA, expr
-{ CurrentSemanticValue.n = new(NodeType.ExprList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 781: // window_partition_list -> expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 782: // window_order -> TORDER, TBY, order_list
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 783: // window_frame -> TIDENTIFIER, window_frame_bound
-{ CurrentSemanticValue.n = WindowAst.Frame(ValueStack[ValueStack.Depth-2].s, ValueStack[ValueStack.Depth-1].n, null); }
-        break;
-      case 784: // window_frame -> TIDENTIFIER, TBETWEEN, window_frame_bound, TAND, 
-                //                 window_frame_bound
-{ CurrentSemanticValue.n = WindowAst.Frame(ValueStack[ValueStack.Depth-5].s, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
-        break;
-      case 785: // window_frame -> window_frame, TIDENTIFIER, TIDENTIFIER
-{ CurrentSemanticValue.n = WindowAst.RefuseExclude(ValueStack[ValueStack.Depth-2].s); }
-        break;
-      case 786: // window_frame -> window_frame, TIDENTIFIER, TGROUP
-{ CurrentSemanticValue.n = WindowAst.RefuseExclude(ValueStack[ValueStack.Depth-2].s); }
-        break;
-      case 787: // window_frame_bound -> TIDENTIFIER, TIDENTIFIER
-{ CurrentSemanticValue.n = WindowAst.Bound(ValueStack[ValueStack.Depth-2].s, ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 788: // window_frame_bound -> int, TIDENTIFIER
-{ CurrentSemanticValue.n = WindowAst.OffsetBound(ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 789: // window_frame_bound -> placeholder, TIDENTIFIER
-{ CurrentSemanticValue.n = WindowAst.OffsetBound(ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 790: // window_frame_bound -> float, TIDENTIFIER
-{ CurrentSemanticValue.n = WindowAst.OffsetBound(ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 791: // window_frame_bound -> string, TIDENTIFIER
-{ CurrentSemanticValue.n = WindowAst.OffsetBound(ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 792: // extract_expr -> identifier, LPAREN, identifier, TFROM, condition, RPAREN
-{ CurrentSemanticValue.n = ExtractCall.Build(ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-4].n.yytext, ValueStack[ValueStack.Depth-2].n); }
-        break;
-      case 793: // extract_expr -> identifier, LPAREN, string, TFROM, condition, RPAREN
-{ CurrentSemanticValue.n = ExtractCall.Build(ValueStack[ValueStack.Depth-6].n, SqlStringLiteral.Decode(ValueStack[ValueStack.Depth-4].n.yytext ?? ""), ValueStack[ValueStack.Depth-2].n); }
-        break;
-      case 794: // position_expr -> identifier, LPAREN, condition, TIN, position_operand, RPAREN
-{ CurrentSemanticValue.n = PositionCall.Build(ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n); }
-        break;
-      case 795: // position_operand -> simple_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 796: // position_operand -> fcall_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 797: // position_operand -> cast_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 798: // position_operand -> case_expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 799: // cast_expr -> TCAST, LPAREN, condition, TAS, cast_target_type, RPAREN
-{ CurrentSemanticValue.n = new(NodeType.ExprCast, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null); }
-        break;
-      case 800: // case_expr -> TCASE, case_when_list, case_else_opt, TEND
-{ CurrentSemanticValue.n = new(NodeType.ExprCase, null, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null); }
-        break;
-      case 801: // case_expr -> TCASE, condition, case_when_list, case_else_opt, TEND
-{ CurrentSemanticValue.n = new(NodeType.ExprCase, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null); }
-        break;
-      case 802: // case_expr -> TIF, LPAREN, condition, TCOMMA, condition, TCOMMA, condition, 
-                //              RPAREN
-{ CurrentSemanticValue.n = new(NodeType.ExprCase, null, new(NodeType.ExprCaseWhen, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-4].n, null, null, null, null, null, null), ValueStack[ValueStack.Depth-2].n, null, null, null, null, "IF"); }
-        break;
-      case 803: // case_when_list -> case_when_list, case_when_clause
-{ CurrentSemanticValue.n = new(NodeType.ExprCaseWhenList, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 804: // case_when_list -> case_when_clause
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 805: // case_when_clause -> TWHEN, condition, TTHEN, condition
-{ CurrentSemanticValue.n = new(NodeType.ExprCaseWhen, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 806: // case_else_opt -> TELSE, condition
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
-        break;
-      case 807: // case_else_opt -> /* empty */
-{ CurrentSemanticValue.n = null; }
-        break;
-      case 808: // fcall_argument_list -> fcall_argument_list, TCOMMA, fcall_argument_item
-{ CurrentSemanticValue.n = new(NodeType.ExprArgumentList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 809: // fcall_argument_list -> fcall_argument_item
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 810: // fcall_argument_item -> expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 811: // group_paren_expr -> LPAREN, condition, RPAREN
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-2].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-2].s; }
-        break;
-      case 812: // simple_expr -> any_identifier
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 813: // simple_expr -> TKEY
-{ CurrentSemanticValue.n = new(NodeType.Identifier, null, null, null, null, null, null, null, "key"); }
-        break;
-      case 814: // simple_expr -> int
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 815: // simple_expr -> bytes
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 816: // simple_expr -> array_literal
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 817: // simple_expr -> float
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 818: // simple_expr -> string
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 819: // simple_expr -> bool
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 820: // simple_expr -> null
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 821: // simple_expr -> placeholder
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 822: // simple_expr -> numeric_literal
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 823: // simple_expr -> temporal_literal
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 824: // simple_expr -> identifier_typed_literal
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 825: // simple_expr -> interval_literal
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 826: // identifier_typed_literal -> TIDENTIFIER, string
-{ CurrentSemanticValue.n = new(NodeType.ExprCast, ValueStack[ValueStack.Depth-1].n, TypeFromWord(ValueStack[ValueStack.Depth-2].s), null, null, null, null, null, null); }
-        break;
-      case 827: // interval_literal -> TINTERVAL, string
-{ CurrentSemanticValue.n = new(NodeType.ExprCast, ValueStack[ValueStack.Depth-1].n, IntervalTypeNode(), null, null, null, null, null, null); }
-        break;
-      case 828: // interval_literal -> TINTERVAL, string, TIDENTIFIER
-{ CurrentSemanticValue.n = IntervalWithUnit(ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 829: // interval_literal -> TINTERVAL, int, TIDENTIFIER
-{ CurrentSemanticValue.n = IntervalWithUnit(ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 830: // interval_literal -> TINTERVAL, float, TIDENTIFIER
-{ CurrentSemanticValue.n = IntervalWithUnit(ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 831: // interval_literal -> TINTERVAL, placeholder, TIDENTIFIER
-{ CurrentSemanticValue.n = IntervalWithUnit(ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 832: // numeric_literal -> TTYPE_NUMERIC, string
-{ CurrentSemanticValue.n = new(NodeType.ExprCast, ValueStack[ValueStack.Depth-1].n, NodeAst.TypeNumeric, null, null, null, null, null, null); }
-        break;
-      case 833: // temporal_literal -> TTYPE_DATE, string
-{ CurrentSemanticValue.n = new(NodeType.ExprCast, ValueStack[ValueStack.Depth-1].n, NodeAst.TypeDate, null, null, null, null, null, null); }
-        break;
-      case 834: // temporal_literal -> TTYPE_DATETIME, string
-{ CurrentSemanticValue.n = new(NodeType.ExprCast, ValueStack[ValueStack.Depth-1].n, NodeAst.TypeDateTime, null, null, null, null, null, null); }
-        break;
-      case 835: // use_default_expr -> TDEFAULT
-{ CurrentSemanticValue.n = NodeAst.ExprDefault; }
-        break;
-      case 836: // projection_all -> TMULT
-{ CurrentSemanticValue.n = NodeAst.ExprAllFields; }
-        break;
-      case 837: // any_identifier -> qualified_identifier
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 838: // any_identifier -> identifier
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 839: // any_identifier -> escaped_identifier
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 840: // qualified_identifier -> any_identifier, TDOT, any_identifier
-{ CurrentSemanticValue.n = new(NodeType.Identifier, null, null, null, null, null, null, null, string.Concat(ValueStack[ValueStack.Depth-3].n.yytext, ".", ValueStack[ValueStack.Depth-1].n.yytext)); }
-        break;
-      case 841: // qualified_identifier -> any_identifier, TDOT, TKEY
-{ CurrentSemanticValue.n = new(NodeType.Identifier, null, null, null, null, null, null, null, string.Concat(ValueStack[ValueStack.Depth-3].n.yytext, ".key")); }
-        break;
-      case 842: // identifier -> TIDENTIFIER
-{ CurrentSemanticValue.n = new(NodeType.Identifier, null, null, null, null, null, null, null, CurrentSemanticValue.s); }
-        break;
-      case 843: // identifier -> TESCAPE
-{ CurrentSemanticValue.n = new(NodeType.Identifier, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].s); }
-        break;
-      case 844: // escaped_identifier -> TESCAPED_IDENTIFIER
-{ CurrentSemanticValue.n = new(NodeType.Identifier, null, null, null, null, null, null, null, CurrentSemanticValue.s.Trim('`')); }
-        break;
-      case 845: // int -> TDIGIT
-{ CurrentSemanticValue.n = new(NodeType.Integer, null, null, null, null, null, null, null, CurrentSemanticValue.s); }
-        break;
-      case 846: // float -> TFLOAT
-{ CurrentSemanticValue.n = new(NodeType.Float, null, null, null, null, null, null, null, CurrentSemanticValue.s); }
-        break;
-      case 847: // string -> TSTRING
-{ CurrentSemanticValue.n = new(NodeType.String, null, null, null, null, null, null, null, CurrentSemanticValue.s); }
-        break;
-      case 848: // bytes -> TBYTESLIT
-{ CurrentSemanticValue.n = new(NodeType.BytesLiteral, null, null, null, null, null, null, null, CurrentSemanticValue.s); }
-        break;
-      case 849: // array_literal -> TTYPE_ARRAY, LBRACKET, RBRACKET
-{ CurrentSemanticValue.n = new(NodeType.ArrayLiteral, null, null, null, null, null, null, null, null); }
-        break;
-      case 850: // array_literal -> TTYPE_ARRAY, LBRACKET, array_element_list, RBRACKET
-{ CurrentSemanticValue.n = new(NodeType.ArrayLiteral, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, null); }
-        break;
-      case 851: // array_element_list -> array_element_list, TCOMMA, expr
-{ CurrentSemanticValue.n = new(NodeType.ExprList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
-        break;
-      case 852: // array_element_list -> expr
-{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
-        break;
-      case 853: // bool -> TTRUE
-{ CurrentSemanticValue.n = NodeAst.True; }
-        break;
-      case 854: // bool -> TFALSE
-{ CurrentSemanticValue.n = NodeAst.False; }
-        break;
-      case 855: // null -> TNULL
-{ CurrentSemanticValue.n = NodeAst.Null; }
-        break;
-      case 856: // placeholder -> TPLACEHOLDER
-{ CurrentSemanticValue.n = new(NodeType.Placeholder, null, null, null, null, null, null, null, CurrentSemanticValue.s); }
-        break;
-    }
-#pragma warning restore 162, 1522
   }
+
+  // opt_as_identity -> /* empty */
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction557()
+  {
+{ CurrentSemanticValue.s = null; }
+  }
+
+  // default_expr -> int
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction558()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // default_expr -> float
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction559()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // default_expr -> bytes
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction560()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // default_expr -> string
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction561()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // default_expr -> bool
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction562()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // default_expr -> null
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction563()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // default_expr -> fcall_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction564()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // default_expr -> numeric_literal
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction565()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // default_expr -> temporal_literal
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction566()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // default_expr -> identifier_typed_literal
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction567()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // field_type -> TTYPE_OBJECT_ID
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction568()
+  {
+{ CurrentSemanticValue.n = NodeAst.TypeObjectId; }
+  }
+
+  // field_type -> TTYPE_STRING
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction569()
+  {
+{ CurrentSemanticValue.n = NodeAst.TypeString; }
+  }
+
+  // field_type -> TTYPE_STRING, LPAREN, TDIGIT, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction570()
+  {
+{ CurrentSemanticValue.n = new(NodeType.TypeStringSized, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].s); }
+  }
+
+  // field_type -> TTYPE_INT64
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction571()
+  {
+{ CurrentSemanticValue.n = NodeAst.TypeInteger64; }
+  }
+
+  // field_type -> TTYPE_INT16
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction572()
+  {
+{ CurrentSemanticValue.n = NodeAst.TypeInteger16; }
+  }
+
+  // field_type -> TTYPE_INT32
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction573()
+  {
+{ CurrentSemanticValue.n = NodeAst.TypeInteger32; }
+  }
+
+  // field_type -> TINTEGER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction574()
+  {
+{ CurrentSemanticValue.n = NodeAst.TypeInteger32; }
+  }
+
+  // field_type -> TTYPE_FLOAT64
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction575()
+  {
+{ CurrentSemanticValue.n = NodeAst.TypeFloat64; }
+  }
+
+  // field_type -> TTYPE_BOOL
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction576()
+  {
+{ CurrentSemanticValue.n = NodeAst.TypeBool; }
+  }
+
+  // field_type -> TTYPE_FLOAT32
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction577()
+  {
+{ CurrentSemanticValue.n = NodeAst.TypeFloat32; }
+  }
+
+  // field_type -> TTYPE_BYTES
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction578()
+  {
+{ CurrentSemanticValue.n = NodeAst.TypeBytes; }
+  }
+
+  // field_type -> TTYPE_BYTES, LPAREN, TDIGIT, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction579()
+  {
+{ CurrentSemanticValue.n = new(NodeType.TypeBytesSized, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-2].s); }
+  }
+
+  // field_type -> TTYPE_DATE
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction580()
+  {
+{ CurrentSemanticValue.n = NodeAst.TypeDate; }
+  }
+
+  // field_type -> TTYPE_DATETIME
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction581()
+  {
+{ CurrentSemanticValue.n = NodeAst.TypeDateTime; }
+  }
+
+  // field_type -> TTYPE_UUID
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction582()
+  {
+{ CurrentSemanticValue.n = NodeAst.TypeUuid; }
+  }
+
+  // field_type -> TTYPE_NUMERIC
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction583()
+  {
+{ CurrentSemanticValue.n = NodeAst.TypeNumeric; }
+  }
+
+  // field_type -> TTYPE_NUMERIC, LPAREN, TDIGIT, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction584()
+  {
+{ CurrentSemanticValue.n = NodeAst.RejectParameterizedNumeric(); }
+  }
+
+  // field_type -> TTYPE_NUMERIC, LPAREN, TDIGIT, TCOMMA, TDIGIT, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction585()
+  {
+{ CurrentSemanticValue.n = NodeAst.RejectParameterizedNumeric(); }
+  }
+
+  // field_type -> TTYPE_ARRAY, LPAREN, field_type, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction586()
+  {
+{ CurrentSemanticValue.n = new(NodeType.TypeArray, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, null); }
+  }
+
+  // field_type -> TTYPE_ARRAY, LPAREN, TIDENTIFIER, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction587()
+  {
+{ CurrentSemanticValue.n = new(NodeType.TypeArray, ArrayElementTypeFromWord(ValueStack[ValueStack.Depth-2].s), null, null, null, null, null, null, null); }
+  }
+
+  // cast_target_type -> field_type
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction588()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // cast_target_type -> TDOUBLE
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction589()
+  {
+{ CurrentSemanticValue.n = NodeAst.TypeFloat64; }
+  }
+
+  // cast_target_type -> TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction590()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Identifier, null, null, null, null, null, null, null, CurrentSemanticValue.s.ToLowerInvariant()); }
+  }
+
+  // update_list -> update_list, TCOMMA, update_item
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction591()
+  {
+{ CurrentSemanticValue.n = new(NodeType.UpdateList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // update_list -> update_item
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction592()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // update_item -> any_identifier, TEQUALS, expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction593()
+  {
+{ CurrentSemanticValue.n = new(NodeType.UpdateItem, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // select_field_list -> select_field_list, TCOMMA, select_field_item
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction594()
+  {
+{ CurrentSemanticValue.n = new(NodeType.IdentifierList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // select_field_list -> select_field_item
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction595()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // select_field_item -> expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction596()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // select_field_item -> expr, TAS, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction597()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprAlias, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // select_limit_offset -> int
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction598()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // select_limit_offset -> placeholder
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction599()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // insert_field_list -> insert_field_list, TCOMMA, insert_field_item
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction600()
+  {
+{ CurrentSemanticValue.n = new(NodeType.IdentifierList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // insert_field_list -> insert_field_item
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction601()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // insert_field_item -> any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction602()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // values_list -> values_list, TCOMMA, values_item
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction603()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // values_list -> values_item
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction604()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // values_item -> expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction605()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // order_list -> order_list, TCOMMA, order_item
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction606()
+  {
+{ CurrentSemanticValue.n = new(NodeType.IdentifierList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // order_list -> order_item
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction607()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // order_item -> expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction608()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // order_item -> expr, TASC
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction609()
+  {
+{ CurrentSemanticValue.n = new(NodeType.SortAsc, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // order_item -> expr, TDESC
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction610()
+  {
+{ CurrentSemanticValue.n = new(NodeType.SortDesc, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // condition -> expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction611()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // expr -> equals_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction612()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> not_equals_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction613()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> less_than_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction614()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> greater_than_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction615()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> less_equals_than_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction616()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> greater_equals_than_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction617()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> between_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction618()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> and_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction619()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> or_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction620()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> not_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction621()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> negate_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction622()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> not_between_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction623()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> not_like_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction624()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> not_ilike_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction625()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> add_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction626()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> sub_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction627()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> mult_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction628()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> div_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction629()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> mod_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction630()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> power_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction631()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> concat_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction632()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> bitwise_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction633()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> json_op_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction634()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> bit_not_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction635()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> postfix_cast_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction636()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> subscript_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction637()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> like_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction638()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> ilike_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction639()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> regex_match_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction640()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> regex_imatch_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction641()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> regex_not_match_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction642()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> regex_not_imatch_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction643()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> simple_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction644()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> group_paren_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction645()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> fcall_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction646()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> window_call_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction647()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> cast_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction648()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> extract_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction649()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> position_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction650()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> case_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction651()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> projection_all
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction652()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> use_default_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction653()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> is_null_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction654()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> is_not_null_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction655()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> is_true_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction656()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> is_not_true_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction657()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> is_false_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction658()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> is_not_false_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction659()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> in_subquery_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction660()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> not_in_subquery_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction661()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> exists_subquery_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction662()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // expr -> scalar_subquery_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction663()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // between_expr -> condition, TBETWEEN, between_bound, TAND, between_bound
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction664()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprBetween, ValueStack[ValueStack.Depth-5].n, null, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null); }
+  }
+
+  // not_between_expr -> condition, TNOT, TBETWEEN, between_bound, TAND, 
+  //                     between_bound
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction665()
+  {
+{ CurrentSemanticValue.n = NodeAst.Not(new(NodeType.ExprBetween, ValueStack[ValueStack.Depth-6].n, null, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null)); }
+  }
+
+  // between_bound -> simple_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction666()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // between_bound -> group_paren_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction667()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // between_bound -> fcall_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction668()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // between_bound -> cast_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction669()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // between_bound -> case_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction670()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // between_bound -> scalar_subquery_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction671()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // between_bound -> between_bound, TADD, between_bound
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction672()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprAdd, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // between_bound -> between_bound, TMINUS, between_bound
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction673()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprSub, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // between_bound -> between_bound, TMULT, between_bound
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction674()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprMult, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // between_bound -> between_bound, TDIV, between_bound
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction675()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprDiv, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // between_bound -> between_bound, TMOD, between_bound
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction676()
+  {
+{ CurrentSemanticValue.n = NodeAst.ModCall(ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // between_bound -> between_bound, TCARET, between_bound
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction677()
+  {
+{ CurrentSemanticValue.n = NodeAst.FunctionCall("pow", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // between_bound -> between_bound, TCONCAT, between_bound
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction678()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprConcat, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // between_bound -> between_bound, TBITAND, between_bound
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction679()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprBitAnd, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // between_bound -> between_bound, TBITOR, between_bound
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction680()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprBitOr, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // between_bound -> between_bound, TBITXOR, between_bound
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction681()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprBitXor, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // between_bound -> between_bound, TSHIFTLEFT, between_bound
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction682()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprShiftLeft, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // between_bound -> between_bound, TSHIFTRIGHT, between_bound
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction683()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprShiftRight, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // between_bound -> between_bound, TREGEXMATCH, between_bound
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction684()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprRegexMatch, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // between_bound -> between_bound, TREGEXIMATCH, between_bound
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction685()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprRegexMatchCi, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // between_bound -> between_bound, TREGEXNOTMATCH, between_bound
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction686()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprRegexNotMatch, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // between_bound -> between_bound, TREGEXNOTIMATCH, between_bound
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction687()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprRegexNotMatchCi, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // between_bound -> between_bound, TJSONFIELD, between_bound
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction688()
+  {
+{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_object_field", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // between_bound -> between_bound, TJSONFIELDTEXT, between_bound
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction689()
+  {
+{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_object_field_text", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // between_bound -> between_bound, TJSONPATH, between_bound
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction690()
+  {
+{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_path_get", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // between_bound -> between_bound, TJSONPATHTEXT, between_bound
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction691()
+  {
+{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_path_get_text", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // between_bound -> between_bound, TJSONCONTAINS, between_bound
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction692()
+  {
+{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_contains", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // between_bound -> between_bound, TJSONCONTAINEDBY, between_bound
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction693()
+  {
+{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_contained", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // between_bound -> between_bound, TJSONEXISTS, between_bound
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction694()
+  {
+{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_exists", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // between_bound -> between_bound, TJSONEXISTSANY, between_bound
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction695()
+  {
+{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_exists_any", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // between_bound -> between_bound, TJSONEXISTSALL, between_bound
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction696()
+  {
+{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_exists_all", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // between_bound -> between_bound, TJSONDELETEPATH, between_bound
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction697()
+  {
+{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_delete_path", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // between_bound -> TMINUS, between_bound
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction698()
+  {
+{ CurrentSemanticValue.n = NodeAst.Negate(ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // between_bound -> TREGEXMATCH, between_bound
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction699()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprBitNot, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
+  }
+
+  // between_bound -> between_bound, TCOLONCOLON, cast_target_type
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction700()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprCast, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // between_bound -> between_bound, LBRACKET, condition, RBRACKET
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction701()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprSubscript, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null); }
+  }
+
+  // and_expr -> condition, TAND, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction702()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprAnd, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // or_expr -> condition, TOR, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction703()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprOr, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // not_expr -> TNOT, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction704()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprNot, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
+  }
+
+  // negate_expr -> TMINUS, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction705()
+  {
+{ CurrentSemanticValue.n = NodeAst.Negate(ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // equals_expr -> condition, TEQUALS, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction706()
+  {
+{ CurrentSemanticValue.n = NodeAst.Comparison(NodeType.ExprEquals, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // not_equals_expr -> condition, TNOTEQUALS, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction707()
+  {
+{ CurrentSemanticValue.n = NodeAst.Comparison(NodeType.ExprNotEquals, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // less_than_expr -> condition, TLESSTHAN, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction708()
+  {
+{ CurrentSemanticValue.n = NodeAst.Comparison(NodeType.ExprLessThan, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // greater_than_expr -> condition, TGREATERTHAN, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction709()
+  {
+{ CurrentSemanticValue.n = NodeAst.Comparison(NodeType.ExprGreaterThan, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // greater_equals_than_expr -> condition, TGREATERTHANEQUALS, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction710()
+  {
+{ CurrentSemanticValue.n = NodeAst.Comparison(NodeType.ExprGreaterEqualsThan, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // less_equals_than_expr -> condition, TLESSTHANEQUALS, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction711()
+  {
+{ CurrentSemanticValue.n = NodeAst.Comparison(NodeType.ExprLessEqualsThan, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // add_expr -> condition, TADD, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction712()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprAdd, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // sub_expr -> condition, TMINUS, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction713()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprSub, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // mult_expr -> condition, TMULT, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction714()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprMult, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // div_expr -> condition, TDIV, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction715()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprDiv,  ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // mod_expr -> condition, TMOD, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction716()
+  {
+{ CurrentSemanticValue.n = NodeAst.ModCall(ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // concat_expr -> condition, TCONCAT, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction717()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprConcat, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // json_op_expr -> condition, TJSONFIELD, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction718()
+  {
+{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_object_field", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // json_op_expr -> condition, TJSONFIELDTEXT, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction719()
+  {
+{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_object_field_text", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // json_op_expr -> condition, TJSONPATH, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction720()
+  {
+{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_path_get", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // json_op_expr -> condition, TJSONPATHTEXT, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction721()
+  {
+{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_path_get_text", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // json_op_expr -> condition, TJSONCONTAINS, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction722()
+  {
+{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_contains", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // json_op_expr -> condition, TJSONCONTAINEDBY, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction723()
+  {
+{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_contained", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // json_op_expr -> condition, TJSONEXISTS, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction724()
+  {
+{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_exists", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // json_op_expr -> condition, TJSONEXISTSANY, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction725()
+  {
+{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_exists_any", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // json_op_expr -> condition, TJSONEXISTSALL, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction726()
+  {
+{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_exists_all", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // json_op_expr -> condition, TJSONDELETEPATH, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction727()
+  {
+{ CurrentSemanticValue.n = NodeAst.FunctionCall("jsonb_delete_path", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // power_expr -> condition, TCARET, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction728()
+  {
+{ CurrentSemanticValue.n = NodeAst.FunctionCall("pow", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // bitwise_expr -> condition, TBITAND, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction729()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprBitAnd, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // bitwise_expr -> condition, TBITOR, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction730()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprBitOr, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // bitwise_expr -> condition, TBITXOR, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction731()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprBitXor, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // bitwise_expr -> condition, TSHIFTLEFT, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction732()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprShiftLeft, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // bitwise_expr -> condition, TSHIFTRIGHT, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction733()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprShiftRight, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // bit_not_expr -> TREGEXMATCH, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction734()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprBitNot, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
+  }
+
+  // postfix_cast_expr -> condition, TCOLONCOLON, cast_target_type
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction735()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprCast, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // subscript_expr -> condition, LBRACKET, condition, RBRACKET
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction736()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprSubscript, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null); }
+  }
+
+  // like_expr -> condition, TLIKE, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction737()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprLike, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // like_expr -> condition, TLIKE, condition, TESCAPE, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction738()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprLike, ValueStack[ValueStack.Depth-5].n, NodeAst.FunctionCall("like_escape", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n), null, null, null, null, null, null); }
+  }
+
+  // ilike_expr -> condition, TILIKE, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction739()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprILike, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // ilike_expr -> condition, TILIKE, condition, TESCAPE, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction740()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprILike, ValueStack[ValueStack.Depth-5].n, NodeAst.FunctionCall("like_escape", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n), null, null, null, null, null, null); }
+  }
+
+  // not_like_expr -> condition, TNOT, TLIKE, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction741()
+  {
+{ CurrentSemanticValue.n = NodeAst.Not(new(NodeType.ExprLike, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null)); }
+  }
+
+  // not_like_expr -> condition, TNOT, TLIKE, condition, TESCAPE, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction742()
+  {
+{ CurrentSemanticValue.n = NodeAst.Not(new(NodeType.ExprLike, ValueStack[ValueStack.Depth-6].n, NodeAst.FunctionCall("like_escape", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n), null, null, null, null, null, null)); }
+  }
+
+  // not_ilike_expr -> condition, TNOT, TILIKE, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction743()
+  {
+{ CurrentSemanticValue.n = NodeAst.Not(new(NodeType.ExprILike, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null)); }
+  }
+
+  // not_ilike_expr -> condition, TNOT, TILIKE, condition, TESCAPE, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction744()
+  {
+{ CurrentSemanticValue.n = NodeAst.Not(new(NodeType.ExprILike, ValueStack[ValueStack.Depth-6].n, NodeAst.FunctionCall("like_escape", ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n), null, null, null, null, null, null)); }
+  }
+
+  // regex_match_expr -> condition, TREGEXMATCH, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction745()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprRegexMatch,      ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // regex_imatch_expr -> condition, TREGEXIMATCH, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction746()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprRegexMatchCi,    ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // regex_not_match_expr -> condition, TREGEXNOTMATCH, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction747()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprRegexNotMatch,   ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // regex_not_imatch_expr -> condition, TREGEXNOTIMATCH, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction748()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprRegexNotMatchCi, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // is_null_expr -> condition, TIS, TNULL
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction749()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprIsNull, ValueStack[ValueStack.Depth-3].n, NodeAst.Null, null, null, null, null, null, null); }
+  }
+
+  // is_not_null_expr -> condition, TIS, TNOT, TNULL
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction750()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprIsNotNull, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null); }
+  }
+
+  // is_true_expr -> condition, TIS, TTRUE
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction751()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprIsTrue, ValueStack[ValueStack.Depth-3].n, null, null, null, null, null, null, null); }
+  }
+
+  // is_not_true_expr -> condition, TIS, TNOT, TTRUE
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction752()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprIsNotTrue, ValueStack[ValueStack.Depth-4].n, null, null, null, null, null, null, null); }
+  }
+
+  // is_false_expr -> condition, TIS, TFALSE
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction753()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprIsFalse, ValueStack[ValueStack.Depth-3].n, null, null, null, null, null, null, null); }
+  }
+
+  // is_not_false_expr -> condition, TIS, TNOT, TFALSE
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction754()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprIsNotFalse, ValueStack[ValueStack.Depth-4].n, null, null, null, null, null, null, null); }
+  }
+
+  // in_subquery_expr -> condition, TIN, query_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction755()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprInSubquery, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // in_subquery_expr -> condition, TIN, LPAREN, in_value_list, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction756()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprInMembership, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null); }
+  }
+
+  // not_in_subquery_expr -> condition, TNOT, TIN, query_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction757()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprNotInSubquery, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // not_in_subquery_expr -> condition, TNOT, TIN, LPAREN, in_value_list, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction758()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprNotInMembership, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null); }
+  }
+
+  // in_value_list -> in_value_list, TCOMMA, in_value_item
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction759()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // in_value_list -> in_value_item
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction760()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // in_value_item -> simple_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction761()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // exists_subquery_expr -> TEXISTS, query_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction762()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprExistsSubquery, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
+  }
+
+  // scalar_subquery_expr -> query_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction763()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprScalarSubquery, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null); }
+  }
+
+  // fcall_expr -> identifier, LPAREN, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction764()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprFuncCall, ValueStack[ValueStack.Depth-3].n, null, null, null, null, null, null, null); }
+  }
+
+  // fcall_expr -> identifier, LPAREN, fcall_argument_list, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction765()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprFuncCall, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null); }
+  }
+
+  // fcall_expr -> qualified_identifier, LPAREN, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction766()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprFuncCall, ValueStack[ValueStack.Depth-3].n, null, null, null, null, null, null, null); }
+  }
+
+  // fcall_expr -> qualified_identifier, LPAREN, fcall_argument_list, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction767()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprFuncCall, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null); }
+  }
+
+  // fcall_expr -> identifier, query_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction768()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprFuncCall, ValueStack[ValueStack.Depth-2].n, new NodeAst(NodeType.ExprScalarSubquery, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null, null), null, null, null, null, null, null); }
+  }
+
+  // window_call_expr -> fcall_expr, TOVER, LPAREN, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction769()
+  {
+{ CurrentSemanticValue.n = WindowAst.Call(ValueStack[ValueStack.Depth-4].n, null); }
+  }
+
+  // window_call_expr -> fcall_expr, TOVER, LPAREN, window_spec, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction770()
+  {
+{ CurrentSemanticValue.n = WindowAst.Call(ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-2].n); }
+  }
+
+  // window_call_expr -> fcall_expr, TOVER, identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction771()
+  {
+{ CurrentSemanticValue.n = WindowAst.RefuseNamedWindow(ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // window_spec -> window_partition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction772()
+  {
+{ CurrentSemanticValue.n = WindowAst.Spec(ValueStack[ValueStack.Depth-1].n, null, null); }
+  }
+
+  // window_spec -> window_partition, window_order
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction773()
+  {
+{ CurrentSemanticValue.n = WindowAst.Spec(ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null); }
+  }
+
+  // window_spec -> window_partition, window_order, window_frame
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction774()
+  {
+{ CurrentSemanticValue.n = WindowAst.Spec(ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // window_spec -> window_partition, window_frame
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction775()
+  {
+{ CurrentSemanticValue.n = WindowAst.Spec(ValueStack[ValueStack.Depth-2].n, null, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // window_spec -> window_order
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction776()
+  {
+{ CurrentSemanticValue.n = WindowAst.Spec(null, ValueStack[ValueStack.Depth-1].n, null); }
+  }
+
+  // window_spec -> window_order, window_frame
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction777()
+  {
+{ CurrentSemanticValue.n = WindowAst.Spec(null, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // window_spec -> window_frame
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction778()
+  {
+{ CurrentSemanticValue.n = WindowAst.Spec(null, null, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // window_partition -> TIDENTIFIER, TBY, window_partition_list
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction779()
+  {
+{ CurrentSemanticValue.n = WindowAst.Partition(ValueStack[ValueStack.Depth-3].s, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // window_partition_list -> window_partition_list, TCOMMA, expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction780()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // window_partition_list -> expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction781()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // window_order -> TORDER, TBY, order_list
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction782()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // window_frame -> TIDENTIFIER, window_frame_bound
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction783()
+  {
+{ CurrentSemanticValue.n = WindowAst.Frame(ValueStack[ValueStack.Depth-2].s, ValueStack[ValueStack.Depth-1].n, null); }
+  }
+
+  // window_frame -> TIDENTIFIER, TBETWEEN, window_frame_bound, TAND, 
+  //                 window_frame_bound
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction784()
+  {
+{ CurrentSemanticValue.n = WindowAst.Frame(ValueStack[ValueStack.Depth-5].s, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n); }
+  }
+
+  // window_frame -> window_frame, TIDENTIFIER, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction785()
+  {
+{ CurrentSemanticValue.n = WindowAst.RefuseExclude(ValueStack[ValueStack.Depth-2].s); }
+  }
+
+  // window_frame -> window_frame, TIDENTIFIER, TGROUP
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction786()
+  {
+{ CurrentSemanticValue.n = WindowAst.RefuseExclude(ValueStack[ValueStack.Depth-2].s); }
+  }
+
+  // window_frame_bound -> TIDENTIFIER, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction787()
+  {
+{ CurrentSemanticValue.n = WindowAst.Bound(ValueStack[ValueStack.Depth-2].s, ValueStack[ValueStack.Depth-1].s); }
+  }
+
+  // window_frame_bound -> int, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction788()
+  {
+{ CurrentSemanticValue.n = WindowAst.OffsetBound(ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].s); }
+  }
+
+  // window_frame_bound -> placeholder, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction789()
+  {
+{ CurrentSemanticValue.n = WindowAst.OffsetBound(ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].s); }
+  }
+
+  // window_frame_bound -> float, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction790()
+  {
+{ CurrentSemanticValue.n = WindowAst.OffsetBound(ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].s); }
+  }
+
+  // window_frame_bound -> string, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction791()
+  {
+{ CurrentSemanticValue.n = WindowAst.OffsetBound(ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].s); }
+  }
+
+  // extract_expr -> identifier, LPAREN, identifier, TFROM, condition, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction792()
+  {
+{ CurrentSemanticValue.n = ExtractCall.Build(ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-4].n.yytext, ValueStack[ValueStack.Depth-2].n); }
+  }
+
+  // extract_expr -> identifier, LPAREN, string, TFROM, condition, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction793()
+  {
+{ CurrentSemanticValue.n = ExtractCall.Build(ValueStack[ValueStack.Depth-6].n, SqlStringLiteral.Decode(ValueStack[ValueStack.Depth-4].n.yytext ?? ""), ValueStack[ValueStack.Depth-2].n); }
+  }
+
+  // position_expr -> identifier, LPAREN, condition, TIN, position_operand, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction794()
+  {
+{ CurrentSemanticValue.n = PositionCall.Build(ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n); }
+  }
+
+  // position_operand -> simple_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction795()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // position_operand -> fcall_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction796()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // position_operand -> cast_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction797()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // position_operand -> case_expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction798()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // cast_expr -> TCAST, LPAREN, condition, TAS, cast_target_type, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction799()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprCast, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null); }
+  }
+
+  // case_expr -> TCASE, case_when_list, case_else_opt, TEND
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction800()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprCase, null, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null); }
+  }
+
+  // case_expr -> TCASE, condition, case_when_list, case_else_opt, TEND
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction801()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprCase, ValueStack[ValueStack.Depth-4].n, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null); }
+  }
+
+  // case_expr -> TIF, LPAREN, condition, TCOMMA, condition, TCOMMA, condition, 
+  //              RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction802()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprCase, null, new(NodeType.ExprCaseWhen, ValueStack[ValueStack.Depth-6].n, ValueStack[ValueStack.Depth-4].n, null, null, null, null, null, null), ValueStack[ValueStack.Depth-2].n, null, null, null, null, "IF"); }
+  }
+
+  // case_when_list -> case_when_list, case_when_clause
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction803()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprCaseWhenList, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // case_when_list -> case_when_clause
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction804()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // case_when_clause -> TWHEN, condition, TTHEN, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction805()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprCaseWhen, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // case_else_opt -> TELSE, condition
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction806()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+  }
+
+  // case_else_opt -> /* empty */
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction807()
+  {
+{ CurrentSemanticValue.n = null; }
+  }
+
+  // fcall_argument_list -> fcall_argument_list, TCOMMA, fcall_argument_item
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction808()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprArgumentList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // fcall_argument_list -> fcall_argument_item
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction809()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // fcall_argument_item -> expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction810()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // group_paren_expr -> LPAREN, condition, RPAREN
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction811()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-2].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-2].s; }
+  }
+
+  // simple_expr -> any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction812()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // simple_expr -> TKEY
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction813()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Identifier, null, null, null, null, null, null, null, "key"); }
+  }
+
+  // simple_expr -> int
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction814()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // simple_expr -> bytes
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction815()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // simple_expr -> array_literal
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction816()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // simple_expr -> float
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction817()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // simple_expr -> string
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction818()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // simple_expr -> bool
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction819()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // simple_expr -> null
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction820()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // simple_expr -> placeholder
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction821()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // simple_expr -> numeric_literal
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction822()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // simple_expr -> temporal_literal
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction823()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // simple_expr -> identifier_typed_literal
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction824()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // simple_expr -> interval_literal
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction825()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // identifier_typed_literal -> TIDENTIFIER, string
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction826()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprCast, ValueStack[ValueStack.Depth-1].n, TypeFromWord(ValueStack[ValueStack.Depth-2].s), null, null, null, null, null, null); }
+  }
+
+  // interval_literal -> TINTERVAL, string
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction827()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprCast, ValueStack[ValueStack.Depth-1].n, IntervalTypeNode(), null, null, null, null, null, null); }
+  }
+
+  // interval_literal -> TINTERVAL, string, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction828()
+  {
+{ CurrentSemanticValue.n = IntervalWithUnit(ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].s); }
+  }
+
+  // interval_literal -> TINTERVAL, int, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction829()
+  {
+{ CurrentSemanticValue.n = IntervalWithUnit(ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].s); }
+  }
+
+  // interval_literal -> TINTERVAL, float, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction830()
+  {
+{ CurrentSemanticValue.n = IntervalWithUnit(ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].s); }
+  }
+
+  // interval_literal -> TINTERVAL, placeholder, TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction831()
+  {
+{ CurrentSemanticValue.n = IntervalWithUnit(ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].s); }
+  }
+
+  // numeric_literal -> TTYPE_NUMERIC, string
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction832()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprCast, ValueStack[ValueStack.Depth-1].n, NodeAst.TypeNumeric, null, null, null, null, null, null); }
+  }
+
+  // temporal_literal -> TTYPE_DATE, string
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction833()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprCast, ValueStack[ValueStack.Depth-1].n, NodeAst.TypeDate, null, null, null, null, null, null); }
+  }
+
+  // temporal_literal -> TTYPE_DATETIME, string
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction834()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprCast, ValueStack[ValueStack.Depth-1].n, NodeAst.TypeDateTime, null, null, null, null, null, null); }
+  }
+
+  // use_default_expr -> TDEFAULT
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction835()
+  {
+{ CurrentSemanticValue.n = NodeAst.ExprDefault; }
+  }
+
+  // projection_all -> TMULT
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction836()
+  {
+{ CurrentSemanticValue.n = NodeAst.ExprAllFields; }
+  }
+
+  // any_identifier -> qualified_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction837()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // any_identifier -> identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction838()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // any_identifier -> escaped_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction839()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // qualified_identifier -> any_identifier, TDOT, any_identifier
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction840()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Identifier, null, null, null, null, null, null, null, string.Concat(ValueStack[ValueStack.Depth-3].n.yytext, ".", ValueStack[ValueStack.Depth-1].n.yytext)); }
+  }
+
+  // qualified_identifier -> any_identifier, TDOT, TKEY
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction841()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Identifier, null, null, null, null, null, null, null, string.Concat(ValueStack[ValueStack.Depth-3].n.yytext, ".key")); }
+  }
+
+  // identifier -> TIDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction842()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Identifier, null, null, null, null, null, null, null, CurrentSemanticValue.s); }
+  }
+
+  // identifier -> TESCAPE
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction843()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Identifier, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].s); }
+  }
+
+  // escaped_identifier -> TESCAPED_IDENTIFIER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction844()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Identifier, null, null, null, null, null, null, null, CurrentSemanticValue.s.Trim('`')); }
+  }
+
+  // int -> TDIGIT
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction845()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Integer, null, null, null, null, null, null, null, CurrentSemanticValue.s); }
+  }
+
+  // float -> TFLOAT
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction846()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Float, null, null, null, null, null, null, null, CurrentSemanticValue.s); }
+  }
+
+  // string -> TSTRING
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction847()
+  {
+{ CurrentSemanticValue.n = new(NodeType.String, null, null, null, null, null, null, null, CurrentSemanticValue.s); }
+  }
+
+  // bytes -> TBYTESLIT
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction848()
+  {
+{ CurrentSemanticValue.n = new(NodeType.BytesLiteral, null, null, null, null, null, null, null, CurrentSemanticValue.s); }
+  }
+
+  // array_literal -> TTYPE_ARRAY, LBRACKET, RBRACKET
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction849()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ArrayLiteral, null, null, null, null, null, null, null, null); }
+  }
+
+  // array_literal -> TTYPE_ARRAY, LBRACKET, array_element_list, RBRACKET
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction850()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ArrayLiteral, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, null); }
+  }
+
+  // array_element_list -> array_element_list, TCOMMA, expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction851()
+  {
+{ CurrentSemanticValue.n = new(NodeType.ExprList, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+  }
+
+  // array_element_list -> expr
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction852()
+  {
+{ CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; CurrentSemanticValue.s = ValueStack[ValueStack.Depth-1].s; }
+  }
+
+  // bool -> TTRUE
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction853()
+  {
+{ CurrentSemanticValue.n = NodeAst.True; }
+  }
+
+  // bool -> TFALSE
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction854()
+  {
+{ CurrentSemanticValue.n = NodeAst.False; }
+  }
+
+  // null -> TNULL
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction855()
+  {
+{ CurrentSemanticValue.n = NodeAst.Null; }
+  }
+
+  // placeholder -> TPLACEHOLDER
+  [global::System.Runtime.CompilerServices.MethodImpl(global::System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private void YYAction856()
+  {
+{ CurrentSemanticValue.n = new(NodeType.Placeholder, null, null, null, null, null, null, null, CurrentSemanticValue.s); }
+  }
+
+#pragma warning restore 162, 1522
 
   protected override string TerminalToString(int terminal)
   {

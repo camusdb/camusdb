@@ -1,6 +1,7 @@
 %namespace CamusDB.Core.SQLParser
 %partial
 %parsertype sqlParser
+%nolocations
 %visibility internal
 %tokentype Token
 
