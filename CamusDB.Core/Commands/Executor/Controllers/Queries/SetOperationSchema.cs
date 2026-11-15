@@ -90,6 +90,52 @@ internal static class SetOperationSchema
     }
 
     /// <summary>
+    /// The columns of a recursive CTE's work table, before its column-alias list: the names, row keys
+    /// and types of the non-recursive term. An untyped column (a NULL literal or a placeholder alone) is
+    /// String there, as PostgreSQL makes an unknown type text: the recursive term reads the column
+    /// before its own type is known, so the type comes from the non-recursive term alone.
+    /// </summary>
+    public static IReadOnlyList<DerivedColumnSchema> RecursiveColumns(
+        SelectQuery nonRecursiveTerm,
+        BoundSelectQuery bound,
+        IReadOnlyList<DerivedColumnSchema> columns)
+    {
+        IReadOnlyList<bool> untyped = UntypedColumns(nonRecursiveTerm, bound, columns.Count);
+        DerivedColumnSchema[] result = new DerivedColumnSchema[columns.Count];
+
+        for (int i = 0; i < result.Length; i++)
+        {
+            DerivedColumnSchema column = columns[i];
+            result[i] = untyped[i] || column.Type == ColumnType.Null
+                ? column with { Type = ColumnType.String, ElementType = null }
+                : column;
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Refuses a recursive CTE whose result type differs from the type of its non-recursive term, as
+    /// PostgreSQL does. The work table keeps the rows of each step in the types of the first step, so a
+    /// recursive term that gives FLOAT64 for an INT64 column would change the type of rows already
+    /// returned. A cast in the non-recursive term gives the column the wider type.
+    /// </summary>
+    public static void CheckRecursiveTypes(
+        string name,
+        IReadOnlyList<DerivedColumnSchema> nonRecursive,
+        IReadOnlyList<DerivedColumnSchema> overall)
+    {
+        for (int i = 0; i < overall.Count; i++)
+        {
+            if (nonRecursive[i].Type != overall[i].Type)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    $"Recursive query '{name}' column {i + 1} has type {nonRecursive[i].Type} in the non-recursive term " +
+                    $"but type {overall[i].Type} overall; cast the non-recursive term to the type of the whole query");
+        }
+    }
+
+    /// <summary>
     /// The type the cells of one output column are widened to before they are compared. Only a
     /// numeric or temporal widening changes a value; any other cell keeps its type, and a cell whose
     /// type differs from its column's (an untyped placeholder bound to another type) simply never

@@ -134,6 +134,13 @@ internal static class ViewColumnDependencyAnalyzer
                     Walk(schema, from.rightAst, scope, columnIds);
                 return;
 
+            case NodeType.WorkTableReference:
+                // The work table of a recursive CTE is a relation with no table behind it. Its name
+                // must be known here, as a function's is, or a qualified reference to it would fall
+                // through to an outer relation of the same name.
+                scope.NonTables.Add(from.rightAst?.yytext ?? from.leftAst?.yytext ?? "");
+                return;
+
             case NodeType.DerivedTableReference:
                 if (from.rightAst?.yytext is { Length: > 0 } derivedAlias)
                     scope.NonTables.Add(derivedAlias);

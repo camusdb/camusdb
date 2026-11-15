@@ -155,6 +155,23 @@ internal sealed class DerivedTableExecutor
     {
         IAsyncEnumerable<QueryResultRow> cursor;
 
+        // The work table of a recursive CTE: the rows of the step before, which the recursive UNION
+        // keeps, read under the keys of the work table's columns.
+        if (source.Source.WorkTable is { } workTable)
+        {
+            SpillableRowList rows = workTable.Table.Rows
+                ?? throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    $"The work table of recursive query '{workTable.Table.Name}' was read outside its recursion");
+
+            cursor = rows.EnumerateAsync(outerTicket.CancellationToken);
+
+            if (source.InnerRowKeys is { } workRenames)
+                cursor = RenameInnerRowKeys(cursor, workRenames);
+
+            return cursor;
+        }
+
         if (source.SetOperation is { } setOperation)
         {
             cursor = setOperationExecutor.Execute(database, setOperation, outerTicket, stats);

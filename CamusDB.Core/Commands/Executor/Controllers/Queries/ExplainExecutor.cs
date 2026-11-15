@@ -660,6 +660,23 @@ internal sealed class ExplainExecutor
             if (analyze && node is DerivedTableScanNode { BoundSource.Source.Windows: not null } windowScan)
                 windowScan.WindowStats = new WindowStats();
 
+            // A reader of a recursive CTE shows the plans of the two terms, under the recursive UNION that
+            // its query passes through. They run inside the reader's own query, which EXPLAIN (ANALYZE)
+            // does not count, so they get no counters: a count of zero would be false.
+            if (node is DerivedTableScanNode { BoundSource: { SetOperation: null } reader } readerScan
+                && BoundSetOperation.PassedThrough(reader.InnerBound) is { Source.WorkTable: not null } recursion)
+            {
+                QueryPlan nonRecursive = PlanOperand(plan, recursion.Left, recursion.LeftSubqueries, ticket, traceEstimates, analyze: false);
+                QueryPlan recursive = PlanOperand(plan, recursion.Right, recursion.RightSubqueries, ticket, traceEstimates, analyze: false);
+
+                readerScan.SetOperationOperands =
+                [
+                    new SetOperationOperandNode { Side = "left", Plan = nonRecursive, Input = nonRecursive.Root },
+                    new SetOperationOperandNode { Side = "right", Plan = recursive, Input = recursive.Root },
+                ];
+                continue;
+            }
+
             if (node is not DerivedTableScanNode { BoundSource.SetOperation: { } setOperation } scan)
                 continue;
 

@@ -3016,9 +3016,10 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
         break;
       case 81: // with_clause -> TWITH, TIDENTIFIER, cte_list
 {
-                if (string.Equals(ValueStack[ValueStack.Depth-2].s, "recursive", System.StringComparison.OrdinalIgnoreCase))
-                    throw new CamusDBException(CamusDBErrorCodes.FeatureNotSupported, "WITH RECURSIVE is not supported");
-                throw new CamusDBException(CamusDBErrorCodes.SqlSyntaxError, "syntax error, unexpected '" + ValueStack[ValueStack.Depth-2].s + "' after WITH");
+                if (!string.Equals(ValueStack[ValueStack.Depth-2].s, "recursive", System.StringComparison.OrdinalIgnoreCase))
+                    throw new CamusDBException(CamusDBErrorCodes.SqlSyntaxError, "syntax error, unexpected '" + ValueStack[ValueStack.Depth-2].s + "' after WITH");
+                sawWith = true;
+                CurrentSemanticValue.n = CommonTableExpressions.Recursive(ValueStack[ValueStack.Depth-1].n);
             }
         break;
       case 82: // cte_list -> cte_list, TCOMMA, common_table_expr

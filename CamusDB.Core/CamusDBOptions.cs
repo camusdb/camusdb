@@ -1799,6 +1799,32 @@ public sealed record CamusDBOptions
     public long MaxBufferedResultBytes { get; init; } = 256L * 1024 * 1024;
 
     /// <summary>
+    /// Most steps of the recursive term of one recursive CTE (<c>WITH RECURSIVE</c>) that may make rows.
+    /// A recursion with no end otherwise runs until the disk is full, because a statement has no time
+    /// limit. The first row of a step past the limit fails the statement with
+    /// <see cref="CamusDBErrorCodes.RecursiveQueryLimitExceeded"/>, so a recursion of exactly this many
+    /// steps ends normally. The recursive UNION reads the value from its database's options each time it
+    /// runs, so a change applies to the next statement. Cluster scope: a node with another value would
+    /// fail a statement that another node runs.
+    /// <para><c>&lt;= 0</c> — limit is disabled.</para>
+    /// Default: <c>10000</c>.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
+    public int MaxRecursiveCteIterations { get; init; } = 10_000;
+
+    /// <summary>
+    /// Most rows that one run of a recursive CTE may make, the rows of the non-recursive term included.
+    /// The work table of each step spills to disk under the spill settings, and a recursion with UNION
+    /// keeps one copy of each row in memory to drop the rows it already returned, so this bounds both.
+    /// A row past the limit fails the statement with <see cref="CamusDBErrorCodes.RecursiveQueryLimitExceeded"/>.
+    /// Read and scoped as <see cref="MaxRecursiveCteIterations"/> is.
+    /// <para><c>&lt;= 0</c> — limit is disabled.</para>
+    /// Default: <c>10000000</c> (about 1 GB of narrow rows).
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
+    public long MaxRecursiveCteRows { get; init; } = 10_000_000;
+
+    /// <summary>
     /// Most explicit transactions (<c>/start-transaction</c>, gRPC <c>BeginTransaction</c> and the
     /// <c>BEGIN</c> of a batch stream) that this node keeps open at one time. Each one holds tracking
     /// state, and after its first write a Kahuna session, its locks and its key set, until a commit,

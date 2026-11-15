@@ -12,10 +12,20 @@ For every limit, a value of `0` or less disables it. All of them are runtime set
 | `max_buffered_result_rows` | `1000000` | Rows in one buffered response | CADB0556, HTTP 400 |
 | `max_buffered_result_bytes` | `268435456` (256 MiB) | Estimated memory of one buffered response | CADB0556, HTTP 400 |
 | `max_statement_bytes` | `8388608` (8 MiB) | Inline SQL text that one statement may send to the parser | CADB0557, HTTP 413 |
+| `max_recursive_cte_iterations` | `10000` | Steps of one `WITH RECURSIVE` query that make rows | CADB0560, HTTP 400 |
+| `max_recursive_cte_rows` | `10000000` | Rows that one run of a `WITH RECURSIVE` query makes | CADB0560, HTTP 400 |
 | `max_open_explicit_transactions` | `10000` | Explicit transactions open at one time on this node | CADB0558, HTTP 503 |
 | `max_client_connections` | `10000` | Client connections open at one time on this node | The connection is closed |
 | `max_databases` | `10000` | Databases in the registry | CADB0408, HTTP 500 |
 | `cluster_activity_max_concurrent_fan_outs` | `8` | `SHOW CLUSTER QUERIES` / `CONNECTIONS` running at one time | CADB0558, HTTP 503 |
+
+## Recursive queries
+
+A `WITH RECURSIVE` query whose recursion does not end runs until the disk is full, because a
+statement has no time limit. Its work table spills to disk, so memory does not stop it. The two
+limits stop it with **CADB0560** (`RecursiveQueryLimitExceeded`), and the message names the setting.
+These two settings are cluster settings: every node must give the same answer to the same statement.
+See [recursive queries](common-table-expressions.md#recursive-queries).
 
 ## Buffered results
 

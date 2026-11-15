@@ -20,6 +20,14 @@ namespace CamusDB.Core.SQLParser;
 /// or a DELETE … USING list is a reference; the target of a write never is. A CTE name hides a table
 /// or a view of the same name.</para>
 ///
+/// <para><b>RECURSIVE.</b> Under <c>WITH RECURSIVE</c> every CTE is visible in every query of the list,
+/// its own included, as in PostgreSQL. A CTE whose query reads itself is recursive: its query must be
+/// <c>non-recursive term UNION [ALL] recursive term</c>, and its one reference to itself becomes a
+/// <see cref="NodeType.WorkTableReference"/>, with a <see cref="NodeType.RecursiveCte"/> marker on the
+/// UNION. Its readers then get a copy of that query, as for any CTE, and the executor runs it step by
+/// step (see <c>RecursiveUnionExecutor</c>). The other queries are written out in the order of what
+/// they read, and two CTEs that read each other are refused.</para>
+///
 /// <para><b>Inner WITH first.</b> A WITH inside parentheses is written out when the parser reduces
 /// the parentheses, before the enclosing WITH is known. That is correct: the inner WITH replaces
 /// only the names it defines, and a name it leaves is still a plain relation name, which the
@@ -78,9 +86,18 @@ internal static class CommonTableExpressions
     public static NodeAst[]? ComputedOnceMarkers(NodeAst root) =>
         markersByRoot.TryGetValue(root, out NodeAst[]? markers) ? markers : null;
 
+    /// <summary>The <see cref="NodeAst.yytext"/> of a <see cref="NodeType.With"/> written <c>WITH RECURSIVE</c>.</summary>
+    public const string RecursiveWord = "recursive";
+
+    /// <summary>The definitions of <c>WITH RECURSIVE</c>, for <see cref="With"/>.</summary>
+    public static NodeAst Recursive(NodeAst definitions) =>
+        new(NodeType.WithRecursiveList, definitions, null, null, null, null, null, null, null);
+
     /// <summary>A WITH node over <paramref name="statement"/>.</summary>
     public static NodeAst With(NodeAst definitions, NodeAst statement) =>
-        new(NodeType.With, definitions, statement, null, null, null, null, null, null);
+        definitions.nodeType == NodeType.WithRecursiveList
+            ? new(NodeType.With, definitions.leftAst, statement, null, null, null, null, null, RecursiveWord)
+            : new(NodeType.With, definitions, statement, null, null, null, null, null, null);
 
     /// <summary>One CTE definition. A qualified name is refused: a CTE belongs to no database.</summary>
     public static NodeAst Definition(NodeAst name, NodeAst? columns, string? materialization, NodeAst query)
@@ -174,13 +191,19 @@ internal static class CommonTableExpressions
         }
 
         NodeAst statement = with.rightAst!;
+        bool recursive = with.yytext == RecursiveWord;
+        int count = definitions.Count;
 
-        // The query of CTE k sees the CTEs before it; the statement sees all of them.
-        int[] references = new int[definitions.Count];
-        for (int k = 0; k < definitions.Count; k++)
-            CountReferences(definitions[k].rightAst!, indexByName, visible: k, references);
+        // Without RECURSIVE, the query of CTE k sees the CTEs before it. With RECURSIVE, every query sees
+        // every CTE of the list, itself included, as in PostgreSQL, and the queries are written out in the
+        // order of what they read. The statement sees all of them.
+        int[] order = recursive ? PrepareRecursive(definitions, indexByName) : Enumerable.Range(0, count).ToArray();
 
-        CountReferences(statement, indexByName, visible: definitions.Count, references);
+        int[] references = new int[count];
+        for (int k = 0; k < count; k++)
+            CountReferences(definitions[k].rightAst!, indexByName, visible: recursive ? count : k, references);
+
+        CountReferences(statement, indexByName, visible: count, references);
 
         NodeAst?[] markers = new NodeAst?[definitions.Count];
         if (markersOut is not null)
@@ -201,11 +224,301 @@ internal static class CommonTableExpressions
 
         Expansion expansion = new(definitions, markers);
 
-        for (int k = 0; k < definitions.Count; k++)
-            expansion.Substitute(definitions[k].rightAst!, indexByName, visible: k);
+        // A copy of a CTE's query must already hold the CTEs that it reads, so each query is written out
+        // after theirs. A recursive CTE no longer names itself here: its reference is a work table now.
+        foreach (int k in order)
+            expansion.Substitute(definitions[k].rightAst!, indexByName, visible: recursive ? count : k);
 
-        expansion.Substitute(statement, indexByName, visible: definitions.Count);
+        expansion.Substitute(statement, indexByName, visible: count);
         return statement;
+    }
+
+    /// <summary>
+    /// Prepares the definitions of a WITH RECURSIVE list and returns the order in which their queries are
+    /// written out: each CTE after the CTEs that its query reads. A CTE whose query reads itself is
+    /// recursive, and <see cref="RecursiveTerm.Prepare"/> checks it and replaces that reference. Two or
+    /// more CTEs that read each other are refused, as in PostgreSQL.
+    /// </summary>
+    private static int[] PrepareRecursive(List<NodeAst> definitions, Dictionary<string, int> indexByName)
+    {
+        int count = definitions.Count;
+        List<int>[] reads = new List<int>[count];
+
+        for (int k = 0; k < count; k++)
+        {
+            int[] counts = new int[count];
+            CountReferences(definitions[k].rightAst!, indexByName, visible: count, counts);
+
+            reads[k] = [];
+            for (int i = 0; i < count; i++)
+            {
+                if (counts[i] > 0)
+                    reads[k].Add(i);
+            }
+        }
+
+        int[] order = DependencyOrder(definitions, reads);
+
+        for (int k = 0; k < count; k++)
+        {
+            if (reads[k].Contains(k))
+                RecursiveTerm.Prepare(definitions[k]);
+        }
+
+        return order;
+    }
+
+    /// <summary>
+    /// The definitions in an order where each one comes after the ones it reads (a depth-first post-order).
+    /// A definition that reads itself is not a cycle here. Any other cycle is mutual recursion, which
+    /// PostgreSQL does not implement either.
+    /// </summary>
+    private static int[] DependencyOrder(List<NodeAst> definitions, List<int>[] reads)
+    {
+        int count = definitions.Count;
+
+        // 0 = not seen, 1 = on the current path, 2 = done.
+        byte[] state = new byte[count];
+        List<int> order = new(count);
+        Stack<(int Index, int Next)> path = new();
+
+        for (int start = 0; start < count; start++)
+        {
+            if (state[start] != 0)
+                continue;
+
+            state[start] = 1;
+            path.Push((start, 0));
+
+            while (path.TryPop(out (int Index, int Next) frame))
+            {
+                if (frame.Next == reads[frame.Index].Count)
+                {
+                    state[frame.Index] = 2;
+                    order.Add(frame.Index);
+                    continue;
+                }
+
+                path.Push((frame.Index, frame.Next + 1));
+                int read = reads[frame.Index][frame.Next];
+
+                if (read == frame.Index || state[read] == 2)
+                    continue;
+
+                if (state[read] == 1)
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.FeatureNotSupported,
+                        $"Mutual recursion between WITH queries is not supported: '{definitions[frame.Index].leftAst!.yytext}' " +
+                        $"and '{definitions[read].leftAst!.yytext}' are in a cycle of WITH queries that read each other");
+
+                state[read] = 1;
+                path.Push((read, 0));
+            }
+        }
+
+        return order.ToArray();
+    }
+
+    /// <summary>
+    /// Checks the query of a recursive CTE and replaces its reference to itself by a
+    /// <see cref="NodeType.WorkTableReference"/>. The rules are the ones PostgreSQL checks before it plans
+    /// the query:
+    /// <list type="bullet">
+    /// <item>The query is <c>non-recursive term UNION [ALL] recursive term</c>, with no ORDER BY, LIMIT
+    /// or OFFSET on the UNION.</item>
+    /// <item>The non-recursive term does not read the CTE.</item>
+    /// <item>The recursive term reads it one time, in a FROM: not in a subquery of an expression, not on
+    /// the side of an outer join that can be NULL, not in INTERSECT ALL, and not in EXCEPT (the right
+    /// side, or the left side of EXCEPT ALL). In each of those places a row of the term would depend on
+    /// rows that a later step adds, so a step that sees only the rows of the step before gives a wrong
+    /// answer.</item>
+    /// </list>
+    /// The binder refuses an aggregate over the reference: an aggregate can be a function of an installed
+    /// extension, and the parser does not know the database.
+    /// </summary>
+    private static class RecursiveTerm
+    {
+        /// <summary>Where the walk found a reference: a place that allows it, or the first place that refuses it.</summary>
+        private enum Context { Allowed, Subquery, OuterJoin, Intersect, Except }
+
+        private readonly record struct Found(NodeAst Parent, int Slot, NodeAst Item, Context Context);
+
+        public static void Prepare(NodeAst definition)
+        {
+            string name = definition.leftAst!.yytext!;
+            NodeAst query = definition.rightAst!;
+
+            if (!SetOperationAst.IsSetOperationSelect(query) || SetOperationAst.KindOf(query.rightAst!) != SetOperationAst.Union)
+                throw Invalid($"Recursive query '{name}' does not have the form non-recursive-term UNION [ALL] recursive-term");
+
+            // The ORDER BY, LIMIT and OFFSET of the whole UNION.
+            if (query.extendedTwo is not null)
+                throw NotSupported($"ORDER BY in a recursive query is not supported: '{name}'");
+
+            if (query.extendedThree is not null)
+                throw NotSupported($"LIMIT in a recursive query is not supported: '{name}'");
+
+            if (query.extendedFour is not null)
+                throw NotSupported($"OFFSET in a recursive query is not supported: '{name}'");
+
+            NodeAst union = query.rightAst!;
+
+            if (Find(union.leftAst!, name).Count > 0)
+                throw Invalid($"The recursive reference to query '{name}' must not appear within its non-recursive term");
+
+            List<Found> found = Find(union.rightAst!, name);
+
+            if (found.Count == 0)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    $"The recursive term of query '{name}' has no reference to it");
+
+            if (found.Count > 1)
+                throw Invalid($"The recursive reference to query '{name}' must not appear more than once");
+
+            Found reference = found[0];
+
+            string? place = reference.Context switch
+            {
+                Context.Subquery => "within a subquery",
+                Context.OuterJoin => "within an outer join",
+                Context.Intersect => "within INTERSECT ALL",
+                Context.Except => "within EXCEPT",
+                _ => null,
+            };
+
+            if (place is not null)
+                throw Invalid($"The recursive reference to query '{name}' must not appear {place}");
+
+            SetChild(reference.Parent, reference.Slot, WorkTable(reference.Item, name));
+            union.extendedOne = new NodeAst(NodeType.RecursiveCte, definition.extendedOne, null, null, null, null, null, null, name);
+        }
+
+        /// <summary>Every relation slot under <paramref name="tree"/> that names <paramref name="name"/>, with the place it is in.</summary>
+        private static List<Found> Find(NodeAst tree, string name)
+        {
+            List<Found> found = [];
+            Stack<(NodeAst Node, Context Context)> pending = new();
+            pending.Push((tree, Context.Allowed));
+
+            while (pending.TryPop(out (NodeAst Node, Context Context) entry))
+            {
+                NodeAst node = entry.Node;
+
+                for (int i = 0; i < SlotCount; i++)
+                {
+                    NodeAst? child = Child(node, i);
+                    if (child is null)
+                        continue;
+
+                    Context context = ChildContext(node, i, entry.Context);
+
+                    if (IsRelationSlot(node, i) && string.Equals(RelationName(child), name, StringComparison.OrdinalIgnoreCase))
+                    {
+                        found.Add(new Found(node, i, child, context));
+                        continue;
+                    }
+
+                    pending.Push((child, context));
+                }
+            }
+
+            return found;
+        }
+
+        /// <summary>
+        /// The place of slot <paramref name="slot"/> of <paramref name="node"/>. A place that refuses the
+        /// reference keeps its refusal for everything under it, so the first refusal on the path names
+        /// the error, as in PostgreSQL.
+        /// </summary>
+        private static Context ChildContext(NodeAst node, int slot, Context context)
+        {
+            if (context != Context.Allowed)
+                return context;
+
+            switch (node.nodeType)
+            {
+                case NodeType.Select:
+                    // The FROM is a relation; every other slot is an expression, where a query is a subquery.
+                    return slot == 1 ? Context.Allowed : Context.Subquery;
+
+                case NodeType.Join:
+                {
+                    JoinAstKind.Kind kind = JoinAstKind.Read(node);
+                    return slot switch
+                    {
+                        0 => kind == JoinAstKind.Kind.Right ? Context.OuterJoin : Context.Allowed,
+                        1 => kind == JoinAstKind.Kind.Left ? Context.OuterJoin : Context.Allowed,
+                        _ => Context.Subquery,
+                    };
+                }
+
+                case NodeType.SetOperationReference when slot <= 1:
+                {
+                    bool all = SetOperationAst.IsAll(node);
+                    return SetOperationAst.KindOf(node) switch
+                    {
+                        SetOperationAst.Intersect when all => Context.Intersect,
+                        SetOperationAst.Except when slot == 1 || all => Context.Except,
+                        _ => Context.Allowed,
+                    };
+                }
+
+                default:
+                    return context;
+            }
+        }
+
+        /// <summary>The work-table reference that replaces <paramref name="item"/>. A hint is refused: a work table has no index and no cache.</summary>
+        private static NodeAst WorkTable(NodeAst item, string name)
+        {
+            NodeAst? hint = item.nodeType switch
+            {
+                NodeType.TableReference => item.extendedOne,
+                NodeType.IdentifierWithOpts => item,
+                _ => null,
+            };
+
+            if (hint is not null)
+                throw Invalid($"A hint cannot be applied to the recursive reference to query '{name}'");
+
+            NodeAst? alias = item.nodeType == NodeType.TableReference ? item.rightAst : null;
+            NodeAst identifier = new(NodeType.Identifier, null, null, null, null, null, null, null, name);
+
+            return new NodeAst(NodeType.WorkTableReference, identifier, alias, null, null, null, null, null, null);
+        }
+
+        private static CamusDBException Invalid(string message) => new(CamusDBErrorCodes.InvalidInput, message);
+
+        private static CamusDBException NotSupported(string message) => new(CamusDBErrorCodes.FeatureNotSupported, message);
+    }
+
+    /// <summary>
+    /// True when a relation slot under <paramref name="tree"/> names <paramref name="name"/> as a plain
+    /// relation: a table, a view or a CTE reference not yet written out. A work-table reference is not
+    /// one. The view-body renderer uses it before it writes a recursive CTE back as a WITH.
+    /// </summary>
+    internal static bool ReadsRelationNamed(NodeAst tree, string name)
+    {
+        Stack<NodeAst> pending = new();
+        pending.Push(tree);
+
+        while (pending.TryPop(out NodeAst? node))
+        {
+            for (int i = 0; i < SlotCount; i++)
+            {
+                NodeAst? child = Child(node, i);
+                if (child is null)
+                    continue;
+
+                if (IsRelationSlot(node, i) && string.Equals(RelationName(child), name, StringComparison.OrdinalIgnoreCase))
+                    return true;
+
+                pending.Push(child);
+            }
+        }
+
+        return false;
     }
 
     /// <summary>The definitions of a WITH list in written order. The list is left-deep, so the walk follows the left spine.</summary>

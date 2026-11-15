@@ -259,15 +259,16 @@ select_no_parens : simple_select { $$.n = SetOperationAst.Finish($1.n, null, nul
                  | with_clause select_clause offset_clause { $$.n = CommonTableExpressions.With($1.n, SetOperationAst.Finish($2.n, null, null, $3.n)); }
                  ;
 
-/* WITH name [(c1, ...)] AS [[NOT] MATERIALIZED] (query) [, ...]. MATERIALIZED is already reserved for
-   the materialized-view statements. RECURSIVE is a plain identifier: it is refused here by name, so it
-   stays usable as a CTE name, a table name and a column name. */
+/* WITH [RECURSIVE] name [(c1, ...)] AS [[NOT] MATERIALIZED] (query) [, ...]. MATERIALIZED is already
+   reserved for the materialized-view statements. RECURSIVE is a plain identifier, checked here by name,
+   so it stays usable as a CTE name, a table name and a column name. */
 with_clause : TWITH cte_list { sawWith = true; $$.n = $2.n; }
             | TWITH TIDENTIFIER cte_list
             {
-                if (string.Equals($2.s, "recursive", System.StringComparison.OrdinalIgnoreCase))
-                    throw new CamusDBException(CamusDBErrorCodes.FeatureNotSupported, "WITH RECURSIVE is not supported");
-                throw new CamusDBException(CamusDBErrorCodes.SqlSyntaxError, "syntax error, unexpected '" + $2.s + "' after WITH");
+                if (!string.Equals($2.s, "recursive", System.StringComparison.OrdinalIgnoreCase))
+                    throw new CamusDBException(CamusDBErrorCodes.SqlSyntaxError, "syntax error, unexpected '" + $2.s + "' after WITH");
+                sawWith = true;
+                $$.n = CommonTableExpressions.Recursive($3.n);
             }
             ;
 

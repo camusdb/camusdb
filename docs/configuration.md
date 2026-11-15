@@ -119,6 +119,8 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 | `max_statement_bytes` | — | `8388608` |
 | `max_buffered_result_rows` | — | `1000000` |
 | `max_buffered_result_bytes` | — | `268435456` |
+| `max_recursive_cte_iterations` | — | `10000` (see [common-table-expressions.md](common-table-expressions.md#recursive-queries)) |
+| `max_recursive_cte_rows` | — | `10000000` |
 | `max_open_explicit_transactions` | — | `10000` |
 | `max_client_connections` | — | `10000` |
 | `inline_functions_enabled` | — | `false` (accept `CREATE FUNCTION ... LANGUAGE csharp`; see [Inline functions](#inline-functions)) |

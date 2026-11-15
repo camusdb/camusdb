@@ -379,6 +379,8 @@ public static class ConfigResolver
         MaxStatementBytes = config.MaxStatementBytes,
         MaxBufferedResultRows = config.MaxBufferedResultRows,
         MaxBufferedResultBytes = config.MaxBufferedResultBytes,
+        MaxRecursiveCteIterations = config.MaxRecursiveCteIterations,
+        MaxRecursiveCteRows = config.MaxRecursiveCteRows,
         MaxOpenExplicitTransactions = config.MaxOpenExplicitTransactions,
         MaxClientConnections = config.MaxClientConnections,
         MaxIndexColumns = config.MaxIndexColumns,

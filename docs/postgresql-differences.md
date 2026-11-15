@@ -157,9 +157,12 @@ A derived table and a view compute every column of each of their rows before the
 | `WITH c AS (SELECT id FROM nowhere) SELECT v FROM d WHERE id = 1` | `10` | `relation "nowhere" does not exist` | The parser writes out each CTE where the statement reads it, so a CTE that nothing reads runs no check. A statement that reads it reports the unknown table. |
 | `SELECT same FROM (WITH r AS (SELECT random() AS x) SELECT a.x = b.x AS same FROM r a, r b) q` | `false` | `true` | A `WITH` in parentheses can read the columns of the query around it, so each reader runs its own copy. A `WITH` at the start of the statement computes a CTE that it reads two or more times one time, as PostgreSQL does. |
 | `WITH r AS NOT MATERIALIZED (SELECT random() AS x) SELECT a.x = b.x AS same FROM r a, r b` | `false` | `true` | `NOT MATERIALIZED` always inlines. PostgreSQL computes a CTE that calls a volatile function one time, whatever the hint says. |
+| `WITH RECURSIVE r (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 20000) SELECT COUNT(*) FROM r` | `CADB0560` | `20000` | A statement has no time limit, so a recursion with no end would run until the disk is full. The cluster settings `max_recursive_cte_iterations` (10,000 steps) and `max_recursive_cte_rows` (10,000,000 rows) stop it. Both can be raised, and `0` turns a limit off. |
+| `WITH RECURSIVE r (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r) SELECT a.n + b.n FROM (SELECT n FROM r LIMIT 1) a, (SELECT n FROM r LIMIT 1) b` | `CADB0560` | `2` | A CTE that the statement reads two times is computed one time, and that run makes every row before a reader gets one. PostgreSQL gives each reader rows when it asks for them. A recursive CTE that the statement reads one time streams, so a `LIMIT` over it stops it, as in PostgreSQL. |
 
 A view stores its body with each CTE written out as a derived table, so `SHOW CREATE VIEW` shows no
-`WITH`, where PostgreSQL shows the `WITH` that the body had.
+`WITH` at the start, where PostgreSQL shows the `WITH` that the body had. A recursive CTE is shown
+where it is read, as `(WITH RECURSIVE name AS (…) SELECT * FROM name) AS alias`.
 
 ## NULL in ORDER BY
 
@@ -256,7 +259,7 @@ CamusDB refuses these forms with a clear error, so no answer is wrong. `d` has t
 | `SELECT * FROM d a JOIN d b USING (id)` | `CADB0406` | Both rows, with one `id` column |
 | `SELECT * FROM d a NATURAL JOIN d b` | `CADB0406` | Both rows, with one column for each common name |
 | `SELECT * FROM d a FULL JOIN d b ON a.id = b.id` | `CADB0533`; use `LEFT JOIN` or `RIGHT JOIN` | Both rows |
-| `WITH RECURSIVE r AS (SELECT 1 AS n) SELECT n FROM r` | `CADB0533` | `1` |
+| `WITH RECURSIVE r (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 3) SEARCH DEPTH FIRST BY n SET ord SELECT n FROM r ORDER BY ord`, and `CYCLE` | `CADB0406` | `1`, `2`, `3` |
 | `SELECT NULL IS UNKNOWN`, and `IS NOT UNKNOWN` | `CADB0406` | `true` |
 | `SELECT 1 IS DISTINCT FROM 2`, and `IS NOT DISTINCT FROM` | `CADB0406` | `true` |
 | `SELECT 1 ISNULL`, and `NOTNULL` | `CADB0406` | `false` |

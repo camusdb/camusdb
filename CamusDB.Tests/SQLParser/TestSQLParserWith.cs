@@ -256,16 +256,16 @@ public sealed class TestSQLParserWith
     }
 
     [Test]
-    public void ADuplicateNameARecursiveWithAndAnIndexHintAreRefused()
+    public void ADuplicateNameAnUnknownWordAfterWithAndAnIndexHintAreRefused()
     {
         CamusDBException duplicate = Assert.Throws<CamusDBException>(
             () => SQLParserProcessor.Parse("WITH a AS (SELECT 1), A AS (SELECT 2) SELECT * FROM a"))!;
         Assert.AreEqual(CamusDBErrorCodes.InvalidInput, duplicate.Code);
         StringAssert.Contains("more than once", duplicate.Message);
 
-        CamusDBException recursive = Assert.Throws<CamusDBException>(
-            () => SQLParserProcessor.Parse("WITH RECURSIVE a AS (SELECT 1) SELECT * FROM a"))!;
-        Assert.AreEqual(CamusDBErrorCodes.FeatureNotSupported, recursive.Code);
+        CamusDBException word = Assert.Throws<CamusDBException>(
+            () => SQLParserProcessor.Parse("WITH ITERATIVE a AS (SELECT 1) SELECT * FROM a"))!;
+        Assert.AreEqual(CamusDBErrorCodes.SqlSyntaxError, word.Code);
 
         CamusDBException hint = Assert.Throws<CamusDBException>(
             () => SQLParserProcessor.Parse("WITH a AS (SELECT id FROM t) SELECT * FROM a@{FORCE_INDEX=i}"))!;
@@ -295,5 +295,126 @@ public sealed class TestSQLParserWith
         // twice is computed once, but each reference still holds a copy of its query.
         CamusDBException refused = Assert.Throws<CamusDBException>(() => SQLParserProcessor.Parse(sql.ToString()))!;
         Assert.AreEqual(CamusDBErrorCodes.StatementTooDeeplyNested, refused.Code);
+    }
+
+    private static List<NodeAst> NodesOf(NodeAst root, NodeType type)
+    {
+        List<NodeAst> found = [];
+        Stack<NodeAst> pending = new();
+        pending.Push(root);
+
+        while (pending.Count > 0)
+        {
+            NodeAst node = pending.Pop();
+            if (node.nodeType == type)
+                found.Add(node);
+
+            foreach (NodeAst? child in new[] { node.leftAst, node.rightAst, node.extendedOne, node.extendedTwo, node.extendedThree,
+                         node.extendedFour, node.extendedFive, node.extendedSix, node.extendedSeven })
+            {
+                if (child is not null)
+                    pending.Push(child);
+            }
+        }
+
+        return found;
+    }
+
+    [Test]
+    public void ARecursiveCteBecomesADerivedTableOverAMarkedUnionWithAWorkTable()
+    {
+        NodeAst ast = SQLParserProcessor.Parse(
+            "WITH RECURSIVE t (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t AS w WHERE n < 3) SELECT n FROM t");
+
+        NodeAst reader = ast.rightAst!;
+        Assert.AreEqual(NodeType.DerivedTableReference, reader.nodeType);
+        Assert.AreEqual("t", reader.rightAst!.yytext);
+
+        NodeAst union = reader.leftAst!.rightAst!;
+        Assert.AreEqual(NodeType.SetOperationReference, union.nodeType);
+        Assert.AreEqual("UNION ALL", union.yytext);
+        Assert.AreEqual(NodeType.RecursiveCte, union.extendedOne!.nodeType);
+        Assert.AreEqual("t", union.extendedOne.yytext);
+        Assert.AreEqual("n", union.extendedOne.leftAst!.yytext, "the marker carries the column list");
+
+        // The reference to itself is in the recursive term only, with the alias it was written with.
+        Assert.IsEmpty(NodesOf(union.leftAst!, NodeType.WorkTableReference));
+        List<NodeAst> work = NodesOf(union.rightAst!, NodeType.WorkTableReference);
+        Assert.AreEqual(1, work.Count);
+        Assert.AreEqual("t", work[0].leftAst!.yytext);
+        Assert.AreEqual("w", work[0].rightAst!.yytext);
+    }
+
+    [Test]
+    public void AWithRecursiveListSeesEveryCteAndACteWithNoSelfReferenceIsPlain()
+    {
+        // b is written after a, and a reads it: under RECURSIVE that is allowed.
+        NodeAst ast = SQLParserProcessor.Parse("WITH RECURSIVE a AS (SELECT x FROM b), b AS (SELECT 1 AS x) SELECT x FROM a");
+
+        Assert.AreEqual(2, DerivedTables(ast).Count, "a, and inside it b");
+        Assert.IsEmpty(NodesOf(ast, NodeType.RecursiveCte));
+        Assert.IsEmpty(NodesOf(ast, NodeType.WorkTableReference));
+    }
+
+    [Test]
+    public void ARecursiveCteReadTwiceHasOneMarkerAndOneInParenthesesHasNone()
+    {
+        NodeAst twice = SQLParserProcessor.Parse(
+            "WITH RECURSIVE t (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 3) SELECT a.n FROM t a, t b");
+
+        List<NodeAst> readers = DerivedTables(twice);
+        Assert.AreEqual(2, readers.Count);
+        Assert.IsNotNull(readers[0].extendedFour);
+        Assert.AreSame(readers[0].extendedFour, readers[1].extendedFour);
+
+        NodeAst nested = SQLParserProcessor.Parse(
+            "SELECT n FROM (WITH RECURSIVE t (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 3) SELECT a.n FROM t a, t b) q");
+
+        foreach (NodeAst reader in DerivedTables(nested))
+            Assert.IsNull(reader.extendedFour);
+    }
+
+    [Test]
+    public void ALongNonRecursiveTermKeepsTheRecursiveTermAsTheRightOperand()
+    {
+        // Twelve operands before the recursive term: a chain that long is rebalanced, and the UNION of the
+        // recursion must keep its own two operands.
+        StringBuilder sql = new("WITH RECURSIVE t (n) AS (SELECT 1");
+        for (int i = 2; i <= 12; i++)
+            sql.Append($" UNION ALL SELECT {i}");
+        sql.Append(" UNION ALL SELECT n + 100 FROM t WHERE n < 100) SELECT n FROM t");
+
+        NodeAst ast = SQLParserProcessor.Parse(sql.ToString());
+
+        NodeAst union = NodesOf(ast, NodeType.RecursiveCte).Count == 1
+            ? NodesOf(ast, NodeType.SetOperationReference).Find(n => n.extendedOne is { nodeType: NodeType.RecursiveCte })!
+            : throw new AssertionException("one recursive UNION");
+
+        Assert.AreEqual(1, NodesOf(union.rightAst!, NodeType.WorkTableReference).Count);
+        Assert.IsEmpty(NodesOf(union.leftAst!, NodeType.WorkTableReference));
+        Assert.AreEqual(12, NodesOf(union.leftAst!, NodeType.Integer).Count);
+    }
+
+    [Test]
+    public void TheParserRefusesTheFormsOfARecursiveQueryThatPostgreSqlRefuses()
+    {
+        (string Sql, string Code, string Message)[] refused =
+        [
+            ("WITH RECURSIVE t (n) AS (SELECT n FROM t) SELECT n FROM t", CamusDBErrorCodes.InvalidInput, "does not have the form"),
+            ("WITH RECURSIVE t (n) AS (SELECT n FROM t UNION ALL SELECT 1) SELECT n FROM t", CamusDBErrorCodes.InvalidInput, "non-recursive term"),
+            ("WITH RECURSIVE t (n) AS (SELECT 1 UNION ALL SELECT a.n FROM t a, t b) SELECT n FROM t", CamusDBErrorCodes.InvalidInput, "more than once"),
+            ("WITH RECURSIVE t (n) AS (SELECT 1 UNION ALL SELECT x FROM u WHERE x IN (SELECT n FROM t)) SELECT n FROM t", CamusDBErrorCodes.InvalidInput, "within a subquery"),
+            ("WITH RECURSIVE t (n) AS (SELECT 1 UNION ALL SELECT u.x FROM u LEFT JOIN t ON t.n = u.x) SELECT n FROM t", CamusDBErrorCodes.InvalidInput, "within an outer join"),
+            ("WITH RECURSIVE t (n) AS (SELECT 1 UNION ALL SELECT n FROM t ORDER BY 1) SELECT n FROM t", CamusDBErrorCodes.FeatureNotSupported, "ORDER BY"),
+            ("WITH RECURSIVE a (x) AS (SELECT 1 UNION ALL SELECT x FROM b), b (x) AS (SELECT x FROM a) SELECT x FROM a", CamusDBErrorCodes.FeatureNotSupported, "Mutual recursion"),
+            ("WITH RECURSIVE t (n) AS (SELECT 1 UNION ALL SELECT n FROM t@{FORCE_INDEX=i}) SELECT n FROM t", CamusDBErrorCodes.InvalidInput, "hint"),
+        ];
+
+        foreach ((string sql, string code, string message) in refused)
+        {
+            CamusDBException error = Assert.Throws<CamusDBException>(() => SQLParserProcessor.Parse(sql), sql)!;
+            Assert.AreEqual(code, error.Code, sql);
+            StringAssert.Contains(message, error.Message, sql);
+        }
     }
 }

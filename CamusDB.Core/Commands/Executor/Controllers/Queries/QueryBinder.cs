@@ -74,6 +74,7 @@ internal sealed class QueryBinder
 
         await CollectBoundSourcesAsync(database, query.Source, sources, derivedSources, aliases, nested).ConfigureAwait(false);
         ValidateJoinPredicates(query.Source, sources, derivedSources);
+        RefuseAggregateOverWorkTable(query, derivedSources);
 
         QueryRowNameResolver rowNames = new(sources, derivedSources);
         BoundSelectQuery bound = new(query, sources, rowNames, derivedSources);
@@ -176,7 +177,13 @@ internal sealed class QueryBinder
             }
             catch (CamusDBException)
             {
-                declared.Add((derived.Alias, await DeclaredNamesAsync(database, derived.Query).ConfigureAwait(false)));
+                // A work table whose non-recursive term reads the query around the subquery cannot bind
+                // alone either. Its names are the CTE's column list and the names of that term.
+                IReadOnlyCollection<string> names = derived.WorkTable is { } workTable
+                    ? await WorkTableDeclaredNamesAsync(database, workTable.Table).ConfigureAwait(false)
+                    : await DeclaredNamesAsync(database, derived.Query).ConfigureAwait(false);
+
+                declared.Add((derived.Alias, names));
             }
         }
 
@@ -212,6 +219,25 @@ internal sealed class QueryBinder
             if (item.OutputName is { } name)
                 names.Add(name[(name.LastIndexOf('.') + 1)..]);
         }
+
+        return names;
+    }
+
+    /// <summary>
+    /// The names of a work table that cannot bind alone: the CTE's column list and the names that the
+    /// select list of the non-recursive term declares. The list renames only the first columns, so both
+    /// sets are in; a name too many only makes a mistake fail as an unknown column (see
+    /// <see cref="DeclaredNamesAsync"/>).
+    /// </summary>
+    private async Task<IReadOnlyCollection<string>> WorkTableDeclaredNamesAsync(DatabaseDescriptor database, RecursiveWorkTable workTable)
+    {
+        HashSet<string> names = new(StringComparer.OrdinalIgnoreCase);
+
+        if (workTable.ColumnAliases is { } aliases)
+            names.UnionWith(aliases);
+
+        if (workTable.NonRecursiveTerm is { } nonRecursiveTerm)
+            names.UnionWith(await DeclaredNamesAsync(database, nonRecursiveTerm).ConfigureAwait(false));
 
         return names;
     }
@@ -417,6 +443,26 @@ internal sealed class QueryBinder
                         $"Duplicate alias '{derivedSource.Alias}'");
                 }
 
+                // The work table of a recursive CTE has no inner query to bind: its columns are the
+                // columns of the CTE, and it opens no table, so there is nothing to authorize.
+                if (derivedSource.WorkTable is { } workTableSource)
+                {
+                    RecursiveWorkTable workTable = workTableSource.Table;
+
+                    if (workTable.Columns is null)
+                        await BindWorkTableForSchemaAsync(database, workTable).ConfigureAwait(false);
+
+                    derivedSources.Add(new BoundDerivedTableSource(
+                        derivedSource,
+                        derivedSource.Alias,
+                        workTable.Columns!,
+                        new BoundSelectQuery(derivedSource.Query, [], new QueryRowNameResolver([])))
+                    {
+                        InnerRowKeys = workTable.RowKeys,
+                    });
+                    return;
+                }
+
                 // A function in FROM has no inner query to bind: its columns and types come from the
                 // function, and it opens no table, so there is nothing to authorize.
                 if (derivedSource.Function is { } call)
@@ -569,22 +615,102 @@ internal sealed class QueryBinder
     {
         (BoundSelectQuery left, SubqueryBindProducts leftSubqueries) =
             await BindNestedAsync(database, setOperation.Left, nested).ConfigureAwait(false);
-        (BoundSelectQuery right, SubqueryBindProducts rightSubqueries) =
-            await BindNestedAsync(database, setOperation.Right, nested).ConfigureAwait(false);
 
         // The columns come from each bound operand, as for a derived table above: there each
         // uncorrelated subquery is folded into its value, or into a NULL that keeps its column type.
         IReadOnlyList<DerivedColumnSchema> leftColumns = DerivedTableSchemaBuilder.Build(left.Query, left);
+
+        // The recursive term reads the work table, whose columns come from the non-recursive term, so
+        // they are set before the recursive term binds.
+        IReadOnlyList<DerivedColumnSchema>? recursiveColumns = setOperation.WorkTable is { } workTable
+            ? SetWorkTableColumns(workTable, left, leftColumns)
+            : null;
+
+        (BoundSelectQuery right, SubqueryBindProducts rightSubqueries) =
+            await BindNestedAsync(database, setOperation.Right, nested).ConfigureAwait(false);
+
         IReadOnlyList<DerivedColumnSchema> rightColumns = DerivedTableSchemaBuilder.Build(right.Query, right);
 
         (IReadOnlyList<DerivedColumnSchema> columns, IReadOnlyList<bool> untyped) =
             SetOperationSchema.Resolve(setOperation, left, leftColumns, right, rightColumns);
+
+        if (recursiveColumns is not null)
+            SetOperationSchema.CheckRecursiveTypes(setOperation.WorkTable!.Name, recursiveColumns, columns);
 
         return new BoundSetOperation(setOperation, left, right, leftColumns, rightColumns, columns, untyped)
         {
             LeftSubqueries = leftSubqueries,
             RightSubqueries = rightSubqueries,
         };
+    }
+
+    /// <summary>
+    /// Sets the columns of <paramref name="workTable"/> from its bound non-recursive term and returns them
+    /// before the CTE's column-alias list. The kept rows are the UNION's output rows, keyed by the
+    /// non-recursive term's keys; the work table reads them under plain keys with the alias names, as a
+    /// derived table reads its inner rows (<see cref="BoundDerivedTableSource.InnerRowKeys"/>).
+    /// </summary>
+    private static IReadOnlyList<DerivedColumnSchema> SetWorkTableColumns(
+        RecursiveWorkTable workTable,
+        BoundSelectQuery nonRecursiveTerm,
+        IReadOnlyList<DerivedColumnSchema> nonRecursiveColumns)
+    {
+        IReadOnlyList<DerivedColumnSchema> recursiveColumns =
+            SetOperationSchema.RecursiveColumns(nonRecursiveTerm.Query, nonRecursiveTerm, nonRecursiveColumns);
+
+        IReadOnlyList<DerivedColumnSchema> columns =
+            DerivedTableSchemaBuilder.WithPlainRowKeys(recursiveColumns, out (string InnerKey, string RowKey)[]? rowKeys);
+
+        if (workTable.ColumnAliases is { } aliases)
+            columns = DerivedTableSchemaBuilder.WithColumnAliases(columns, aliases, workTable.Name, ref rowKeys);
+
+        workTable.Columns = columns;
+        workTable.RowKeys = rowKeys;
+        return recursiveColumns;
+    }
+
+    /// <summary>
+    /// Binds the non-recursive term of <paramref name="workTable"/> for its schema only and sets the work
+    /// table's columns. Only a recursive term that binds outside the bind of its UNION needs this: a
+    /// scope analysis that made its own query model. Nothing runs and no row is read.
+    /// </summary>
+    private async Task BindWorkTableForSchemaAsync(DatabaseDescriptor database, RecursiveWorkTable workTable)
+    {
+        SelectQuery nonRecursiveTerm = workTable.NonRecursiveTerm
+            ?? throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                $"The work table of recursive query '{workTable.Name}' belongs to no recursive UNION");
+
+        BoundSelectQuery bound = await BindAsync(database, nonRecursiveTerm, nested: null).ConfigureAwait(false);
+        SetWorkTableColumns(workTable, bound, DerivedTableSchemaBuilder.Build(bound.Query, bound));
+    }
+
+    /// <summary>
+    /// Refuses an aggregate in a SELECT whose FROM reads the work table of a recursive CTE, as PostgreSQL
+    /// does: each step would aggregate the rows of the step before it only, so the answer would depend on
+    /// how the rows fall into steps. A SELECT over a derived table that reads the work table may
+    /// aggregate, as in PostgreSQL: only the SELECT whose own FROM holds the work table is refused.
+    /// </summary>
+    private static void RefuseAggregateOverWorkTable(SelectQuery query, List<BoundDerivedTableSource> derivedSources)
+    {
+        foreach (BoundDerivedTableSource derived in derivedSources)
+        {
+            if (derived.Source.WorkTable is not { } workTable)
+                continue;
+
+            bool aggregates = query.Having is { } having && QueryExpressionClassifier.ContainsAggregate(having.Expression);
+
+            foreach (ProjectionItem projection in query.Projections)
+                aggregates |= QueryExpressionClassifier.ContainsAggregate(projection.Expression);
+
+            foreach (OrderByItem item in query.OrderBy ?? [])
+                aggregates |= QueryExpressionClassifier.ContainsAggregate(item.Expression);
+
+            if (aggregates)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    $"Aggregate functions are not allowed in the recursive term of recursive query '{workTable.Table.Name}'");
+        }
     }
 
     /// <summary>

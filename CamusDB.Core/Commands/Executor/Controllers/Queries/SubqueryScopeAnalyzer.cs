@@ -278,7 +278,8 @@ internal sealed class SubqueryScopeAnalyzer
                 continue;
             }
 
-            if (current.Source is TableFunctionSource)
+            // A function and a work table declare their columns through the derived table around them.
+            if (current.Source is TableFunctionSource or WorkTableSource)
                 continue;
 
             levels.Push(new Level(current, parent));

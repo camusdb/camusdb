@@ -906,6 +906,12 @@ public class ConfigDefinition
     /// <summary>Most estimated bytes one buffered response may hold. &lt;= 0 disables. Default 256 MiB.</summary>
     public long MaxBufferedResultBytes { get; set; } = 256L * 1024 * 1024;
 
+    /// <summary>Most steps of one recursive CTE that may make rows. &lt;= 0 disables. Default 10 000.</summary>
+    public int MaxRecursiveCteIterations { get; set; } = 10_000;
+
+    /// <summary>Most rows one run of a recursive CTE may make. &lt;= 0 disables. Default 10 000 000.</summary>
+    public long MaxRecursiveCteRows { get; set; } = 10_000_000;
+
     /// <summary>Most explicit transactions open at one time on this node. &lt;= 0 disables. Default 10 000.</summary>
     public int MaxOpenExplicitTransactions { get; set; } = 10_000;
 

@@ -541,7 +541,7 @@ unpopulated object.
 | `DROP TABLE … CASCADE` | **No `CASCADE` form** | Drop the dependent views explicitly. |
 | `security_invoker` views | **Not supported** | Only the owner's-rights model is implemented. |
 | `WITH` in a body | **Stored without the `WITH`** | Each CTE is stored as a derived table where the body reads it, so `SHOW CREATE VIEW` shows no `WITH`, and a CTE that the body reads two times runs two times. See [WITH queries](common-table-expressions.md#views). |
-| `WITH RECURSIVE` views | **Not supported** | CamusDB has no `WITH RECURSIVE`. |
+| `WITH RECURSIVE` in a body | **Stored where it is read** | A recursive CTE cannot become a plain derived table, so it is stored as `(WITH RECURSIVE name AS (…) SELECT * FROM name) AS alias` where the body reads it. See [WITH queries](common-table-expressions.md#views). `CREATE RECURSIVE VIEW` is not supported. |
 | Cross-database views | **Not supported** | Matches the existing single-database restriction on `INSERT … SELECT`. |
 | Temporary views | **Not supported** | CamusDB has no temporary relations. |
 | Mixing `*` with other projections | **Refused** | The expansion order is not stable across a base column being added, so the frozen shape could not be honored. |

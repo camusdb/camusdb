@@ -53,6 +53,14 @@ public sealed record DerivedTableSource(
     public SetOperationSource? SetOperation => Query.Source as SetOperationSource;
 
     /// <summary>
+    /// The work table this derived table stands for, or null for any other derived table. When it is
+    /// set, <see cref="Query"/> is the inner shell <c>SELECT * FROM work table</c>: it is never bound or
+    /// executed as a query, and the derived-table executor reads the rows of the previous step of the
+    /// recursion (see <see cref="WorkTableSource"/>).
+    /// </summary>
+    public WorkTableSource? WorkTable => Query.Source as WorkTableSource;
+
+    /// <summary>
     /// The window calls of the windowed SELECT this derived table stands for, or null for any other
     /// derived table. <c>WindowQueryRewriter</c> sets it: <see cref="Query"/> is then the inner query
     /// that computes every window input, and <c>DerivedTableExecutor</c> runs the window operator over

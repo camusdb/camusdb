@@ -108,7 +108,9 @@ the parentheses, or wrap the query in a derived table.
 An operand can be a view. It expands as it does in any `FROM`.
 
 An operand can start with a `WITH` inside its parentheses, and a `WITH` can stand in front of the whole
-set operation; see [WITH queries](common-table-expressions.md). `CORRESPONDING BY` is not supported.
+set operation; see [WITH queries](common-table-expressions.md). The query of a recursive CTE is a
+`UNION` or `UNION ALL` that runs its right operand again for each step; see
+[recursive queries](common-table-expressions.md#recursive-queries). `CORRESPONDING BY` is not supported.
 
 ## Views
 

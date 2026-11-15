@@ -120,7 +120,8 @@ internal sealed class SelectQueryCreator
     private static bool IsCrossJoinOnlyTree(NodeAst ast)
     {
         if (ast.nodeType != NodeType.Join)
-            return ast.nodeType is NodeType.TableReference or NodeType.DerivedTableReference or NodeType.TableFunctionReference;
+            return ast.nodeType is NodeType.TableReference or NodeType.DerivedTableReference or NodeType.TableFunctionReference
+                or NodeType.WorkTableReference;
 
         return JoinAstKind.Read(ast) == JoinAstKind.Kind.Cross
             && IsCrossJoinOnlyTree(ast.leftAst!)
@@ -145,6 +146,7 @@ internal sealed class SelectQueryCreator
             NodeType.TableReference => CreateTableSource(tableAst),
             NodeType.DerivedTableReference => CreateDerivedTableSource(tableAst),
             NodeType.TableFunctionReference => CreateTableFunctionSource(tableAst),
+            NodeType.WorkTableReference => CreateWorkTableSource(tableAst),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid comma join table reference"),
         };
 
@@ -155,6 +157,7 @@ internal sealed class SelectQueryCreator
             NodeType.TableReference => CreateTableSource(fromAst),
             NodeType.DerivedTableReference => CreateDerivedTableSource(fromAst),
             NodeType.TableFunctionReference => CreateTableFunctionSource(fromAst),
+            NodeType.WorkTableReference => CreateWorkTableSource(fromAst),
             NodeType.SetOperationReference => CreateSetOperationSource(fromAst),
             NodeType.Join => CreateJoinSource(fromAst),
             NodeType.Identifier => new TableSource(fromAst.yytext!),
@@ -192,7 +195,7 @@ internal sealed class SelectQueryCreator
                 // A bare identifier is a table leaf too: the parser never builds one here, but the stored
                 // body of a view does, because it drops an alias that repeats the table's name.
                 if (leftAst.nodeType is not (NodeType.TableReference or NodeType.DerivedTableReference or NodeType.TableFunctionReference
-                        or NodeType.Identifier or NodeType.IdentifierWithOpts))
+                        or NodeType.WorkTableReference or NodeType.Identifier or NodeType.IdentifierWithOpts))
                 {
                     throw new CamusDBException(
                         CamusDBErrorCodes.FeatureNotSupported,
@@ -309,14 +312,82 @@ internal sealed class SelectQueryCreator
                 $"Unknown set operation '{setOperationAst.yytext}'"),
         };
 
-        SetOperationSource setOperation = new(
-            kind,
-            SetOperationAst.IsAll(setOperationAst),
-            CreateSetOperationOperand(setOperationAst.leftAst, setOperationAst.yytext),
-            CreateSetOperationOperand(setOperationAst.rightAst, setOperationAst.yytext));
+        SelectQuery left = CreateSetOperationOperand(setOperationAst.leftAst, setOperationAst.yytext);
+        SelectQuery right = CreateSetOperationOperand(setOperationAst.rightAst, setOperationAst.yytext);
+
+        // The UNION of a recursive CTE takes the work table that its recursive term reads.
+        RecursiveWorkTable? workTable = setOperationAst.extendedOne is { nodeType: NodeType.RecursiveCte } marker
+            ? AttachWorkTable(left, right, marker)
+            : null;
+
+        SetOperationSource setOperation = new(kind, SetOperationAst.IsAll(setOperationAst), left, right)
+        {
+            WorkTable = workTable,
+        };
 
         SelectQuery shell = new(setOperation, [new ProjectionItem(NodeAst.ExprAllFields, null)]);
         return new DerivedTableSource(shell, SetOperationSource.DerivedAlias);
+    }
+
+    /// <summary>
+    /// A derived table over the work table of a recursive CTE (see <see cref="WorkTableSource"/>), with
+    /// the alias that the reference wrote, or the CTE name. The work table is new: the recursive UNION
+    /// around the reference takes it when the creator builds that UNION.
+    /// </summary>
+    private static DerivedTableSource CreateWorkTableSource(NodeAst workTableAst)
+    {
+        string name = workTableAst.leftAst!.yytext!;
+        WorkTableSource source = new(new RecursiveWorkTable(name));
+        SelectQuery shell = new(source, [new ProjectionItem(NodeAst.ExprAllFields, null)]);
+
+        return new DerivedTableSource(shell, workTableAst.rightAst?.yytext ?? name);
+    }
+
+    /// <summary>
+    /// The work table that the recursive term <paramref name="recursiveTerm"/> reads, given to the UNION
+    /// that <paramref name="marker"/> marks. The creator builds a query from the inside out, so a recursive
+    /// CTE written inside this term took its own work table already, and a work table that is taken is
+    /// passed over. The parser leaves exactly one reference to the CTE in a relation of the term.
+    /// </summary>
+    private static RecursiveWorkTable AttachWorkTable(SelectQuery nonRecursiveTerm, SelectQuery recursiveTerm, NodeAst marker)
+    {
+        string name = marker.yytext!;
+        Stack<QuerySource> pending = new();
+        pending.Push(recursiveTerm.Source);
+
+        while (pending.TryPop(out QuerySource? source))
+        {
+            switch (source)
+            {
+                case DerivedTableSource { WorkTable: { } work }:
+                    if (!work.Table.IsAttached && string.Equals(work.Table.Name, name, StringComparison.OrdinalIgnoreCase))
+                    {
+                        work.Table.IsAttached = true;
+                        work.Table.NonRecursiveTerm = nonRecursiveTerm;
+                        work.Table.ColumnAliases = marker.leftAst is { } columns ? ColumnAliasNames(columns) : null;
+                        return work.Table;
+                    }
+                    break;
+
+                case DerivedTableSource derived:
+                    pending.Push(derived.Query.Source);
+                    break;
+
+                case JoinSource join:
+                    pending.Push(join.Right);
+                    pending.Push(join.Left);
+                    break;
+
+                case SetOperationSource setOperation:
+                    pending.Push(setOperation.Right.Source);
+                    pending.Push(setOperation.Left.Source);
+                    break;
+            }
+        }
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.InvalidInternalOperation,
+            $"The recursive term of query '{name}' has no reference to it");
     }
 
     /// <summary>

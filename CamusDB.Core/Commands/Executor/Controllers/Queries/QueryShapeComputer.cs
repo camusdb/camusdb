@@ -153,11 +153,22 @@ internal static class QueryShapeComputer
             case SetOperationSource so:
                 // Without this arm the default writes the type name only, so two set operations over
                 // different operands would share a shape, and a cached plan of one would serve the other.
-                sb.Append("SET_OPERATION:").Append(so.OperatorText).Append(" LEFT(");
+                sb.Append("SET_OPERATION:").Append(so.OperatorText);
+
+                // A recursive UNION runs its right operand once per step, so it never shares a shape
+                // with a plain UNION over the same operands.
+                if (so.WorkTable is { } recursion)
+                    sb.Append(" RECURSIVE:").Append(recursion.Name);
+
+                sb.Append(" LEFT(");
                 AppendQuery(so.Left, sb);
                 sb.Append(") RIGHT(");
                 AppendQuery(so.Right, sb);
                 sb.Append(')');
+                break;
+
+            case WorkTableSource wt:
+                sb.Append("WORK_TABLE:").Append(wt.Table.Name);
                 break;
 
             default:

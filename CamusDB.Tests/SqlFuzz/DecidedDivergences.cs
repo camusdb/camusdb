@@ -559,9 +559,19 @@ public static class DecidedDivergences
             CamusDBErrorCodes.SqlSyntaxError, "UPDATE 1",
             NotSupportedYet),
 
-        new("WITH RECURSIVE is not supported", NoSetup,
-            "WITH RECURSIVE r AS (SELECT 1 AS n) SELECT n FROM r",
-            CamusDBErrorCodes.FeatureNotSupported, "1",
+        new("A recursive WITH query stops after max_recursive_cte_iterations steps", NoSetup,
+            "WITH RECURSIVE r (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 20000) SELECT COUNT(*) FROM r",
+            CamusDBErrorCodes.RecursiveQueryLimitExceeded, "20000",
+            "A statement has no time limit in CamusDB, so a recursion with no end would run until the disk is full. The cluster settings max_recursive_cte_iterations (10,000 steps) and max_recursive_cte_rows (10,000,000 rows) stop it. Both can be raised, and 0 turns a limit off. PostgreSQL has no such limit."),
+
+        new("A recursive WITH query that the statement reads two times runs to its end first", NoSetup,
+            "WITH RECURSIVE r (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r) SELECT a.n + b.n FROM (SELECT n FROM r LIMIT 1) a, (SELECT n FROM r LIMIT 1) b",
+            CamusDBErrorCodes.RecursiveQueryLimitExceeded, "2",
+            "A WITH query that the statement reads two or more times is computed one time, and that run makes every row before any reader gets one. PostgreSQL gives each reader rows when it asks for them, so a LIMIT in each reader stops a recursion with no end. A recursive WITH query that the statement reads one time streams, and a LIMIT over it stops it, as in PostgreSQL."),
+
+        new("SEARCH and CYCLE are not supported in a recursive WITH query", NoSetup,
+            "WITH RECURSIVE r (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 3) SEARCH DEPTH FIRST BY n SET ord SELECT n FROM r ORDER BY ord",
+            CamusDBErrorCodes.SqlSyntaxError, "1",
             NotSupportedYet),
 
         new("A WITH query that the statement does not read is not checked", RowTable,

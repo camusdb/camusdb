@@ -441,10 +441,25 @@ internal sealed class JoinLeafScanner
     {
         // A windowed SELECT's derived table is read once too: its window operator already holds what
         // it must, and keeping its output again would copy every row a second time.
-        if (readOnce && (source.SetOperation is not null || source.Source.Windows is not null))
+        // The reader of a recursive CTE streams too when it is read once: a LIMIT over a recursion with
+        // no end must stop it, as in PostgreSQL, and keeping the rows first would run it to its limit.
+        if (readOnce && (source.SetOperation is not null || source.Source.Windows is not null || ReadsRecursiveUnion(source)))
         {
             await foreach (QueryResultRow row in derivedTableExecutor
                 .Stream(plan.Database, source, plan.Ticket, executionFilter, setOperationStats, windowStats)
+                .WithCancellation(ct)
+                .ConfigureAwait(false))
+                yield return row;
+
+            yield break;
+        }
+
+        // The work table of a recursive CTE is kept by the recursive UNION already, so a read, and a
+        // re-read by a join, streams those rows and copies nothing.
+        if (source.Source.WorkTable is not null)
+        {
+            await foreach (QueryResultRow row in derivedTableExecutor
+                .Stream(plan.Database, source, plan.Ticket, executionFilter)
                 .WithCancellation(ct)
                 .ConfigureAwait(false))
                 yield return row;
@@ -491,6 +506,17 @@ internal sealed class JoinLeafScanner
         await foreach (QueryResultRow row in rows.EnumerateAsync(ct).ConfigureAwait(false))
             yield return row;
     }
+
+    /// <summary>
+    /// True when <paramref name="source"/> is a CTE reference whose query only passes a recursive UNION
+    /// through (<c>SELECT *</c> over it), which is the form the parser gives every reader of a
+    /// recursive CTE.
+    /// </summary>
+    private static bool ReadsRecursiveUnion(BoundDerivedTableSource source) =>
+        source.SetOperation is null
+        && source.Source.Function is null
+        && source.Source.WorkTable is null
+        && BoundSetOperation.PassedThrough(source.InnerBound) is { Source.WorkTable: not null };
 
     /// <summary>
     /// Streams the rows of a function in <c>FROM</c> (see <see cref="TableFunctionSource"/>). The

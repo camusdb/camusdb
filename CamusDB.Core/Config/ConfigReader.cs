@@ -136,6 +136,8 @@ public class ConfigReader
         "max_statement_bytes",
         "max_buffered_result_rows",
         "max_buffered_result_bytes",
+        "max_recursive_cte_iterations",
+        "max_recursive_cte_rows",
         "max_open_explicit_transactions",
         "max_client_connections",
         "max_index_columns",

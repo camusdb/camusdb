@@ -34,11 +34,18 @@ internal sealed class ViewBodyRenderer : SqlAstRenderer
 {
     private static readonly ViewBodyRenderer Instance = new();
 
+    /// <summary>
+    /// The name that each work-table reference renders with, by its CTE's name, while that recursive CTE
+    /// renders under another name (see <see cref="RenderRecursiveDerivedTable"/>); null when no CTE is
+    /// renamed. State of one rendering, so <see cref="RenderSelect"/> renders with a renderer of its own.
+    /// </summary>
+    private Dictionary<string, string>? workTableNames;
+
     /// <summary>Renders a whole <c>SELECT</c> statement to canonical SQL.</summary>
     public static string RenderSelect(NodeAst select)
     {
         StringBuilder sb = new();
-        Instance.RenderSelectInto(sb, select);
+        new ViewBodyRenderer().RenderSelectInto(sb, select);
         return sb.ToString();
     }
 
@@ -248,6 +255,96 @@ internal sealed class ViewBodyRenderer : SqlAstRenderer
         }
     }
 
+    /// <summary>
+    /// The recursive UNION that the derived table <paramref name="derived"/> reads, or null. The parser
+    /// gives a reader of a recursive CTE the form <c>(non-recursive UNION recursive) AS alias</c>. When the
+    /// stored text of that reader is parsed again, the parser gives it one more level,
+    /// <c>(SELECT * FROM (…) AS name) AS alias</c>. Both forms are read here, so both render to the same
+    /// text, and a view's text does not change when it is rendered again.
+    /// </summary>
+    private static NodeAst? RecursiveQueryOf(NodeAst derived)
+    {
+        NodeAst query = derived.leftAst!;
+
+        if (IsRecursiveUnion(query))
+            return query;
+
+        bool passesThrough = query.nodeType == NodeType.Select
+            && query.leftAst?.nodeType == NodeType.ExprAllFields
+            && query.rightAst is { nodeType: NodeType.DerivedTableReference } inner
+            && IsRecursiveUnion(inner.leftAst!)
+            && query.extendedOne is null && query.extendedTwo is null && query.extendedThree is null
+            && query.extendedFour is null && query.extendedFive is null && query.extendedSix is null
+            && query.extendedSeven is null && query.yytext is null;
+
+        return passesThrough ? query.rightAst!.leftAst : null;
+
+        static bool IsRecursiveUnion(NodeAst node) =>
+            SetOperationAst.IsSetOperationSelect(node) && node.rightAst!.extendedOne is { nodeType: NodeType.RecursiveCte };
+    }
+
+    /// <summary>
+    /// Renders a reader of a recursive CTE as
+    /// <c>(WITH RECURSIVE name [(columns)] AS (query) SELECT * FROM name) AS alias [(columns)]</c>. The text
+    /// parses again to the same recursion.
+    ///
+    /// <para><b>The name.</b> It is the CTE's own name, unless the recursive query also reads a table of
+    /// that name. That happens when the query reads the table through a CTE of an outer WITH, or when a
+    /// table it reads took that name in a rename. In the text the WITH would hide that table, so the CTE
+    /// renders as <c>name_1</c> (or the first free number), and its work-table reference as
+    /// <c>name_1 AS name</c>, so the recursive term still reads its columns through the old name.</para>
+    /// </summary>
+    private void RenderRecursiveDerivedTable(StringBuilder sb, NodeAst derived, NodeAst recursive)
+    {
+        NodeAst marker = recursive.rightAst!.extendedOne!;
+        string name = marker.yytext!;
+        string rendered = name;
+
+        for (int suffix = 1; CommonTableExpressions.ReadsRelationNamed(recursive, rendered); suffix++)
+            rendered = $"{name}_{suffix}";
+
+        // A recursive CTE inside this one with the same name hides it, so the mapping of an outer CTE of
+        // that name does not apply in here.
+        Dictionary<string, string>? outer = workTableNames;
+
+        if (!string.Equals(rendered, name, StringComparison.Ordinal))
+            workTableNames = new(outer ?? [], StringComparer.OrdinalIgnoreCase) { [name] = rendered };
+        else if (outer is not null && outer.ContainsKey(name))
+        {
+            workTableNames = new(outer, StringComparer.OrdinalIgnoreCase);
+            workTableNames.Remove(name);
+        }
+
+        try
+        {
+            sb.Append("(WITH RECURSIVE ").Append(rendered);
+
+            if (marker.leftAst is not null)
+            {
+                sb.Append(" (");
+                RenderFunctionArguments(sb, marker.leftAst, NodeType.IdentifierList);
+                sb.Append(')');
+            }
+
+            sb.Append(" AS (");
+            RenderSetOperationInto(sb, recursive);
+            sb.Append(") SELECT * FROM ").Append(rendered);
+        }
+        finally
+        {
+            workTableNames = outer;
+        }
+
+        sb.Append(") AS ").Append(derived.rightAst!.yytext);
+
+        if (derived.extendedThree is not null)
+        {
+            sb.Append('(');
+            RenderFunctionArguments(sb, derived.extendedThree, NodeType.IdentifierList);
+            sb.Append(')');
+        }
+    }
+
     private void RenderSetOperationOperand(StringBuilder sb, NodeAst operand)
     {
         bool parenthesize = SetOperationAst.IsSetOperationSelect(operand)
@@ -396,6 +493,30 @@ internal sealed class ViewBodyRenderer : SqlAstRenderer
                     RenderFunctionArguments(sb, from.extendedTwo, NodeType.IdentifierList);
                     sb.Append(')');
                 }
+                return;
+
+            case NodeType.WorkTableReference:
+            {
+                // The reference of a recursive CTE to itself, inside the WITH RECURSIVE that the
+                // derived-table case below writes for the CTE. Under another name it keeps its old
+                // name as its alias, which is what the recursive term reads its columns through.
+                string name = from.leftAst!.yytext!;
+                string? alias = from.rightAst?.yytext;
+
+                if (workTableNames is not null && workTableNames.TryGetValue(name, out string? renamed))
+                {
+                    sb.Append(renamed).Append(" AS ").Append(alias ?? name);
+                    return;
+                }
+
+                sb.Append(name);
+                if (alias is not null)
+                    sb.Append(" AS ").Append(alias);
+                return;
+            }
+
+            case NodeType.DerivedTableReference when RecursiveQueryOf(from) is { } recursive:
+                RenderRecursiveDerivedTable(sb, from, recursive);
                 return;
 
             case NodeType.DerivedTableReference:

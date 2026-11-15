@@ -295,7 +295,7 @@ internal static class ViewDefinitionBuilder
         return new NodeAst(
             NodeType.Select,
             wrapper.leftAst,
-            new NodeAst(NodeType.SetOperationReference, left, right, null, null, null, null, null, setOperationAst.yytext),
+            new NodeAst(NodeType.SetOperationReference, left, right, setOperationAst.extendedOne, null, null, null, null, setOperationAst.yytext),
             wrapper.extendedOne, orderBy, wrapper.extendedThree, wrapper.extendedFour, wrapper.extendedFive,
             wrapper.yytext, wrapper.extendedSix, wrapper.extendedSeven);
     }
@@ -424,7 +424,7 @@ internal static class ViewDefinitionBuilder
         return new NodeAst(
             NodeType.Select,
             node.leftAst,
-            new NodeAst(NodeType.SetOperationReference, left, setOperationAst.rightAst, null, null, null, null, null, setOperationAst.yytext),
+            new NodeAst(NodeType.SetOperationReference, left, setOperationAst.rightAst, setOperationAst.extendedOne, null, null, null, null, setOperationAst.yytext),
             node.extendedOne, node.extendedTwo, node.extendedThree, node.extendedFour, node.extendedFive,
             node.yytext, node.extendedSix, node.extendedSeven);
     }

@@ -55,10 +55,13 @@ internal sealed class SetOperationExecutor
 
     private readonly QueryDistincter queryDistincter = new();
 
+    private readonly RecursiveUnionExecutor recursiveUnionExecutor;
+
     public SetOperationExecutor(QueryExecutor queryExecutor, QueryJoinExecutor queryJoinExecutor)
     {
         this.queryExecutor = queryExecutor;
         this.queryJoinExecutor = queryJoinExecutor;
+        recursiveUnionExecutor = new RecursiveUnionExecutor(this);
     }
 
     /// <summary>
@@ -71,6 +74,10 @@ internal sealed class SetOperationExecutor
         QueryTicket outerTicket,
         SetOperationStats? stats = null)
     {
+        // The UNION of a recursive CTE runs its recursive term again for each step.
+        if (setOperation.Source.WorkTable is not null)
+            return recursiveUnionExecutor.Execute(database, setOperation, outerTicket, stats);
+
         RowLayout layout = RowLayout.ForColumns(setOperation.Columns.Select(static column => column.RowKey));
         QueryExecutionContext context = QueryExecutionContext.For(database, outerTicket);
 
@@ -99,7 +106,7 @@ internal sealed class SetOperationExecutor
     /// carries the operand's own <paramref name="subqueries"/>, so an EXISTS in an operand's WHERE
     /// finds its prepared subquery and an IN lifted into a semi-join finds its spec.
     /// </summary>
-    private async IAsyncEnumerable<QueryResultRow> RunOperand(
+    internal async IAsyncEnumerable<QueryResultRow> RunOperand(
         DatabaseDescriptor database,
         BoundSelectQuery operand,
         SubqueryBindProducts subqueries,

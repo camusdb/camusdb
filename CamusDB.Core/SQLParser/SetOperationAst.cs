@@ -138,7 +138,10 @@ internal static class SetOperationAst
     internal static void Normalize(NodeAst root, List<NodeAst> operands)
     {
         string? text = root.yytext;
-        bool associative = KindOf(root) is Union or Intersect;
+
+        // The UNION of a recursive CTE keeps its two operands: the right one is the recursive term, and a
+        // new grouping would move the work-table reference into another operand.
+        bool associative = KindOf(root) is Union or Intersect && root.extendedOne is null;
 
         if (!associative)
         {
@@ -156,7 +159,9 @@ internal static class SetOperationAst
         {
             NodeAst operand = pending.Pop();
 
-            if (IsPlainWrapper(operand) && string.Equals(operand.rightAst!.yytext, text, StringComparison.Ordinal))
+            if (IsPlainWrapper(operand)
+                && operand.rightAst!.extendedOne is null
+                && string.Equals(operand.rightAst.yytext, text, StringComparison.Ordinal))
             {
                 pending.Push(operand.rightAst.rightAst!);
                 pending.Push(operand.rightAst.leftAst!);

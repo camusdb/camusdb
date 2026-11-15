@@ -40,6 +40,15 @@ public sealed record SetOperationSource(
     /// </summary>
     public const string DerivedAlias = "*set_operation*";
 
+    /// <summary>
+    /// The work table of a recursive CTE, or null for any other set operation. When it is set, the
+    /// operator is UNION or UNION ALL, <see cref="Left"/> is the non-recursive term and
+    /// <see cref="Right"/> is the recursive term, which reads the work table once. The executor runs
+    /// the right operand again for each step (see <c>RecursiveUnionExecutor</c>), and the output columns
+    /// have the types of the left operand.
+    /// </summary>
+    public RecursiveWorkTable? WorkTable { get; init; }
+
     /// <summary>The operator as SQL writes it, with ALL for the ALL form: <c>UNION ALL</c>, <c>EXCEPT</c>.</summary>
     public string OperatorText => Kind switch
     {

@@ -735,6 +735,17 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string JsonbValueCorrupt = "CADB0559";
 
+    /// <summary>
+    /// A recursive CTE (<c>WITH RECURSIVE</c>) went past one of its limits: more steps of its recursive
+    /// term made rows than <see cref="CamusDBOptions.MaxRecursiveCteIterations"/> allows, or the CTE made
+    /// more rows than <see cref="CamusDBOptions.MaxRecursiveCteRows"/> allows. Without the limits, a
+    /// recursion with no end runs until the disk is full, because a statement has no time limit. The
+    /// message names the setting. Add a condition that ends the recursion, use UNION in place of UNION
+    /// ALL to drop the rows already returned (that ends a walk over a cycle), or raise the setting. Not
+    /// retryable as is. Maps to HTTP 400 and gRPC <c>RESOURCE_EXHAUSTED</c>.
+    /// </summary>
+    public const string RecursiveQueryLimitExceeded = "CADB0560";
+
     public const string InvalidConfig = "CADB0600";
 
     /// <summary>
@@ -1268,6 +1279,7 @@ public static class CamusDBErrorCodes
         SpillLimitExceeded => 507,
         ReturningResultTooLarge => 400,
         ResultSetTooLarge => 400,
+        RecursiveQueryLimitExceeded => 400,
         StatementTooLarge => 413,
         ConcurrencyLimitExceeded => 503,
         QueryNotFound => 404,

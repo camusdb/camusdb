@@ -427,6 +427,15 @@ internal sealed class QueryDistincter
     internal static int DistinctValueHash(ColumnValue value)
         => value.Type == ColumnType.Null ? 0 : ColumnValueHash.Of(value);
 
+    /// <summary>
+    /// An empty set of rows that compares rows by the DISTINCT rule (NULL equals NULL). The recursive
+    /// UNION keeps every row it returned in one, because each step must drop the rows that any earlier
+    /// step returned. It stays in memory: the next step reads the new rows of this step, so each row must
+    /// be known as new or old when it arrives. After a spill, <see cref="DistinctWithSpill"/> knows that
+    /// only when its whole input is read.
+    /// </summary>
+    internal static HashSet<QueryResultRow> NewDistinctSet() => new(new DistinctRowEqualityComparer());
+
     private static async IAsyncEnumerable<QueryResultRow> DistinctRows(
         IAsyncEnumerable<QueryResultRow> dataCursor)
     {

@@ -378,17 +378,32 @@ public static class PlanRenderer
     {
         // A reader of a CTE that the statement computes once says so: every such reader reads the rows
         // that the first one kept, so the plan under it runs one time for the statement.
+        // A reader of a recursive CTE is named for its recursion, with the reader's alias.
+        BoundSetOperation? recursion = node.BoundSource.SetOperation is null
+            && BoundSetOperation.PassedThrough(node.BoundSource.InnerBound) is { Source.WorkTable: not null } passed
+                ? passed
+                : null;
+
         if (node.BoundSource.Source.ComputedOnce is { } marker)
         {
             string inner = node.BoundSource.SetOperation is { } computedSet
                 ? RenderSetOperation(computedSet.Source, plan.Database.Options.SpillEnabled)
-                : $"derived-table-scan(alias={node.BoundSource.Alias})";
+                : recursion is not null
+                    ? RenderRecursiveReader(recursion, node.BoundSource.Alias)
+                    : $"derived-table-scan(alias={node.BoundSource.Alias})";
 
             return string.Concat(inner.AsSpan(0, inner.Length - 1), $", computed_once={marker.yytext})");
         }
 
         if (node.BoundSource.SetOperation is { } setOperation)
             return RenderSetOperation(setOperation.Source, plan.Database.Options.SpillEnabled);
+
+        if (recursion is not null)
+            return RenderRecursiveReader(recursion, node.BoundSource.Alias);
+
+        // The work table of a recursive CTE reads the rows of the step before.
+        if (node.BoundSource.Source.WorkTable is { } workTable)
+            return $"work-table-scan(cte={workTable.Table.Name}, alias={node.BoundSource.Alias})";
 
         if (node.BoundSource.Source.Windows is { } windows)
             return RenderWindows(windows, node.WindowStats);
@@ -496,10 +511,18 @@ public static class PlanRenderer
     /// streams both operands, and every other form hashes, <c>union(distinct: hash)</c>,
     /// <c>intersect(all, hash)</c>, <c>except(hash, spill)</c>. <c>spill</c> means the hash table
     /// may move to disk, which <see cref="CamusDBOptions.SpillEnabled"/> decides; whether it did is a
-    /// run-time fact.
+    /// run-time fact. The UNION of a recursive CTE is <c>recursive-union(all, cte=t)</c> or
+    /// <c>recursive-union(distinct: hash, cte=t)</c>.
     /// </summary>
     private static string RenderSetOperation(SetOperationSource setOperation, bool spillEnabled)
     {
+        // A recursive CTE runs its recursive term once per step. UNION drops the rows already returned
+        // with a set in memory, so it never spills.
+        if (setOperation.WorkTable is { } workTable)
+            return setOperation.All
+                ? $"recursive-union(all, cte={workTable.Name})"
+                : $"recursive-union(distinct: hash, cte={workTable.Name})";
+
         string name = setOperation.Kind switch
         {
             SetOperationKind.Union => "union",
@@ -516,6 +539,13 @@ public static class PlanRenderer
             return $"union(distinct: hash{spill})";
 
         return setOperation.All ? $"{name}(all, hash{spill})" : $"{name}(hash{spill})";
+    }
+
+    /// <summary>The label of a reader of a recursive CTE: the recursive UNION, with the reader's alias.</summary>
+    private static string RenderRecursiveReader(BoundSetOperation recursion, string alias)
+    {
+        string union = RenderSetOperation(recursion.Source, spillEnabled: false);
+        return string.Concat(union.AsSpan(0, union.Length - 1), $", alias={alias})");
     }
 
     private static string RenderSemiJoin(SemiJoinNode node)

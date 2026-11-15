@@ -28,6 +28,7 @@ it can produce its first output row. Those are the spill targets:
 | `UNION` | one row per distinct tuple | the `DISTINCT` path |
 | `INTERSECT [ALL]`, `EXCEPT [ALL]` | one count per distinct row of the right operand | partition both operands by row hash, combine each pair of partitions in memory ([set-operations.md](./set-operations.md#spill-to-disk)) |
 | Derived tables / subqueries (`FROM (SELECT …)`) | materialized so they can be re-scanned | re-enumerable spill buffer |
+| Recursive CTE (`WITH RECURSIVE`) | the rows of one step, which the next step reads | re-enumerable spill buffer for each step; the copy of each returned row that `UNION` keeps stays in memory ([common-table-expressions.md](./common-table-expressions.md#memory)) |
 | Window functions (`OVER (…)`) | a sort per `(PARTITION BY, ORDER BY)`, and the rows of one partition | external merge sort, and a re-enumerable spill buffer per partition; the window inputs of the current partition stay in memory ([window-functions.md](./window-functions.md#spill-to-disk)) |
 | `DELETE` / `UPDATE` match set | all matching rows are collected before any mutation (see below) | re-enumerable spill buffer |
 

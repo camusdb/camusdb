@@ -176,7 +176,7 @@ internal static class ViewExpander
 
                     return ReferenceEquals(l, from.leftAst) && ReferenceEquals(r, from.rightAst)
                         ? from
-                        : new NodeAst(NodeType.SetOperationReference, l, r, null, null, null, null, null, from.yytext);
+                        : new NodeAst(NodeType.SetOperationReference, l, r, from.extendedOne, null, null, null, null, from.yytext);
                 }
 
             case NodeType.Join:

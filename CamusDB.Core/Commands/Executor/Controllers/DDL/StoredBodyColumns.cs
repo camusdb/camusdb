@@ -129,6 +129,13 @@ internal static class StoredBodyColumns
                 scope.NonTables.Add(from.extendedOne?.yytext ?? from.leftAst?.yytext ?? "");
                 return;
 
+            case NodeType.WorkTableReference:
+                // The work table of a recursive CTE is a relation with no table behind it. Its name
+                // must be known here, as a function's is, or a qualified reference to it would fall
+                // through to an outer relation of the same name.
+                scope.NonTables.Add(from.rightAst?.yytext ?? from.leftAst?.yytext ?? "");
+                return;
+
             case NodeType.DerivedTableReference:
                 if (from.rightAst?.yytext is { Length: > 0 } alias)
                     scope.NonTables.Add(alias);
@@ -187,7 +194,7 @@ internal static class StoredBodyColumns
 
                     return ReferenceEquals(l, from.leftAst) && ReferenceEquals(r, from.rightAst)
                         ? from
-                        : new NodeAst(NodeType.SetOperationReference, l, r, null, null, null, null, null, from.yytext);
+                        : new NodeAst(NodeType.SetOperationReference, l, r, from.extendedOne, null, null, null, null, from.yytext);
                 }
 
             case NodeType.DerivedTableReference:

@@ -1291,4 +1291,27 @@ public enum NodeType
     /// <c>yytext</c> = the CTE name, for EXPLAIN and errors.
     /// </summary>
     CteMaterialization,
+
+    /// <summary>
+    /// The definitions of <c>WITH RECURSIVE</c>, as the grammar gives them to
+    /// <see cref="SQLParser.CommonTableExpressions.With"/>. <c>leftAst</c> = the definitions. A parse-only
+    /// wrapper: <see cref="With"/> takes the definitions out and keeps the word in its <c>yytext</c>.
+    /// </summary>
+    WithRecursiveList,
+
+    /// <summary>
+    /// The reference of a recursive CTE to itself, in the FROM of its recursive term. It reads the
+    /// rows that the previous step of the recursion made (the work table). <c>leftAst</c> = the CTE
+    /// name identifier, <c>rightAst</c> = the alias identifier or null (then the CTE name is the alias).
+    /// </summary>
+    WorkTableReference,
+
+    /// <summary>
+    /// The marker of a recursive CTE, in <c>extendedOne</c> of its top <see cref="SetOperationReference"/>
+    /// (always UNION or UNION ALL): the left operand is the non-recursive term, the right operand is
+    /// the recursive term, which holds one <see cref="WorkTableReference"/>. <c>yytext</c> = the CTE
+    /// name, <c>leftAst</c> = the CTE's column-alias list or null. A rewrite that builds the set
+    /// operation again must carry this slot.
+    /// </summary>
+    RecursiveCte,
 }
