@@ -84,6 +84,16 @@ public sealed record DerivedTableSource(
     public SQLParser.NodeAst? ComputedOnce { get; init; }
 
     /// <summary>
+    /// The SELECT of a <c>LATERAL</c> derived table, as parsed, or null for any other derived table.
+    /// <see cref="Query"/> is the same SELECT as a query model. The binder keeps the parse tree because a
+    /// <c>LATERAL</c> derived table that reads the <c>FROM</c> items to its left runs as a correlated body
+    /// (<c>CorrelatedSubqueryBody</c>): each name of a left item becomes a hidden placeholder in a copy of
+    /// this tree, and the copy runs once for each left row. A <c>LATERAL</c> derived table that reads no left
+    /// item binds and runs as a plain derived table.
+    /// </summary>
+    public SQLParser.NodeAst? LateralBody { get; init; }
+
+    /// <summary>
     /// The alias of the derived table that holds a windowed SELECT. The asterisks keep it apart from
     /// any identifier a user can write without quotes, as for <see cref="SetOperationSource.DerivedAlias"/>.
     /// </summary>

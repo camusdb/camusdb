@@ -182,7 +182,7 @@ internal static class StoredBodyBinder
                     NodeAst inner = Bind(schema, from.leftAst!);
                     return ReferenceEquals(inner, from.leftAst)
                         ? from
-                        : new NodeAst(NodeType.DerivedTableReference, inner, from.rightAst, from.extendedOne, from.extendedTwo, from.extendedThree, from.extendedFour, null, null);
+                        : new NodeAst(NodeType.DerivedTableReference, inner, from.rightAst, from.extendedOne, from.extendedTwo, from.extendedThree, from.extendedFour, null, from.yytext);
                 }
 
             case NodeType.Join:
@@ -324,7 +324,7 @@ internal static class StoredBodyBinder
                     NodeAst inner = Resolve(schema, from.leftAst!, viewName);
                     return ReferenceEquals(inner, from.leftAst)
                         ? from
-                        : new NodeAst(NodeType.DerivedTableReference, inner, from.rightAst, from.extendedOne, from.extendedTwo, from.extendedThree, from.extendedFour, null, null);
+                        : new NodeAst(NodeType.DerivedTableReference, inner, from.rightAst, from.extendedOne, from.extendedTwo, from.extendedThree, from.extendedFour, null, from.yytext);
                 }
 
             case NodeType.Join:

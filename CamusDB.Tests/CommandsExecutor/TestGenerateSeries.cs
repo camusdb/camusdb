@@ -416,9 +416,10 @@ public class TestGenerateSeries : SharedNodeBaseTest
         await AssertFails(executor, database, dbname,
             "SELECT * FROM generate_series(1.5, 3)", CamusDBErrorCodes.InvalidInput, "argument 1 must be an integer");
 
-        // An argument that reads a column of another relation in the same FROM is LATERAL.
+        // An argument that names a column reads the items to the left of the call (LATERAL), so the call
+        // as the only item of a FROM names no column it can read.
         await AssertFails(executor, database, dbname,
-            "SELECT * FROM items t, generate_series(1, t.qty) g", CamusDBErrorCodes.FeatureNotSupported, "LATERAL");
+            "SELECT * FROM generate_series(1, qty) g", CamusDBErrorCodes.UnknownColumn, "qty");
 
         await AssertFails(executor, database, dbname,
             "SELECT * FROM generate_series(1, (SELECT MAX(qty) FROM items)) g",

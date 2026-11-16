@@ -230,8 +230,9 @@ SELECT t FROM split_words('x y') AS s(t);   -- a column alias renames the column
 - **One output column.** `T` is one mapped type, arrays included. `Column` names the column; without
   it, the function name (or the relation alias) names it. A row class with several columns is not
   supported in this version.
-- **Arguments** follow the scalar-function rules, but a call reads no column of another relation in
-  the same `FROM` (there is no `LATERAL`). A NULL argument for a parameter that does not accept NULL
+- **Arguments** follow the scalar-function rules. An argument can name a column of an item to the left
+  of the call in the same `FROM`; the call then runs one time for each row of that item, as a
+  `LATERAL` function does (see [LATERAL](./joins.md#lateral)). A NULL argument for a parameter that does not accept NULL
   gives zero rows, and so does a `null` return value. A `null` element is a NULL row value.
 - **Laziness and disposal.** The server pulls one value at a time and can stop at any point: a
   `LIMIT`, a cancel, an error elsewhere in the query. It then disposes the enumerator, so a `finally`

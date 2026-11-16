@@ -239,6 +239,15 @@ two times, which CamusDB computes once. The source of INSERT … SELECT takes th
 with an index hint keeps the table, because a CTE has no index. The generator does not write a column
 list, `MATERIALIZED`, a CTE that reads another CTE, or a WITH in front of a write.
 
+About one SELECT in five with an inner or LEFT join prints some of those joins as a `LATERAL` derived
+table (see [LATERAL](joins.md#lateral)): `JOIN t1 AS a1 ON p` as `CROSS JOIN LATERAL (SELECT * FROM t1 AS
+a1 WHERE p) AS a1`, and a LEFT JOIN as `LEFT JOIN LATERAL (…) AS a1 ON TRUE`. The rows are the same, so
+every oracle checks the LATERAL path. In a TLP check only the whole query has the LATERAL form, and in a
+NoREC check only the optimized query has it. A join keeps its form when the right table has an index hint
+or the ON holds a subquery, and the JOIN ON variant of TLP keeps every join, because it adds its partition
+to the last ON. The generator does not write a LATERAL derived table that does more than filter one table,
+or a function in FROM that reads a column.
+
 The statement list carries BEGIN, COMMIT and ROLLBACK markers, so a consumer can group statements into
 explicit transactions without a new format. Every list keeps its seed.
 

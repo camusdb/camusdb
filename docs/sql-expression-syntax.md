@@ -502,8 +502,9 @@ resolves to the enclosing query. A name resolves to the nearest query that has i
 - A name that no query has is an unknown column (`CADB0404`), as before.
 
 The names are read in every clause of the subquery, in the subqueries inside it, and in its derived
-tables and set operations. A derived table cannot read the other items of its own `FROM` (that needs
-`LATERAL`, which CamusDB does not have), but it can read the enclosing query, as in PostgreSQL.
+tables and set operations. A derived table cannot read the other items of its own `FROM`, but it can
+read the enclosing query, as in PostgreSQL. A `LATERAL` derived table can also read the items to its
+left in its own `FROM` (see [LATERAL](./joins.md#lateral)).
 
 - An **uncorrelated** subquery runs once, before the statement reads its first row, and its result
   takes its place: a scalar subquery becomes its value, `EXISTS` becomes `true` or `false`, and

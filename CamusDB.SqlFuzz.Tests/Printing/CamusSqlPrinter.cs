@@ -247,7 +247,7 @@ internal sealed class CamusSqlPrinter : ISqlPrinter
         }
 
         sb.Append(" FROM ");
-        WriteFrom(sb, select.From, declared);
+        WriteFrom(sb, select.From, declared, select.LateralJoins);
 
         if (select.Where is not null)
         {
@@ -303,12 +303,23 @@ internal sealed class CamusSqlPrinter : ISqlPrinter
             sb.Append(" OFFSET ").Append(offset.ToString(CultureInfo.InvariantCulture));
     }
 
-    private void WriteFrom(StringBuilder sb, FromItem from) => WriteFrom(sb, from, declared: null);
+    private void WriteFrom(StringBuilder sb, FromItem from) => WriteFrom(sb, from, declared: null, lateral: false);
 
-    private void WriteFrom(StringBuilder sb, FromItem from, IReadOnlyList<string>? declared)
+    private void WriteFrom(StringBuilder sb, FromItem from, IReadOnlyList<string>? declared, bool lateral)
     {
         switch (from)
         {
+            case JoinFrom join when lateral && PrintsAsLateral(join):
+                WriteFrom(sb, join.Left, declared, lateral);
+                sb.Append(join.Kind == JoinKind.Left ? " LEFT JOIN LATERAL (SELECT * FROM " : " CROSS JOIN LATERAL (SELECT * FROM ");
+                WriteFrom(sb, join.Right, declared, lateral);
+                sb.Append(" WHERE ");
+                Write(sb, join.On!);
+                sb.Append(") AS ").Append(join.Right.Alias);
+                if (join.Kind == JoinKind.Left)
+                    sb.Append(" ON TRUE");
+                break;
+
             case TableRef table:
                 bool viaCte = table.ViaCte && table.IndexHint is null && declared is not null && declared.Contains(table.Table);
                 sb.Append(viaCte ? CteName(table.Table) : table.Table).Append(" AS ").Append(table.Alias);
@@ -317,7 +328,7 @@ internal sealed class CamusSqlPrinter : ISqlPrinter
                 break;
 
             case JoinFrom join:
-                WriteFrom(sb, join.Left, declared);
+                WriteFrom(sb, join.Left, declared, lateral);
                 sb.Append(join.Kind switch
                 {
                     JoinKind.Inner => " INNER JOIN ",
@@ -325,7 +336,7 @@ internal sealed class CamusSqlPrinter : ISqlPrinter
                     JoinKind.Right => " RIGHT JOIN ",
                     _ => " CROSS JOIN ",
                 });
-                WriteFrom(sb, join.Right, declared);
+                WriteFrom(sb, join.Right, declared, lateral);
                 if (join.On is not null)
                 {
                     sb.Append(" ON ");
@@ -333,6 +344,35 @@ internal sealed class CamusSqlPrinter : ISqlPrinter
                 }
                 break;
         }
+    }
+
+    /// <summary>
+    /// True when <paramref name="join"/> prints as a <c>LATERAL</c> derived table (see <see cref="JoinFrom.ViaLateral"/>):
+    /// an inner or LEFT join with an ON, no index hint on the right table, and no subquery in the ON. A subquery in
+    /// an ON is refused when it is correlated, and the WHERE of the derived table would accept it.
+    /// </summary>
+    internal static bool PrintsAsLateral(JoinFrom join) =>
+        join.ViaLateral
+        && join.Kind is JoinKind.Inner or JoinKind.Left
+        && join.On is not null
+        && join.Right.IndexHint is null
+        && !HoldsSubquery(join.On);
+
+    private static bool HoldsSubquery(Expr expression)
+    {
+        Stack<object> pending = new();
+        pending.Push(expression);
+
+        while (pending.TryPop(out object? node))
+        {
+            if (node is ExistsExpr or InSubqueryExpr or SelectStmt)
+                return true;
+
+            foreach (object child in ExprWalker.Children(node))
+                pending.Push(child);
+        }
+
+        return false;
     }
 
     private void Write(StringBuilder sb, Expr expression)

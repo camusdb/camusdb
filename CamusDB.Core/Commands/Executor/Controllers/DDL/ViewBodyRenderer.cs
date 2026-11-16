@@ -516,12 +516,24 @@ internal sealed class ViewBodyRenderer : SqlAstRenderer
             }
 
             case NodeType.DerivedTableReference when RecursiveQueryOf(from) is { } recursive:
+                if (LateralAst.IsLateral(from))
+                    sb.Append("LATERAL ");
+
                 RenderRecursiveDerivedTable(sb, from, recursive);
+                return;
+
+            // A function in FROM that reads the items to its left: the parser wrapped the call, so the call
+            // renders and parses again to the same wrap.
+            case NodeType.DerivedTableReference when LateralAst.WrappedFunction(from) is { } wrapped:
+                RenderFrom(sb, wrapped);
                 return;
 
             case NodeType.DerivedTableReference:
                 // A CTE of the body was written out as a derived table when the body was parsed, so the
                 // stored body has no WITH. Its column list renders as the derived table's.
+                if (LateralAst.IsLateral(from))
+                    sb.Append("LATERAL ");
+
                 sb.Append('(');
                 RenderSelectInto(sb, from.leftAst!);
                 sb.Append(") AS ").Append(from.rightAst!.yytext);

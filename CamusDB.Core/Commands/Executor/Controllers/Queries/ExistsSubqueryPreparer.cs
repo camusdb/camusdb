@@ -418,6 +418,38 @@ internal sealed class ExistsSubqueryPreparer
     }
 
     /// <summary>
+    /// Prepares the body of a <c>LATERAL</c> derived table that reads the <c>FROM</c> items to its left. It
+    /// runs through the whole pipeline for each left row, as the body of a correlated scalar subquery does,
+    /// and returns rows of any number of columns.
+    /// </summary>
+    internal async Task<CorrelatedSubqueryBody> PrepareLateralBodyAsync(
+        DatabaseDescriptor database,
+        NodeAst select,
+        SelectQuery bodyQuery,
+        IReadOnlyList<NodeAst> outerReferences,
+        IReadOnlyList<BoundTableSource> outerTables,
+        IReadOnlyList<BoundDerivedTableSource> outerDerived,
+        ExecuteSQLTicket ticket)
+    {
+        CorrelatedSubqueryBody body = await CorrelatedSubqueryBody.PrepareAsync(
+            subqueryExecutor,
+            database,
+            select,
+            bodyQuery,
+            outerReferences,
+            outerTables,
+            outerDerived,
+            ticket,
+            isExistsBody: false,
+            isRelationBody: true).ConfigureAwait(false);
+
+        // A body that binds again for each row was checked in a flow that does not refuse a constant division.
+        ConstantDivisionCheck.CheckSelect(bodyQuery);
+
+        return body;
+    }
+
+    /// <summary>
     /// Prepares a correlated body in the fast form when it fits, and as a <see cref="CorrelatedSubqueryBody"/>
     /// otherwise. Both forms check the body here, so an error does not depend on the outer rows.
     /// </summary>

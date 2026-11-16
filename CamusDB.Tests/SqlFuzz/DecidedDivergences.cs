@@ -574,6 +574,11 @@ public static class DecidedDivergences
             CamusDBErrorCodes.SqlSyntaxError, "1",
             NotSupportedYet),
 
+        new("A RIGHT JOIN LATERAL is refused also when it reads no left item", RowTable,
+            "SELECT a.id FROM d a RIGHT JOIN LATERAL (SELECT 1 AS w) s ON true ORDER BY a.id",
+            CamusDBErrorCodes.InvalidInput, "1",
+            "A RIGHT JOIN keeps every row of its right side, so a LATERAL right side that reads the left side has no left row to run for. PostgreSQL refuses that form only when the right side reads the left side. CamusDB refuses the keyword itself, because a RIGHT JOIN runs as a LEFT JOIN with its sides swapped. Write the derived table without LATERAL when it reads no left item."),
+
         new("A WITH query that the statement does not read is not checked", RowTable,
             "WITH c AS (SELECT id FROM nowhere) SELECT v FROM d WHERE id = 1",
             "10", "relation \"nowhere\" does not exist",

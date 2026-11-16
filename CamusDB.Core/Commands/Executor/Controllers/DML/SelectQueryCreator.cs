@@ -121,7 +121,7 @@ internal sealed class SelectQueryCreator
     {
         if (ast.nodeType != NodeType.Join)
             return ast.nodeType is NodeType.TableReference or NodeType.DerivedTableReference or NodeType.TableFunctionReference
-                or NodeType.WorkTableReference;
+                or NodeType.WorkTableReference or NodeType.Identifier or NodeType.IdentifierWithOpts;
 
         return JoinAstKind.Read(ast) == JoinAstKind.Kind.Cross
             && IsCrossJoinOnlyTree(ast.leftAst!)
@@ -147,6 +147,10 @@ internal sealed class SelectQueryCreator
             NodeType.DerivedTableReference => CreateDerivedTableSource(tableAst),
             NodeType.TableFunctionReference => CreateTableFunctionSource(tableAst),
             NodeType.WorkTableReference => CreateWorkTableSource(tableAst),
+
+            // The stored body of a view drops an alias that repeats the table's name, so a table of its
+            // comma list or cross-join chain can be a bare name.
+            NodeType.Identifier or NodeType.IdentifierWithOpts => CreateTableSource(tableAst),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid comma join table reference"),
         };
 
@@ -192,6 +196,16 @@ internal sealed class SelectQueryCreator
                     joinAst.extendedOne!);
 
             case JoinAstKind.Kind.Right:
+                // A RIGHT JOIN keeps every row of its right side, so a LATERAL right side would have no
+                // left row to run for. PostgreSQL refuses it when the right side reads the left; here the
+                // keyword alone refuses it, because the swap below puts the right side first.
+                if (LateralAst.IsLateral(rightAst))
+                {
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.InvalidInput,
+                        "The join type of a LATERAL derived table must be INNER, LEFT or CROSS");
+                }
+
                 // A bare identifier is a table leaf too: the parser never builds one here, but the stored
                 // body of a view does, because it drops an alias that repeats the table's name.
                 if (leftAst.nodeType is not (NodeType.TableReference or NodeType.DerivedTableReference or NodeType.TableFunctionReference
@@ -275,6 +289,7 @@ internal sealed class SelectQueryCreator
         {
             ColumnAliases = derivedAst.extendedThree is { } columns ? ColumnAliasNames(columns) : null,
             ComputedOnce = derivedAst.extendedFour,
+            LateralBody = LateralAst.IsLateral(derivedAst) ? derivedAst.leftAst : null,
         };
     }
 
@@ -573,10 +588,11 @@ internal sealed class SelectQueryCreator
     /// <c>AS t(n)</c> names the relation <c>t</c> and the column <c>n</c>. A function that names its own
     /// column (an extension's <c>Column = "word"</c>) keeps that name unless the alias renames it.</para>
     ///
-    /// <para><b>Arguments read no column.</b> An argument that names a column would have to read a row
-    /// of another relation in the same <c>FROM</c>, which is <c>LATERAL</c>; that, and a subquery
-    /// argument, are refused here. Everything else — literals, parameters, operators, scalar function
-    /// calls — is evaluated once, before the first row.</para>
+    /// <para><b>Arguments.</b> A call whose arguments name a column reads the items to its left, so the
+    /// parser wraps it in a <c>LATERAL</c> derived table (<see cref="LateralAst.FunctionInFrom"/>) and marks
+    /// the call inside it; only that marked call may name a column here. A subquery argument is refused.
+    /// Everything else (literals, parameters, operators, scalar function calls) is evaluated once, before
+    /// the first row of each run.</para>
     /// </summary>
     private static DerivedTableSource CreateTableFunctionSource(NodeAst functionAst)
     {
@@ -587,8 +603,12 @@ internal sealed class SelectQueryCreator
 
         TableFunction function = TableFunctionRegistry.Resolve(name, arguments.Count);
 
+        // The call inside a LATERAL derived table may name the columns of the items to its left; the bind
+        // of that derived table replaces each such name with the left row's value.
+        bool argumentsMayNameColumns = LateralAst.IsLateralFunction(functionAst);
+
         foreach (NodeAst argument in arguments)
-            RejectNonConstantArgument(function.Name, argument);
+            RejectNonConstantArgument(function.Name, argument, argumentsMayNameColumns);
 
         string? alias = functionAst.extendedOne?.yytext;
 
@@ -648,7 +668,7 @@ internal sealed class SelectQueryCreator
         output.Reverse();
     }
 
-    private static void RejectNonConstantArgument(string functionName, NodeAst argument)
+    private static void RejectNonConstantArgument(string functionName, NodeAst argument, bool mayNameColumns)
     {
         Stack<NodeAst> pending = new();
         pending.Push(argument);
@@ -659,6 +679,9 @@ internal sealed class SelectQueryCreator
 
             switch (node.nodeType)
             {
+                case NodeType.Identifier when mayNameColumns:
+                    continue;
+
                 case NodeType.Identifier:
                     throw new CamusDBException(
                         CamusDBErrorCodes.FeatureNotSupported,

@@ -102,7 +102,10 @@ internal sealed class JoinQueryPlanner
         // the potentially-expensive join-order enumeration / DP.
         // Read the config flag once per plan: it is a mutable static, and reading it again at
         // the Put below could observe a mid-plan flip (Put into a cache the lookup said was off).
-        bool planCacheEnabled = _cache is not null && _options.PlanCacheEnabled;
+        // A LATERAL derived table reads the items to its left, so the join order stays as written: every
+        // reorder could put it before an item it reads. Such a plan has nothing for the plan cache to keep.
+        bool hasLateral = HasLateralSource(bound);
+        bool planCacheEnabled = !hasLateral && _cache is not null && _options.PlanCacheEnabled;
 
         string shapeId = QueryShapeComputer.Compute(bound.Query);
         IReadOnlyList<(string, int)> schemaDeps = CollectSchemaDeps(bound);
@@ -148,6 +151,9 @@ internal sealed class JoinQueryPlanner
             else
                 _cache.RecordReplayFailure();
         }
+
+        if (hasLateral)
+            choice = JoinOrderChoice.WholePredicate(bound.Query.Source, pushdown);
 
         // A miss, or a hit whose order cannot be rebuilt over the current query: plan from the start.
         choice ??= _options.CostBasedJoinOrderEnabled && _stats is not null
@@ -198,6 +204,18 @@ internal sealed class JoinQueryPlanner
                 extensionStamp);
 
         return plan;
+    }
+
+    /// <summary>True when a source of <paramref name="bound"/> is a <c>LATERAL</c> derived table that reads the items to its left.</summary>
+    private static bool HasLateralSource(BoundSelectQuery bound)
+    {
+        foreach (BoundDerivedTableSource derived in bound.DerivedSources)
+        {
+            if (derived.Lateral is not null)
+                return true;
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -489,6 +507,12 @@ internal sealed class JoinQueryPlanner
         JoinEquiJoinIndexMatch? indexMatch = null;
         bool hasIndexMatch = right.Table is not null
             && JoinEquiJoinAnalyzer.TryMatch(right.Table, joinSource.OnPredicate, bound, out indexMatch);
+
+        // A LATERAL right side runs once for each left row, which only the nested loop does: no other
+        // operator reads its right side with a left row in hand.
+        if (right.Derived is { Lateral: not null })
+            return new NestedLoopJoinNode(left, right, joinSource.OnPredicate)
+                { RightExecutionFilter = rightFilter, Kind = kind };
 
         // Test-only overrides — checked before any algorithm selection.
         if (stats?.ForceNestedLoopForTesting == true)

@@ -140,6 +140,19 @@ internal sealed class SelectBindPipeline
     }
 
     /// <summary>
+    /// Prepares the body of a <c>LATERAL</c> derived table, see <see cref="NestedSelectBinder.PrepareLateralAsync"/>.
+    /// </summary>
+    internal Task<CorrelatedSubqueryBody> PrepareLateralAsync(
+        DatabaseDescriptor database,
+        NodeAst select,
+        SelectQuery bodyQuery,
+        IReadOnlyList<NodeAst> outerReferences,
+        IReadOnlyList<BoundTableSource> outerTables,
+        IReadOnlyList<BoundDerivedTableSource> outerDerived,
+        ExecuteSQLTicket ticket) =>
+        existsSubqueryPreparer.PrepareLateralBodyAsync(database, select, bodyQuery, outerReferences, outerTables, outerDerived, ticket);
+
+    /// <summary>
     /// Prepares the WHERE and the SET values of an UPDATE, or the WHERE of a DELETE, on
     /// <paramref name="tableName"/>, whose rows are the outer query of each subquery. Every uncorrelated
     /// subquery folds to its value, as for any other clause. Each correlated one is prepared against the target
@@ -247,6 +260,19 @@ internal readonly struct NestedSelectBinder
     /// <summary>Runs the pipeline over <paramref name="query"/> under the statement's ticket.</summary>
     public ValueTask<SelectBindResult> BindAsync(DatabaseDescriptor database, SelectQuery query) =>
         pipeline.BindAsync(database, query, ticket);
+
+    /// <summary>
+    /// Prepares the body of a <c>LATERAL</c> derived table that reads the <c>FROM</c> items to its left
+    /// (<paramref name="outerTables"/> and <paramref name="outerDerived"/>), under the statement's ticket.
+    /// </summary>
+    public Task<CorrelatedSubqueryBody> PrepareLateralAsync(
+        DatabaseDescriptor database,
+        NodeAst select,
+        SelectQuery bodyQuery,
+        IReadOnlyList<NodeAst> outerReferences,
+        IReadOnlyList<BoundTableSource> outerTables,
+        IReadOnlyList<BoundDerivedTableSource> outerDerived) =>
+        pipeline.PrepareLateralAsync(database, select, bodyQuery, outerReferences, outerTables, outerDerived, ticket);
 }
 
 /// <summary>

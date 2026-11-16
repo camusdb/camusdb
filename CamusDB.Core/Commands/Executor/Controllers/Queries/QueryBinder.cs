@@ -443,6 +443,16 @@ internal sealed class QueryBinder
                         $"Duplicate alias '{derivedSource.Alias}'");
                 }
 
+                // A LATERAL derived table after other FROM items can read them. The items to its left are
+                // the sources bound so far, because a join binds its left side first.
+                if (derivedSource.LateralBody is { } lateralBody
+                    && (sources.Count > 0 || derivedSources.Count > 0)
+                    && await TryBindLateralAsync(database, derivedSource, lateralBody, sources, derivedSources, nested).ConfigureAwait(false) is { } lateral)
+                {
+                    derivedSources.Add(lateral);
+                    return;
+                }
+
                 // The work table of a recursive CTE has no inner query to bind: its columns are the
                 // columns of the CTE, and it opens no table, so there is nothing to authorize.
                 if (derivedSource.WorkTable is { } workTableSource)
@@ -471,7 +481,18 @@ internal sealed class QueryBinder
 
                     // The arguments run only when the source is read, and a LIMIT 0 reads nothing.
                     foreach (NodeAst argument in call.Arguments)
+                    {
+                        // A name that the LATERAL bind around the call did not replace with a left value
+                        // names no column that the call can read.
+                        if (FirstColumnName(argument) is { } unknown)
+                        {
+                            throw new CamusDBException(
+                                CamusDBErrorCodes.UnknownColumn,
+                                $"Unknown column '{unknown}' in an argument of {call.FunctionName} in FROM");
+                        }
+
                         ConditionalResultTypes.Check(argument, lookup: null, recorder: null, allowAggregates: false);
+                    }
 
                     List<DerivedColumnSchema> functionColumns = new(call.ColumnNames.Count);
                     if (function.OutputColumns is { } outputs)
@@ -579,6 +600,112 @@ internal sealed class QueryBinder
                     CamusDBErrorCodes.InvalidInput,
                     $"Unsupported query source: {source.GetType().Name}");
         }
+    }
+
+    /// <summary>
+    /// The first name of a column in the argument <paramref name="argument"/> of a function in FROM, or null. A
+    /// function call keeps its own name in <c>leftAst</c> and a cast keeps its type in <c>rightAst</c>, and a
+    /// subquery argument was refused when the query was created.
+    /// </summary>
+    private static string? FirstColumnName(NodeAst argument)
+    {
+        Stack<NodeAst> pending = new();
+        pending.Push(argument);
+
+        while (pending.TryPop(out NodeAst? node))
+        {
+            switch (node.nodeType)
+            {
+                case NodeType.Identifier:
+                    return node.yytext;
+
+                case NodeType.ExprFuncCall:
+                    if (node.rightAst is not null)
+                        pending.Push(node.rightAst);
+                    continue;
+
+                case NodeType.ExprCast:
+                    if (node.leftAst is not null)
+                        pending.Push(node.leftAst);
+                    continue;
+            }
+
+            foreach (NodeAst? child in (ReadOnlySpan<NodeAst?>)[
+                node.leftAst, node.rightAst,
+                node.extendedOne, node.extendedTwo, node.extendedThree, node.extendedFour,
+                node.extendedFive, node.extendedSix, node.extendedSeven])
+            {
+                if (child is not null)
+                    pending.Push(child);
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Binds a <c>LATERAL</c> derived table whose SELECT names a column of the <c>FROM</c> items to its left
+    /// (<paramref name="leftTables"/> and <paramref name="leftDerived"/>), or returns null when it names none:
+    /// such a derived table binds and runs as a plain one.
+    ///
+    /// <para>The SELECT becomes a correlated body (<see cref="CorrelatedSubqueryBody"/>): each left name is a
+    /// hidden placeholder with the type of its column, and the body runs once for each left row. Names
+    /// resolve as in a subquery: first inside the SELECT, then to the left items. Through
+    /// <paramref name="nested"/> the body is prepared to run. Without one (a view definition under check)
+    /// it binds for its schema only, and the source must not run.</para>
+    /// </summary>
+    private async Task<BoundDerivedTableSource?> TryBindLateralAsync(
+        DatabaseDescriptor database,
+        DerivedTableSource derivedSource,
+        NodeAst lateralBody,
+        List<BoundTableSource> leftTables,
+        List<BoundDerivedTableSource> leftDerived,
+        NestedSelectBinder? nested)
+    {
+        // Copies: the lists grow as the binder goes on to the items on the right.
+        IReadOnlyList<BoundTableSource> outerTables = [.. leftTables];
+        IReadOnlyList<BoundDerivedTableSource> outerDerived = [.. leftDerived];
+
+        IReadOnlyList<NodeAst> outerReferences = await new SubqueryScopeAnalyzer(this)
+            .FindOuterReferencesAsync(database, lateralBody, OuterNameScope.Of(outerTables, outerDerived))
+            .ConfigureAwait(false);
+
+        if (outerReferences.Count == 0)
+            return null;
+
+        CorrelatedSubqueryBody? body = null;
+        BoundSelectQuery bodyBound;
+
+        if (nested is { } binder)
+        {
+            body = await binder
+                .PrepareLateralAsync(database, lateralBody, derivedSource.Query, outerReferences, outerTables, outerDerived)
+                .ConfigureAwait(false);
+
+            bodyBound = body.Checked;
+        }
+        else
+        {
+            CorrelatedSubqueryBody.Substitution substitution = CorrelatedSubqueryBody.Substitute(
+                lateralBody, derivedSource.Query, outerReferences, outerTables, outerDerived);
+
+            bodyBound = await BindAsync(database, new SelectQueryCreator().CreateSelectQuery(substitution.Select), nested: null)
+                .ConfigureAwait(false);
+        }
+
+        IReadOnlyList<DerivedColumnSchema> columns = DerivedTableSchemaBuilder.WithPlainRowKeys(
+            DerivedTableSchemaBuilder.Build(bodyBound.Query, bodyBound),
+            out (string InnerKey, string RowKey)[]? innerRowKeys);
+
+        if (derivedSource.ColumnAliases is { } columnAliases)
+            columns = DerivedTableSchemaBuilder.WithColumnAliases(columns, columnAliases, derivedSource.Alias, ref innerRowKeys);
+
+        return new BoundDerivedTableSource(derivedSource, derivedSource.Alias, columns, bodyBound)
+        {
+            InnerRowKeys = innerRowKeys,
+            Lateral = body,
+            LateralResults = body is { ResultsCanBeKept: true } ? new CorrelatedResultCache<QueryResultRow[]>(body.Outer) : null,
+        };
     }
 
     /// <summary>

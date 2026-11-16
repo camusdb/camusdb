@@ -86,8 +86,9 @@
    NATURAL are not: FULL is already a plain identifier that the foreign-key MATCH FULL clause
    validates in its parse action, and NATURAL has no join form here yet. USING is reserved, as in
    PostgreSQL, for DELETE ... USING: after the target of DELETE FROM a plain word could be the alias
-   of the target or the start of the USING list, and one token of lookahead cannot tell them apart. */
-%token TLEFT TRIGHT TOUTER TCROSS TUSING
+   of the target or the start of the USING list, and one token of lookahead cannot tell them apart.
+   LATERAL is reserved, as in PostgreSQL: before a parenthesis a plain word reads as a table function. */
+%token TLEFT TRIGHT TOUTER TCROSS TUSING TLATERAL
 %token TRENAME TTO TANALYZE TBRANCH TBRANCHES TANCESTORS TEVICT TFORCE TRELINK TORPHAN
 %token TTRUNCATE TWITHOUT
 %token TCASE TWHEN TTHEN TELSE TEND
@@ -1648,15 +1649,18 @@ table_reference : table_name opt_table_alias opt_table_hint
                 { $$.n = new(NodeType.TableReference, $1.n, $2.n, $3.n, null, null, null, null, null); $$.s = $2.s; }
                 | table_function_reference { $$.n = $1.n; $$.s = $1.s; }
                 | derived_table_reference { $$.n = $1.n; $$.s = $1.s; }
+                | TLATERAL derived_table_reference { $$.n = LateralAst.Mark($2.n); $$.s = $2.s; }
+                | TLATERAL table_function_reference { $$.n = $2.n; $$.s = $2.s; }
                 ;
 
 /* A function call in FROM (generate_series(1, 10) AS i). The parenthesis after the name is what
    tells it apart from a table name: a table reference is never followed by one. The function name is
    a plain identifier and is resolved later, by TableFunctionRegistry. leftAst = the name, rightAst =
    the argument list (null for an empty list), extendedOne = the alias, extendedTwo = the column-alias
-   list of AS t(n), or null. */
+   list of AS t(n), or null. A call whose arguments name a column is LATERAL, with or without the
+   keyword, as in PostgreSQL; LateralAst.FunctionInFrom wraps it in a LATERAL derived table. */
 table_function_reference : identifier LPAREN fcall_argument_list RPAREN table_function_alias
-                         { $$.n = new(NodeType.TableFunctionReference, $1.n, $3.n, $5.n, $5.n?.leftAst, null, null, null, null); $$.s = $5.s; }
+                         { $$.n = LateralAst.FunctionInFrom(new(NodeType.TableFunctionReference, $1.n, $3.n, $5.n, $5.n?.leftAst, null, null, null, null)); $$.s = $5.s; }
                          | identifier LPAREN RPAREN table_function_alias
                          { $$.n = new(NodeType.TableFunctionReference, $1.n, null, $4.n, $4.n?.leftAst, null, null, null, null); $$.s = $4.s; }
                          ;

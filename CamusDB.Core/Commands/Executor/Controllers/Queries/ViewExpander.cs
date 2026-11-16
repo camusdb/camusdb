@@ -164,7 +164,7 @@ internal static class ViewExpander
                     NodeAst inner = Rewrite(schema, from.leftAst!, expansionStack, maxDepth, parseBody, authorize);
                     return ReferenceEquals(inner, from.leftAst)
                         ? from
-                        : new NodeAst(NodeType.DerivedTableReference, inner, from.rightAst, from.extendedOne, from.extendedTwo, from.extendedThree, from.extendedFour, null, null);
+                        : new NodeAst(NodeType.DerivedTableReference, inner, from.rightAst, from.extendedOne, from.extendedTwo, from.extendedThree, from.extendedFour, null, from.yytext);
                 }
 
             case NodeType.SetOperationReference:

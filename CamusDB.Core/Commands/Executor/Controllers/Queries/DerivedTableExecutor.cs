@@ -111,6 +111,115 @@ internal sealed class DerivedTableExecutor
             cursor = Produce(database, source, outerTicket, stats, windowStats);
         }
 
+        await foreach (QueryResultRow row in WidenAndFilter(database, source, outerTicket, executionFilter, cursor).ConfigureAwait(false))
+            yield return row;
+    }
+
+    /// <summary>
+    /// The largest number of rows of one run of a <c>LATERAL</c> body that
+    /// <see cref="BoundDerivedTableSource.LateralResults"/> keeps. A run with more rows runs again for the
+    /// next left row with the same values, so a large result costs time, not memory.
+    /// </summary>
+    internal const int MaxKeptLateralRows = 256;
+
+    /// <summary>
+    /// Runs the <c>LATERAL</c> body of <paramref name="source"/> for one left row and streams the rows that
+    /// pass <paramref name="executionFilter"/>. The nested-loop join calls it once for each left row, with
+    /// the row it built for that left row, whose keys are qualified (<c>{alias}.{column}</c>).
+    ///
+    /// <para>The body reads the left values it names (see <see cref="CorrelatedOuterValues"/>). When the body
+    /// can keep its results, a run whose rows all fit in <see cref="MaxKeptLateralRows"/> is kept under those
+    /// values for the rest of the statement, and a later left row with the same values reads the kept rows.
+    /// A run that a reader stops early (a <c>LIMIT</c>) keeps nothing.</para>
+    /// </summary>
+    public async IAsyncEnumerable<QueryResultRow> StreamLateral(
+        DatabaseDescriptor database,
+        BoundDerivedTableSource source,
+        QueryTicket outerTicket,
+        NodeAst? executionFilter,
+        IReadOnlyDictionary<string, ColumnValue> leftRow)
+    {
+        CorrelatedSubqueryBody body = source.Lateral
+            ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"Derived table '{source.Alias}' is not LATERAL");
+
+        ColumnValue[] outerValues = body.Outer.For(leftRow, outerTicket.Parameters, rowKeysAreQualified: true);
+
+        CorrelatedResultCache<QueryResultRow[]>? results = source.LateralResults is { } cache
+            && CorrelatedResultCache<QueryResultRow[]>.TryKey(outerValues)
+                ? cache
+                : null;
+
+        IAsyncEnumerable<QueryResultRow> cursor;
+
+        if (results is not null && results.TryGet(outerValues, out QueryResultRow[] keptRows))
+        {
+            CorrelatedRunProbe.CountHit();
+            cursor = KeptRows(keptRows);
+        }
+        else
+        {
+            cursor = body.RunAsync(database, outerValues, outerTicket.TxnState, outerTicket.Parameters, outerTicket.CancellationToken);
+
+            if (results is not null)
+                cursor = KeepWhenSmall(cursor, results, outerValues);
+        }
+
+        // A * over a join in the body keys its cells as {alias}.{column}; the derived table reads them under
+        // the plain keys its columns declare.
+        if (source.InnerRowKeys is { } renames)
+            cursor = RenameInnerRowKeys(cursor, renames);
+
+        await foreach (QueryResultRow row in WidenAndFilter(database, source, outerTicket, executionFilter, cursor).ConfigureAwait(false))
+            yield return row;
+    }
+
+    private static async IAsyncEnumerable<QueryResultRow> KeptRows(QueryResultRow[] rows)
+    {
+        foreach (QueryResultRow row in rows)
+            yield return row;
+
+        await Task.CompletedTask.ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Streams <paramref name="cursor"/> and, when it ends with at most <see cref="MaxKeptLateralRows"/> rows,
+    /// keeps them in <paramref name="results"/> under <paramref name="key"/>.
+    /// </summary>
+    private static async IAsyncEnumerable<QueryResultRow> KeepWhenSmall(
+        IAsyncEnumerable<QueryResultRow> cursor,
+        CorrelatedResultCache<QueryResultRow[]> results,
+        ColumnValue[] key)
+    {
+        List<QueryResultRow>? kept = new();
+
+        await foreach (QueryResultRow row in cursor.ConfigureAwait(false))
+        {
+            if (kept is not null)
+            {
+                if (kept.Count < MaxKeptLateralRows)
+                    kept.Add(row);
+                else
+                    kept = null;
+            }
+
+            yield return row;
+        }
+
+        if (kept is not null)
+            results.Add(key, [.. kept], kept.Count);
+    }
+
+    /// <summary>
+    /// The last steps of every read of a derived table: each numeric cell widened to its declared type, and
+    /// the filter of the reader.
+    /// </summary>
+    private async IAsyncEnumerable<QueryResultRow> WidenAndFilter(
+        DatabaseDescriptor database,
+        BoundDerivedTableSource source,
+        QueryTicket outerTicket,
+        NodeAst? executionFilter,
+        IAsyncEnumerable<QueryResultRow> cursor)
+    {
         // A cell can carry a narrower numeric type than its column declares (COALESCE(p, 0) gives an
         // INT64 zero for a NULL NUMERIC p). The outer join plans its key strategy from the declared
         // types, so every cell is widened to that type here, before any consumer reads it. A set

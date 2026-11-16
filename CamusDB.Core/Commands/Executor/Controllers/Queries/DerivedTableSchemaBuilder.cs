@@ -1076,7 +1076,9 @@ internal static class DerivedTableSchemaBuilder
     /// </list>
     /// </summary>
     private static ExpressionType? RecordedSubqueryType(NodeAst target) =>
-        target.nodeType is NodeType.Null or NodeType.ExprScalarSubquery ? SubqueryResultTypes.DeclaredTypeOf(target) : null;
+        target.nodeType is NodeType.Null or NodeType.ExprScalarSubquery or NodeType.Placeholder
+            ? SubqueryResultTypes.DeclaredTypeOf(target)
+            : null;
 
     private static ColumnType InferType(
         NodeAst expression,
@@ -1094,7 +1096,8 @@ internal static class DerivedTableSchemaBuilder
             return ColumnType.Bytes;
 
         // A scalar subquery keeps the declared type of its column, so the column has that type and not
-        // the String fallback. See RecordedSubqueryType.
+        // the String fallback. The hidden placeholder of an outer value in a correlated body (a LATERAL
+        // derived table) keeps the type of its outer column the same way. See RecordedSubqueryType.
         if (RecordedSubqueryType(target) is { } recorded)
             return recorded.Type;
 

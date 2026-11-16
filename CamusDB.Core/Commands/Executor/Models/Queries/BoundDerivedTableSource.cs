@@ -48,6 +48,23 @@ public sealed record BoundDerivedTableSource(
     /// </summary>
     internal (string InnerKey, string RowKey)[]? InnerRowKeys { get; init; }
 
+    /// <summary>
+    /// The correlated body of a <c>LATERAL</c> derived table that reads the <c>FROM</c> items to its left,
+    /// or null for any other derived table. The body runs once for each row of those items, so this source
+    /// is never read on its own: the planner makes it the right side of a nested-loop join, whose left
+    /// side holds every item it reads, and that join runs the body for each left row (see
+    /// <see cref="DerivedTableExecutor.StreamLateral"/>). <see cref="InnerBound"/> is then the body bound
+    /// with placeholders for the left names. It gives the columns and must not run.
+    /// </summary>
+    internal CorrelatedSubqueryBody? Lateral { get; init; }
+
+    /// <summary>
+    /// The rows of <see cref="Lateral"/> for each distinct set of left values, for one execution of the
+    /// statement, or null when the body cannot keep its results (see
+    /// <see cref="CorrelatedSubqueryBody.ResultsCanBeKept"/>). Only a small result is kept.
+    /// </summary>
+    internal CorrelatedResultCache<QueryResultRow[]>? LateralResults { get; init; }
+
     public bool HasColumn(string columnName)
     {
         foreach (DerivedColumnSchema column in Columns)

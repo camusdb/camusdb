@@ -297,6 +297,11 @@ public static class PlanRenderer
     private static string RenderNestedLoopJoin(NestedLoopJoinNode node)
     {
         string detail = $"on={RenderExpr(node.OnPredicate)}, right={node.RightSource.Alias}";
+
+        // A LATERAL right side runs once for each left row.
+        if (node.RightSource.Derived is { Lateral: not null })
+            detail += ", lateral";
+
         if (node.RightExecutionFilter is not null)
             detail += $", right-filter={RenderExpr(node.RightExecutionFilter)}";
         detail += RenderRightInput(node.RightPhysicalNode);

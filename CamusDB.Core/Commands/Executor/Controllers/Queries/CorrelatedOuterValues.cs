@@ -36,6 +36,9 @@ internal sealed class CorrelatedOuterValues
     /// <summary>One reference node for each distinct outer name, in the order of the values.</summary>
     public IReadOnlyList<NodeAst> Names => names;
 
+    /// <summary>The outer table sources that the names resolve to.</summary>
+    public IReadOnlyList<BoundTableSource> OuterTables => outerSources;
+
     private CorrelatedOuterValues(
         NodeAst[] names,
         IReadOnlyList<BoundTableSource> outerSources,
@@ -77,10 +80,15 @@ internal sealed class CorrelatedOuterValues
     }
 
     /// <summary>The value of each name in <paramref name="outerRow"/>, in the order of <see cref="Names"/>.</summary>
-    public ColumnValue[] For(IReadOnlyDictionary<string, ColumnValue> outerRow, Dictionary<string, ColumnValue>? statementParameters)
+    /// <param name="rowKeysAreQualified">True for a row of a join, which keys each cell as
+    /// <c>{alias}.{column}</c>, see <see cref="CorrelatedRowMerger.MergeOuterForEvaluation"/>.</param>
+    public ColumnValue[] For(
+        IReadOnlyDictionary<string, ColumnValue> outerRow,
+        Dictionary<string, ColumnValue>? statementParameters,
+        bool rowKeysAreQualified = false)
     {
         Dictionary<string, ColumnValue> merged = CorrelatedRowMerger.MergeOuterForEvaluation(
-            outerRow, outerSources, outerDerivedSources);
+            outerRow, outerSources, outerDerivedSources, rowKeysAreQualified);
 
         ColumnValue[] values = new ColumnValue[names.Length];
 

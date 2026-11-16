@@ -72,6 +72,13 @@ internal sealed class CorrelatedSubqueryBody
     public SelectBindResult? Bound { get; }
 
     /// <summary>
+    /// The body as the preparation checked it: the same binding as <see cref="Bound"/> when the body binds
+    /// once, else a binding that ran no nested subquery. It gives the output columns of the body and must
+    /// not run.
+    /// </summary>
+    public BoundSelectQuery Checked { get; }
+
+    /// <summary>
     /// The static type of the one output column of a body that is not an EXISTS body, or null when the
     /// statement does not show it. The statement checks compare it as they compare the column of an
     /// uncorrelated subquery, see <see cref="SubqueryResultTypes"/>.
@@ -83,6 +90,7 @@ internal sealed class CorrelatedSubqueryBody
         bool isExistsBody,
         NodeAst select,
         SelectBindResult? bound,
+        BoundSelectQuery checkedBound,
         Models.ExpressionType? outputType,
         string[] parameterNames,
         CorrelatedOuterValues outer,
@@ -92,6 +100,7 @@ internal sealed class CorrelatedSubqueryBody
         this.isExistsBody = isExistsBody;
         Select = select;
         Bound = bound;
+        Checked = checkedBound;
         OutputType = outputType;
         this.parameterNames = parameterNames;
         Outer = outer;
@@ -106,6 +115,8 @@ internal sealed class CorrelatedSubqueryBody
     /// </summary>
     /// <param name="bodyQuery">The body as query creation made it, used only to type the outer names.</param>
     /// <param name="isExistsBody">True for the body of an EXISTS, whose output the pipeline can discard.</param>
+    /// <param name="isRelationBody">True for the body of a <c>LATERAL</c> derived table, which returns rows
+    /// of any number of columns. A body that is neither returns one column.</param>
     public static async Task<CorrelatedSubqueryBody> PrepareAsync(
         SubqueryQueryExecutor executor,
         DatabaseDescriptor database,
@@ -115,44 +126,23 @@ internal sealed class CorrelatedSubqueryBody
         IReadOnlyList<BoundTableSource> outerSources,
         IReadOnlyList<BoundDerivedTableSource> outerDerivedSources,
         ExecuteSQLTicket ticket,
-        bool isExistsBody)
+        bool isExistsBody,
+        bool isRelationBody = false)
     {
-        QueryRowNameResolver outerRowNames = new(outerSources, outerDerivedSources);
-        ConditionalResultTypes.ColumnTypeLookup outerTypes = ConditionalResultTypes.LookupFor(
-            new BoundSelectQuery(bodyQuery, outerSources, outerRowNames, outerDerivedSources),
-            excludeOutputAliases: false);
+        Substitution substitution = Substitute(select, bodyQuery, outerReferences, outerSources, outerDerivedSources);
+        NodeAst substituted = substitution.Select;
+        CorrelatedOuterValues outer = substitution.Outer;
+        string[] parameterNames = substitution.ParameterNames;
+        bool resultsCanBeKept = substitution.ResultsCanBeKept;
 
-        // One value for each distinct outer name, in the order of the reader; the placeholder of value i is
-        // named ParameterPrefix + i.
-        CorrelatedOuterValues outer = CorrelatedOuterValues.Create(outerReferences, outerSources, outerDerivedSources, outerRowNames);
-
-        Dictionary<string, NodeAst> placeholders = new(StringComparer.OrdinalIgnoreCase);
-        Dictionary<NodeAst, NodeAst> replacements = new(ReferenceEqualityComparer.Instance);
-        string[] parameterNames = new string[outer.Names.Count];
-
-        for (int i = 0; i < outer.Names.Count; i++)
-        {
-            string name = outer.Names[i].yytext!;
-
-            parameterNames[i] = ParameterPrefix + i.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            placeholders[name] = SubqueryResultTypes.Remember(
-                new NodeAst(NodeType.Placeholder, null, null, null, null, null, null, null, parameterNames[i]),
-                outerTypes(name));
-        }
-
-        foreach (NodeAst reference in outerReferences)
-            replacements[reference] = placeholders[reference.yytext!];
-
-        NodeAst substituted = NodeAstWalk.Replace(select, replacements);
-
-        bool resultsCanBeKept = CorrelatedResultCache<bool>.CanKeepResultsOf(
-            substituted, new HashSet<NodeAst>(placeholders.Values, ReferenceEqualityComparer.Instance));
         SelectBindResult checkedBind;
         SelectBindResult? bound = null;
 
         // A value body returns one column, as an uncorrelated subquery must. A * (also the * over a set
         // operation) shows its column count only once it is bound.
-        if (!isExistsBody)
+        bool isValueBody = !isExistsBody && !isRelationBody;
+
+        if (isValueBody)
             SubqueryQueryExecutor.ValidateSingleColumnProjection(bodyQuery);
 
         if (NestedSubqueryReadsOuterValue(substituted))
@@ -168,14 +158,79 @@ internal sealed class CorrelatedSubqueryBody
 
         Models.ExpressionType? outputType = null;
 
-        if (!isExistsBody)
+        if (isValueBody)
         {
             SubqueryQueryExecutor.ValidateSingleColumnOutput(checkedBind.Bound);
 
             outputType = SubqueryResultTypes.OutputTypeOf(checkedBind.Bound);
         }
 
-        return new CorrelatedSubqueryBody(executor, isExistsBody, substituted, bound, outputType, parameterNames, outer, resultsCanBeKept);
+        return new CorrelatedSubqueryBody(
+            executor, isExistsBody, substituted, bound, checkedBind.Bound, outputType, parameterNames, outer, resultsCanBeKept);
+    }
+
+    /// <summary>
+    /// The body with a hidden placeholder for each outer name, and the reader of the outer values.
+    /// </summary>
+    /// <param name="Select">A copy of the body in which each outer reference is a hidden placeholder.</param>
+    /// <param name="Outer">Reads the value of each placeholder from an outer row.</param>
+    /// <param name="ParameterNames">The placeholder name of each value of <paramref name="Outer"/>.</param>
+    /// <param name="ResultsCanBeKept">See <see cref="CorrelatedSubqueryBody.ResultsCanBeKept"/>.</param>
+    internal readonly record struct Substitution(
+        NodeAst Select,
+        CorrelatedOuterValues Outer,
+        string[] ParameterNames,
+        bool ResultsCanBeKept);
+
+    /// <summary>
+    /// Replaces each of <paramref name="outerReferences"/> in a copy of <paramref name="select"/> with a hidden
+    /// placeholder that has the type of its outer column. It binds nothing and reads no row, so a bind for the
+    /// schema only (a view definition) can use the copy, see <c>QueryBinder</c>.
+    /// </summary>
+    internal static Substitution Substitute(
+        NodeAst select,
+        SelectQuery bodyQuery,
+        IReadOnlyList<NodeAst> outerReferences,
+        IReadOnlyList<BoundTableSource> outerSources,
+        IReadOnlyList<BoundDerivedTableSource> outerDerivedSources)
+    {
+        QueryRowNameResolver outerRowNames = new(outerSources, outerDerivedSources);
+        ConditionalResultTypes.ColumnTypeLookup outerTypes = ConditionalResultTypes.LookupFor(
+            new BoundSelectQuery(bodyQuery, outerSources, outerRowNames, outerDerivedSources),
+            excludeOutputAliases: false);
+
+        // One value for each distinct outer name, in the order of the reader; the placeholder of value i is
+        // named ParameterPrefix + i.
+        CorrelatedOuterValues outer = CorrelatedOuterValues.Create(outerReferences, outerSources, outerDerivedSources, outerRowNames);
+
+        Dictionary<string, NodeAst> placeholders = new(StringComparer.OrdinalIgnoreCase);
+        Dictionary<NodeAst, NodeAst> replacements = new(ReferenceEqualityComparer.Instance);
+        string[] parameterNames = new string[outer.Names.Count];
+
+        // A body inside another correlated body (a LATERAL derived table in a correlated subquery) already
+        // holds the placeholders of the body around it, whose values come in with the statement parameters.
+        // Its own placeholders take the next free numbers, so a value of this body cannot replace one of those.
+        int first = NextFreePlaceholderNumber(select);
+
+        for (int i = 0; i < outer.Names.Count; i++)
+        {
+            string name = outer.Names[i].yytext!;
+
+            parameterNames[i] = ParameterPrefix + (first + i).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            placeholders[name] = SubqueryResultTypes.Remember(
+                new NodeAst(NodeType.Placeholder, null, null, null, null, null, null, null, parameterNames[i]),
+                outerTypes(name));
+        }
+
+        foreach (NodeAst reference in outerReferences)
+            replacements[reference] = placeholders[reference.yytext!];
+
+        NodeAst substituted = NodeAstWalk.Replace(select, replacements);
+
+        bool resultsCanBeKept = CorrelatedResultCache<bool>.CanKeepResultsOf(
+            substituted, new HashSet<NodeAst>(placeholders.Values, ReferenceEqualityComparer.Instance));
+
+        return new Substitution(substituted, outer, parameterNames, resultsCanBeKept);
     }
 
     /// <summary>
@@ -232,6 +287,39 @@ internal sealed class CorrelatedSubqueryBody
             parameters[parameterNames[i]] = outerValues[i];
 
         return parameters;
+    }
+
+    /// <summary>
+    /// One more than the largest number of a hidden placeholder in <paramref name="select"/>, or 0 when it has
+    /// none.
+    /// </summary>
+    private static int NextFreePlaceholderNumber(NodeAst select)
+    {
+        int next = 0;
+        Stack<NodeAst> pending = new();
+        pending.Push(select);
+
+        while (pending.TryPop(out NodeAst? node))
+        {
+            if (IsHiddenPlaceholder(node)
+                && int.TryParse(node.yytext.AsSpan(ParameterPrefix.Length), System.Globalization.NumberStyles.None,
+                    System.Globalization.CultureInfo.InvariantCulture, out int number)
+                && number >= next)
+            {
+                next = number + 1;
+            }
+
+            foreach (NodeAst? child in (ReadOnlySpan<NodeAst?>)[
+                node.leftAst, node.rightAst,
+                node.extendedOne, node.extendedTwo, node.extendedThree, node.extendedFour,
+                node.extendedFive, node.extendedSix, node.extendedSeven])
+            {
+                if (child is not null)
+                    pending.Push(child);
+            }
+        }
+
+        return next;
     }
 
     /// <summary>

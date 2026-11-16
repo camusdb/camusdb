@@ -269,7 +269,16 @@ internal enum JoinKind
 }
 
 /// <summary>A join. <see cref="On"/> is null for a CROSS join only.</summary>
-internal sealed record JoinFrom(FromItem Left, JoinKind Kind, TableRef Right, Expr? On) : FromItem;
+internal sealed record JoinFrom(FromItem Left, JoinKind Kind, TableRef Right, Expr? On) : FromItem
+{
+    /// <summary>
+    /// True when a SELECT with <see cref="SelectStmt.LateralJoins"/> prints this join as a <c>LATERAL</c> derived
+    /// table: <c>JOIN t AS b ON p</c> as <c>CROSS JOIN LATERAL (SELECT * FROM t AS b WHERE p) AS b</c>, and a
+    /// LEFT JOIN as <c>LEFT JOIN LATERAL (…) AS b ON TRUE</c>. The rows are the same either way. The printer
+    /// keeps the join form for any other join, an index hint on the right table, and an ON with a subquery.
+    /// </summary>
+    public bool ViaLateral { get; init; }
+}
 
 internal sealed record SelectItem(Expr Expr, string? Alias = null);
 
@@ -355,6 +364,13 @@ internal sealed record SelectStmt(
     /// start of a statement and inlines in parentheses.
     /// </summary>
     public IReadOnlyList<string>? CteTables { get; init; }
+
+    /// <summary>
+    /// True when this SELECT prints each join of its FROM that is marked <see cref="JoinFrom.ViaLateral"/> as a
+    /// <c>LATERAL</c> derived table. A statement that an oracle builds from parts of another one prints the
+    /// joins as written.
+    /// </summary>
+    public bool LateralJoins { get; init; }
 }
 
 /// <summary>An EXPLAIN of a SELECT, for the plan names in a finding.</summary>

@@ -1,6 +1,7 @@
 # Joins
 
-CamusDB supports four join forms in the `FROM` clause of a `SELECT`:
+CamusDB supports four join forms in the `FROM` clause of a `SELECT`, and `LATERAL` derived tables
+(see [LATERAL](#lateral)):
 
 | Form | Syntax | Rows returned |
 |------|--------|---------------|
@@ -100,6 +101,61 @@ A join names its output columns as PostgreSQL does:
 equi-join hoist the comma form uses, so a `WHERE a.x = b.x` still becomes an `ON` predicate. A
 cross join that sits among `ON` joins becomes an inner join on the literal `TRUE`.
 
+## LATERAL
+
+A derived table with the keyword `LATERAL` can read the columns of the `FROM` items to its left. It runs
+one time for each row of those items, as in PostgreSQL:
+
+```sql
+-- The two most expensive orders of each customer.
+SELECT c.id, o.id, o.total
+FROM customers c
+CROSS JOIN LATERAL (
+    SELECT id, total FROM orders WHERE orders.customer_id = c.id ORDER BY total DESC LIMIT 2
+) o;
+
+-- Name a computed value once, and read it in later expressions.
+SELECT p.id, v.area, v.area * p.price AS cost
+FROM plots p, LATERAL (SELECT p.width * p.depth AS area) v;
+
+-- Keep a customer with no order: a LEFT JOIN pads the row with NULL.
+SELECT c.id, n.orders
+FROM customers c
+LEFT JOIN LATERAL (SELECT COUNT(*) AS orders FROM orders WHERE customer_id = c.id) n ON true;
+```
+
+The rules:
+
+- **Join forms.** `LATERAL` can follow a comma, `CROSS JOIN`, `JOIN … ON` and `LEFT JOIN … ON`. A
+  `RIGHT JOIN LATERAL` is refused with `CADB0400`, because the right side of a right join has no left row
+  to run for (see [PostgreSQL differences](postgresql-differences.md#lateral)). There is no `CROSS APPLY`
+  or `OUTER APPLY`: write `CROSS JOIN LATERAL (…)` and `LEFT JOIN LATERAL (…) ON true`.
+- **Names.** A name in the derived table resolves first to the derived table's own `FROM`, then to the
+  items to its left, then to the query around the statement part, as for a subquery. A `LATERAL` derived
+  table cannot read an item to its right. A second `LATERAL` derived table can read the first one.
+- **Without `LATERAL`.** A derived table without the keyword cannot read the items of its own `FROM`; a
+  name of such an item is an unknown alias. A `LATERAL` derived table that reads no item to its left runs
+  one time, as a plain derived table.
+- **Functions in `FROM`.** A set-returning function whose arguments name a column is `LATERAL` with or
+  without the keyword, as in PostgreSQL: `FROM t, generate_series(1, t.n) AS g` gives each row of `t`
+  the numbers 1 to `t.n`. A function whose arguments name no column runs one time.
+- **The body.** The derived table can be any `SELECT`: a join, an aggregate, `GROUP BY`, `ORDER BY` and
+  `LIMIT`, a window function, a set operation, a subquery, or no `FROM`.
+- **Views and writes.** A view body, `INSERT … SELECT`, `CREATE TABLE … AS`, `UPDATE … FROM` and
+  `DELETE … USING` can hold a `LATERAL` derived table. `SHOW CREATE VIEW` shows the `LATERAL` keyword.
+- **A reserved word.** `LATERAL` is reserved, as in PostgreSQL. A column or table named `lateral` must be
+  quoted with backticks.
+
+How it runs:
+
+- The join keeps the order written in the `FROM` clause, because a reorder could put the derived table
+  before an item that it reads. The plan cache keeps no join order for such a query.
+- The join is always a nested loop: for each left row, the derived table runs with the left values that
+  it reads. `EXPLAIN` shows `nested-loop-join(…, right=o, lateral)`.
+- Left rows with the same values that the derived table reads share one run in a statement. A run of at
+  most 256 rows is kept for later rows with the same values. A derived table that calls a volatile
+  function, such as `random()`, runs again for each left row.
+
 ## What EXPLAIN shows
 
 Every join operator serves a left outer join, because in each of them the left input is the
@@ -138,6 +194,8 @@ remote probe span returns matched rows only and cannot pad.
 - A `WHERE` conjunct on the null-extended side runs after the join, even when it is
   null-rejecting and the join could have been simplified to an inner join.
 - A `RIGHT JOIN` after another join is not supported (see above).
+- A query with a `LATERAL` derived table keeps its declared join order, and its `LATERAL` join is
+  always a nested loop (see [LATERAL](#lateral)).
 - An `ON` equality between columns of two types (`INT64 = FLOAT64`, `INT64 = NUMERIC`) is not a key
   for a hash join, a merge join or an index probe, so that join always runs as a nested loop. The
   rows are correct: `1 = 1.0` matches and `2 = 2.5` does not. See

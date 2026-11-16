@@ -46,6 +46,9 @@ internal enum StatementFeature
 
     /// <summary>A WITH in front of a SELECT that reads some of its tables through a CTE (see <see cref="SelectStmt.CteTables"/>).</summary>
     CommonTableExpressions,
+
+    /// <summary>A join of a SELECT printed as a <c>LATERAL</c> derived table (see <see cref="SelectStmt.LateralJoins"/>).</summary>
+    LateralJoins,
     Analyze,
     UniqueIndexes,
     CoveringIndexes,

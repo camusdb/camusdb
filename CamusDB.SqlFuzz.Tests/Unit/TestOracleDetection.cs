@@ -227,6 +227,25 @@ internal sealed class TestOracleDetection
         AssertDetects(new NoRecCheck(true, T0ViaCte, [new SelectItem(C0), new SelectItem(C2)], P) { CteTables = ["t0"] },
             runner, LoseRowThroughCte, "norec:rows:mismatch");
 
+    // -- LATERAL --------------------------------------------------------------------------------
+
+    /// <summary>A fault in the LATERAL path alone: a query that prints a join as a LATERAL derived table loses its last row.</summary>
+    private static StatementOutcome? LoseRowThroughLateral(string sql, StatementOutcome o) =>
+        sql.Contains(" JOIN LATERAL (", StringComparison.Ordinal) ? FaultyExecutor.DropLastRow(o) : null;
+
+    private static readonly JoinFrom SelfJoinViaLateral = new(T0, JoinKind.Inner, new TableRef("t0", "a1"),
+        new BinaryExpr(BinaryOp.Eq, C0, new ColumnExpr("a1", "c0", FuzzType.Int64), FuzzType.Bool)) { ViaLateral = true };
+
+    [Test]
+    public Task TlpReportsAWholeQueryThroughALateralJoinThatLosesARow() =>
+        AssertDetects(new TlpCheck(TlpVariant.Where, SelfJoinViaLateral, [new SelectItem(C0), new SelectItem(C2)], P) { LateralJoins = true },
+            runner, LoseRowThroughLateral, "tlp:where:mismatch");
+
+    [Test]
+    public Task NoRecReportsAnOptimizedQueryThroughALateralJoinThatLosesARow() =>
+        AssertDetects(new NoRecCheck(true, SelfJoinViaLateral, [new SelectItem(C0), new SelectItem(C2)], P) { LateralJoins = true },
+            runner, LoseRowThroughLateral, "norec:rows:mismatch");
+
     // -- Plan equivalence -----------------------------------------------------------------------
 
     /// <summary>

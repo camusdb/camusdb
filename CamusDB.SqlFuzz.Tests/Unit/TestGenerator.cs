@@ -281,6 +281,54 @@ internal sealed class TestGenerator
             Is.EqualTo("WITH cte_t0 AS (SELECT * FROM t0) SELECT a0.c0 FROM cte_t0 AS a0 UNION ALL SELECT a1.c0 FROM cte_t0 AS a1"));
     }
 
+    /// <summary>
+    /// Some SELECTs with an inner or LEFT join print one of those joins as a LATERAL derived table that holds
+    /// the ON condition as its WHERE. A statement that reuses the FROM without the flag prints the join.
+    /// </summary>
+    [Test]
+    public void LateralJoinsAppearAndPrintAsDerivedTables()
+    {
+        int lateralSelects = 0;
+
+        for (ulong seed = 1; seed <= 40; seed++)
+        {
+            StatementGenerator generator = new(new FuzzRandom(seed), GeneratorProfile.CamusDB);
+            generator.GenerateSchema();
+            generator.GenerateData();
+
+            for (int i = 0; i < 50; i++)
+            {
+                SelectStmt select = generator.GenerateSelect(SelectOptions.Comparable);
+                if (!select.LateralJoins)
+                    continue;
+
+                lateralSelects++;
+                string sql = CamusSqlPrinter.Instance.Print(select);
+                Assert.That(sql, Does.Contain(" JOIN LATERAL (SELECT * FROM "), sql);
+            }
+        }
+
+        Assert.That(lateralSelects, Is.GreaterThan(30), "SELECTs with a LATERAL join");
+
+        ColumnExpr left = new("a0", "c0", FuzzType.Int64);
+        ColumnExpr right = new("a1", "c0", FuzzType.Int64);
+        BinaryExpr on = new(BinaryOp.Eq, left, right, FuzzType.Bool);
+
+        JoinFrom inner = new(new TableRef("t0", "a0"), JoinKind.Inner, new TableRef("t1", "a1"), on) { ViaLateral = true };
+        Assert.That(CamusSqlPrinter.Instance.Print(new SelectStmt([], inner)),
+            Is.EqualTo("SELECT * FROM t0 AS a0 INNER JOIN t1 AS a1 ON (a0.c0 = a1.c0)"));
+        Assert.That(CamusSqlPrinter.Instance.Print(new SelectStmt([], inner) { LateralJoins = true }),
+            Is.EqualTo("SELECT * FROM t0 AS a0 CROSS JOIN LATERAL (SELECT * FROM t1 AS a1 WHERE (a0.c0 = a1.c0)) AS a1"));
+
+        JoinFrom outer = inner with { Kind = JoinKind.Left };
+        Assert.That(CamusSqlPrinter.Instance.Print(new SelectStmt([], outer) { LateralJoins = true }),
+            Is.EqualTo("SELECT * FROM t0 AS a0 LEFT JOIN LATERAL (SELECT * FROM t1 AS a1 WHERE (a0.c0 = a1.c0)) AS a1 ON TRUE"));
+
+        // An index hint on the right table keeps the join form.
+        JoinFrom hinted = inner with { Right = new TableRef("t1", "a1", "t1_i0") };
+        StringAssert.DoesNotContain("LATERAL", CamusSqlPrinter.Instance.Print(new SelectStmt([], hinted) { LateralJoins = true }));
+    }
+
     private static IEnumerable<TableRef> Tables(FromItem from) => from switch
     {
         TableRef table => [table],

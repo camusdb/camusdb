@@ -237,8 +237,9 @@ come out in the stored order. A document of the wrong kind fails before the firs
 PostgreSQL message (for example `cannot call jsonb_each on a non-object`).
 
 The argument is evaluated once, before the first row. It can be a literal, a parameter or an
-expression without columns. A column of another relation in the same `FROM`
-(`FROM t, jsonb_each(t.doc)`) is a `LATERAL` reference, and CamusDB does not support `LATERAL`.
+expression without columns. It can also name a column of an item to the left of the function in the
+same `FROM`: `FROM t, jsonb_each(t.doc) AS e` runs the function one time for each row of `t`. Such a
+call is `LATERAL`, with or without the keyword, as in PostgreSQL. See [LATERAL](./joins.md#lateral).
 
 `key` is a reserved word in CamusDB (`PRIMARY KEY`). It is accepted as a column reference in an
 expression and after a dot (`SELECT key`, `e.key`), so the `jsonb_each` columns can be read by name.
@@ -418,7 +419,6 @@ part of a document.
 | A text column as a document operand | Refused: the operator needs `jsonb`. | Parsed as a document, as a literal is. |
 | Text that is not JSON compared with a document | The literal is refused. | Equal to no document. |
 | `jsonb_agg(x ORDER BY y)` | Supported. | Not supported. |
-| `LATERAL` (`FROM t, jsonb_each(t.doc)`) | Supported. | Not supported. |
 | SQL/JSON path (`jsonpath`, `@?`, `@@`, `jsonb_path_query`) | Supported. | Not supported. |
 | Subscripts (`doc['key']`) | Supported (PostgreSQL 14). | Not supported. |
 | `row_to_json`, `jsonb_to_record`, `jsonb_populate_record` | Supported. | Not supported. |

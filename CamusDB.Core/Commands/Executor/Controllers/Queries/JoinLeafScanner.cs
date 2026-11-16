@@ -98,6 +98,17 @@ internal sealed class JoinLeafScanner
             yield return row;
     }
 
+    /// <summary>
+    /// Reads a <c>LATERAL</c> right side for one left row of a nested-loop join, see
+    /// <see cref="DerivedTableExecutor.StreamLateral"/>.
+    /// </summary>
+    internal IAsyncEnumerable<QueryResultRow> ScanLateralRightSource(
+        BoundDerivedTableSource source,
+        NodeAst? executionFilter,
+        QueryPlan plan,
+        IReadOnlyDictionary<string, ColumnValue> leftRow) =>
+        derivedTableExecutor.StreamLateral(plan.Database, source, plan.Ticket, executionFilter, leftRow);
+
     internal async IAsyncEnumerable<QueryResultRow> ScanBoundTable(
         BoundTableSource source,
         NodeAst? executionFilter,
@@ -439,6 +450,14 @@ internal sealed class JoinLeafScanner
         SetOperationStats? setOperationStats = null,
         WindowStats? windowStats = null)
     {
+        // A LATERAL derived table has rows only for a left row, which the nested-loop join gives it.
+        if (source.Lateral is not null)
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                $"LATERAL derived table '{source.Alias}' was read without the left row it reads");
+        }
+
         // A windowed SELECT's derived table is read once too: its window operator already holds what
         // it must, and keeping its output again would copy every row a second time.
         // The reader of a recursive CTE streams too when it is read once: a LIMIT over a recursion with

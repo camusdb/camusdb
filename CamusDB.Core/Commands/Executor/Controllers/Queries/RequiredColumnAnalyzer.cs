@@ -147,6 +147,7 @@ internal static class RequiredColumnAnalyzer
             requiredByAlias[source.Alias] = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         CollectJoinSources(bound.Query.Source, bound, ticket, postJoinFilter, scanFiltersByAlias, requiredByAlias);
+        CollectLateralOuterColumns(bound, requiredByAlias);
 
         Dictionary<string, IReadOnlySet<string>?> output = new(StringComparer.OrdinalIgnoreCase);
 
@@ -154,6 +155,45 @@ internal static class RequiredColumnAnalyzer
             output[entry.Key] = entry.Value;
 
         return output;
+    }
+
+    /// <summary>
+    /// Adds the left columns that each <c>LATERAL</c> body reads. The body is not part of the statement's
+    /// clauses, so no other collector sees its names, and a left table scan that skipped such a column would
+    /// give the body a row without it.
+    /// </summary>
+    private static void CollectLateralOuterColumns(BoundSelectQuery bound, Dictionary<string, HashSet<string>> requiredByAlias)
+    {
+        foreach (BoundDerivedTableSource derived in bound.DerivedSources)
+        {
+            if (derived.Lateral is not { } body)
+                continue;
+
+            foreach (NodeAst name in body.Outer.Names)
+            {
+                string text = name.yytext!;
+                int dot = text.LastIndexOf('.');
+
+                if (dot > 0)
+                {
+                    if (requiredByAlias.TryGetValue(text[..dot], out HashSet<string>? qualified))
+                        qualified.Add(text[(dot + 1)..]);
+
+                    continue;
+                }
+
+                // A bare name reads the left table that has the column; the bind already refused a name
+                // that two left sources have.
+                foreach (BoundTableSource source in body.Outer.OuterTables)
+                {
+                    if (requiredByAlias.TryGetValue(source.Alias, out HashSet<string>? bare)
+                        && source.Table.Schema.Columns?.Exists(c => string.Equals(c.Name, text, StringComparison.OrdinalIgnoreCase)) == true)
+                    {
+                        bare.Add(text);
+                    }
+                }
+            }
+        }
     }
 
     private static void CollectJoinSources(

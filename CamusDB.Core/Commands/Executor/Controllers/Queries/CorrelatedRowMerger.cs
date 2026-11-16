@@ -43,13 +43,17 @@ internal static class CorrelatedRowMerger
     /// qualified key. A correlated subquery that runs through the whole pipeline reads its outer values
     /// from this row, see <see cref="CorrelatedSubqueryBody"/>.
     /// </summary>
+    /// <param name="rowKeysAreQualified">True when <paramref name="outerRow"/> keys each cell as
+    /// <c>{alias}.{column}</c> whatever the number of sources, as a row of a join does. A row of a query
+    /// over one source keys its cells by the bare column name.</param>
     public static Dictionary<string, ColumnValue> MergeOuterForEvaluation(
         IReadOnlyDictionary<string, ColumnValue> outerRow,
         IReadOnlyList<BoundTableSource> outerTableSources,
-        IReadOnlyList<BoundDerivedTableSource> outerDerivedSources)
+        IReadOnlyList<BoundDerivedTableSource> outerDerivedSources,
+        bool rowKeysAreQualified = false)
     {
         Dictionary<string, ColumnValue> merged = new(StringComparer.OrdinalIgnoreCase);
-        MergeOuterRow(merged, outerRow, outerTableSources, outerDerivedSources);
+        MergeOuterRow(merged, outerRow, outerTableSources, outerDerivedSources, rowKeysAreQualified);
         return merged;
     }
 
@@ -57,9 +61,10 @@ internal static class CorrelatedRowMerger
         Dictionary<string, ColumnValue> merged,
         IReadOnlyDictionary<string, ColumnValue> outerRow,
         IReadOnlyList<BoundTableSource> outerTableSources,
-        IReadOnlyList<BoundDerivedTableSource> outerDerivedSources)
+        IReadOnlyList<BoundDerivedTableSource> outerDerivedSources,
+        bool rowKeysAreQualified = false)
     {
-        bool useQualifiedOuterKeys = UsesQualifiedOuterKeys(outerTableSources, outerDerivedSources);
+        bool useQualifiedOuterKeys = rowKeysAreQualified || UsesQualifiedOuterKeys(outerTableSources, outerDerivedSources);
 
         foreach (BoundTableSource outerSource in outerTableSources)
             MergeOuterColumns(merged, outerRow, outerSource.Alias, GetTableColumnNames(outerSource), useQualifiedOuterKeys);

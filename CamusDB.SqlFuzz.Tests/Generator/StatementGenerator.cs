@@ -5,6 +5,8 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.SqlFuzz.Tests.Printing;
+
 namespace CamusDB.SqlFuzz.Tests.Generator;
 
 /// <summary>The generated schema of one round: the tables, their indexes, and which STRING columns hold large values.</summary>
@@ -470,10 +472,15 @@ internal sealed class StatementGenerator
     /// table that the FROM names two times (a self join) gives a CTE that the statement reads two times.
     /// A reference with an index hint keeps the table: a CTE has no index.
     /// </summary>
-    private SelectStmt WithCtes(SelectStmt select) =>
-        ChooseCteTables(select.From) is { } chosen
-            ? select with { From = ThroughCtes(select.From, chosen), CteTables = chosen }
+    private SelectStmt WithCtes(SelectStmt select)
+    {
+        if (ChooseCteTables(select.From) is { } chosen)
+            select = select with { From = ThroughCtes(select.From, chosen), CteTables = chosen };
+
+        return ChooseLateralJoins(select.From) is { } lateral
+            ? select with { From = lateral, LateralJoins = true }
             : select;
+    }
 
     /// <summary>
     /// For about one FROM in five, some of its tables without an index hint, for a SELECT to read through
@@ -493,6 +500,32 @@ internal sealed class StatementGenerator
             chosen.Add(random.Pick(tables));
 
         return chosen;
+    }
+
+    /// <summary>
+    /// For about one FROM in five with an inner or LEFT join, <paramref name="from"/> with some of those joins marked
+    /// <see cref="JoinFrom.ViaLateral"/>, for a SELECT with <see cref="SelectStmt.LateralJoins"/>; null otherwise, and
+    /// for a profile without LATERAL joins.
+    /// </summary>
+    public FromItem? ChooseLateralJoins(FromItem from)
+    {
+        if (!profile.Allows(StatementFeature.LateralJoins) || from is not JoinFrom || !random.Chance(0.2))
+            return null;
+
+        bool marked = false;
+        FromItem result = MarkLateral(from, ref marked);
+        return marked ? result : null;
+    }
+
+    private FromItem MarkLateral(FromItem from, ref bool marked)
+    {
+        if (from is not JoinFrom join)
+            return from;
+
+        FromItem left = MarkLateral(join.Left, ref marked);
+        bool mark = CamusSqlPrinter.PrintsAsLateral(join with { ViaLateral = true }) && random.Chance(0.7);
+        marked |= mark;
+        return join with { Left = left, ViaLateral = mark };
     }
 
     /// <summary><paramref name="from"/> with each reference to a table of <paramref name="tables"/>, and no index hint, marked <see cref="TableRef.ViaCte"/>.</summary>

@@ -127,8 +127,9 @@ internal sealed class OuterNameScope
 ///
 /// <para>A derived table in the FROM of a level, and each operand of a set operation there, is a level
 /// too. Its scope is the levels around the query whose FROM holds it, not that query itself: a derived
-/// table cannot read the other items of its own FROM (that needs LATERAL), but it can read the outer
-/// query, as in PostgreSQL. A view is a table here, because its body is not part of the statement.</para>
+/// table cannot read the other items of its own FROM, but it can read the outer query, as in PostgreSQL. A
+/// <c>LATERAL</c> derived table can also read the items of its own FROM, so its scope starts at the query
+/// whose FROM holds it. A view is a table here, because its body is not part of the statement.</para>
 /// </summary>
 internal sealed class SubqueryScopeAnalyzer
 {
@@ -315,6 +316,13 @@ internal sealed class SubqueryScopeAnalyzer
                     sources.Push(join.Right);
                     break;
 
+                // A LATERAL derived table also reads the items of the FROM that holds it, so its scope
+                // starts at that level. A name of an item to its right then counts as inside too, and
+                // the bind of the derived table refuses it.
+                case DerivedTableSource { Function: null, LateralBody: not null } lateral:
+                    PushLevels(levels, lateral.Query, level);
+                    break;
+
                 // A table function, such as a series or the one row of a SELECT with no FROM, is a
                 // derived table with no FROM of its own and no name to read.
                 case DerivedTableSource { Function: null } derived:
@@ -395,6 +403,15 @@ internal sealed class SubqueryScopeAnalyzer
 
         while (sources.TryPop(out QuerySource? source))
         {
+            // The arguments of a call in a LATERAL derived table can name the items to its left.
+            if (source is DerivedTableSource { Function: { } call })
+            {
+                foreach (NodeAst argument in call.Arguments)
+                    CollectNames(argument, identifiers, nested, outputNameIsLocal: false);
+
+                continue;
+            }
+
             if (source is not JoinSource join)
                 continue;
 

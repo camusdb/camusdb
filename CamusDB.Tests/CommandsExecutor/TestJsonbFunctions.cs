@@ -232,10 +232,11 @@ internal sealed class TestJsonbFunctions : SharedNodeBaseTest
             await Run(executor, db, "SELECT * FROM jsonb_each('{}') AS e(a, b, c)"))!;
         StringAssert.Contains("returns 2 columns", tooMany.Message);
 
-        // A table function cannot read a column of another relation of the same FROM (that is LATERAL).
+        // A table function reads a column of an item to its left (LATERAL), once for each row of that item.
         await ExecDDL(executor, db, "CREATE TABLE docs (id int64 PRIMARY KEY, doc jsonb)");
-        Assert.ThrowsAsync<CamusDBException>(async () =>
-            await Run(executor, db, "SELECT e.key FROM docs, jsonb_each(docs.doc) AS e"));
+        await Exec(executor, db, "INSERT INTO docs (id, doc) VALUES (1, '{\"a\": 1, \"b\": 2}'), (2, '{\"c\": 3}')");
+        Assert.AreEqual("1\u001fa\n1\u001fb\n2\u001fc",
+            await Run(executor, db, "SELECT docs.id, e.key FROM docs, jsonb_each(docs.doc) AS e ORDER BY docs.id, e.key"));
     }
 
     private static async Task ExecDDL(CommandExecutor executor, DatabaseDescriptor db, string sql)

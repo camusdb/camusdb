@@ -100,6 +100,24 @@ public sealed class TestViews : SharedNodeBaseTest
     }
 
     [Test]
+    public async Task AViewBodyWithACommaJoinOfUnaliasedTablesRuns()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await SeedOrders(database, executor, dbname);
+        await ExecDdl(database, executor, dbname, "CREATE TABLE notes (nid int64 PRIMARY KEY, order_id int64, body string(32))");
+        await ExecNonQuery(database, executor, dbname, "INSERT INTO notes (nid, order_id, body) VALUES (1, 1, 'x'), (2, 3, 'y')");
+
+        // The stored body drops an alias that repeats a table's name, so each table of the comma list is a
+        // bare name in the stored tree.
+        await ExecDdl(database, executor, dbname,
+            "CREATE VIEW noted AS SELECT orders.id, notes.body FROM orders, notes WHERE notes.order_id = orders.id");
+
+        List<QueryResultRow> rows = await ExecQuery(database, executor, dbname, "SELECT id, body FROM noted ORDER BY id");
+
+        CollectionAssert.AreEqual(new long[] { 1, 3 }, rows.Select(r => r.Row["id"].LongValue).ToArray());
+    }
+
+    [Test]
     public async Task ViewIsQualifiableByItsOwnName()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();

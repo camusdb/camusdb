@@ -164,6 +164,17 @@ A view stores its body with each CTE written out as a derived table, so `SHOW CR
 `WITH` at the start, where PostgreSQL shows the `WITH` that the body had. A recursive CTE is shown
 where it is read, as `(WITH RECURSIVE name AS (…) SELECT * FROM name) AS alias`.
 
+## LATERAL
+
+`d` has the rows `(1, 10)` and `(2, 20)`. See [Joins](joins.md#lateral).
+
+| Statement | CamusDB | PostgreSQL | Why |
+|---|---|---|---|
+| `SELECT a.id FROM d a RIGHT JOIN LATERAL (SELECT 1 AS w) s ON true ORDER BY a.id` | `CADB0400` | `1`, `2` | A `RIGHT JOIN` keeps every row of its right side, so a `LATERAL` right side that reads the left side has no left row to run for. PostgreSQL refuses that form only when the right side reads the left side. CamusDB refuses the keyword itself, because a `RIGHT JOIN` runs as a `LEFT JOIN` with its sides swapped. Write the derived table without `LATERAL` when it reads no left item. |
+
+The T-SQL forms `CROSS APPLY` and `OUTER APPLY` are not supported. Write `CROSS JOIN LATERAL (…)` and
+`LEFT JOIN LATERAL (…) ON true`.
+
 ## NULL in ORDER BY
 
 NULL sorts as the smallest value, the GoogleSQL rule: it comes first in ascending order and last in

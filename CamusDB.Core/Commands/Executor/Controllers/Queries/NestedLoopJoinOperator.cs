@@ -26,6 +26,10 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// volatile function, or when it outgrows the in-memory cap with spilling off; EXPLAIN (ANALYZE)
 /// then shows <c>ran=nested-loop-rescan</c>.</para>
 ///
+/// <para>A <c>LATERAL</c> right side reads the left row, so it runs once for each left row with that row
+/// (<see cref="JoinLeafScanner.ScanLateralRightSource"/>) and is never spooled. The planner gives such a
+/// right side to this operator only.</para>
+///
 /// <para>The left row is qualified once per outer iteration and the join layout is built from the
 /// first emitted pair, so the per-row cost is the right-side scan and the predicate, not layout
 /// construction. A left outer join instead takes its layout from <see cref="OuterJoinPadding"/>,
@@ -84,7 +88,9 @@ internal sealed class NestedLoopJoinOperator
 
             IAsyncEnumerable<QueryResultRow> rightRows = spool is not null
                 ? spool.RowsAsync(plan.Ticket.CancellationToken)
-                : ReadRightSide(joinNode, plan);
+                : joinNode.RightSource.Derived is { Lateral: not null } lateral
+                    ? scanner.ScanLateralRightSource(lateral, joinNode.RightExecutionFilter, plan, leftQualified)
+                    : ReadRightSide(joinNode, plan);
 
             await foreach (QueryResultRow rightRow in rightRows.ConfigureAwait(false))
             {

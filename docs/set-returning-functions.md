@@ -37,10 +37,15 @@ does not wrap to the other end of the range. So
 
 **Arguments.** An argument can be a literal, a parameter (`@from`), an operator expression, or a
 scalar function call: `generate_series(1 + 1, @to, abs(@step))`. Each argument is evaluated one time,
-before the first row. These arguments are refused:
+before the first row.
 
-- A column of another relation in the same `FROM`, as in `FROM t, generate_series(1, t.n)`. That form
-  is `LATERAL`, which is not supported.
+An argument can also name a column of an item to the left of the function in the same `FROM`, as in
+`FROM t, generate_series(1, t.n) AS g`. Such a call is `LATERAL`, with or without the keyword, as in
+PostgreSQL: it runs one time for each row of `t`, with that row's `n`. See
+[LATERAL](./joins.md#lateral). A function that is the only item of its `FROM` can name no column.
+
+These arguments are refused:
+
 - A subquery, as in `generate_series(1, (SELECT MAX(n) FROM t))`.
 - A non-integer value, such as `1.5` or `'x'`.
 
@@ -104,7 +109,6 @@ A view over a series survives a restart. `SHOW CREATE VIEW` prints the call as i
 | Form | Result |
 |------|--------|
 | `SELECT generate_series(1, 3)` (a set-returning function in the select list) | error `CADB0533`: the function is supported only in `FROM` |
-| `FROM t, generate_series(1, t.n)` (`LATERAL`) | error `CADB0533` |
 | A timestamp, date or `numeric` series | error: the arguments must be integers |
 | `WITH ORDINALITY` | parse error |
 | `unnest`, `generate_subscripts`, `regexp_matches`, `regexp_split_to_table` in `FROM` | error `CADB0533`: not supported in `FROM` yet |
