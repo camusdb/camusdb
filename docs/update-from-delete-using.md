@@ -28,12 +28,13 @@ of `JOIN`s. See [joins](joins.md) and [set-returning functions](set-returning-fu
 The target can have an alias without a relation list too: `UPDATE accounts AS a SET … WHERE a.id = 4`
 and `DELETE FROM accounts AS a WHERE a.closed` work.
 
-A `VALUES` list is not a relation in `FROM`, in a `SELECT` or here. Use a derived table instead:
+A `VALUES` list is a relation here too, so one statement can apply a batch of changes. See
+[VALUES lists in FROM](values-lists.md):
 
 ```sql
 UPDATE input_state s
    SET down = v.d
-  FROM (SELECT 'forward' AS k, true AS d UNION ALL SELECT 'back', false) v
+  FROM (VALUES ('forward', true), ('back', false)) AS v (k, d)
  WHERE v.k = s.k;
 ```
 

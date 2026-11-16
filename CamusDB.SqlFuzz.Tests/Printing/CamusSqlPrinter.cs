@@ -327,6 +327,23 @@ internal sealed class CamusSqlPrinter : ISqlPrinter
                     sb.Append("@{FORCE_INDEX=").Append(hint).Append('}');
                 break;
 
+            case ValuesRef values:
+                sb.Append("(VALUES ");
+                for (int r = 0; r < values.Rows.Count; r++)
+                {
+                    sb.Append(r == 0 ? "(" : ", (");
+                    for (int i = 0; i < values.Rows[r].Count; i++)
+                    {
+                        if (i > 0)
+                            sb.Append(", ");
+                        Write(sb, values.Rows[r][i]);
+                    }
+                    sb.Append(')');
+                }
+                sb.Append(") AS ").Append(values.Alias).Append(" (")
+                  .Append(string.Join(", ", values.Columns.Select(c => c.Name))).Append(')');
+                break;
+
             case JoinFrom join:
                 WriteFrom(sb, join.Left, declared, lateral);
                 sb.Append(join.Kind switch

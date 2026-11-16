@@ -329,6 +329,73 @@ internal sealed class TestGenerator
         StringAssert.DoesNotContain("LATERAL", CamusSqlPrinter.Instance.Print(new SelectStmt([], hinted) { LateralJoins = true }));
     }
 
+    /// <summary>
+    /// A VALUES list appears first in the FROM of some SELECTs and of some UPDATE … FROM and DELETE … USING lists,
+    /// prints as <c>(VALUES (…), …) AS a0 (v0, …)</c>, and never appears for a profile without VALUES lists.
+    /// </summary>
+    [Test]
+    public void ValuesListsAppearInSelectsAndJoinedWrites()
+    {
+        int inSelects = 0, inJoins = 0, inWrites = 0;
+
+        for (ulong seed = 1; seed <= 40; seed++)
+        {
+            StatementGenerator generator = new(new FuzzRandom(seed), GeneratorProfile.CamusDB);
+            generator.GenerateSchema();
+            generator.GenerateData();
+
+            for (int i = 0; i < 50; i++)
+            {
+                SelectStmt select = generator.GenerateSelect(SelectOptions.Comparable);
+                FromItem first = select.From;
+                while (first is JoinFrom join)
+                    first = join.Left;
+                if (first is not ValuesRef values)
+                    continue;
+
+                inSelects++;
+                inJoins += select.From is JoinFrom ? 1 : 0;
+                string sql = CamusSqlPrinter.Instance.Print(select);
+                Assert.That(sql, Does.Contain("FROM (VALUES ("), sql);
+                Assert.That(sql, Does.Contain(") AS a0 (" + string.Join(", ", values.Columns.Select(c => c.Name)) + ")"), sql);
+                Assert.That(values.Rows[0].All(item => item is LiteralExpr { Value.IsNull: false }), Is.True, sql);
+            }
+
+            for (int i = 0; i < 100; i++)
+            {
+                FromItem? list = generator.GenerateWrite() switch
+                {
+                    UpdateStmt u => u.From,
+                    DeleteStmt d => d.Using,
+                    _ => null,
+                };
+                while (list is JoinFrom join)
+                    list = join.Left;
+                inWrites += list is ValuesRef ? 1 : 0;
+            }
+        }
+
+        Assert.That(inSelects, Is.GreaterThan(20), "SELECTs with a VALUES list");
+        Assert.That(inJoins, Is.GreaterThan(5), "joins with a VALUES list");
+        Assert.That(inWrites, Is.GreaterThan(2), "joined writes with a VALUES list");
+
+        ValuesRef printed = new("a0", [("v0", FuzzType.Int64), ("v1", FuzzType.String)],
+            [[new LiteralExpr(FuzzValue.Of(1L)), new LiteralExpr(FuzzValue.String("x"))],
+             [new LiteralExpr(FuzzValue.Null(FuzzType.Int64)), new LiteralExpr(FuzzValue.String("y"))]]);
+        Assert.That(CamusSqlPrinter.Instance.Print(new SelectStmt([], printed)),
+            Is.EqualTo("SELECT * FROM (VALUES (1, 'x'), (CAST(NULL AS int64), 'y')) AS a0 (v0, v1)"));
+
+        GeneratorProfile without = GeneratorProfile.CamusDB.WithoutFeatures(StatementFeature.ValuesLists);
+        for (ulong seed = 1; seed <= 10; seed++)
+        {
+            StatementGenerator generator = new(new FuzzRandom(seed), without);
+            generator.GenerateSchema();
+            generator.GenerateData();
+            for (int i = 0; i < 50; i++)
+                StringAssert.DoesNotContain("(VALUES", CamusSqlPrinter.Instance.Print(generator.GenerateSelect(SelectOptions.Comparable)));
+        }
+    }
+
     private static IEnumerable<TableRef> Tables(FromItem from) => from switch
     {
         TableRef table => [table],
@@ -396,6 +463,8 @@ internal sealed class TestGenerator
         }
         if (current is TableRef table)
             yield return table.Alias;
+        if (current is ValuesRef values)
+            yield return values.Alias;
     }
 
     /// <summary>The column references of an expression, without entering its subqueries.</summary>

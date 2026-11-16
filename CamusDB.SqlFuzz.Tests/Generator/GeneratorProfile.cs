@@ -49,6 +49,9 @@ internal enum StatementFeature
 
     /// <summary>A join of a SELECT printed as a <c>LATERAL</c> derived table (see <see cref="SelectStmt.LateralJoins"/>).</summary>
     LateralJoins,
+
+    /// <summary>A <c>VALUES</c> list as the first relation of a FROM list (see <see cref="ValuesRef"/>).</summary>
+    ValuesLists,
     Analyze,
     UniqueIndexes,
     CoveringIndexes,

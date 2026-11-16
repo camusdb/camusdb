@@ -9,7 +9,8 @@ namespace CamusDB.Core.SQLParser;
 
 /// <summary>
 /// The one owner of the word that marks a <see cref="NodeType.DerivedTableReference"/> as
-/// <c>LATERAL</c>. The mark sits in the node's <c>yytext</c>, which no other form of the node uses.
+/// <c>LATERAL</c>. The mark sits in the node's <c>yytext</c>; the only other word there is the mark of a
+/// <c>VALUES</c> list (<see cref="ValuesAst"/>), and a <c>LATERAL</c> <c>VALUES</c> list carries both.
 ///
 /// <para>A <c>LATERAL</c> derived table can read the columns of the <c>FROM</c> items to its left, so
 /// it runs once for each row of those items, as in PostgreSQL. Every code path that builds a derived
@@ -36,7 +37,7 @@ public static class LateralAst
             derived.extendedThree,
             derived.extendedFour,
             derived.extendedFive,
-            Word,
+            ValuesAst.WithLateral(derived.yytext, Word),
             derived.extendedSix,
             derived.extendedSeven);
     }
@@ -44,7 +45,7 @@ public static class LateralAst
     /// <summary>True when <paramref name="node"/> is a derived table node with the <c>LATERAL</c> mark.</summary>
     public static bool IsLateral(NodeAst node) =>
         node.nodeType == NodeType.DerivedTableReference
-        && string.Equals(node.yytext, Word, StringComparison.Ordinal);
+        && (string.Equals(node.yytext, Word, StringComparison.Ordinal) || ValuesAst.IsLateralMark(node.yytext));
 
     /// <summary>
     /// The form of a function in <c>FROM</c> (<see cref="NodeType.TableFunctionReference"/>). A function whose

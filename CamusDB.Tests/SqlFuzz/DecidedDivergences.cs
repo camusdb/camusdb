@@ -554,9 +554,9 @@ public static class DecidedDivergences
             CamusDBErrorCodes.InvalidInput, "1",
             NotSupportedYet),
 
-        new("VALUES is not supported as a relation in FROM", RowTable,
-            "UPDATE d SET v = x.v FROM (VALUES (1, 5)) AS x(id, v) WHERE x.id = d.id",
-            CamusDBErrorCodes.SqlSyntaxError, "UPDATE 1",
+        new("A VALUES list is not supported as the whole body of a CTE or as a statement", NoSetup,
+            "WITH c (n) AS (VALUES (1), (2)) SELECT SUM(n) FROM c",
+            CamusDBErrorCodes.SqlSyntaxError, "3",
             NotSupportedYet),
 
         new("A recursive WITH query stops after max_recursive_cte_iterations steps", NoSetup,

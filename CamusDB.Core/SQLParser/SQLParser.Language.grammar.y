@@ -1651,7 +1651,21 @@ table_reference : table_name opt_table_alias opt_table_hint
                 | derived_table_reference { $$.n = $1.n; $$.s = $1.s; }
                 | TLATERAL derived_table_reference { $$.n = LateralAst.Mark($2.n); $$.s = $2.s; }
                 | TLATERAL table_function_reference { $$.n = $2.n; $$.s = $2.s; }
+                | values_table_reference { $$.n = $1.n; $$.s = $1.s; }
+                | TLATERAL values_table_reference { $$.n = LateralAst.Mark($2.n); $$.s = $2.s; }
                 ;
+
+/* A VALUES list as a relation: (VALUES (1, 'a'), (2, 'b')) AS v (id, k). The alias is required, as in
+   PostgreSQL 16; without a column list the columns are column1, column2, .... The rows use the INSERT row
+   grammar. ValuesAst.Relation writes the list as a derived table over a UNION ALL of FROM-less SELECTs, so
+   it works in every relation slot and after LATERAL with the derived-table code. */
+values_table_reference : LPAREN TVALUES insert_batch_list RPAREN derived_table_alias
+                       { $$.n = ValuesAst.Relation($3.n, $5.n, null); $$.s = $5.s; }
+                       | LPAREN TVALUES insert_batch_list RPAREN TAS any_identifier LPAREN table_function_column_list RPAREN
+                       { $$.n = ValuesAst.Relation($3.n, $6.n, $8.n); $$.s = null; }
+                       | LPAREN TVALUES insert_batch_list RPAREN identifier LPAREN table_function_column_list RPAREN
+                       { $$.n = ValuesAst.Relation($3.n, $5.n, $7.n); $$.s = $5.n.yytext; }
+                       ;
 
 /* A function call in FROM (generate_series(1, 10) AS i). The parenthesis after the name is what
    tells it apart from a table name: a table reference is never followed by one. The function name is

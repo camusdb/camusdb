@@ -228,7 +228,8 @@ the list, most of the time with the primary key of a source, so that most target
 The DML-integrity oracle predicts a joined write with a plain SELECT over `list CROSS JOIN target` and the
 same WHERE. A target row that the prediction names twice matched two rows of the list: an UPDATE must
 then fail and change nothing, and a DELETE deletes the row once. The generator does not write a comma
-list, a derived table or a set-returning function in the list, and it never writes `RETURNING`.
+list, a derived table other than a `VALUES` list (below) or a set-returning function in the list, and it
+never writes `RETURNING`.
 
 About one SELECT in five reads some of its tables through a WITH (see
 [WITH queries](common-table-expressions.md)): `WITH cte_t0 AS (SELECT * FROM t0) SELECT … FROM cte_t0 AS
@@ -247,6 +248,13 @@ NoREC check only the optimized query has it. A join keeps its form when the righ
 or the ON holds a subquery, and the JOIN ON variant of TLP keeps every join, because it adds its partition
 to the last ON. The generator does not write a LATERAL derived table that does more than filter one table,
 or a function in FROM that reads a column.
+
+About one FROM list in twelve starts with a `VALUES` list (see [VALUES lists in FROM](values-lists.md)):
+`(VALUES (1, 'x'), (CAST(NULL AS int64), 'y')) AS a0 (v0, v1)`, with 1 to 4 rows and 1 to 3 columns of
+type `int64`, `float64`, `string` or `bool`. Every item is a literal of its column's type, and the first
+row holds no NULL, so the column types follow from the literals. The list joins the tables after it, and
+it is also the start of some `UPDATE … FROM` and `DELETE … USING` lists, so every oracle reads it. The
+generator does not put a `VALUES` list on the right side of a join or after `LATERAL`.
 
 The statement list carries BEGIN, COMMIT and ROLLBACK markers, so a consumer can group statements into
 explicit transactions without a new format. Every list keeps its seed.

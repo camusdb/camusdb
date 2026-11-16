@@ -139,6 +139,9 @@ The rules:
 - **Functions in `FROM`.** A set-returning function whose arguments name a column is `LATERAL` with or
   without the keyword, as in PostgreSQL: `FROM t, generate_series(1, t.n) AS g` gives each row of `t`
   the numbers 1 to `t.n`. A function whose arguments name no column runs one time.
+- **`VALUES` lists.** `CROSS JOIN LATERAL (VALUES ('a', t.a), ('b', t.b)) AS s (name, value)` splits each
+  row of `t` into two rows. A `VALUES` list is not `LATERAL` without the keyword, as in PostgreSQL. See
+  [VALUES lists in FROM](values-lists.md).
 - **The body.** The derived table can be any `SELECT`: a join, an aggregate, `GROUP BY`, `ORDER BY` and
   `LIMIT`, a window function, a set operation, a subquery, or no `FROM`.
 - **Views and writes.** A view body, `INSERT … SELECT`, `CREATE TABLE … AS`, `UPDATE … FROM` and

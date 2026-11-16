@@ -318,8 +318,15 @@ internal sealed class StatementGenerator
 
         List<ScopeColumn> columns = new();
         TableDef first = random.Pick(State.Tables);
-        bool sizedUsed = first.Name == State.SizedTable;
-        FromItem from = TableSource(first, "a0", options, columns);
+        bool sizedUsed = false;
+        FromItem from;
+        if (ValuesSource("a0", columns) is { } valuesList)
+            from = valuesList;
+        else
+        {
+            sizedUsed = first.Name == State.SizedTable;
+            from = TableSource(first, "a0", options, columns);
+        }
 
         for (int i = 1; i < tableCount; i++)
         {
@@ -361,6 +368,34 @@ internal sealed class StatementGenerator
         }
 
         return (from, new ExprScope(columns, State.Tables));
+    }
+
+    /// <summary>
+    /// For about one FROM in twelve, a <c>VALUES</c> list of 1 to 4 rows and 1 to 3 columns, with its columns
+    /// added to <paramref name="columns"/>; null otherwise, and for a profile without VALUES lists. The column
+    /// types are the plain types the profile allows, so a literal has the column's type with no cast.
+    /// </summary>
+    private ValuesRef? ValuesSource(string alias, List<ScopeColumn> columns)
+    {
+        if (!profile.Allows(StatementFeature.ValuesLists) || !random.Chance(0.08))
+            return null;
+
+        List<FuzzType> types = new[] { FuzzType.Int64, FuzzType.Float64, FuzzType.String, FuzzType.Bool }.Where(profile.Allows).ToList();
+        if (types.Count == 0)
+            return null;
+
+        List<(string Name, FuzzType Type)> valueColumns = new();
+        int width = random.Between(1, 3);
+        for (int i = 0; i < width; i++)
+            valueColumns.Add(("v" + i, random.Pick(types)));
+
+        List<IReadOnlyList<Expr>> rows = new();
+        int height = random.Between(1, 4);
+        for (int r = 0; r < height; r++)
+            rows.Add(valueColumns.Select(c => (Expr)new LiteralExpr(values.Next(c.Type, nullable: r > 0, boundaries: false))).ToList());
+
+        columns.AddRange(valueColumns.Select(c => new ScopeColumn(alias, c.Name, c.Type)));
+        return new ValuesRef(alias, valueColumns, rows);
     }
 
     private TableRef TableSource(TableDef table, string alias, SelectOptions options, List<ScopeColumn> columns)
@@ -739,7 +774,7 @@ internal sealed class StatementGenerator
     /// <summary>An equality of a target column and a column of the list; see <see cref="JoinedForm"/>.</summary>
     private Expr? Link(List<ScopeColumn> target, IReadOnlyList<ScopeColumn> sources, List<TableRef> tables)
     {
-        if (random.Chance(0.6))
+        if (tables.Count > 0 && random.Chance(0.6))
         {
             TableRef source = random.Pick(tables);
             ColumnDef key = State.Table(source.Table).PrimaryKey;

@@ -290,6 +290,7 @@ internal sealed class SelectQueryCreator
             ColumnAliases = derivedAst.extendedThree is { } columns ? ColumnAliasNames(columns) : null,
             ComputedOnce = derivedAst.extendedFour,
             LateralBody = LateralAst.IsLateral(derivedAst) ? derivedAst.leftAst : null,
+            ValuesRowCount = ValuesAst.IsValues(derivedAst) ? ValuesAst.RowCount(derivedAst) : null,
         };
     }
 

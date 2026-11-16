@@ -92,6 +92,12 @@ internal static class ProfileValidator
         }
         if (current is TableRef { IndexHint: not null })
             need(profile.Allows(StatementFeature.IndexHints), "an index hint");
+        if (current is ValuesRef values)
+        {
+            need(profile.Allows(StatementFeature.ValuesLists), "a VALUES list");
+            foreach ((string _, FuzzType type) in values.Columns)
+                need(profile.Allows(type), $"a {type} column");
+        }
     }
 
     private static void CheckSelect(SelectStmt select, GeneratorProfile profile, Action<bool, string> need)

@@ -283,5 +283,5 @@ CamusDB refuses these forms with a clear error, so no answer is wrong. `d` has t
 | `SELECT (SELECT 1 FOR UPDATE)` | `CADB0406` | `1` |
 | `UPDATE d SET v = 0 FROM d e WHERE e.id = d.id AND d.id = 1 RETURNING e.v` | `CADB0400`; `RETURNING` reads the target only | `10` |
 | `UPDATE d SET v = 0 FROM d e WHERE e.id = d.id AND d.id = 1 RETURNING *` | `CADB0400`; list the target columns | The columns of `d` and of `e` |
-| `UPDATE d SET v = x.v FROM (VALUES (1, 5)) AS x(id, v) WHERE x.id = d.id` | `CADB0406`; use a derived table, `(SELECT 1 AS id, 5 AS v UNION ALL …) x` | `UPDATE 1` |
+| `WITH c (n) AS (VALUES (1), (2)) SELECT SUM(n) FROM c`, and a top-level `VALUES (1), (2)` | `CADB0406`; write `SELECT * FROM (VALUES (1), (2)) AS v (n)` | `3` |
 | `INSERT INTO em (id, v) VALUES (1, 1) RETURNING (SELECT 7)` | `CADB0400` | `7` |

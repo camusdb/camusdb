@@ -260,6 +260,13 @@ internal sealed record TableRef(string Table, string Alias, string? IndexHint = 
     public bool ViaCte { get; init; }
 }
 
+/// <summary>
+/// A <c>VALUES</c> list in FROM: <c>(VALUES (…), (…)) AS alias (v0, v1, …)</c>. Every item is a literal of its
+/// column's type, and the first row holds no NULL, so each column has that type under the <c>UNION</c> rule.
+/// The generator puts one only first in a FROM list, so it is never the right side of a join.
+/// </summary>
+internal sealed record ValuesRef(string Alias, IReadOnlyList<(string Name, FuzzType Type)> Columns, IReadOnlyList<IReadOnlyList<Expr>> Rows) : FromItem;
+
 internal enum JoinKind
 {
     Inner,

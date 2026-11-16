@@ -94,6 +94,14 @@ public sealed record DerivedTableSource(
     public SQLParser.NodeAst? LateralBody { get; init; }
 
     /// <summary>
+    /// The number of rows of the <c>VALUES</c> list this derived table stands for, or null for any other
+    /// derived table. The parser writes a <c>VALUES</c> list as a <c>UNION ALL</c> of FROM-less SELECTs
+    /// (<c>ValuesAst</c>), and the list binds and runs as that query; the count only names the source in
+    /// <c>EXPLAIN</c>.
+    /// </summary>
+    public int? ValuesRowCount { get; init; }
+
+    /// <summary>
     /// The alias of the derived table that holds a windowed SELECT. The asterisks keep it apart from
     /// any identifier a user can write without quotes, as for <see cref="SetOperationSource.DerivedAlias"/>.
     /// </summary>

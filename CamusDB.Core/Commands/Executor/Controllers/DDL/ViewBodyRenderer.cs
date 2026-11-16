@@ -345,6 +345,42 @@ internal sealed class ViewBodyRenderer : SqlAstRenderer
         }
     }
 
+    /// <summary>
+    /// Renders the <c>VALUES</c> list in <paramref name="derived"/> as <c>(VALUES (…), (…)) AS alias [(columns)]</c>.
+    /// The names <c>column1</c>, <c>column2</c>, … that the parser gave the first row are not written: the parse
+    /// gives them again.
+    /// </summary>
+    private void RenderValues(StringBuilder sb, NodeAst derived)
+    {
+        sb.Append("(VALUES ");
+
+        List<List<NodeAst>> rows = ValuesAst.Rows(derived);
+        for (int r = 0; r < rows.Count; r++)
+        {
+            if (r > 0)
+                sb.Append(", ");
+
+            sb.Append('(');
+            for (int i = 0; i < rows[r].Count; i++)
+            {
+                if (i > 0)
+                    sb.Append(", ");
+
+                RenderNode(sb, rows[r][i]);
+            }
+
+            sb.Append(')');
+        }
+
+        sb.Append(") AS ").Append(derived.rightAst!.yytext);
+        if (derived.extendedThree is not null)
+        {
+            sb.Append('(');
+            RenderFunctionArguments(sb, derived.extendedThree, NodeType.IdentifierList);
+            sb.Append(')');
+        }
+    }
+
     private void RenderSetOperationOperand(StringBuilder sb, NodeAst operand)
     {
         bool parenthesize = SetOperationAst.IsSetOperationSelect(operand)
@@ -524,6 +560,15 @@ internal sealed class ViewBodyRenderer : SqlAstRenderer
 
             // A function in FROM that reads the items to its left: the parser wrapped the call, so the call
             // renders and parses again to the same wrap.
+            // A VALUES list: the parser wrote it as a UNION ALL of FROM-less SELECTs, so the list renders and
+            // parses again to the same tree.
+            case NodeType.DerivedTableReference when ValuesAst.IsValues(from):
+                if (LateralAst.IsLateral(from))
+                    sb.Append("LATERAL ");
+
+                RenderValues(sb, from);
+                return;
+
             case NodeType.DerivedTableReference when LateralAst.WrappedFunction(from) is { } wrapped:
                 RenderFrom(sb, wrapped);
                 return;

@@ -400,6 +400,10 @@ public static class PlanRenderer
             return string.Concat(inner.AsSpan(0, inner.Length - 1), $", computed_once={marker.yytext})");
         }
 
+        // A VALUES list runs as a UNION ALL of FROM-less SELECTs; it is named for what was written.
+        if (node.BoundSource.Source.ValuesRowCount is { } valuesRows)
+            return $"values(alias={node.BoundSource.Alias}, rows={valuesRows})";
+
         if (node.BoundSource.SetOperation is { } setOperation)
             return RenderSetOperation(setOperation.Source, plan.Database.Options.SpillEnabled);
 
