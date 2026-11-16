@@ -334,6 +334,45 @@ internal sealed class TestGenerator
     /// prints as <c>(VALUES (…), …) AS a0 (v0, …)</c>, and never appears for a profile without VALUES lists.
     /// </summary>
     [Test]
+    public void RangeJoinsBoundANumericRightColumnWithTwoLeftColumns()
+    {
+        int between = 0, comparisons = 0;
+
+        for (ulong seed = 1; seed <= 40; seed++)
+        {
+            StatementGenerator generator = new(new FuzzRandom(seed), GeneratorProfile.CamusDB);
+            generator.GenerateSchema();
+            generator.GenerateData();
+
+            for (int i = 0; i < 50; i++)
+            {
+                SelectStmt select = generator.GenerateSelect(SelectOptions.Comparable);
+                for (FromItem item = select.From; item is JoinFrom join; item = join.Left)
+                {
+                    string rightAlias = join.Right.Alias;
+                    switch (join.On)
+                    {
+                        case BetweenExpr { Value: ColumnExpr key, Low: ColumnExpr low, High: ColumnExpr high, Negated: false }
+                            when key.Source == rightAlias && low.Source != rightAlias && high.Source != rightAlias:
+                            between++;
+                            Assert.That(key.Type, Is.EqualTo(FuzzType.Int64).Or.EqualTo(FuzzType.Float64));
+                            break;
+
+                        case BinaryExpr { Op: BinaryOp.And, Left: BinaryExpr { Op: BinaryOp.Ge or BinaryOp.Gt, Left: ColumnExpr key },
+                                Right: BinaryExpr { Op: BinaryOp.Le or BinaryOp.Lt, Left: ColumnExpr same } }
+                            when key.Source == rightAlias && same == key:
+                            comparisons++;
+                            break;
+                    }
+                }
+            }
+        }
+
+        Assert.That(between, Is.GreaterThan(5), "range joins written with BETWEEN");
+        Assert.That(comparisons, Is.GreaterThan(5), "range joins written with two comparisons");
+    }
+
+    [Test]
     public void ValuesListsAppearInSelectsAndJoinedWrites()
     {
         int inSelects = 0, inJoins = 0, inWrites = 0;

@@ -61,6 +61,13 @@ nested loop, only for a larger outer side. A FROM clause of such a round has at 
 names that table once: a cross join of the table with itself gives some 40,000 pairs, and a probe for
 each pair passes the statement time limit with no defect.
 
+About a third of the joins with no equality key take a range form: a numeric column of the right
+table between two numeric columns of the left side, written with `BETWEEN` or with two comparisons.
+The planner can serve it with a range seek on an index of that column (see
+[Range seek](joins.md#range-seek)). The `force-nested-loop` arm never seeks, so plan equivalence
+compares the seek with the plain nested loop, and the `index-batch-1` and `plan-cache` arms run the
+seek under their own settings.
+
 A configuration name is no evidence that a check compared two different plans. So each passed check
 also takes the EXPLAIN of both plans, and the report gives the count of checks whose second plan had
 another access path, and how often each operator was the second plan. The probe memo of the index

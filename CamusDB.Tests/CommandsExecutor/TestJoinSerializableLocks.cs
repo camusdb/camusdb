@@ -233,6 +233,65 @@ public sealed class TestJoinSerializableLocks : SharedNodeBaseTest
     // the table-scan leaf.
     // -----------------------------------------------------------------------
 
+    // -----------------------------------------------------------------------
+    // Phantom through a range seek: a join with no equality key whose ON bounds the right key with
+    // left values seeks one range per left row. Each seek takes the shared lock of its own range, so
+    // an insert into a range the reader saw as empty is held back, and an insert outside every range
+    // is not.
+    // -----------------------------------------------------------------------
+
+    private const string RangeSeekRead =
+        "SELECT g.n FROM elle_rw_i64_ref j JOIN grid g ON g.n BETWEEN j.target * 10 + 500 AND j.target * 10 + 503 WHERE j.k = @k";
+
+    private static async Task CreateGrid(Fixture fixture)
+    {
+        await NonQuery(fixture, "CREATE TABLE grid (n INT64 PRIMARY KEY)");
+        await NonQuery(fixture, "INSERT INTO grid (n) SELECT g FROM generate_series(0, 99) g");
+    }
+
+    private static Task InsertGrid(Fixture fixture, KvTransaction txn, long n)
+        => fixture.Executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(txn, fixture.DbName,
+            "INSERT INTO grid (n) VALUES (@k)", Key(n)));
+
+    [Test]
+    public async Task RangeSeekRead_EmptyRange_ConcurrentInsertIntoItIsFenced()
+    {
+        Fixture fixture = await Setup();
+        await CreateGrid(fixture);
+
+        KvTransaction txA = await BeginSerializableReadWrite(fixture);
+
+        List<string> plan = (await Run(fixture, "EXPLAIN " + RangeSeekRead, txA, Key(2))).Select(r => r.Row["detail"].StrValue!).ToList();
+        Assert.That(plan.Any(d => d.Contains("range-seek=")), Is.True, "the join must seek the grid key: " + string.Join("\n", plan));
+
+        // Reference row 2 seeks grid 520..523, which holds no row.
+        Assert.That(await Run(fixture, RangeSeekRead, txA, Key(2)), Is.Empty);
+
+        await AssertWriteIsFenced(fixture, writer => InsertGrid(fixture, writer, 521),
+            "an insert into a range a Serializable read-write transaction read as empty through a range seek must be held back");
+
+        Assert.That(await Run(fixture, RangeSeekRead, txA, Key(2)), Is.Empty, "the second read in the same transaction must still see the range as empty");
+        await fixture.Database.Transactions.CommitAsync(txA);
+
+        await AssertWriteSucceeds(fixture, writer => InsertGrid(fixture, writer, 521), "the insert succeeds once the reader ends");
+    }
+
+    [Test]
+    public async Task RangeSeekRead_InsertOutsideTheSoughtRange_IsNotFenced()
+    {
+        Fixture fixture = await Setup();
+        await CreateGrid(fixture);
+
+        KvTransaction txA = await BeginSerializableReadWrite(fixture);
+        Assert.That(await Run(fixture, RangeSeekRead, txA, Key(2)), Is.Empty);
+
+        // 900 is outside 520..523: the seek locks its own range, not the whole grid table.
+        await AssertWriteSucceeds(fixture, writer => InsertGrid(fixture, writer, 900),
+            "an insert outside the range the seek read is not a phantom of that read");
+
+        await fixture.Database.Transactions.CommitAsync(txA);
+    }
+
     [Test]
     public async Task JoinRead_AbsentRow_ConcurrentInsertIsFenced()
         => await AssertAbsentRowIsFenced(JoinRead);

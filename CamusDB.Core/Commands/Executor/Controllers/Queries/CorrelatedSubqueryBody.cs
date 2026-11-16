@@ -52,6 +52,11 @@ internal sealed class CorrelatedSubqueryBody
 
     private readonly bool isExistsBody;
 
+    /// <summary>True for the body of a <c>LATERAL</c> derived table, which returns rows of any number of
+    /// columns. A body that binds again for each row runs through the entry point of a relation, so the
+    /// check of one column does not apply to it.</summary>
+    private readonly bool isRelationBody;
+
     /// <summary>The hidden placeholder name of each outer value, in the order of <see cref="Outer"/>.</summary>
     private readonly string[] parameterNames;
 
@@ -88,6 +93,7 @@ internal sealed class CorrelatedSubqueryBody
     private CorrelatedSubqueryBody(
         SubqueryQueryExecutor executor,
         bool isExistsBody,
+        bool isRelationBody,
         NodeAst select,
         SelectBindResult? bound,
         BoundSelectQuery checkedBound,
@@ -98,6 +104,7 @@ internal sealed class CorrelatedSubqueryBody
     {
         this.executor = executor;
         this.isExistsBody = isExistsBody;
+        this.isRelationBody = isRelationBody;
         Select = select;
         Bound = bound;
         Checked = checkedBound;
@@ -166,7 +173,7 @@ internal sealed class CorrelatedSubqueryBody
         }
 
         return new CorrelatedSubqueryBody(
-            executor, isExistsBody, substituted, bound, checkedBind.Bound, outputType, parameterNames, outer, resultsCanBeKept);
+            executor, isExistsBody, isRelationBody, substituted, bound, checkedBind.Bound, outputType, parameterNames, outer, resultsCanBeKept);
     }
 
     /// <summary>
@@ -266,8 +273,11 @@ internal sealed class CorrelatedSubqueryBody
         if (Bound is { } bound)
             return executor.RunBoundAsync(database, bound, txnState, parameters, cancellationToken);
 
-        return isExistsBody
-            ? executor.ExecuteExistsSelectAsync(database, Select, txnState, parameters, cancellationToken)
+        if (isExistsBody)
+            return executor.ExecuteExistsSelectAsync(database, Select, txnState, parameters, cancellationToken);
+
+        return isRelationBody
+            ? executor.ExecuteRelationSelectAsync(database, Select, txnState, parameters, cancellationToken)
             : executor.ExecuteSelectAsync(database, Select, txnState, parameters, cancellationToken);
     }
 

@@ -110,6 +110,10 @@ reports a join row this way:
     right rows, and the detail shows `ran=nested-loop-rescan`) in two cases: the right-side
     filter calls a volatile function, or spilling is off and the right side has more rows than
     `HashJoinMaxBuildRows`.
+  - A `nested-loop-join` with `range-seek=<index>(<bounds>)` keeps nothing in memory. For each left
+    row it reads only the index range that the left row's bounds give, so `kv_scan_entries` counts
+    the index entries of all those ranges and `rows_read` the right rows fetched. See
+    [Range seek](joins.md#range-seek).
   - `index-nested-loop-join` probes a page of outer rows at a time (`IndexScanFetchBatchSize`
     rows): the distinct keys of the page cost one index read and one row read for the whole page,
     and the detail shows the number of pages as `probe-batches=`. Over a unique index it adds one

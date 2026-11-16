@@ -645,6 +645,14 @@ applies the `PostJoinFilter`, then hands the cursor to `QueryPostScanPipeline.Ap
 
 - `TableScanNode` → full scan with per-alias inline filter.
 - `DerivedTableScanNode` → materializes the inner query once, caches in `plan.DerivedMaterializations`.
+- `NestedLoopJoinNode` with `RangeSeek` → for each left row, evaluate the bounds against the left row,
+  rewrite them into the key type (`NumericBoundNormalizer`), combine them with
+  `IndexScanSelector.TryBuildLeadingColumnRange`, and read that index range through
+  `JoinLeafScanner.ScanBoundTableByIndexRange` (range lock, counters and right filter as any join
+  leaf); then evaluate `ON` on each pair. The planner (`JoinRangeSeekAnalyzer`) gives a join a seek
+  only when it has no equality key, `ON` bounds the first column of an ascending right index on both
+  sides with left-only expressions, and the right table has at least `MinRangeSeekRightRows` (64)
+  rows or no row count yet. See [`joins.md`](./joins.md#range-seek).
 - `NestedLoopJoinNode` → for each left row, walk the right source, merge, evaluate `ON`.
   A base-table right side is read from storage once, on the first left row, and kept for the
   other left rows (`NestedLoopInnerSpool`: in memory, or in a spill file when spilling is on).

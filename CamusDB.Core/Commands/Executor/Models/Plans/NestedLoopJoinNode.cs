@@ -36,6 +36,14 @@ public sealed class NestedLoopJoinNode : PhysicalPlanNode
     /// </summary>
     public PhysicalPlanNode? RightPhysicalNode { get; internal set; }
 
+    /// <summary>
+    /// The index range of the right table to seek for each left row, when the <c>ON</c> predicate bounds
+    /// the leading column of a right-side index with left values; null for the plain nested loop. With
+    /// a seek the right side is not spooled and <see cref="RightPhysicalNode"/> is not used: each left
+    /// row reads only its own range, and the <c>ON</c> predicate still decides each pair.
+    /// </summary>
+    public JoinRangeSeek? RangeSeek { get; init; }
+
     public NestedLoopJoinNode(PhysicalPlanNode left, BoundJoinRightSource rightSource, NodeAst onPredicate)
     {
         Input = left;

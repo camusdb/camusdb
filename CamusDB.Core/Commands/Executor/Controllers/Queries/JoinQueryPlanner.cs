@@ -471,7 +471,7 @@ internal sealed class JoinQueryPlanner
                 hash.RightPhysicalNode = TryBuildIndexLeaf(filter, table, database, stats, leafParameters, keepBoundedLeaves);
                 break;
 
-            case NestedLoopJoinNode { RightSource.Table: { } table, RightExecutionFilter: { } filter } nestedLoop:
+            case NestedLoopJoinNode { RangeSeek: null, RightSource.Table: { } table, RightExecutionFilter: { } filter } nestedLoop:
                 nestedLoop.RightPhysicalNode = TryBuildIndexLeaf(filter, table, database, stats, leafParameters, keepBoundedLeaves);
                 break;
         }
@@ -579,11 +579,43 @@ internal sealed class JoinQueryPlanner
             return BuildHashJoinNode(left, right, joinSource.OnPredicate, equiKeys!, rightFilter, database, stats, kind, step);
         }
 
+        // No equality key. A closed range on the leading column of a right-side index, bounded by
+        // values of the left row, is read with one seek per left row instead of testing every right
+        // row against the predicate.
+        if (kind is JoinKind.Inner or JoinKind.LeftOuter
+            && JoinRangeSeekAnalyzer.TryPlan(right, joinSource.OnPredicate, bound) is { } seek
+            && RangeSeekPays(right.Table!, database, stats))
+        {
+            return new NestedLoopJoinNode(left, right, joinSource.OnPredicate)
+            {
+                RightExecutionFilter = rightFilter,
+                Kind = kind,
+                RangeSeek = seek,
+            };
+        }
+
         return new NestedLoopJoinNode(left, right, joinSource.OnPredicate)
         {
             RightExecutionFilter = rightFilter,
             Kind = kind,
         };
+    }
+
+    /// <summary>
+    /// The right-table size below which the plain nested loop keeps a join that a range seek could
+    /// serve. The plain loop reads a small right table once and replays it from memory for each left
+    /// row, which costs less than a storage seek per left row.
+    /// </summary>
+    internal const long MinRangeSeekRightRows = 64;
+
+    /// <summary>
+    /// True when a range seek per left row is expected to cost less than the plain nested loop: the
+    /// right table has at least <see cref="MinRangeSeekRightRows"/> rows, or no row count is known.
+    /// </summary>
+    private static bool RangeSeekPays(BoundTableSource rightTable, DatabaseDescriptor database, StatisticsManager? stats)
+    {
+        long? rows = stats?.GetRowCountEstimate(database, rightTable.Table);
+        return rows is null || rows.Value >= MinRangeSeekRightRows;
     }
 
     /// <summary>

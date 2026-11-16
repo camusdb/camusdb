@@ -159,6 +159,41 @@ How it runs:
   most 256 rows is kept for later rows with the same values. A derived table that calls a volatile
   function, such as `random()`, runs again for each left row.
 
+## Range seek
+
+A join with no equality key normally runs as a nested loop that tests every right row against `ON`
+for every left row. When `ON` bounds the first column of an ascending right-side index from below
+and from above with values of the left row, the join reads, for each left row, only that index
+range. A "numbers table" join is the common case:
+
+```sql
+SELECT s.id, n.n
+  FROM spans s
+  JOIN numbers n ON n.n BETWEEN s.lo AND s.hi;
+```
+
+- The bounds can be `BETWEEN`, `<`, `<=`, `>` and `>=`, with the right column on either side. Several
+  bounds of one side combine into the tightest one.
+- The right column must be named with its alias (`n.n`). A bound can use literals, parameters,
+  columns of the left side named with their aliases, arithmetic, `CAST`, `CASE` and functions that are
+  not volatile. A bound that reads a right column, or a subquery, gives no seek.
+- Both a lower and an upper bound are needed. A range open on one side, a descending first index
+  column, and a right table with fewer than 64 rows keep the plain nested loop, which reads the
+  right table once and replays it from memory.
+- A unique index of several columns serves the seek only when its other columns are `NOT NULL`,
+  because a unique index has no entry for a row with a NULL key column.
+- The `ON` predicate still tests each pair, so the rows are the rows of the plain nested loop. A
+  NULL bound gives no right row for that left row (a left join pads it), and a range whose lower end
+  is above its upper end gives none either. A bound of a type with no exact form in the key's type
+  is left out for that row, which widens the range. A fractional bound on an `INT64` key moves to
+  the integer that keeps the same rows (`n.n >= 2.5` reads from 3).
+- Under Serializable read-write, each seek takes the shared lock of its own range, as an index
+  range scan does (see `transactions-locking-and-isolation.md` §6.2). An insert into a range the
+  join read is held back; an insert outside every range is not.
+- `EXPLAIN` shows `nested-loop-join(…, range-seek=<index>(<bounds>))`, and `EXPLAIN (ANALYZE)` counts
+  the index entries of all the ranges in `kv_scan_entries`.
+- The join-order search does not price the seek yet: it prices the join as a plain nested loop.
+
 ## What EXPLAIN shows
 
 Every join operator serves a left outer join, because in each of them the left input is the

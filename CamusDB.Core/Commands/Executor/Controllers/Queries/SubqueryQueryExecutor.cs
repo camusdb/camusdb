@@ -85,6 +85,19 @@ internal sealed class SubqueryQueryExecutor
         ExecuteSelectInternalAsync(database, selectAst, txnState, parameters, requireSingleColumn: true, outputType, isExistsBody: false, cancellationToken);
 
     /// <summary>
+    /// Executes the body of a <c>LATERAL</c> derived table, which returns rows of any number of columns, and
+    /// returns a streaming cursor. The body of a derived table gives its column count to the outer query, so
+    /// no check of one column applies.
+    /// </summary>
+    public IAsyncEnumerable<QueryResultRow> ExecuteRelationSelectAsync(
+        DatabaseDescriptor database,
+        NodeAst selectAst,
+        KvTransaction txnState,
+        Dictionary<string, ColumnValue>? parameters,
+        CancellationToken cancellationToken = default) =>
+        ExecuteSelectInternalAsync(database, selectAst, txnState, parameters, requireSingleColumn: false, outputType: null, isExistsBody: false, cancellationToken);
+
+    /// <summary>
     /// Executes a subquery for EXISTS semantics and returns a streaming cursor.
     /// Projection shape is not validated; callers check whether any row is present.
     /// </summary>

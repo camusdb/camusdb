@@ -686,7 +686,7 @@ internal static class IndexScanSelector
     }
 
     /// <summary>Direction of the index's column at <paramref name="position"/> (Ascending when unset).</summary>
-    private static bool IsAscending(TableIndexSchema index, int position)
+    internal static bool IsAscending(TableIndexSchema index, int position)
         => index.DirectionAt(position) == OrderType.Ascending;
 
     private static string BareColumnName(string columnName)
@@ -716,6 +716,21 @@ internal static class IndexScanSelector
 
         return false;
     }
+
+    /// <summary>
+    /// The tightest range on the first key column that <paramref name="comparisons"/> describe, as
+    /// <see cref="TryMatchPredicateIndex"/> builds it for a range with no equality prefix. A join range
+    /// seek (<see cref="Models.Plans.JoinRangeSeek"/>) calls it once per left row with that row's bound
+    /// values, so the seek and a single-table range scan read the same keys for the same bounds. Each
+    /// constant must already have the key column's type, and the column must be ascending.
+    /// </summary>
+    internal static bool TryBuildLeadingColumnRange(
+        List<AnalyzedComparison> comparisons,
+        out CompositeColumnValue? fromBound,
+        out bool fromInclusive,
+        out CompositeColumnValue? toBound,
+        out bool toInclusive) =>
+        TryBuildRangeBounds([], 0, comparisons, out fromBound, out fromInclusive, out toBound, out toInclusive);
 
     private static bool TryBuildRangeBounds(
         ColumnValue[] equalityPrefixValues,

@@ -358,7 +358,9 @@ internal sealed class StatementGenerator
             if (kind != JoinKind.Cross)
             {
                 ExprScope onScope = new ExprScope(joined, State.Tables).ForUncorrelatedSubqueries();
-                on = EquiJoin(columns, rightColumns, force: needsEquality || tableCount == 3) ?? expressions.Predicate(onScope);
+                on = EquiJoin(columns, rightColumns, force: needsEquality || tableCount == 3)
+                    ?? RangeJoin(columns, rightColumns)
+                    ?? expressions.Predicate(onScope);
                 if (random.Chance(0.25))
                     on = new BinaryExpr(BinaryOp.And, on, expressions.Predicate(onScope), FuzzType.Bool);
             }
@@ -424,6 +426,48 @@ internal sealed class StatementGenerator
         List<(ScopeColumn L, ScopeColumn R)> same = pairs.Where(p => p.L.Type == p.R.Type).ToList();
         (ScopeColumn a, ScopeColumn b) = same.Count > 0 && random.Chance(0.8) ? random.Pick(same) : random.Pick(pairs);
         return new BinaryExpr(BinaryOp.Eq, new ColumnExpr(a.Source, a.Column, a.Type), new ColumnExpr(b.Source, b.Column, b.Type), FuzzType.Bool);
+    }
+
+    /// <summary>
+    /// A range join for a third of the joins without an equality: a numeric column of the right table
+    /// bounded by two numeric columns of the left side, as <c>BETWEEN</c> or as two comparisons, strict
+    /// or not. The planner serves this shape with a range seek on an index of the right column, so the
+    /// oracles compare the seek with the plain nested loop. A float bound on an integer key, an empty
+    /// range and a NULL bound all come up.
+    /// </summary>
+    private Expr? RangeJoin(List<ScopeColumn> left, List<ScopeColumn> right)
+    {
+        if (!random.Chance(0.33))
+            return null;
+
+        List<ScopeColumn> keys = right.Where(c => c.Type is FuzzType.Int64 or FuzzType.Float64).ToList();
+        List<ScopeColumn> bounds = left.Where(c => c.Type is FuzzType.Int64 or FuzzType.Float64).ToList();
+        if (keys.Count == 0 || bounds.Count == 0)
+            return null;
+
+        ScopeColumn key = random.Pick(keys);
+        ScopeColumn low = random.Pick(bounds);
+        ScopeColumn high = random.Pick(bounds);
+
+        Expr keyExpr = new ColumnExpr(key.Source, key.Column, key.Type);
+        Expr lowExpr = new ColumnExpr(low.Source, low.Column, low.Type);
+        Expr highExpr = new ColumnExpr(high.Source, high.Column, high.Type);
+
+        bool between = profile.Allows(ExprFeature.Between);
+        List<BinaryOp> lowerOps = new[] { BinaryOp.Ge, BinaryOp.Gt }.Where(profile.Allows).ToList();
+        List<BinaryOp> upperOps = new[] { BinaryOp.Le, BinaryOp.Lt }.Where(profile.Allows).ToList();
+        bool comparisons = profile.Allows(BinaryOp.And) && lowerOps.Count > 0 && upperOps.Count > 0;
+
+        if (between && (!comparisons || random.Chance(0.5)))
+            return new BetweenExpr(keyExpr, lowExpr, highExpr, Negated: false);
+
+        if (!comparisons)
+            return null;
+
+        return new BinaryExpr(BinaryOp.And,
+            new BinaryExpr(random.Pick(lowerOps), keyExpr, lowExpr, FuzzType.Bool),
+            new BinaryExpr(random.Pick(upperOps), keyExpr, highExpr, FuzzType.Bool),
+            FuzzType.Bool);
     }
 
     /// <summary>1 to 4 typed output columns over <paramref name="scope"/>, most of them plain columns.</summary>

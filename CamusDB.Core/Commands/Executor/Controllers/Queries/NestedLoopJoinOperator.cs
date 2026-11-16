@@ -8,8 +8,10 @@
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Plans;
+using CamusDB.Core.CommandsExecutor.Models.Predicates;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
@@ -29,6 +31,10 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// <para>A <c>LATERAL</c> right side reads the left row, so it runs once for each left row with that row
 /// (<see cref="JoinLeafScanner.ScanLateralRightSource"/>) and is never spooled. The planner gives such a
 /// right side to this operator only.</para>
+///
+/// <para>With a <see cref="NestedLoopJoinNode.RangeSeek"/> the right side is not spooled: each left row
+/// computes its own bounds and reads only that index range (<see cref="SeekRightSide"/>), through the
+/// same leaf scan, range lock and counters as any join leaf range scan.</para>
 ///
 /// <para>The left row is qualified once per outer iteration and the join layout is built from the
 /// first emitted pair, so the per-row cost is the right-side scan and the predicate, not layout
@@ -65,7 +71,10 @@ internal sealed class NestedLoopJoinOperator
             ? await OuterJoinPadding.CreateAsync(joinNode.RightSource, plan, joinNode.RightPhysicalNode).ConfigureAwait(false)
             : null;
 
-        await using NestedLoopInnerSpool? spool = TryCreateSpool(joinNode, plan);
+        JoinRangeSeek? seek = joinNode.RangeSeek;
+        List<AnalyzedComparison>? seekBounds = seek is null ? null : new(seek.Bounds.Count);
+
+        await using NestedLoopInnerSpool? spool = seek is null ? TryCreateSpool(joinNode, plan) : null;
 
         await foreach (QueryResultRow leftRow in tree.ExecuteNode(joinNode.Input!, plan).ConfigureAwait(false))
         {
@@ -86,11 +95,13 @@ internal sealed class NestedLoopJoinOperator
 
             bool matched = false;
 
-            IAsyncEnumerable<QueryResultRow> rightRows = spool is not null
-                ? spool.RowsAsync(plan.Ticket.CancellationToken)
-                : joinNode.RightSource.Derived is { Lateral: not null } lateral
-                    ? scanner.ScanLateralRightSource(lateral, joinNode.RightExecutionFilter, plan, leftQualified)
-                    : ReadRightSide(joinNode, plan);
+            IAsyncEnumerable<QueryResultRow> rightRows = seek is not null
+                ? SeekRightSide(joinNode, seek, seekBounds!, plan, leftQualified)
+                : spool is not null
+                    ? spool.RowsAsync(plan.Ticket.CancellationToken)
+                    : joinNode.RightSource.Derived is { Lateral: not null } lateral
+                        ? scanner.ScanLateralRightSource(lateral, joinNode.RightExecutionFilter, plan, leftQualified)
+                        : ReadRightSide(joinNode, plan);
 
             await foreach (QueryResultRow rightRow in rightRows.ConfigureAwait(false))
             {
@@ -134,6 +145,89 @@ internal sealed class NestedLoopJoinOperator
         return new NestedLoopInnerSpool(
             () => ReadRightSide(joinNode, plan),
             QueryExecutionContext.For(plan.Database, plan.Ticket));
+    }
+
+    /// <summary>
+    /// Reads the right rows of one left row through the join's range seek: the bounds are evaluated
+    /// against the left row, rewritten into the key column's type, combined into the tightest range by
+    /// the rule a single-table range scan uses (<see cref="IndexScanSelector.TryBuildLeadingColumnRange"/>),
+    /// and read as an index range scan of the right table with the pushed right filter.
+    /// <list type="bullet">
+    ///   <item>A NULL bound reads nothing: a comparison with NULL is never true, so no right row can
+    ///   satisfy the conjunct it came from.</item>
+    ///   <item>A bound of another type with no exact rewrite into the key's domain is left out, which
+    ///   widens the range; the <c>ON</c> predicate still tests each pair.</item>
+    ///   <item>A bound that does not evaluate against the left row alone (an error) is left out too, for
+    ///   the same reason. The <c>ON</c> predicate then reports the error on the pairs it tests.</item>
+    ///   <item>A range whose lower end is above its upper end reads nothing.</item>
+    /// </list>
+    /// </summary>
+    private IAsyncEnumerable<QueryResultRow> SeekRightSide(
+        NestedLoopJoinNode joinNode,
+        JoinRangeSeek seek,
+        List<AnalyzedComparison> bounds,
+        QueryPlan plan,
+        IReadOnlyDictionary<string, ColumnValue> left)
+    {
+        bounds.Clear();
+
+        foreach (JoinRangeSeekBound seekBound in seek.Bounds)
+        {
+            ColumnValue value;
+            try
+            {
+                value = SqlExecutor.EvalExpr(seekBound.Expression, left, plan.Ticket.Parameters);
+            }
+            catch (CamusDBException)
+            {
+                continue;
+            }
+
+            if (value.Type == ColumnType.Null)
+                return EmptyRows();
+
+            string op = seekBound.Operator;
+
+            if (value.Type != seek.KeyType)
+            {
+                if (NumericBoundNormalizer.Normalize(op, value, seek.KeyType, out string newOp, out ColumnValue newValue)
+                    != NumericBoundNormalizer.Outcome.Converted)
+                    continue;
+
+                (op, value) = (newOp, newValue);
+            }
+
+            bounds.Add(new AnalyzedComparison(seek.KeyColumn, op, value, seekBound.Expression));
+        }
+
+        CompositeColumnValue? from = null, to = null;
+        bool fromInclusive = true, toInclusive = true;
+
+        if (bounds.Count > 0)
+        {
+            IndexScanSelector.TryBuildLeadingColumnRange(bounds, out from, out fromInclusive, out to, out toInclusive);
+
+            if (from is not null && to is not null)
+            {
+                int cmp = string.CompareOrdinal(KeyEncoder.Encode(from), KeyEncoder.Encode(to));
+                if (cmp > 0 || (cmp == 0 && !(fromInclusive && toInclusive)))
+                    return EmptyRows();
+            }
+        }
+
+        IndexRangeScanNode range = new(seek.Index, from, fromInclusive, to, toInclusive)
+        {
+            BoundSource = joinNode.RightSource.Table,
+            ExecutionFilter = joinNode.RightExecutionFilter,
+        };
+
+        return scanner.ScanBoundTableByIndexRange(range, plan, joinNode.Stats);
+    }
+
+    private static async IAsyncEnumerable<QueryResultRow> EmptyRows()
+    {
+        await Task.CompletedTask.ConfigureAwait(false);
+        yield break;
     }
 
     /// <summary>

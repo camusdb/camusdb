@@ -139,6 +139,30 @@ internal class TestLateralJoins : SharedNodeBaseTest
     }
 
     [Test]
+    public async Task ABodyOfManyColumnsWithANestedSubqueryThatReadsALeftColumnRuns()
+    {
+        (string db, DatabaseDescriptor database, CommandExecutor executor) = await Seeded();
+
+        // The nested subquery reads a left column, so the body binds again for each left row.
+        List<QueryResultRow> rows = await Query(executor, database, db,
+            "SELECT i.id, c.k, c.n FROM items i CROSS JOIN LATERAL " +
+            "(SELECT i.v AS k, (SELECT COUNT(*) FROM tags t WHERE t.item_id = i.id) AS n) c " +
+            "WHERE i.id BETWEEN 2 AND 4 ORDER BY i.id");
+
+        CollectionAssert.AreEqual(new long[] { 2, 3, 4 }, Longs(rows, "id"));
+        CollectionAssert.AreEqual(new long[] { 20, 30, 40 }, Longs(rows, "k"));
+        CollectionAssert.AreEqual(new long[] { 1, 0, 2 }, Longs(rows, "n"));
+
+        List<QueryResultRow> unpivot = await Query(executor, database, db,
+            "SELECT s.slot, s.n FROM items i CROSS JOIN LATERAL " +
+            "(VALUES ('v', i.v), ('tags', (SELECT COUNT(*) FROM tags t WHERE t.item_id = i.id))) AS s (slot, n) " +
+            "WHERE i.id = 4 ORDER BY s.slot");
+
+        CollectionAssert.AreEqual(new string?[] { "tags", "v" }, Strings(unpivot, "slot"));
+        CollectionAssert.AreEqual(new long[] { 2, 40 }, Longs(unpivot, "n"));
+    }
+
+    [Test]
     public async Task AnInnerJoinLateralAppliesItsOnCondition()
     {
         (string db, DatabaseDescriptor database, CommandExecutor executor) = await Seeded();

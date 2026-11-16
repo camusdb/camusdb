@@ -302,11 +302,30 @@ public static class PlanRenderer
         if (node.RightSource.Derived is { Lateral: not null })
             detail += ", lateral";
 
+        // A range seek reads, for each left row, only the index range its bounds give.
+        if (node.RangeSeek is { } seek)
+            detail += $", range-seek={seek.Index.Name}({RenderSeekBounds(seek)})";
+
         if (node.RightExecutionFilter is not null)
             detail += $", right-filter={RenderExpr(node.RightExecutionFilter)}";
         detail += RenderRightInput(node.RightPhysicalNode);
         detail += RenderJoinKind(node.Kind);
         return $"nested-loop-join({detail})";
+    }
+
+    private static string RenderSeekBounds(JoinRangeSeek seek)
+    {
+        System.Text.StringBuilder text = new();
+
+        foreach (JoinRangeSeekBound seekBound in seek.Bounds)
+        {
+            if (text.Length > 0)
+                text.Append(" AND ");
+
+            text.Append(seek.KeyColumn).Append(' ').Append(seekBound.Operator).Append(' ').Append(RenderExpr(seekBound.Expression));
+        }
+
+        return text.ToString();
     }
 
     private static string RenderIndexNestedLoopJoin(IndexNestedLoopJoinNode node)

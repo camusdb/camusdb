@@ -102,6 +102,8 @@ internal static class QueryPlanStepAdapter
 
                 case NestedLoopJoinNode nestedLoop:
                     shape.Append(nestedLoop.RightSource.Table?.Table.Id).Append(',');
+                    if (nestedLoop.RangeSeek is { } seek)
+                        shape.Append("seek:").Append(seek.Index.KvId).Append(',');
                     AppendShape(nestedLoop.RightPhysicalNode, shape);
                     break;
 
@@ -157,7 +159,7 @@ internal static class QueryPlanStepAdapter
         {
             bool fullRightScan = node switch
             {
-                NestedLoopJoinNode nestedLoop => nestedLoop.RightPhysicalNode is null && nestedLoop.RightSource.Table is not null,
+                NestedLoopJoinNode nestedLoop => nestedLoop.RangeSeek is null && nestedLoop.RightPhysicalNode is null && nestedLoop.RightSource.Table is not null,
                 HashJoinNode hash => hash.RightPhysicalNode is null && hash.BuildSource.Table is not null,
                 MergeJoinNode merge => merge.RightPhysicalNode is null && merge.RightSource.Table is not null,
                 _ => false,
