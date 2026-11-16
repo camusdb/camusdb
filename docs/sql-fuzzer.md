@@ -61,6 +61,11 @@ nested loop, only for a larger outer side. A FROM clause of such a round has at 
 names that table once: a cross join of the table with itself gives some 40,000 pairs, and a probe for
 each pair passes the statement time limit with no defect.
 
+A fifth of the join equalities compare a column of one side with an expression of the columns of the
+other side. The planner keys a hash join on such an expression (see
+[Expression keys](joins.md#expression-keys)), so the oracles compare that join with the nested loop
+of the `force-nested-loop` arm.
+
 About a third of the joins with no equality key take a range form: a numeric column of the right
 table between two numeric columns of the left side, written with `BETWEEN` or with two comparisons.
 The planner can serve it with a range seek on an index of that column (see

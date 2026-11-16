@@ -425,7 +425,21 @@ internal sealed class StatementGenerator
         // Equal types first: they are the common join, and they match more rows.
         List<(ScopeColumn L, ScopeColumn R)> same = pairs.Where(p => p.L.Type == p.R.Type).ToList();
         (ScopeColumn a, ScopeColumn b) = same.Count > 0 && random.Chance(0.8) ? random.Pick(same) : random.Pick(pairs);
-        return new BinaryExpr(BinaryOp.Eq, new ColumnExpr(a.Source, a.Column, a.Type), new ColumnExpr(b.Source, b.Column, b.Type), FuzzType.Bool);
+        Expr leftKey = new ColumnExpr(a.Source, a.Column, a.Type);
+        Expr rightKey = new ColumnExpr(b.Source, b.Column, b.Type);
+
+        // For a fifth of the equalities, one side is an expression of the columns of its own side. The
+        // planner keys a hash join on such an expression, so the oracles compare that join with the
+        // nested loop that tests the same equality for each pair.
+        if (random.Chance(0.2))
+        {
+            if (random.Chance(0.5))
+                leftKey = expressions.Generate(a.Type, new ExprScope(left, State.Tables).ForUncorrelatedSubqueries(), 1);
+            else
+                rightKey = expressions.Generate(b.Type, new ExprScope(right, State.Tables).ForUncorrelatedSubqueries(), 1);
+        }
+
+        return new BinaryExpr(BinaryOp.Eq, leftKey, rightKey, FuzzType.Bool);
     }
 
     /// <summary>

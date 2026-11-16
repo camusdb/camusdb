@@ -159,6 +159,40 @@ How it runs:
   most 256 rows is kept for later rows with the same values. A derived table that calls a volatile
   function, such as `random()`, runs again for each left row.
 
+## Expression keys
+
+A hash join keys on an `ON` equality whose two sides each read only one side of the join. A side
+can be a column or an expression of its own side:
+
+```sql
+SELECT s.id, sd.tex
+  FROM seg s
+  JOIN linedef l ON l.id = s.linedef_id
+  JOIN sidedef sd ON sd.id = CASE WHEN s.side = 0 THEN l.right_sidedef ELSE l.left_sidedef END;
+```
+
+- The hash join computes the expression once for each row of its side and looks the value up in the
+  hash table. With no key, such a join runs as a nested loop that tests every pair, or as a hash join
+  on its other keys that tests the expression for each pair.
+- An expression can use literals, columns of its own side named with their aliases, arithmetic,
+  `CAST`, `CASE` and functions that are not volatile. A parameter, a subquery, an unqualified column
+  name or a column of the other side gives no key. Two plain columns are a key as before.
+- The static type of the expression must be the type of the other side, by the rule for two columns
+  (see [Limits](#limits)). `t.f = n.n * 0.5` is a key for a `FLOAT64` column `f`. `t.k = n.n * 1.0`
+  is no key for an `INT64` column `k`.
+- The `ON` predicate still tests each pair, so the rows are the rows of the nested loop. A NULL key
+  value matches nothing; a left join pads its row.
+- The hash join computes the key for every row of its side. So an error in the expression, such as
+  a division by zero, can come from a row that the nested loop never tests, for example a left row
+  when the right side is empty.
+- Only the hash join takes an expression key, also when it spills to the Grace hash join. A merge
+  join, an index nested-loop join and the broadcast hash join read a key by its column name, so they
+  serve column keys only. On a cluster, a hash join with an expression key runs its probe locally.
+- `EXPLAIN` shows the expression in parentheses:
+  `hash-join(on=(CASE WHEN s.side = 0 THEN l.right_sidedef ELSE l.left_sidedef END)=id, build=sd)`.
+- The join-order search uses the key to choose the operator, but its row estimate treats the
+  equality as a condition with no key.
+
 ## Range seek
 
 A join with no equality key normally runs as a nested loop that tests every right row against `ON`

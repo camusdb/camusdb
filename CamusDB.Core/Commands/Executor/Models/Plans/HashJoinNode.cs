@@ -69,13 +69,16 @@ public sealed class HashJoinNode : PhysicalPlanNode
 
     /// <summary>
     /// Qualified left-side (probe) lookup column names, one per equi-key conjunct, e.g. <c>o.id</c>.
-    /// Parallel to <see cref="BuildKeyColumns"/>.
+    /// Parallel to <see cref="BuildKeyColumns"/>. When a key of either side is an expression, both lists
+    /// are a <c>JoinKeyExpressionList</c>: an expression key has a placeholder name that no row carries,
+    /// and the key extractor computes its value from the row. Read a key through the extractor, never
+    /// by name.
     /// </summary>
     public IReadOnlyList<string> ProbeKeyColumns { get; }
 
     /// <summary>
     /// Unqualified column names on the build (right) side, e.g. <c>order_id</c>.
-    /// Parallel to <see cref="ProbeKeyColumns"/>.
+    /// Parallel to <see cref="ProbeKeyColumns"/>, which says when a key is an expression.
     /// </summary>
     public IReadOnlyList<string> BuildKeyColumns { get; }
 

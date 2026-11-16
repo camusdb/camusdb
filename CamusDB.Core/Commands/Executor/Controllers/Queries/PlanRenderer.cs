@@ -337,10 +337,16 @@ public static class PlanRenderer
         return $"index-nested-loop-join({detail})";
     }
 
+    /// <summary>A hash join key by name, or the text of its expression when it is an expression key.</summary>
+    private static string RenderKey(IReadOnlyList<string> keys, int index) =>
+        keys is JoinKeyExpressionList list && list.ExpressionAt(index) is { } expression
+            ? $"({RenderExpr(expression)})"
+            : keys[index];
+
     private static string RenderHashJoin(HashJoinNode node)
     {
-        string keys = string.Join(", ", node.ProbeKeyColumns.Zip(node.BuildKeyColumns,
-            (p, b) => $"{p}={b}"));
+        string keys = string.Join(", ", node.ProbeKeyColumns.Select((p, i) =>
+            $"{RenderKey(node.ProbeKeyColumns, i)}={RenderKey(node.BuildKeyColumns, i)}"));
         string build = node.BuildSide == HashJoinBuildSide.Left
             ? ResolveNodeAlias(node.Input) ?? node.BuildSource.Alias
             : node.BuildSource.Alias;

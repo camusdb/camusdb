@@ -663,7 +663,10 @@ applies the `PostJoinFilter`, then hands the cursor to `QueryPostScanPipeline.Ap
   non-unique → equality-prefix scan). A NULL lookup value is never probed. Left outer: a NULL
   lookup value, an empty probe, or a probe whose rows all fail `ON` yields one padded row.
 - `HashJoinNode` → materialise the build side into an in-memory hash table keyed on the equi-join
-  columns; stream the probe side and look up each row. Falls back to nested-loop if the build
+  columns; stream the probe side and look up each row. A key can be an expression of one side
+  (`JoinEquiJoinAnalyzer` matches it, `JoinKeyExpressionList` computes it for each row from the key
+  column list of that side); such a node is never a merge join or a broadcast probe. See
+  [`joins.md`](./joins.md#expression-keys). Falls back to nested-loop if the build
   side exceeds `HashJoinMaxBuildRows`. Build side is the smaller estimated input for an inner
   join and always the right input for a left outer join. Left outer: a probe row with a NULL key,
   no bucket, or no bucket row that passes `ON` is padded at once. The Grace path applies the same

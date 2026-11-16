@@ -33,7 +33,9 @@ internal static class JoinKeyExtractor
     /// NULL semantics). <paramref name="destination"/> must have exactly
     /// <paramref name="keyColumns"/>.Count slots and is overwritten on every call, so the caller
     /// must finish reading it (hash-table lookup, partition routing, span comparison) before the
-    /// next extraction. Hash-table code paths pass the filled span to the alternate lookup of
+    /// next extraction. When <paramref name="keyColumns"/> is a <see cref="JoinKeyExpressionList"/>,
+    /// its expression keys are computed from <paramref name="row"/>, a qualified left row or an
+    /// unqualified right row as that list was built for. Hash-table code paths pass the filled span to the alternate lookup of
     /// <see cref="CompositeColumnValueComparer"/>; an owned copy is made only on bucket insert.
     /// </summary>
     internal static bool TryExtractKeyInto(
@@ -41,6 +43,10 @@ internal static class JoinKeyExtractor
         IReadOnlyList<string> keyColumns,
         ColumnValue[] destination)
     {
+        // A key list with expression keys computes them from the row.
+        if (keyColumns is JoinKeyExpressionList expressionKeys)
+            return expressionKeys.TryExtractInto(row, destination);
+
         for (int i = 0; i < keyColumns.Count; i++)
         {
             if (!row.TryGetValue(keyColumns[i], out ColumnValue? v) || v.Type == ColumnType.Null)

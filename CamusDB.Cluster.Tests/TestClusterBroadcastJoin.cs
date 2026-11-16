@@ -314,6 +314,53 @@ public sealed class TestClusterBroadcastJoin
     }
 
     /// <summary>
+    /// A join key computed from an expression (<c>d.k = f.dim_id + 0</c>) cannot travel: a broadcast
+    /// fragment carries key names only. After the split, every node runs that join as a local hash
+    /// join keyed on the expression, ships no fragment, and returns the rows of the column-key join.
+    /// </summary>
+    [Test]
+    public async Task ExpressionKeyJoin_AfterSplit_RunsLocally_AndMatchesTheColumnKeyJoin()
+    {
+        (InProcessSchemaCluster cluster, string db, List<string> factIds) = await SetupAsync();
+
+        try
+        {
+            const string columnKeySql =
+                "SELECT f.id, f.val, d.name FROM facts f JOIN dims d ON f.dim_id = d.k WHERE f.val >= 20 AND f.val < 180";
+            const string expressionKeySql =
+                "SELECT f.id, f.val, d.name FROM facts f JOIN dims d ON d.k = f.dim_id + 0 WHERE f.val >= 20 AND f.val < 180";
+
+            List<(string FactId, long Val, string Name)> reference = Canonical(Shape(await RunSql(cluster.Nodes[0], db, columnKeySql)));
+            Assert.That(reference, Is.Not.Empty);
+
+            await SplitFactsAtMedianAsync(cluster, db, factIds);
+
+            foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+            {
+                cluster.FragmentTransport!.ResetExecuted();
+
+                Assert.AreEqual(reference, Canonical(Shape(await RunSql(node, db, expressionKeySql))),
+                    $"Node {node.Index}: the expression-key join must return the column-key join rows");
+
+                Assert.AreEqual(0, cluster.FragmentTransport.ExecutedJoinCount,
+                    $"Node {node.Index}: an expression key must not ship a broadcast fragment");
+
+                List<QueryResultRow> plan = await RunSql(node, db, "EXPLAIN (ANALYZE) " + expressionKeySql);
+                string dump = string.Join("\n", plan.Select(r => $"{r.Row["node"].StrValue} | {r.Row["detail"].StrValue}"));
+                QueryResultRow join = plan.Single(r => r.Row["node"].StrValue == "hash-join");
+
+                Assert.That(join.Row["detail"].StrValue, Does.Contain("(f.dim_id + 0)"), dump);
+                Assert.That(join.Row["detail"].StrValue, Does.Not.Contain("ran=broadcast"), dump);
+                Assert.AreEqual(reference.Count, join.Row["actual_rows"].LongValue, dump);
+            }
+        }
+        finally
+        {
+            await cluster.DisposeAsync();
+        }
+    }
+
+    /// <summary>
     /// EXPLAIN (ANALYZE) of a broadcast join says what the plan cannot: the hash join ran as a
     /// broadcast probe (<c>ran=broadcast</c>), and each probed span has a <c>broadcast-span</c> row.
     /// A span that ran on its leader reports the rows that leader scanned, from the fragment's

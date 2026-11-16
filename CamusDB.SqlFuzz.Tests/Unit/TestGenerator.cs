@@ -372,6 +372,36 @@ internal sealed class TestGenerator
         Assert.That(comparisons, Is.GreaterThan(5), "range joins written with two comparisons");
     }
 
+    /// <summary>
+    /// Some join equalities compare a column of one side with an expression of the other, the shape the
+    /// planner keys a hash join on.
+    /// </summary>
+    [Test]
+    public void SomeJoinEqualitiesCompareAColumnWithAnExpression()
+    {
+        int expressionSides = 0;
+
+        for (ulong seed = 1; seed <= 40; seed++)
+        {
+            StatementGenerator generator = new(new FuzzRandom(seed), GeneratorProfile.CamusDB);
+            generator.GenerateSchema();
+            generator.GenerateData();
+
+            for (int i = 0; i < 50; i++)
+            {
+                SelectStmt select = generator.GenerateSelect(SelectOptions.Comparable);
+                for (FromItem item = select.From; item is JoinFrom join; item = join.Left)
+                {
+                    if (join.On is BinaryExpr { Op: BinaryOp.Eq, Left: var l, Right: var r }
+                        && (l is ColumnExpr) != (r is ColumnExpr))
+                        expressionSides++;
+                }
+            }
+        }
+
+        Assert.That(expressionSides, Is.GreaterThan(5), "join equalities with an expression on one side");
+    }
+
     [Test]
     public void ValuesListsAppearInSelectsAndJoinedWrites()
     {

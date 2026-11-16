@@ -268,7 +268,8 @@ Notes:
   join. `nested-loop-join` and `index-nested-loop-join` render the whole `on=` predicate of the join.
   `hash-join` and `merge-join` render only their key pairs: an equi-conjunct that moved into the join
   shows up as one more key (`on=b.y=y, a.z=z`), and a conjunct that is not a key is evaluated in the
-  join but is not shown. The filter that runs after the last join is not a plan node, so it is not
+  join but is not shown. A key computed from an expression shows the expression in parentheses
+  (`on=(n.n * 0.5)=f`); see [Expression keys](joins.md#expression-keys). The filter that runs after the last join is not a plan node, so it is not
   shown either. A `nested-loop-join(on=true, …)` is a cross product: the planner keeps one only when
   the predicates need it (no conjunct connects the two sides).
 

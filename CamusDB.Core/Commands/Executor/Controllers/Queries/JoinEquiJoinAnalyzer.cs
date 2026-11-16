@@ -29,7 +29,8 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 internal static class JoinEquiJoinAnalyzer
 {
     /// <summary>
-    /// Extracts every <c>left.col = right.col</c> equi-key pair from <paramref name="onPredicate"/>
+    /// Extracts every equi-key pair from <paramref name="onPredicate"/>: <c>left.col = right.col</c>,
+    /// and an equality whose sides are expressions of one side each (<see cref="TryMatchExpressionConjunct"/>),
     /// without requiring an index on the right side. Used by hash join and merge join.
     /// </summary>
     public static bool TryExtractEquiKeys(
@@ -42,14 +43,151 @@ internal static class JoinEquiJoinAnalyzer
         List<NodeAst> conjuncts = [];
         PredicateAnalyzer.CollectAndConjuncts(onPredicate, conjuncts);
 
+        HashSet<string>? leftAliases = null;
+
         foreach (NodeAst conjunct in conjuncts)
         {
             if (TryMatchHashJoinConjunct(conjunct, rightSource, bound, out JoinEquiKeyPair? pair))
+            {
+                pairs.Add(pair);
+                continue;
+            }
+
+            leftAliases ??= JoinSideExpressions.LeftAliases(bound, rightSource.Alias);
+
+            if (TryMatchExpressionConjunct(conjunct, rightSource, bound, leftAliases, pairs.Count, out pair))
                 pairs.Add(pair);
         }
 
         keyPairs = pairs;
         return pairs.Count > 0;
+    }
+
+    /// <summary>
+    /// Matches <c>f(left…) = g(right…)</c>, in either order, where each side is a column or an
+    /// expression, one side reads only the left row and the other only the right row
+    /// (<see cref="JoinSideExpressions.IsLeftOnly"/>, <see cref="JoinSideExpressions.IsRightOnly"/>, with
+    /// no parameters), at least one side is an expression, and each side reads at least one column. A
+    /// pair of two columns is the job of <see cref="TryMatchHashJoinConjunct"/>. The static type of an
+    /// expression must be known, and the two sides must agree by the rule a column pair follows
+    /// (<see cref="KeyTypesAgree"/>). Only the hash join computes such a key; see
+    /// <see cref="JoinKeyExpressionList"/>.
+    /// </summary>
+    private static bool TryMatchExpressionConjunct(
+        NodeAst conjunct,
+        BoundJoinRightSource rightSource,
+        BoundSelectQuery bound,
+        HashSet<string> leftAliases,
+        int position,
+        out JoinEquiKeyPair pair)
+    {
+        pair = null!;
+
+        if (conjunct.nodeType != NodeType.ExprEquals || conjunct.leftAst is null || conjunct.rightAst is null)
+            return false;
+
+        if (conjunct.leftAst.nodeType == NodeType.Identifier && conjunct.rightAst.nodeType == NodeType.Identifier)
+            return false;
+
+        if (TryMatchExpressionOrientation(conjunct.leftAst, conjunct.rightAst, rightSource, bound, leftAliases, position, out pair))
+            return true;
+
+        return TryMatchExpressionOrientation(conjunct.rightAst, conjunct.leftAst, rightSource, bound, leftAliases, position, out pair);
+    }
+
+    private static bool TryMatchExpressionOrientation(
+        NodeAst leftSide,
+        NodeAst rightSide,
+        BoundJoinRightSource rightSource,
+        BoundSelectQuery bound,
+        HashSet<string> leftAliases,
+        int position,
+        out JoinEquiKeyPair pair)
+    {
+        pair = null!;
+
+        // The left term.
+        string leftKey;
+        NodeAst? leftExpression = null;
+        ColumnType? leftType;
+
+        if (leftSide.nodeType == NodeType.Identifier)
+        {
+            if (leftSide.yytext is null || !TryResolveLeftLookupColumnByAlias(leftSide.yytext, rightSource.Alias, bound, out leftKey))
+                return false;
+
+            leftType = LeftColumnType(leftKey, bound);
+        }
+        else
+        {
+            if (!JoinSideExpressions.IsLeftOnly(leftSide, leftAliases, allowParameters: false)
+                || !JoinSideExpressions.ReadsAColumn(leftSide))
+                return false;
+
+            if (StaticType(leftSide, bound) is not { } type)
+                return false;
+
+            leftKey = JoinKeyExpressionList.PlaceholderName(position);
+            leftExpression = leftSide;
+            leftType = type;
+        }
+
+        // The right term.
+        string rightKey;
+        NodeAst? rightExpression = null;
+        IReadOnlyDictionary<string, string>? rightNames = null;
+        ColumnType? rightType;
+
+        if (rightSide.nodeType == NodeType.Identifier)
+        {
+            if (rightSide.yytext is null
+                || !TrySplitQualified(rightSide.yytext, out string rightAlias, out string rightColumn)
+                || !string.Equals(rightAlias, rightSource.Alias, StringComparison.OrdinalIgnoreCase)
+                || !rightSource.HasColumn(rightColumn))
+                return false;
+
+            rightType = RightColumnType(rightSource, rightColumn);
+            rightKey = rightColumn;
+
+            if (rightSource.Derived is { } derivedRight && !derivedRight.TryGetRowKey(rightColumn, out rightKey))
+                return false;
+        }
+        else
+        {
+            if (!JoinSideExpressions.IsRightOnly(rightSide, rightSource, out Dictionary<string, string> names)
+                || names.Count == 0)
+                return false;
+
+            if (StaticType(rightSide, bound) is not { } type)
+                return false;
+
+            rightKey = JoinKeyExpressionList.PlaceholderName(position);
+            rightExpression = rightSide;
+            rightNames = names;
+            rightType = type;
+        }
+
+        if (leftType == ColumnType.Array || rightType == ColumnType.Array)
+            return false;
+
+        ColumnType? keyType = rightType is { } knownRight && knownRight != ColumnType.Null ? knownRight : leftType;
+
+        if (leftType is { } l && l != ColumnType.Null && keyType is { } k && k != ColumnType.Null && l != k)
+            return false;
+
+        pair = new JoinEquiKeyPair(leftKey, rightKey, leftExpression, rightExpression, rightNames, keyType);
+        return true;
+    }
+
+    /// <summary>The static type of a key expression, or null when the statement does not show it.</summary>
+    private static ColumnType? StaticType(NodeAst expression, BoundSelectQuery bound)
+    {
+        ExpressionType? type = ConditionalResultTypes.TypeOf(
+            expression,
+            ConditionalResultTypes.LookupFor(bound, excludeOutputAliases: false),
+            ConditionalResultTypes.CallTyping.BuiltIn);
+
+        return type is { } known && known.Type != ColumnType.Null ? known.Type : null;
     }
 
     private static bool TryMatchHashJoinConjunct(

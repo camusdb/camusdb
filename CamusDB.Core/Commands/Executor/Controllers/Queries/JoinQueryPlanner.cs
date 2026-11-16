@@ -522,13 +522,16 @@ internal sealed class JoinQueryPlanner
         if (hasEquiKeys && stats?.ForceHashJoinForTesting == true)
             return BuildHashJoinNode(left, right, joinSource.OnPredicate, equiKeys!, rightFilter, database, stats, kind, step);
 
-        if (hasEquiKeys && stats?.ForceMergeJoinForTesting == true)
+        // A merge join orders both inputs by the key names, so an expression key has no merge join.
+        bool expressionKeys = hasEquiKeys && HasExpressionKey(equiKeys!);
+
+        if (hasEquiKeys && !expressionKeys && stats?.ForceMergeJoinForTesting == true)
             return BuildMergeJoinNode(left, right, joinSource.OnPredicate!, equiKeys!, rightFilter, kind);
 
         // Cost-based merge-join selection: check whether both sides have free index
         // ordering before entering the index/hash branches; if yes, merge join beats
         // both INLJ and hash for large inputs.
-        (bool leftFree, bool rightFree) = hasEquiKeys
+        (bool leftFree, bool rightFree) = hasEquiKeys && !expressionKeys
             ? CheckFreeOrdering(left, right, equiKeys!)
             : (false, false);
 
@@ -844,12 +847,25 @@ internal sealed class JoinQueryPlanner
         return dot >= 0 && dot < columnName.Length - 1 ? columnName[(dot + 1)..] : columnName;
     }
 
+    private static bool HasExpressionKey(IReadOnlyList<JoinEquiKeyPair> equiKeys)
+    {
+        for (int i = 0; i < equiKeys.Count; i++)
+        {
+            if (equiKeys[i].IsExpression)
+                return true;
+        }
+
+        return false;
+    }
+
     /// <summary>
     /// Constructs a <see cref="HashJoinNode"/> from pre-extracted equi-keys, choosing the
     /// optimal build side. Shared by the indexed and unindexed hash-join selection paths.
     /// A left outer join pins the build side to the right input and never consults
     /// <see cref="ChooseBuildSide"/>: the preserved side must be the probe so an unmatched
-    /// probe row can be padded in stream order (see <see cref="HashJoinNode"/>).
+    /// probe row can be padded in stream order (see <see cref="HashJoinNode"/>). When a key is an
+    /// expression of the row of its side, the key columns of both sides are a
+    /// <see cref="JoinKeyExpressionList"/>.
     /// </summary>
     private HashJoinNode BuildHashJoinNode(
         PhysicalPlanNode left,
@@ -871,6 +887,29 @@ internal sealed class JoinQueryPlanner
             buildKeys[i] = equiKeys[i].RightColumnName;
         }
 
+        IReadOnlyList<string> probeKeyColumns = probeKeys;
+        IReadOnlyList<string> buildKeyColumns = buildKeys;
+
+        if (HasExpressionKey(equiKeys))
+        {
+            NodeAst?[] leftExpressions = new NodeAst?[equiKeys.Count];
+            NodeAst?[] rightExpressions = new NodeAst?[equiKeys.Count];
+            ColumnType?[] keyTypes = new ColumnType?[equiKeys.Count];
+            IReadOnlyDictionary<string, string>?[] noRowKeys = new IReadOnlyDictionary<string, string>?[equiKeys.Count];
+            IReadOnlyDictionary<string, string>?[] rightRowKeys = new IReadOnlyDictionary<string, string>?[equiKeys.Count];
+
+            for (int i = 0; i < equiKeys.Count; i++)
+            {
+                leftExpressions[i] = equiKeys[i].LeftExpression;
+                rightExpressions[i] = equiKeys[i].RightExpression;
+                keyTypes[i] = equiKeys[i].KeyType;
+                rightRowKeys[i] = equiKeys[i].RightRowKeys;
+            }
+
+            probeKeyColumns = new JoinKeyExpressionList(probeKeys, leftExpressions, keyTypes, noRowKeys);
+            buildKeyColumns = new JoinKeyExpressionList(buildKeys, rightExpressions, keyTypes, rightRowKeys);
+        }
+
         HashJoinBuildSide buildSide = kind == JoinKind.LeftOuter
             ? HashJoinBuildSide.Right
             : step is { } estimate
@@ -878,7 +917,7 @@ internal sealed class JoinQueryPlanner
                 ? estimate.LeftRows < estimate.RightRows ? HashJoinBuildSide.Left : HashJoinBuildSide.Right
                 : ChooseBuildSide(left, right, database, stats, rightFilter);
 
-        return new HashJoinNode(left, right, onPredicate, probeKeys, buildKeys)
+        return new HashJoinNode(left, right, onPredicate, probeKeyColumns, buildKeyColumns)
         {
             Kind = kind,
             BuildExecutionFilter = rightFilter,

@@ -88,6 +88,10 @@ internal sealed class BroadcastJoinPlanner
         if (joinNode.Kind != JoinKind.Inner)
             return Decline(plan, $"join kind {joinNode.Kind} needs padded rows a remote probe cannot produce");
 
+        // A fragment carries the key names only, and an expression key has no cell to read by name.
+        if (joinNode.ProbeKeyColumns is JoinKeyExpressionList || joinNode.BuildKeyColumns is JoinKeyExpressionList)
+            return Decline(plan, "a join key is an expression, which a remote probe cannot compute");
+
         // The probe side must be a plain primary-row base table so its keyspace can be
         // span-fragmented: the left scan leaf when the right side was built, or the right
         // table source when the left subtree was built (a derived right source cannot be

@@ -6,7 +6,6 @@
  */
 
 using CamusDB.Core.Catalogs.Models;
-using CamusDB.Core.CommandsExecutor.Controllers.Functions;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Plans;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
@@ -44,7 +43,7 @@ internal static class JoinRangeSeekAnalyzer
 
         TableDescriptor table = right.Table.Table;
         string rightAlias = right.Alias;
-        HashSet<string> leftAliases = LeftAliases(bound, rightAlias);
+        HashSet<string> leftAliases = JoinSideExpressions.LeftAliases(bound, rightAlias);
 
         List<NodeAst> conjuncts = [];
         PredicateAnalyzer.CollectAndConjuncts(onPredicate, conjuncts);
@@ -92,20 +91,6 @@ internal static class JoinRangeSeekAnalyzer
         return new JoinRangeSeek(best, best.Columns[0], ColumnTypeOf(table, best.Columns[0]), bestBounds!);
     }
 
-    private static HashSet<string> LeftAliases(BoundSelectQuery bound, string rightAlias)
-    {
-        HashSet<string> aliases = new(StringComparer.OrdinalIgnoreCase);
-
-        foreach (BoundTableSource source in bound.Sources)
-            aliases.Add(source.Alias);
-
-        foreach (BoundDerivedTableSource source in bound.DerivedSources)
-            aliases.Add(source.Alias);
-
-        aliases.Remove(rightAlias);
-        return aliases;
-    }
-
     private static void CollectBounds(
         NodeAst conjunct,
         BoundJoinRightSource right,
@@ -117,8 +102,8 @@ internal static class JoinRangeSeekAnalyzer
         {
             // x BETWEEN low AND high: the operand is leftAst, the bounds are extendedOne and extendedTwo.
             if (TryRightKey(conjunct.leftAst, right, rightAlias, out string column)
-                && conjunct.extendedOne is { } low && IsLeftOnly(low, leftAliases)
-                && conjunct.extendedTwo is { } high && IsLeftOnly(high, leftAliases))
+                && conjunct.extendedOne is { } low && JoinSideExpressions.IsLeftOnly(low, leftAliases, allowParameters: true)
+                && conjunct.extendedTwo is { } high && JoinSideExpressions.IsLeftOnly(high, leftAliases, allowParameters: true))
             {
                 Add(byColumn, column, new JoinRangeSeekBound(">=", low));
                 Add(byColumn, column, new JoinRangeSeekBound("<=", high));
@@ -139,13 +124,13 @@ internal static class JoinRangeSeekAnalyzer
         if (op is null || conjunct.leftAst is null || conjunct.rightAst is null)
             return;
 
-        if (TryRightKey(conjunct.leftAst, right, rightAlias, out string keyLeft) && IsLeftOnly(conjunct.rightAst, leftAliases))
+        if (TryRightKey(conjunct.leftAst, right, rightAlias, out string keyLeft) && JoinSideExpressions.IsLeftOnly(conjunct.rightAst, leftAliases, allowParameters: true))
         {
             Add(byColumn, keyLeft, new JoinRangeSeekBound(op, conjunct.rightAst));
             return;
         }
 
-        if (TryRightKey(conjunct.rightAst, right, rightAlias, out string keyRight) && IsLeftOnly(conjunct.leftAst, leftAliases))
+        if (TryRightKey(conjunct.rightAst, right, rightAlias, out string keyRight) && JoinSideExpressions.IsLeftOnly(conjunct.leftAst, leftAliases, allowParameters: true))
             Add(byColumn, keyRight, new JoinRangeSeekBound(Flip(op), conjunct.leftAst));
     }
 
@@ -188,113 +173,10 @@ internal static class JoinRangeSeekAnalyzer
         if (node is not { nodeType: NodeType.Identifier, yytext: { } text })
             return false;
 
-        if (!TrySplitQualified(text, out string alias, out column))
+        if (!JoinSideExpressions.TrySplitQualified(text, out string alias, out column))
             return false;
 
         return string.Equals(alias, rightAlias, StringComparison.OrdinalIgnoreCase) && right.HasColumn(column);
-    }
-
-    /// <summary>
-    /// True when <paramref name="expression"/> reads nothing but literals, parameters and columns of the
-    /// left side, and calls no volatile function. The walk is iterative, because an expression can be
-    /// as deep as the statement allows.
-    /// </summary>
-    private static bool IsLeftOnly(NodeAst expression, HashSet<string> leftAliases)
-    {
-        if (ScalarFunctionEvaluator.ContainsVolatileFunction(expression))
-            return false;
-
-        Stack<NodeAst> pending = new();
-        pending.Push(expression);
-
-        while (pending.Count > 0)
-        {
-            NodeAst node = pending.Pop();
-
-            switch (node.nodeType)
-            {
-                case NodeType.Identifier:
-                    if (node.yytext is null
-                        || !TrySplitQualified(node.yytext, out string alias, out _)
-                        || !leftAliases.Contains(alias))
-                        return false;
-                    continue;
-
-                case NodeType.Integer:
-                case NodeType.Float:
-                case NodeType.String:
-                case NodeType.Bool:
-                case NodeType.Null:
-                case NodeType.Placeholder:
-                    continue;
-
-                case NodeType.ExprFuncCall:
-                    // leftAst is the function name, not a column.
-                    if (node.rightAst is not null)
-                        pending.Push(node.rightAst);
-                    continue;
-
-                case NodeType.ExprCast:
-                    // rightAst is the target type, not a column.
-                    if (node.leftAst is not null)
-                        pending.Push(node.leftAst);
-                    continue;
-
-                case NodeType.ExprAdd:
-                case NodeType.ExprSub:
-                case NodeType.ExprMult:
-                case NodeType.ExprDiv:
-                case NodeType.ExprArgumentList:
-                case NodeType.ExprList:
-                case NodeType.ExprCase:
-                case NodeType.ExprCaseWhen:
-                case NodeType.ExprCaseWhenList:
-                case NodeType.ExprEquals:
-                case NodeType.ExprNotEquals:
-                case NodeType.ExprLessThan:
-                case NodeType.ExprLessEqualsThan:
-                case NodeType.ExprGreaterThan:
-                case NodeType.ExprGreaterEqualsThan:
-                case NodeType.ExprAnd:
-                case NodeType.ExprOr:
-                case NodeType.ExprNot:
-                case NodeType.ExprIsNull:
-                case NodeType.ExprIsNotNull:
-                    PushChildren(node, pending);
-                    continue;
-
-                default:
-                    return false;
-            }
-        }
-
-        return true;
-    }
-
-    private static void PushChildren(NodeAst node, Stack<NodeAst> pending)
-    {
-        foreach (NodeAst? child in new[] { node.leftAst, node.rightAst, node.extendedOne, node.extendedTwo,
-                     node.extendedThree, node.extendedFour, node.extendedFive, node.extendedSix, node.extendedSeven })
-        {
-            if (child is not null)
-                pending.Push(child);
-        }
-    }
-
-    private static bool TrySplitQualified(string identifier, out string alias, out string columnName)
-    {
-        int dotIndex = identifier.IndexOf('.');
-
-        if (dotIndex <= 0 || dotIndex >= identifier.Length - 1)
-        {
-            alias = "";
-            columnName = identifier;
-            return false;
-        }
-
-        alias = identifier[..dotIndex];
-        columnName = identifier[(dotIndex + 1)..];
-        return true;
     }
 
     private static ColumnType ColumnTypeOf(TableDescriptor table, string columnName)
