@@ -469,6 +469,10 @@ internal sealed class JoinLeafScanner
                 $"LATERAL derived table '{source.Alias}' was read without the left row it reads");
         }
 
+        // The plan EXPLAIN built for this derived table's query, if any; the executor runs it in place of a
+        // new plan, so EXPLAIN (ANALYZE) counts the rows that ran.
+        ExplainedDerivedTable? explained = plan.ExplainedDerivedTables?.For(source);
+
         // A windowed SELECT's derived table is read once too: its window operator already holds what
         // it must, and keeping its output again would copy every row a second time.
         // The reader of a recursive CTE streams too when it is read once: a LIMIT over a recursion with
@@ -476,7 +480,7 @@ internal sealed class JoinLeafScanner
         if (readOnce && (source.SetOperation is not null || source.Source.Windows is not null || ReadsRecursiveUnion(source)))
         {
             await foreach (QueryResultRow row in derivedTableExecutor
-                .Stream(plan.Database, source, plan.Ticket, executionFilter, setOperationStats, windowStats)
+                .Stream(plan.Database, source, plan.Ticket, executionFilter, setOperationStats, windowStats, explained)
                 .WithCancellation(ct)
                 .ConfigureAwait(false))
                 yield return row;
@@ -528,7 +532,7 @@ internal sealed class JoinLeafScanner
         if (!plan.DerivedMaterializations.TryGetValue(source, out SpillableRowList? rows))
         {
             rows = await derivedTableExecutor
-                .MaterializeAsync(plan.Database, source, plan.Ticket, executionFilter)
+                .MaterializeAsync(plan.Database, source, plan.Ticket, executionFilter, explained)
                 .ConfigureAwait(false);
             plan.DerivedMaterializations[source] = rows;
         }

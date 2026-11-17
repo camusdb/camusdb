@@ -52,17 +52,20 @@ internal sealed class DerivedTableExecutor
     /// before this method returns (it is called internally), so the returned list is ready to
     /// enumerate. Ownership of the list transfers to the caller.
     /// </summary>
+    /// <param name="explained">The plan EXPLAIN built for the derived table's query, which then runs in
+    /// place of a new plan; null outside EXPLAIN. See <see cref="ExplainedDerivedTable"/>.</param>
     public async Task<SpillableRowList> MaterializeAsync(
         DatabaseDescriptor database,
         BoundDerivedTableSource source,
         QueryTicket outerTicket,
-        NodeAst? executionFilter)
+        NodeAst? executionFilter,
+        ExplainedDerivedTable? explained = null)
     {
         SpillableRowList rows = new(QueryExecutionContext.For(database, outerTicket));
 
         try
         {
-            await foreach (QueryResultRow row in Stream(database, source, outerTicket, executionFilter).ConfigureAwait(false))
+            await foreach (QueryResultRow row in Stream(database, source, outerTicket, executionFilter, explained: explained).ConfigureAwait(false))
                 await rows.AddAsync(row).ConfigureAwait(false);
 
             await rows.SealAsync().ConfigureAwait(false);
@@ -88,13 +91,15 @@ internal sealed class DerivedTableExecutor
     /// The per-operand row counts of a set operation, for EXPLAIN (ANALYZE); null otherwise and for
     /// any other derived table.
     /// </param>
+    /// <param name="explained">The plan EXPLAIN built for the derived table's query; null otherwise.</param>
     public async IAsyncEnumerable<QueryResultRow> Stream(
         DatabaseDescriptor database,
         BoundDerivedTableSource source,
         QueryTicket outerTicket,
         NodeAst? executionFilter,
         SetOperationStats? stats = null,
-        WindowStats? windowStats = null)
+        WindowStats? windowStats = null,
+        ExplainedDerivedTable? explained = null)
     {
         IAsyncEnumerable<QueryResultRow> cursor;
 
@@ -102,13 +107,13 @@ internal sealed class DerivedTableExecutor
         // reads them. A statement that opened no entry for it runs it here, as an inlined CTE.
         if (source.Source.ComputedOnce is { } marker
             && await ComputedOnceRows.GetOrComputeAsync(
-                    outerTicket.TxnState, marker, () => KeepAsync(database, source, outerTicket)).ConfigureAwait(false) is { } kept)
+                    outerTicket.TxnState, marker, () => KeepAsync(database, source, outerTicket, explained)).ConfigureAwait(false) is { } kept)
         {
             cursor = kept.EnumerateAsync(outerTicket.CancellationToken);
         }
         else
         {
-            cursor = Produce(database, source, outerTicket, stats, windowStats);
+            cursor = Produce(database, source, outerTicket, stats, windowStats, explained);
         }
 
         await foreach (QueryResultRow row in WidenAndFilter(database, source, outerTicket, executionFilter, cursor).ConfigureAwait(false))
@@ -306,7 +311,8 @@ internal sealed class DerivedTableExecutor
         BoundDerivedTableSource source,
         QueryTicket outerTicket,
         SetOperationStats? stats,
-        WindowStats? windowStats)
+        WindowStats? windowStats,
+        ExplainedDerivedTable? explained = null)
     {
         IAsyncEnumerable<QueryResultRow> cursor;
 
@@ -338,6 +344,29 @@ internal sealed class DerivedTableExecutor
         else
         {
             BoundSelectQuery innerBound = source.InnerBound;
+
+            // EXPLAIN built the plan of this query: it runs here, one time, so its counters are the ones
+            // EXPLAIN (ANALYZE) shows. Any later read plans the query again, as without EXPLAIN.
+            if (explained is not null && explained.TryStartRun())
+            {
+                cursor = RunExplained(explained);
+
+                if (source.InnerRowKeys is { } explainedRenames)
+                    cursor = RenameInnerRowKeys(cursor, explainedRenames);
+
+                if (source.Source.Windows is { } explainedWindows)
+                    cursor = WindowOperator.Apply(
+                        cursor,
+                        explainedWindows,
+                        source.Columns,
+                        QueryExecutionContext.For(database, outerTicket),
+                        querySorter,
+                        outerTicket.Parameters,
+                        windowStats,
+                        outerTicket.CancellationToken);
+
+                return cursor;
+            }
 
             // The request-scoped name, not the descriptor's display name: the inner ticket can be
             // re-resolved by name downstream, and the descriptor's name is a cached value that a rename
@@ -384,18 +413,61 @@ internal sealed class DerivedTableExecutor
     }
 
     /// <summary>
+    /// Runs the plan EXPLAIN built for a derived table's query (<see cref="ExplainedDerivedTable"/>). With
+    /// counters on, it adds the rows and the time of the run to the plan's root and to the line of the
+    /// derived table, because only the root of a plan gets a time of its own.
+    /// </summary>
+    private async IAsyncEnumerable<QueryResultRow> RunExplained(ExplainedDerivedTable explained)
+    {
+        QueryPlan plan = explained.Plan;
+
+        IAsyncEnumerable<QueryResultRow> cursor = plan.BoundQuery is not null
+            ? queryJoinExecutor.ExecuteJoinPlan(plan)
+            : queryExecutor.ExecuteQueryPlan(plan);
+
+        System.Diagnostics.Stopwatch watch = System.Diagnostics.Stopwatch.StartNew();
+        long rows = 0;
+
+        try
+        {
+            await foreach (QueryResultRow row in cursor.ConfigureAwait(false))
+            {
+                rows++;
+                yield return row;
+            }
+        }
+        finally
+        {
+            watch.Stop();
+
+            if (explained.Analyze)
+            {
+                double ms = watch.Elapsed.TotalMilliseconds;
+                plan.Root.Stats ??= new();
+                plan.Root.Stats.ElapsedMs = (plan.Root.Stats.ElapsedMs ?? 0) + ms;
+                explained.ScanStats.RowsEmitted += rows;
+                explained.ScanStats.ElapsedMs = (explained.ScanStats.ElapsedMs ?? 0) + ms;
+            }
+        }
+    }
+
+    /// <summary>
     /// Runs the query of a CTE that the statement computes once into a list that
     /// <see cref="ComputedOnceRows"/> keeps for the statement. No reader's filter applies here: every
     /// reader filters the kept rows itself. When the run throws, the list and its spill file are
     /// disposed here.
     /// </summary>
-    private async Task<SpillableRowList> KeepAsync(DatabaseDescriptor database, BoundDerivedTableSource source, QueryTicket outerTicket)
+    private async Task<SpillableRowList> KeepAsync(
+        DatabaseDescriptor database,
+        BoundDerivedTableSource source,
+        QueryTicket outerTicket,
+        ExplainedDerivedTable? explained)
     {
         SpillableRowList rows = new(QueryExecutionContext.For(database, outerTicket));
 
         try
         {
-            await foreach (QueryResultRow row in Produce(database, source, outerTicket, stats: null, windowStats: null)
+            await foreach (QueryResultRow row in Produce(database, source, outerTicket, stats: null, windowStats: null, explained)
                                .WithCancellation(outerTicket.CancellationToken).ConfigureAwait(false))
                 await rows.AddAsync(row).ConfigureAwait(false);
 

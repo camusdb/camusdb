@@ -1177,14 +1177,18 @@
       ],
       "rows": 6,
       "resultHash": "f3dd23ccad3e36a0",
-      "work": 300,
+      "work": 6300,
       "statementRowsRead": 150,
-      "qErrorMedian": 833.83,
+      "qErrorMedian": 8,
       "qErrorMax": 1666.67,
       "joinOrder": "cost-based",
       "joinStepsCosted": 2,
       "plan": [
         "hash-join(on=st.id=store_id, build=st, build-filter=x.n > 100)",
+        "derived-table-scan(alias=x)",
+        "project",
+        "aggregate(group=[store_id], aggs=[count(*)], streaming: true)",
+        "table-scan(table=orders, forced-index=orders_store_idx)",
         "table-scan(table=stores)"
       ]
     },
@@ -1196,14 +1200,16 @@
       ],
       "rows": 1,
       "resultHash": "3355a64987e80a32",
-      "work": 0,
+      "work": 1792,
       "statementRowsRead": 896,
-      "qErrorMedian": 526.32,
+      "qErrorMedian": 1.67,
       "qErrorMax": 526.32,
       "joinOrder": "heuristic",
       "joinStepsCosted": 0,
       "plan": [
-        "derived-table-scan(alias=s)"
+        "derived-table-scan(alias=s)",
+        "project",
+        "index-range-scan(index=orders_status_total_idx, from>='shipped', to<='shipped')"
       ]
     },
     {
@@ -1413,14 +1419,18 @@
       ],
       "rows": 4,
       "resultHash": "3fb850dfa6974eb2",
-      "work": 4000,
+      "work": 16000,
       "statementRowsRead": 8000,
-      "qErrorMedian": 1.93,
+      "qErrorMedian": 1,
       "qErrorMax": 2.85,
       "joinOrder": "cost-based",
       "joinStepsCosted": 2,
       "plan": [
         "hash-join(on=c.id=customer_id, build=c)",
+        "derived-table-scan(alias=bo)",
+        "project",
+        "filter(total >= 2000)",
+        "table-scan(table=orders)",
         "table-scan(table=customers)"
       ]
     },
@@ -1434,15 +1444,19 @@
       ],
       "rows": 3,
       "resultHash": "fa5642f4862c4791",
-      "work": 5656,
+      "work": 8656,
       "statementRowsRead": 4328,
-      "qErrorMedian": 1.06,
-      "qErrorMax": 1.75,
+      "qErrorMedian": 1.43,
+      "qErrorMax": 9.01,
       "joinOrder": "cost-based",
       "joinStepsCosted": 6,
       "plan": [
         "index-nested-loop-join(on=i.product_id = ap.id, index=order_items_product_idx, left=ap.id, right=product_id, probe-batches=7)",
         "hash-join(on=b.id=brand_id, build=ap)",
+        "derived-table-scan(alias=ap)",
+        "project",
+        "filter(discontinued = false)",
+        "table-scan(table=products)",
         "index-range-scan(index=~pk, to<=3)"
       ]
     },
@@ -2223,14 +2237,17 @@
       ],
       "rows": 1,
       "resultHash": "8b7e9f4ba22bcb55",
-      "work": 0,
+      "work": 12000,
       "statementRowsRead": 6000,
-      "qErrorMedian": 104.17,
+      "qErrorMedian": 1.33,
       "qErrorMax": 104.17,
       "joinOrder": "heuristic",
       "joinStepsCosted": 0,
       "plan": [
-        "derived-table-scan(alias=big_orders)"
+        "derived-table-scan(alias=big_orders)",
+        "project",
+        "filter(total >= 2000)",
+        "table-scan(table=orders)"
       ]
     }
   ]

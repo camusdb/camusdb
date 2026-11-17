@@ -39,4 +39,10 @@ public sealed class DerivedTableScanNode : PhysicalPlanNode
     /// See <see cref="SetOperationOperandNode"/>.
     /// </summary>
     public IReadOnlyList<SetOperationOperandNode>? SetOperationOperands { get; internal set; }
+
+    /// <summary>
+    /// The plan of the derived table's query when EXPLAIN built it; null otherwise. EXPLAIN shows its nodes
+    /// under this line when this reader is <see cref="Controllers.Queries.ExplainedDerivedTable.RenderedAt"/>.
+    /// </summary>
+    internal Controllers.Queries.ExplainedDerivedTable? Explained { get; set; }
 }

@@ -72,16 +72,39 @@ public static class PlanRenderer
     {
         yield return SplitNodeLine(GetRenderLine(node, plan));
 
-        // The operands of a set operation, when EXPLAIN planned them, come right after it, each one
-        // with the plan its nodes belong to. ExplainExecutor.WalkNodesOrdered visits the same order.
-        if (node is DerivedTableScanNode { SetOperationOperands: { } operands })
-            foreach (SetOperationOperandNode operand in operands)
-                foreach (var item in WalkNodesInner(operand, operand.Plan))
-                    yield return item;
+        foreach ((PhysicalPlanNode child, QueryPlan childPlan) in ExtraChildren(node, plan))
+            foreach (var item in WalkNodesInner(child, childPlan))
+                yield return item;
 
         if (node.Input is not null)
             foreach (var item in WalkNodesInner(node.Input, plan))
                 yield return item;
+    }
+
+    /// <summary>
+    /// The children of <paramref name="node"/> that EXPLAIN shows besides its <see cref="PhysicalPlanNode.Input"/>,
+    /// each with the plan its nodes belong to, in the order they come right after the node:
+    /// <list type="bullet">
+    /// <item>the operands of a set operation, when EXPLAIN planned them (<see cref="SetOperationOperandNode"/>);</item>
+    /// <item>the derived table on the right side of a join (<see cref="PhysicalPlanNode.ExplainedRightScan"/>);</item>
+    /// <item>the plan of a derived table's query, under the reader that shows it
+    /// (<see cref="ExplainedDerivedTable.RenderedAt"/>).</item>
+    /// </list>
+    /// Every walk of a plan for EXPLAIN uses this, so the rendered lines and the nodes they come from stay in
+    /// one order (see <c>ExplainExecutor.WalkNodesOrdered</c>).
+    /// </summary>
+    internal static IEnumerable<(PhysicalPlanNode Node, QueryPlan Plan)> ExtraChildren(PhysicalPlanNode node, QueryPlan plan)
+    {
+        if (node is DerivedTableScanNode { SetOperationOperands: { } operands })
+            foreach (SetOperationOperandNode operand in operands)
+                yield return (operand, operand.Plan);
+
+        if (node.ExplainedRightScan is { } rightScan)
+            yield return (rightScan, plan);
+
+        if (node is DerivedTableScanNode { Explained: { } explained } scan
+            && ReferenceEquals(explained.RenderedAt, scan.BoundSource))
+            yield return (explained.Plan.Root, explained.Plan);
     }
 
     private static (string Name, string Detail) SplitNodeLine(string line)
@@ -150,9 +173,8 @@ public static class PlanRenderer
 
         sb.Append(prefix + line).Append('\n');
 
-        if (node is DerivedTableScanNode { SetOperationOperands: { } operands })
-            foreach (SetOperationOperandNode operand in operands)
-                RenderNode(operand, operand.Plan, sb, depth + 1, includeRequiredColumns, includeDistributedProperties);
+        foreach ((PhysicalPlanNode child, QueryPlan childPlan) in ExtraChildren(node, plan))
+            RenderNode(child, childPlan, sb, depth + 1, includeRequiredColumns, includeDistributedProperties);
 
         if (node.Input is not null)
             RenderNode(node.Input, plan, sb, depth + 1, includeRequiredColumns, includeDistributedProperties);

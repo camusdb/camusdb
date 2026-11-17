@@ -117,6 +117,7 @@ internal sealed class ExplainExecutor
 
         QueryPlan plan = await BuildPlanAsync(database, selectAst, ticket, lockingClause: lockingClause).ConfigureAwait(false);
         AttachSetOperationOperands(plan, ticket, traceEstimates: false, analyze: false);
+        await AttachDerivedPlansAsync(plan, ticket, traceEstimates: false, analyze: false, new ExplainedDerivedTables()).ConfigureAwait(false);
 
         return RenderPlan(plan, stage).ToAsyncEnumerable();
     }
@@ -282,6 +283,7 @@ internal sealed class ExplainExecutor
         Stopwatch planning = Stopwatch.StartNew();
         QueryPlan plan = await BuildPlanAsync(database, selectAst, ticket, traceEstimates: true, lockingClause).ConfigureAwait(false);
         AttachSetOperationOperands(plan, ticket, traceEstimates: true, analyze: true);
+        await AttachDerivedPlansAsync(plan, ticket, traceEstimates: true, analyze: true, new ExplainedDerivedTables()).ConfigureAwait(false);
         planning.Stop();
 
         return RunAnalyzedPlan(plan, planning.Elapsed.TotalMilliseconds);
@@ -343,6 +345,14 @@ internal sealed class ExplainExecutor
                 stats = WithRightInputReads(physNode.Stats, rightInput);
             else
                 stats = physNode?.Stats;
+
+            // Only the root of a plan gets a time of its own. A derived table whose query EXPLAIN planned
+            // gets the time of that query's run, as the root of the plan under it does. Another reader of a
+            // CTE computed once reads the kept rows, so the run's time is not its own.
+            if (physNode is DerivedTableScanNode { Explained: { } explained } derivedScan
+                && ReferenceEquals(explained.RenderedAt, derivedScan.BoundSource)
+                && stats is { ElapsedMs: null })
+                stats.ElapsedMs = explained.ScanStats.ElapsedMs;
 
             if (physNode is not null)
                 detail = AppendRuntimeDetail(detail, physNode, stats);
@@ -699,6 +709,131 @@ internal sealed class ExplainExecutor
     }
 
     /// <summary>
+    /// Plans the query of each derived table that <paramref name="plan"/> reads, and of each derived table
+    /// those queries read, so EXPLAIN shows their operators (<see cref="ExplainedDerivedTable"/>). A derived
+    /// table on the <see cref="PhysicalPlanNode.Input"/> chain shows the plan under its own line; one on the
+    /// right side of a join gets a line of its own under the join (<see cref="PhysicalPlanNode.ExplainedRightScan"/>).
+    ///
+    /// <para>Each query is planned as the derived-table executor plans it when it runs, with the plan-time
+    /// lookup of small dimension leaves, so the plan shown is the plan that runs. With
+    /// <paramref name="analyze"/> the plans get counters, and the executor runs them in place of a new plan.</para>
+    ///
+    /// <para>Not planned here: a LATERAL body (it binds and runs for each left row), a set operation (see
+    /// <see cref="AttachSetOperationOperands"/>), the reader of a recursive CTE, a work table and a function in
+    /// FROM, which have no query of their own. A derived table inside a set-operation operand or inside a
+    /// subquery keeps its single line.</para>
+    /// </summary>
+    private async Task AttachDerivedPlansAsync(
+        QueryPlan plan, ExecuteSQLTicket ticket, bool traceEstimates, bool analyze, ExplainedDerivedTables registry)
+    {
+        plan.ExplainedDerivedTables = registry;
+
+        for (PhysicalPlanNode? node = plan.Root; node is not null; node = node.Input)
+        {
+            if (node is DerivedTableScanNode scan && HasQueryToExplain(scan.BoundSource))
+                scan.Explained = await ExplainDerivedAsync(plan, scan.BoundSource, ticket, traceEstimates, analyze, registry).ConfigureAwait(false);
+
+            if (RightDerivedSourceOf(node) is { } right && HasQueryToExplain(right))
+            {
+                ExplainedDerivedTable explained = await ExplainDerivedAsync(plan, right, ticket, traceEstimates, analyze, registry).ConfigureAwait(false);
+
+                node.ExplainedRightScan = new DerivedTableScanNode
+                {
+                    BoundSource = right,
+                    Explained = explained,
+                    Stats = analyze ? explained.ScanStats : null,
+                };
+            }
+        }
+    }
+
+    /// <summary>The derived table on the right side of a join node, or null for any other node.</summary>
+    private static BoundDerivedTableSource? RightDerivedSourceOf(PhysicalPlanNode node) => node switch
+    {
+        NestedLoopJoinNode nestedLoop => nestedLoop.RightSource.Derived,
+        HashJoinNode hash => hash.BuildSource.Derived,
+        MergeJoinNode merge => merge.RightSource.Derived,
+        _ => null,
+    };
+
+    /// <summary>
+    /// True when <paramref name="source"/> runs a query of its own through the derived-table executor, which
+    /// can then run a plan that EXPLAIN built. See <see cref="AttachDerivedPlansAsync"/> for the kinds left out.
+    /// </summary>
+    private static bool HasQueryToExplain(BoundDerivedTableSource source) =>
+        source.Lateral is null
+        && source.SetOperation is null
+        && source.Source.Function is null
+        && source.Source.WorkTable is null
+        && BoundSetOperation.PassedThrough(source.InnerBound) is not { Source.WorkTable: not null };
+
+    /// <summary>
+    /// The entry of <paramref name="source"/>: a new plan of its query, or, for a reader of a CTE that the
+    /// statement computes once, the entry of the first reader, which alone shows the plan.
+    /// </summary>
+    private async Task<ExplainedDerivedTable> ExplainDerivedAsync(
+        QueryPlan parent,
+        BoundDerivedTableSource source,
+        ExecuteSQLTicket ticket,
+        bool traceEstimates,
+        bool analyze,
+        ExplainedDerivedTables registry)
+    {
+        if (registry.For(source) is { } known)
+            return known;
+
+        if (source.Source.ComputedOnce is { } marker && registry.ForComputedOnce(marker) is { } shared)
+        {
+            registry.Add(source, shared);
+            return shared;
+        }
+
+        BoundSelectQuery innerBound = source.InnerBound;
+        QueryTicket outer = parent.Ticket;
+
+        // The ticket the derived-table executor gives the query when it runs.
+        ExecuteSQLTicket executeTicket = new(
+            txnState: ticket.TxnState,
+            database: outer.DatabaseName,
+            sql: "",
+            parameters: outer.Parameters,
+            cancellationToken: outer.CancellationToken,
+            probe: outer.Probe);
+
+        QueryTicket innerTicket = QueryTicketAdapter.ToQueryTicket(
+            innerBound, executeTicket, source.InnerSubqueries.ExistsRegistry, source.InnerSubqueries.SemiJoinSpecs);
+
+        QueryPlan innerPlan;
+
+        if (innerBound.IsMultiSource)
+        {
+            IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys = await queryExecutor.JoinExecutor
+                .ResolvePlanTimeLeafKeysAsync(parent.Database, innerBound, innerTicket).ConfigureAwait(false);
+            innerPlan = (traceEstimates ? tracingJoinQueryPlanner : joinQueryPlanner).GetPlan(parent.Database, innerBound, innerTicket, leafKeys);
+        }
+        else
+        {
+            innerPlan = (traceEstimates ? tracingQueryPlanner : queryPlanner).GetPlan(parent.Database, innerBound.PrimaryTable, innerTicket);
+        }
+
+        ExplainedDerivedTable explained = new(innerPlan, source, analyze);
+        registry.Add(source, explained);
+
+        AttachSetOperationOperands(innerPlan, ticket, traceEstimates, analyze);
+        await AttachDerivedPlansAsync(innerPlan, ticket, traceEstimates, analyze, registry).ConfigureAwait(false);
+
+        if (analyze)
+        {
+            innerPlan.CollectRuntimeStats = true;
+
+            if (innerPlan.BoundQuery is not null)
+                AttachJoinStats(innerPlan.Root);
+        }
+
+        return explained;
+    }
+
+    /// <summary>
     /// Plans one operand with the ticket the set operation would give it when it runs
     /// (<see cref="SetOperationExecutor"/>). The plan-time leaf lookup is skipped: it reads rows, and
     /// a plan built without it is still the plan of a valid execution.
@@ -757,9 +892,10 @@ internal sealed class ExplainExecutor
     {
         result.Add(node);
 
-        if (node is DerivedTableScanNode { SetOperationOperands: { } operands })
-            foreach (SetOperationOperandNode operand in operands)
-                WalkNodesOrderedInner(operand, result);
+        // The same children, in the same order, as the rendered lines (PlanRenderer.ExtraChildren). The
+        // plan of each child is not needed here: only the nodes are zipped with the lines.
+        foreach ((PhysicalPlanNode child, QueryPlan _) in PlanRenderer.ExtraChildren(node, null!))
+            WalkNodesOrderedInner(child, result);
 
         if (node.Input is not null)
             WalkNodesOrderedInner(node.Input, result);

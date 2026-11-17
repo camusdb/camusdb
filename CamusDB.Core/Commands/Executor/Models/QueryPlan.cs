@@ -173,6 +173,13 @@ public sealed class QueryPlan
     public bool CollectRuntimeStats { get; internal set; }
 
     /// <summary>
+    /// The plans EXPLAIN built for the derived tables this plan and the plans under it read; null outside
+    /// EXPLAIN. The derived-table reader of the join executor runs the plan it finds here (see
+    /// <see cref="Controllers.Queries.ExplainedDerivedTable"/>).
+    /// </summary>
+    internal Controllers.Queries.ExplainedDerivedTables? ExplainedDerivedTables { get; set; }
+
+    /// <summary>
     /// Optional dependency collector attached by the cached-read path. When non-null,
     /// scan methods record range and point deps into this collector as rows are read. After
     /// execution completes, <see cref="QueryDependencyCollector.Build"/> returns the

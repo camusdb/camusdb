@@ -87,8 +87,10 @@ A `VALUES` list reads no table. It takes no lock, needs no privilege, and adds n
 
 ## EXPLAIN
 
-A `VALUES` list that is the only source of a query shows as `values(alias=v, rows=N)`. In a join, a
-`VALUES` list has no line of its own, as for any derived table: the join line names the other side.
+A `VALUES` list that is the only source of a query shows as `values(alias=v, rows=N)`. On the right
+side of a join, a `VALUES` list has no line of its own: the join line names the other side. A derived
+table that runs a query of its own shows it there (see
+[Derived tables and CTEs](explain.md#derived-tables-and-ctes)).
 
 ## Not supported
 

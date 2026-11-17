@@ -82,4 +82,11 @@ public abstract class PhysicalPlanNode
     /// Null during normal query execution and plain EXPLAIN.
     /// </summary>
     public PlanNodeStats? Stats { get; internal set; }
+
+    /// <summary>
+    /// For a join whose right side is a derived table, the line EXPLAIN shows for that derived table, with
+    /// the plan of its query under it; null for any other node and outside EXPLAIN. The right side of a join
+    /// has no node in the <see cref="Input"/> chain, so EXPLAIN adds this one.
+    /// </summary>
+    internal DerivedTableScanNode? ExplainedRightScan { get; set; }
 }

@@ -133,12 +133,14 @@ reports a join row this way:
   - `merge-join` adds the reads of its ordered right input (an index walk or a sorted scan).
     That input is a node, but the plan walk does not render it.
 - A leaf row (`table-scan`, `index-range-scan`, `index-in-list`) counts its own reads, as on a
-  single-table plan. A `derived-table-scan` row counts the rows of its materialized result. Its
-  inner query has no rows here, so its `rows_read` is `0`. A derived table on the right side
-  adds nothing to the join's `rows_read`. A `function-scan` row reads nothing from storage: its
+  single-table plan. A `derived-table-scan` row counts the rows of its materialized result, and its
+  own `rows_read` is `0`: the rows of its query under it count the reads (see
+  [Derived tables and CTEs](#derived-tables-and-ctes)). A derived table on the right side adds
+  nothing to the join's `rows_read`. A `function-scan` row reads nothing from storage: its
   `rows_read`, `kv_lookups` and `kv_scan_entries` are `0`, and `actual_rows` counts the rows it
   generated.
-- `actual_time_ms` is on the root row only, as on a single-table plan.
+- `actual_time_ms` is on the root row, as on a single-table plan, and on each
+  `derived-table-scan` row whose query is shown under it, with the root of that query.
 
 The work after the last join is not a plan node for a join query: the filter that runs after the
 joins, grouping, ordering, `LIMIT` and projection. So the root row is the last join, not the final
@@ -181,6 +183,35 @@ local span or shipped from a peer: the left leaf for a right build, or the join 
 build. The rows that a peer scanned and did not ship are only in its `broadcast-span` row.
 
 ---
+
+### Derived tables and CTEs
+
+A derived table in `FROM`, an inlined CTE and a view body run a query of their own. `EXPLAIN` and
+`EXPLAIN (ANALYZE)` show the operators of that query under the `derived-table-scan(alias=…)` row, one
+level deeper, and a derived table inside that query shows its own query in the same way. So a chain of
+CTEs shows each level:
+
+```text
+hash-join(on=g.id=grp, build=g)
+  derived-table-scan(alias=c)                 -- actual_rows=3, actual_time_ms=14.6
+    derived-table-scan(alias=b)
+      hash-join(on=g.id=grp, build=g)
+        derived-table-scan(alias=a)           -- actual_rows=9, actual_time_ms=5.9
+          project
+            filter(v > 30)
+              table-scan(table=items)         -- rows_read=12
+```
+
+- A derived table on the right side of a join has no row in the join's input chain, so `EXPLAIN` adds
+  a `derived-table-scan` row for it right under the join row, with its query under it.
+- With `ANALYZE`, the query of a derived table runs from the plan shown, so its rows are the counters
+  of that run. The `derived-table-scan` row and the root row of its query have the time of that run.
+- A CTE that the statement computes once shows its query once, under the first reader in the plan.
+  The other readers read the kept rows; their rows show `actual_rows` and no time.
+- A `LATERAL` derived table runs its query for each left row, and keeps its one row with
+  `lateral` in the join detail. A set operation shows its operands (`operand(left)`,
+  `operand(right)`), a function in `FROM` shows `function-scan`, and a derived table inside a
+  set-operation operand or a subquery keeps its one row.
 
 ### The lock step under EXPLAIN ANALYZE
 
