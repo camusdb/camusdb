@@ -589,6 +589,17 @@ if (config.IsClusterMode)
     // Raft applies; the gate must be registered or the route mapping fails at startup.
     builder.Services.AddNodeTransportGate();
 
+    // A stopping node hands its partition leadership to its peers before the web server stops, so its
+    // partitions do not sit leaderless for an election timeout. See LeadershipHandoffService.
+    builder.Services.AddHostedService<CamusDB.App.Services.LeadershipHandoffService>();
+
+    // The web server waits for its open requests before the graceful shutdown below can run, for up to
+    // the host's shutdown timeout, 30 seconds by default. Peers keep their Raft and Kahuna streams to
+    // this node open for good, so in a cluster it always waited the full 30 seconds: as long as the
+    // grace period a Kubernetes pod gets by default, which killed every node before it closed its
+    // databases. 15 seconds covers the hand-off and leaves the graceful shutdown the rest.
+    builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(15));
+
     // The authentication middleware finds the peer policy here; its absence means peers are not
     // authenticated by certificate.
     if (raftPeerTrust is not null)
