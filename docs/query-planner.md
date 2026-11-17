@@ -290,7 +290,8 @@ reads one table and needs only its `FROM` and `WHERE` takes the fast form
 the subquery scope under inner keys first, and with an index seek when one fits. Every other body is a
 `CorrelatedSubqueryBody`: each outer name is replaced by a hidden placeholder that has the type of the
 outer column, and the body runs through the whole pipeline for each outer row with the outer values as
-parameters. Such a body binds once when no nested subquery reads an outer value, and once per row
+parameters. Each outer name resolves one time to the keys of the outer row that hold it
+(`CorrelatedOuterValues`), so a row reads only the cells that the body names. Such a body binds once when no nested subquery reads an outer value, and once per row
 otherwise; it is always checked at prepare time, so an error does not depend on the outer rows. Each
 prepared subquery can have a `CorrelatedResultCache`, which keeps the result for each distinct set of
 outer values for the rest of the execution: the boolean of an `EXISTS`, the value of a scalar subquery, or

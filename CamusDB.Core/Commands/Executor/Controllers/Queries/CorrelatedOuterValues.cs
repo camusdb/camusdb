@@ -20,8 +20,16 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// exactly what the body can read of the outer row: two rows with the same values give the body the same
 /// input.</para>
 ///
-/// <para>The resolver holds only the outer sources, so a bare name resolves to the outer query, as it does
-/// for the body. Its memo is filled when this object is built and only read for each row.</para>
+/// <para><b>The reads.</b> A name resolves, by the outer resolver, to a key of a row that holds every outer
+/// column under its bare and its qualified key, and that key comes from a fixed list of keys of the outer row
+/// (<see cref="CorrelatedRowMerger.OuterRowKeysByMergedKey"/>).
+/// <see cref="Create"/> computes that list for each name, so each row reads only the cells of the names, in
+/// place of a merged row of every outer column under two keys. A name that no key of the row fills is an
+/// unknown column, as it is for the merged row. For a <see cref="QueryRow"/> the keys resolve to one slot for
+/// each name, one time for each <see cref="RowLayout"/>.</para>
+///
+/// <para>The object is shared by the executions of a cached statement, so the per-row path writes nothing
+/// but the slot cache, which it replaces as a whole.</para>
 /// </summary>
 internal sealed class CorrelatedOuterValues
 {
@@ -29,9 +37,14 @@ internal sealed class CorrelatedOuterValues
 
     private readonly IReadOnlyList<BoundTableSource> outerSources;
 
-    private readonly IReadOnlyList<BoundDerivedTableSource> outerDerivedSources;
+    /// <summary>For each name, the keys of an outer row that keys its cells by the bare column name when one source is in scope.</summary>
+    private readonly string[][] readsOfSourceRow;
 
-    private readonly QueryRowNameResolver outerRowNames;
+    /// <summary>For each name, the keys of an outer row of a join, which keys each cell as <c>{alias}.{column}</c>.</summary>
+    private readonly string[][] readsOfQualifiedRow;
+
+    /// <summary>The slot of each name in the last row layout read, see <see cref="SlotsFor"/>.</summary>
+    private LayoutSlots? lastSlots;
 
     /// <summary>One reference node for each distinct outer name, in the order of the values.</summary>
     public IReadOnlyList<NodeAst> Names => names;
@@ -42,13 +55,13 @@ internal sealed class CorrelatedOuterValues
     private CorrelatedOuterValues(
         NodeAst[] names,
         IReadOnlyList<BoundTableSource> outerSources,
-        IReadOnlyList<BoundDerivedTableSource> outerDerivedSources,
-        QueryRowNameResolver outerRowNames)
+        string[][] readsOfSourceRow,
+        string[][] readsOfQualifiedRow)
     {
         this.names = names;
         this.outerSources = outerSources;
-        this.outerDerivedSources = outerDerivedSources;
-        this.outerRowNames = outerRowNames;
+        this.readsOfSourceRow = readsOfSourceRow;
+        this.readsOfQualifiedRow = readsOfQualifiedRow;
     }
 
     /// <summary>
@@ -63,6 +76,7 @@ internal sealed class CorrelatedOuterValues
     {
         HashSet<string> seen = new(StringComparer.OrdinalIgnoreCase);
         List<NodeAst> names = new(outerReferences.Count);
+        List<string> mergedKeys = new(outerReferences.Count);
 
         foreach (NodeAst reference in outerReferences)
         {
@@ -71,30 +85,105 @@ internal sealed class CorrelatedOuterValues
             if (!seen.Add(name))
                 continue;
 
-            // Also fills the memo of the resolver, which each row then reads.
-            outerRowNames.ValidateColumnReference(name);
+            // Throws for an unknown or ambiguous name.
+            mergedKeys.Add(outerRowNames.ResolveRowLookupKey(name));
             names.Add(reference);
         }
 
-        return new CorrelatedOuterValues([.. names], outerSources, outerDerivedSources, outerRowNames);
+        return new CorrelatedOuterValues(
+            [.. names],
+            outerSources,
+            ReadsOf(mergedKeys, CorrelatedRowMerger.OuterRowKeysByMergedKey(outerSources, outerDerivedSources, rowKeysAreQualified: false)),
+            ReadsOf(mergedKeys, CorrelatedRowMerger.OuterRowKeysByMergedKey(outerSources, outerDerivedSources, rowKeysAreQualified: true)));
+    }
+
+    private static string[][] ReadsOf(List<string> mergedKeys, Dictionary<string, List<string>> outerRowKeys)
+    {
+        string[][] reads = new string[mergedKeys.Count][];
+
+        for (int i = 0; i < mergedKeys.Count; i++)
+            reads[i] = outerRowKeys.TryGetValue(mergedKeys[i], out List<string>? keys) ? [.. keys] : [];
+
+        return reads;
     }
 
     /// <summary>The value of each name in <paramref name="outerRow"/>, in the order of <see cref="Names"/>.</summary>
     /// <param name="rowKeysAreQualified">True for a row of a join, which keys each cell as
-    /// <c>{alias}.{column}</c>, see <see cref="CorrelatedRowMerger.MergeOuterForEvaluation"/>.</param>
-    public ColumnValue[] For(
-        IReadOnlyDictionary<string, ColumnValue> outerRow,
-        Dictionary<string, ColumnValue>? statementParameters,
-        bool rowKeysAreQualified = false)
+    /// <c>{alias}.{column}</c>, see <see cref="CorrelatedRowMerger.OuterRowKeysByMergedKey"/>.</param>
+    public ColumnValue[] For(IReadOnlyDictionary<string, ColumnValue> outerRow, bool rowKeysAreQualified = false)
     {
-        Dictionary<string, ColumnValue> merged = CorrelatedRowMerger.MergeOuterForEvaluation(
-            outerRow, outerSources, outerDerivedSources, rowKeysAreQualified);
-
+        string[][] reads = rowKeysAreQualified ? readsOfQualifiedRow : readsOfSourceRow;
         ColumnValue[] values = new ColumnValue[names.Length];
 
-        for (int i = 0; i < names.Length; i++)
-            values[i] = SqlExecutor.EvalExpr(names[i], merged, statementParameters, outerRowNames);
+        if (outerRow is QueryRow queryRow)
+        {
+            int[] slots = SlotsFor(queryRow.Layout, reads);
+
+            for (int i = 0; i < slots.Length; i++)
+            {
+                if (slots[i] < 0)
+                    throw UnknownColumn(i);
+
+                values[i] = queryRow.GetColumnValue(slots[i]);
+            }
+
+            return values;
+        }
+
+        for (int i = 0; i < reads.Length; i++)
+            values[i] = Read(outerRow, reads[i]) ?? throw UnknownColumn(i);
 
         return values;
     }
+
+    private static ColumnValue? Read(IReadOnlyDictionary<string, ColumnValue> outerRow, string[] keys)
+    {
+        foreach (string key in keys)
+        {
+            if (outerRow.TryGetValue(key, out ColumnValue? value) && value is not null)
+                return value;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The slot of each name in a row of <paramref name="layout"/>, or -1 when no key of the name is in it. The
+    /// last result is kept, because the rows of one operator share one layout. Concurrent executions of a
+    /// cached statement can replace it; each one reads a complete entry, so a race costs a new resolution only.
+    /// </summary>
+    private int[] SlotsFor(RowLayout layout, string[][] reads)
+    {
+        LayoutSlots? cached = Volatile.Read(ref lastSlots);
+
+        if (cached is not null && ReferenceEquals(cached.Layout, layout) && ReferenceEquals(cached.Reads, reads))
+            return cached.Slots;
+
+        int[] slots = new int[reads.Length];
+
+        for (int i = 0; i < reads.Length; i++)
+        {
+            slots[i] = -1;
+
+            foreach (string key in reads[i])
+            {
+                int slot = layout.IndexOf(key);
+
+                if (slot >= 0)
+                {
+                    slots[i] = slot;
+                    break;
+                }
+            }
+        }
+
+        Volatile.Write(ref lastSlots, new LayoutSlots(layout, reads, slots));
+        return slots;
+    }
+
+    private CamusDBException UnknownColumn(int name) =>
+        new(CamusDBErrorCodes.UnknownColumn, "Unknown column: " + names[name].yytext!);
+
+    /// <summary>The slots of the names in one row layout, for one form of row keys.</summary>
+    private sealed record LayoutSlots(RowLayout Layout, string[][] Reads, int[] Slots);
 }

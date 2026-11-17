@@ -67,11 +67,15 @@ internal sealed class NestedLoopJoinOperator
         RowLayout? qualifiedLeftLayout = null;
         Dictionary<string, int>? rightOrdinalMap = null;
         JoinRowPairer pairer = new();
+        LateralExpressionBody.ParameterBuffer? lateralParameters = null;
+        JoinRangeSeek? seek = joinNode.RangeSeek;
+
+        // A seek reads the right rows through its index, and such a row also decodes the index's key
+        // columns, so the padding must expect them too.
         OuterJoinPadding? padding = joinNode.Kind == JoinKind.LeftOuter
-            ? await OuterJoinPadding.CreateAsync(joinNode.RightSource, plan, joinNode.RightPhysicalNode).ConfigureAwait(false)
+            ? await OuterJoinPadding.CreateAsync(joinNode.RightSource, plan, joinNode.RightPhysicalNode, seek?.Index).ConfigureAwait(false)
             : null;
 
-        JoinRangeSeek? seek = joinNode.RangeSeek;
         List<AnalyzedComparison>? seekBounds = seek is null ? null : new(seek.Bounds.Count);
 
         await using NestedLoopInnerSpool? spool = seek is null ? TryCreateSpool(joinNode, plan) : null;
@@ -99,7 +103,7 @@ internal sealed class NestedLoopJoinOperator
             if (seek is null && spool is null && joinNode.RightSource.Derived is { LateralExpressions: not null } expressionBody)
             {
                 QueryResultRow? evaluated = await scanner
-                    .EvaluateLateralExpressionsAsync(expressionBody, joinNode.RightExecutionFilter, plan, leftQualified)
+                    .EvaluateLateralExpressionsAsync(expressionBody, joinNode.RightExecutionFilter, plan, leftQualified, lateralParameters ??= new())
                     .ConfigureAwait(false);
 
                 if (evaluated is { } rightRow)

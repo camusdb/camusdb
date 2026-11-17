@@ -127,20 +127,65 @@ internal sealed class LateralExpressionBody
         return new LateralExpressionBody(body, expressions, rowKeys, columnNames, NumericWidening.NumericColumns(columns));
     }
 
+    /// <summary>The row that the items are evaluated against: they read no column, so it is empty and never written.</summary>
+    private static readonly IReadOnlyDictionary<string, ColumnValue> NoColumns = new Dictionary<string, ColumnValue>(0);
+
     /// <summary>
     /// The one row of the body for the left values <paramref name="outerValues"/>, which
     /// <see cref="CorrelatedSubqueryBody.Outer"/> read from one left row.
     /// </summary>
-    public QueryResultRow Evaluate(ColumnValue[] outerValues, Dictionary<string, ColumnValue>? statementParameters)
+    /// <param name="parameterBuffer">The parameter map of the caller for this body, or null for a new map.</param>
+    public QueryResultRow Evaluate(
+        ColumnValue[] outerValues,
+        Dictionary<string, ColumnValue>? statementParameters,
+        ParameterBuffer? parameterBuffer = null)
     {
-        Dictionary<string, ColumnValue> parameters = body.ParametersFor(outerValues, statementParameters);
-        Dictionary<string, ColumnValue> emptyRow = new(0);
+        Dictionary<string, ColumnValue> parameters = parameterBuffer is null
+            ? body.ParametersFor(outerValues, statementParameters)
+            : parameterBuffer.For(body, outerValues, statementParameters);
+
         Dictionary<string, ColumnValue> cells = new(expressions.Length, StringComparer.OrdinalIgnoreCase);
 
         for (int i = 0; i < expressions.Length; i++)
-            cells[rowKeys[i]] = SqlExecutor.EvalExpr(expressions[i], emptyRow, parameters);
+            cells[rowKeys[i]] = SqlExecutor.EvalExpr(expressions[i], NoColumns, parameters);
 
         return new QueryResultRow(new ObjectIdValue(), cells);
+    }
+
+    /// <summary>
+    /// The parameter map of an expression-only body for one nested-loop join: the statement parameters and the
+    /// hidden placeholders of the left values. The join builds it for its first left row, and for each later
+    /// row only the placeholder values change, so a row does not copy the statement parameters into a new map.
+    ///
+    /// <para>The reuse is safe because <see cref="Evaluate"/> reads the map synchronously and no cell keeps a
+    /// reference to it, and because one buffer belongs to one join operator of one execution, which evaluates
+    /// one left row at a time. A subquery run keeps a map of its own for each row: its rows stream lazily, so a
+    /// later row must not change the values that an earlier run still reads.</para>
+    /// </summary>
+    internal sealed class ParameterBuffer
+    {
+        private Dictionary<string, ColumnValue>? parameters;
+
+        private CorrelatedSubqueryBody? owner;
+
+        private Dictionary<string, ColumnValue>? statementParameters;
+
+        internal Dictionary<string, ColumnValue> For(
+            CorrelatedSubqueryBody body,
+            ColumnValue[] outerValues,
+            Dictionary<string, ColumnValue>? statementParameters)
+        {
+            if (parameters is not null && ReferenceEquals(owner, body) && ReferenceEquals(this.statementParameters, statementParameters))
+            {
+                body.SetOuterValues(parameters, outerValues);
+                return parameters;
+            }
+
+            parameters = body.ParametersFor(outerValues, statementParameters);
+            owner = body;
+            this.statementParameters = statementParameters;
+            return parameters;
+        }
     }
 
     /// <summary>

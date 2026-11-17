@@ -70,7 +70,7 @@ internal sealed class ExistsSubqueryExecutor(SubqueryQueryExecutor? queryExecuto
 
         if (prepared.Results is { } results)
         {
-            ColumnValue[] outerValues = results.Outer.For(outerRow, parameters);
+            ColumnValue[] outerValues = results.Outer.For(outerRow);
 
             if (CorrelatedResultCache<bool>.TryKey(outerValues))
             {

@@ -186,6 +186,8 @@ How it runs:
   before an item that it reads. The plan cache keeps no join order for such a query.
 - The join is always a nested loop: for each left row, the derived table runs with the left values that
   it reads. `EXPLAIN` shows `nested-loop-join(…, right=o, lateral)`.
+- For each left row, the join reads only the left columns that the derived table names. Each name
+  resolves to its place in the left row one time, so a wide left row costs no more than a narrow one.
 - Left rows with the same values that the derived table reads share one run in a statement. A run of at
   most 256 rows is kept for later rows with the same values. A derived table that calls a volatile
   function, such as `random()`, runs again for each left row.

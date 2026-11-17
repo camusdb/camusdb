@@ -253,7 +253,7 @@ internal sealed class CorrelatedSubqueryBody
         KvTransaction txnState,
         Dictionary<string, ColumnValue>? statementParameters,
         CancellationToken cancellationToken) =>
-        RunAsync(database, Outer.For(outerRow, statementParameters), txnState, statementParameters, cancellationToken);
+        RunAsync(database, Outer.For(outerRow), txnState, statementParameters, cancellationToken);
 
     /// <summary>
     /// The rows of the body for the outer values <paramref name="outerValues"/>, which <see cref="Outer"/> read
@@ -284,21 +284,40 @@ internal sealed class CorrelatedSubqueryBody
 
     /// <summary>
     /// The statement parameters and <paramref name="outerValues"/>, under their hidden placeholder names. A new
-    /// dictionary for each row: the statement parameters are not changed. <see cref="LateralExpressionBody"/>
-    /// evaluates a body with the same parameters.
+    /// dictionary for each row: the statement parameters are not changed, and a run that streams lazily keeps
+    /// the values of its row. <see cref="LateralExpressionBody"/> evaluates a body with the same parameters, in
+    /// a map that one join reuses (<see cref="LateralExpressionBody.ParameterBuffer"/>).
     /// </summary>
     internal Dictionary<string, ColumnValue> ParametersFor(
         ColumnValue[] outerValues,
         Dictionary<string, ColumnValue>? statementParameters)
     {
+        // Sized for both sets, so the dictionary does not grow while it fills.
         Dictionary<string, ColumnValue> parameters = statementParameters is null
             ? new(parameterNames.Length)
-            : new(statementParameters, statementParameters.Comparer);
+            : new(statementParameters.Count + parameterNames.Length, statementParameters.Comparer);
+
+        if (statementParameters is not null)
+        {
+            foreach (KeyValuePair<string, ColumnValue> parameter in statementParameters)
+                parameters[parameter.Key] = parameter.Value;
+        }
 
         for (int i = 0; i < parameterNames.Length; i++)
             parameters[parameterNames[i]] = outerValues[i];
 
         return parameters;
+    }
+
+    /// <summary>
+    /// Writes <paramref name="outerValues"/> under their hidden placeholder names into <paramref name="parameters"/>,
+    /// a map that <see cref="ParametersFor"/> built for an earlier row of the same statement execution. The
+    /// statement parameters in it stay as they are.
+    /// </summary>
+    internal void SetOuterValues(Dictionary<string, ColumnValue> parameters, ColumnValue[] outerValues)
+    {
+        for (int i = 0; i < parameterNames.Length; i++)
+            parameters[parameterNames[i]] = outerValues[i];
     }
 
     /// <summary>

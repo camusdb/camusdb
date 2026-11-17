@@ -117,8 +117,9 @@ internal sealed class JoinLeafScanner
         BoundDerivedTableSource source,
         NodeAst? executionFilter,
         QueryPlan plan,
-        IReadOnlyDictionary<string, ColumnValue> leftRow) =>
-        derivedTableExecutor.EvaluateLateralExpressionsAsync(plan.Database, source, plan.Ticket, executionFilter, leftRow);
+        IReadOnlyDictionary<string, ColumnValue> leftRow,
+        LateralExpressionBody.ParameterBuffer parameterBuffer) =>
+        derivedTableExecutor.EvaluateLateralExpressionsAsync(plan.Database, source, plan.Ticket, executionFilter, leftRow, parameterBuffer);
 
     internal async IAsyncEnumerable<QueryResultRow> ScanBoundTable(
         BoundTableSource source,

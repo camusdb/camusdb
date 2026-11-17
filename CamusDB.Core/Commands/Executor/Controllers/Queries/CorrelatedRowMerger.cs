@@ -39,32 +39,16 @@ internal static class CorrelatedRowMerger
     }
 
     /// <summary>
-    /// The outer half of <see cref="MergeForEvaluation"/>: each outer column under its bare and its
-    /// qualified key. A correlated subquery that runs through the whole pipeline reads its outer values
-    /// from this row, see <see cref="CorrelatedSubqueryBody"/>.
+    /// The outer half of <see cref="MergeForEvaluation"/>: each outer column under its bare and its qualified
+    /// key. <see cref="OuterRowKeysByMergedKey"/> follows the same rules.
     /// </summary>
-    /// <param name="rowKeysAreQualified">True when <paramref name="outerRow"/> keys each cell as
-    /// <c>{alias}.{column}</c> whatever the number of sources, as a row of a join does. A row of a query
-    /// over one source keys its cells by the bare column name.</param>
-    public static Dictionary<string, ColumnValue> MergeOuterForEvaluation(
-        IReadOnlyDictionary<string, ColumnValue> outerRow,
-        IReadOnlyList<BoundTableSource> outerTableSources,
-        IReadOnlyList<BoundDerivedTableSource> outerDerivedSources,
-        bool rowKeysAreQualified = false)
-    {
-        Dictionary<string, ColumnValue> merged = new(StringComparer.OrdinalIgnoreCase);
-        MergeOuterRow(merged, outerRow, outerTableSources, outerDerivedSources, rowKeysAreQualified);
-        return merged;
-    }
-
     private static void MergeOuterRow(
         Dictionary<string, ColumnValue> merged,
         IReadOnlyDictionary<string, ColumnValue> outerRow,
         IReadOnlyList<BoundTableSource> outerTableSources,
-        IReadOnlyList<BoundDerivedTableSource> outerDerivedSources,
-        bool rowKeysAreQualified = false)
+        IReadOnlyList<BoundDerivedTableSource> outerDerivedSources)
     {
-        bool useQualifiedOuterKeys = rowKeysAreQualified || UsesQualifiedOuterKeys(outerTableSources, outerDerivedSources);
+        bool useQualifiedOuterKeys = UsesQualifiedOuterKeys(outerTableSources, outerDerivedSources);
 
         foreach (BoundTableSource outerSource in outerTableSources)
             MergeOuterColumns(merged, outerRow, outerSource.Alias, GetTableColumnNames(outerSource), useQualifiedOuterKeys);
@@ -80,6 +64,66 @@ internal static class CorrelatedRowMerger
 
             MergeOuterColumns(merged, outerRow, outerSource.Alias, columnNames, useQualifiedOuterKeys);
         }
+    }
+
+    /// <summary>
+    /// For each key of the outer half of a merged row (<see cref="MergeOuterRow"/>), the keys of the outer row
+    /// that can fill it, in the order of the merge: the first of them that the outer row holds gives the value.
+    /// It follows the merge rules exactly, so a reader of these keys (<see cref="CorrelatedOuterValues"/>) gets
+    /// the values that the merged row holds, and builds no merged row.
+    /// </summary>
+    /// <param name="rowKeysAreQualified">True when the outer row keys each cell as <c>{alias}.{column}</c>
+    /// whatever the number of sources, as a row of a join does. A row of a query over one source keys its cells
+    /// by the bare column name.</param>
+    internal static Dictionary<string, List<string>> OuterRowKeysByMergedKey(
+        IReadOnlyList<BoundTableSource> outerTableSources,
+        IReadOnlyList<BoundDerivedTableSource> outerDerivedSources,
+        bool rowKeysAreQualified)
+    {
+        Dictionary<string, List<string>> keys = new(StringComparer.OrdinalIgnoreCase);
+        bool useQualifiedOuterKeys = rowKeysAreQualified || UsesQualifiedOuterKeys(outerTableSources, outerDerivedSources);
+
+        foreach (BoundTableSource outerSource in outerTableSources)
+            AddOuterRowKeys(keys, outerSource.Alias, GetTableColumnNames(outerSource), useQualifiedOuterKeys);
+
+        foreach (BoundDerivedTableSource outerSource in outerDerivedSources)
+        {
+            List<string> columnNames = new(outerSource.Columns.Count);
+
+            foreach (DerivedColumnSchema column in outerSource.Columns)
+                columnNames.Add(column.RowKey);
+
+            AddOuterRowKeys(keys, outerSource.Alias, columnNames, useQualifiedOuterKeys);
+        }
+
+        return keys;
+    }
+
+    private static void AddOuterRowKeys(
+        Dictionary<string, List<string>> keys,
+        string alias,
+        IEnumerable<string> columnNames,
+        bool useQualifiedOuterKeys)
+    {
+        foreach (string columnName in columnNames)
+        {
+            // MergeOuterColumns also tries the bare name when the lookup key is not qualified, but then the
+            // lookup key is the bare name, so one key covers both reads.
+            string lookupKey = useQualifiedOuterKeys
+                ? QueryRowNameResolver.FormatQualifiedKey(alias, columnName)
+                : columnName;
+
+            AddOuterRowKey(keys, columnName, lookupKey);
+            AddOuterRowKey(keys, QueryRowNameResolver.FormatQualifiedKey(alias, columnName), lookupKey);
+        }
+    }
+
+    private static void AddOuterRowKey(Dictionary<string, List<string>> keys, string mergedKey, string lookupKey)
+    {
+        if (!keys.TryGetValue(mergedKey, out List<string>? lookupKeys))
+            keys[mergedKey] = lookupKeys = new(1);
+
+        lookupKeys.Add(lookupKey);
     }
 
     private static IEnumerable<string> GetTableColumnNames(BoundTableSource outerSource)

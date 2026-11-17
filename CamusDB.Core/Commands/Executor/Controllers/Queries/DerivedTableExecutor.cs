@@ -147,8 +147,6 @@ internal sealed class DerivedTableExecutor
         CorrelatedSubqueryBody body = source.Lateral
             ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"Derived table '{source.Alias}' is not LATERAL");
 
-        ColumnValue[] outerValues = body.Outer.For(leftRow, outerTicket.Parameters, rowKeysAreQualified: true);
-
         // A body of expressions only: one row, keyed by the column row keys, with no subquery run.
         if (source.LateralExpressions is not null)
         {
@@ -157,6 +155,8 @@ internal sealed class DerivedTableExecutor
 
             yield break;
         }
+
+        ColumnValue[] outerValues = body.Outer.For(leftRow, rowKeysAreQualified: true);
 
         CorrelatedResultCache<QueryResultRow[]>? results = source.LateralResults is { } cache
             && CorrelatedResultCache<QueryResultRow[]>.TryKey(outerValues)
@@ -198,13 +198,14 @@ internal sealed class DerivedTableExecutor
         BoundDerivedTableSource source,
         QueryTicket outerTicket,
         NodeAst? executionFilter,
-        IReadOnlyDictionary<string, ColumnValue> leftRow)
+        IReadOnlyDictionary<string, ColumnValue> leftRow,
+        LateralExpressionBody.ParameterBuffer? parameterBuffer = null)
     {
         LateralExpressionBody expressions = source.LateralExpressions
             ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"Derived table '{source.Alias}' is not a LATERAL body of expressions");
 
-        ColumnValue[] outerValues = source.Lateral!.Outer.For(leftRow, outerTicket.Parameters, rowKeysAreQualified: true);
-        QueryResultRow row = expressions.Evaluate(outerValues, outerTicket.Parameters);
+        ColumnValue[] outerValues = source.Lateral!.Outer.For(leftRow, rowKeysAreQualified: true);
+        QueryResultRow row = expressions.Evaluate(outerValues, outerTicket.Parameters, parameterBuffer);
 
         (string RowKey, ColumnType Type)[] numericColumns = expressions.NumericColumns;
 

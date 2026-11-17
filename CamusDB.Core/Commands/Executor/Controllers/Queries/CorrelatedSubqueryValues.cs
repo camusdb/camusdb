@@ -258,7 +258,7 @@ internal static class CorrelatedSubqueryValues
         registry.TryGetValue(node, out PreparedValueSubquery prepared);
 
         // The outer values key the result cache and are the input of the run, so the row is read once.
-        ColumnValue[] outerValues = prepared.Body.Outer.For(row, ticket.Parameters);
+        ColumnValue[] outerValues = prepared.Body.Outer.For(row);
         CorrelatedResultCache<KeptSubqueryResult>? results =
             prepared.Results is { } cache && CorrelatedResultCache<KeptSubqueryResult>.TryKey(outerValues) ? cache : null;
 

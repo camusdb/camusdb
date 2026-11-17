@@ -189,6 +189,34 @@ internal class TestJoinRangeSeek : SharedNodeBaseTest
         Assert.That(rows.All(r => r.Row["n"].Type == ColumnType.Null), Is.True);
     }
 
+    /// <summary>
+    /// A row read through an index also decodes the index's key columns, so the seek of
+    /// <c>ix_readings_v_tag</c> returns <c>tag</c> although the query reads only <c>v</c>. The
+    /// left-join padding must expect that key too. A padding built from the read columns alone made
+    /// the first right row fail with "Join row shape diverged from join layout".
+    /// </summary>
+    [Test]
+    public async Task ALeftJoinSeekOverAnIndexWithAnUnreadKeyColumnPadsAndMatches()
+    {
+        (string db, DatabaseDescriptor database, CommandExecutor executor) = await Seeded();
+        await Ddl(executor, database, db, "CREATE TABLE readings (id INT64 PRIMARY KEY, v INT64, tag STRING)");
+        await Ddl(executor, database, db, "CREATE INDEX ix_readings_v_tag ON readings (v, tag)");
+        await Dml(executor, database, db, $"INSERT INTO readings (id, v, tag) SELECT g, g, 'r' || g FROM generate_series(0, {Numbers - 1}) g");
+
+        string sql = "SELECT s.id, r.v FROM spans s LEFT JOIN readings r ON r.v BETWEEN s.lo AND s.hi ORDER BY s.id, r.v";
+        StringAssert.Contains("range-seek=ix_readings_v_tag", await NestedLoopDetail(executor, database, db, sql));
+
+        List<string> seek = Lines(await Query(executor, database, db, sql));
+        List<string> plain = Lines(await Query(executor, database, db, sql.Replace("r.v BETWEEN", "r.v + 0 BETWEEN")));
+        CollectionAssert.AreEqual(plain, seek);
+
+        // 22 matched rows (see ABetweenOfLeftColumnsSeeksTheRightKeyForEachLeftRow), plus one padded row
+        // for span 3 (empty range) and one for span 4 (NULL lower end).
+        Assert.That(seek, Has.Count.EqualTo(24));
+        CollectionAssert.Contains(seek, "3|NULL");
+        CollectionAssert.Contains(seek, "4|NULL");
+    }
+
     [Test]
     public async Task BoundsMayUseExpressionsParametersAndARightFilter()
     {
