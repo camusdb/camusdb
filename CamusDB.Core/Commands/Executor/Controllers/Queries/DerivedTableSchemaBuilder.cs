@@ -1119,7 +1119,7 @@ internal static class DerivedTableSchemaBuilder
         if (target.nodeType == NodeType.Placeholder
             && target.yytext is { } placeholder
             && parameters is not null
-            && parameters.TryGetValue(placeholder, out ColumnValue value)
+            && parameters.TryGetValue(placeholder, out ColumnValue? value)
             && value.Type != ColumnType.Null)
         {
             return value.Type;

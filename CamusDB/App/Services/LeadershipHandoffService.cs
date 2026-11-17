@@ -164,7 +164,8 @@ public sealed class LeadershipHandoffService : IHostedLifecycleService
         bool[] outcomes = await Task.WhenAll(transfers).ConfigureAwait(false);
         int handedOff = outcomes.Count(o => o);
 
-        logger.LogInformation("Handed off leadership of {HandedOff} of {Led} partitions before stopping", handedOff, outcomes.Length);
+        if (logger.IsEnabled(LogLevel.Information))
+            logger.LogInformation("Handed off leadership of {HandedOff} of {Led} partitions before stopping", handedOff, outcomes.Length);
 
         return (handedOff, outcomes.Length);
     }
@@ -193,7 +194,8 @@ public sealed class LeadershipHandoffService : IHostedLifecycleService
             }
             catch (RaftException e)
             {
-                logger.LogDebug("Could not hand partition {PartitionId} to {Target}: {Reason}", partitionId, target, e.Message);
+                if (logger.IsEnabled(LogLevel.Debug))
+                    logger.LogDebug("Could not hand partition {PartitionId} to {Target}: {Reason}", partitionId, target, e.Message);
                 continue;
             }
 
@@ -208,7 +210,8 @@ public sealed class LeadershipHandoffService : IHostedLifecycleService
                     return true;
             }
 
-            logger.LogDebug("Could not hand partition {PartitionId} to {Target}: {Status}", partitionId, target, status);
+            if (logger.IsEnabled(LogLevel.Debug))
+                logger.LogDebug("Could not hand partition {PartitionId} to {Target}: {Status}", partitionId, target, status);
         }
 
         logger.LogWarning("Could not hand off leadership of partition {PartitionId}; it will elect a new leader", partitionId);
@@ -235,7 +238,7 @@ public sealed class LeadershipHandoffService : IHostedLifecycleService
         if (stillOpen > 0)
             logger.LogWarning("Closed {Connections} peer connections before stopping with {Clients} client connections still open",
                 aborted, stillOpen);
-        else
+        else if (logger.IsEnabled(LogLevel.Information))
             logger.LogInformation("Closed {Connections} peer connections before stopping", aborted);
 
         return aborted;
