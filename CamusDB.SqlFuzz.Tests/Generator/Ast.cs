@@ -378,6 +378,14 @@ internal sealed record SelectStmt(
     /// joins as written.
     /// </summary>
     public bool LateralJoins { get; init; }
+
+    /// <summary>
+    /// True when this SELECT prints the expression of each select-list item in one <c>LATERAL</c> derived table
+    /// with no FROM, after the whole FROM: <c>SELECT lx.e0 AS o0 FROM … CROSS JOIN LATERAL (SELECT expr AS e0)
+    /// AS lx</c>. The rows do not change. It applies only when every item is a scalar of the FROM rows (see
+    /// <see cref="Printing.CamusSqlPrinter.PrintsItemsAsLateral"/>); otherwise the SELECT prints as written.
+    /// </summary>
+    public bool LateralItems { get; init; }
 }
 
 /// <summary>An EXPLAIN of a SELECT, for the plan names in a finding.</summary>

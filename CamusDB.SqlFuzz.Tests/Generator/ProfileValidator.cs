@@ -106,6 +106,7 @@ internal static class ProfileValidator
 
         need(select.CteTables is null or { Count: 0 } || profile.Allows(StatementFeature.CommonTableExpressions), "a WITH clause");
         need(!select.LateralJoins || profile.Allows(StatementFeature.LateralJoins), "a LATERAL join");
+        need(!select.LateralItems || profile.Allows(StatementFeature.LateralJoins), "a LATERAL derived table of the select list");
         need(select.GroupBy is null or { Count: 0 } || profile.Allows(StatementFeature.GroupBy), "GROUP BY");
         need(select.Having is null || profile.Allows(StatementFeature.Having), "HAVING");
         need(!select.Distinct || profile.Allows(StatementFeature.Distinct), "DISTINCT");

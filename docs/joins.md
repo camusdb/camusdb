@@ -158,6 +158,15 @@ How it runs:
 - Left rows with the same values that the derived table reads share one run in a statement. A run of at
   most 256 rows is kept for later rows with the same values. A derived table that calls a volatile
   function, such as `random()`, runs again for each left row.
+- A derived table that only names expressions of the left row, such as `LATERAL (SELECT p.width *
+  p.depth AS area) v`, gives one row for each left row. The join evaluates its expressions on the left
+  row and runs no subquery, so the cost is close to the cost of the same expressions in a select list.
+  The body must be one `SELECT` with no `FROM`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`,
+  `OFFSET` or `DISTINCT`, and no volatile call. Each item can hold literals, parameters, left columns,
+  operators, `CAST`, `CASE`, scalar functions and uncorrelated subqueries, which run one time for the
+  statement. A nested subquery that reads the left row keeps the run for each left row. The rows,
+  column types, NULLs and errors are the same in both forms. `EXPLAIN` shows
+  `lateral=expressions(area)` with the column names in place of `lateral`.
 
 ## Expression keys
 

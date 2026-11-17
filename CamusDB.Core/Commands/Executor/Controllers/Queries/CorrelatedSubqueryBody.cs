@@ -283,9 +283,10 @@ internal sealed class CorrelatedSubqueryBody
 
     /// <summary>
     /// The statement parameters and <paramref name="outerValues"/>, under their hidden placeholder names. A new
-    /// dictionary for each row: the statement parameters are not changed.
+    /// dictionary for each row: the statement parameters are not changed. <see cref="LateralExpressionBody"/>
+    /// evaluates a body with the same parameters.
     /// </summary>
-    private Dictionary<string, ColumnValue> ParametersFor(
+    internal Dictionary<string, ColumnValue> ParametersFor(
         ColumnValue[] outerValues,
         Dictionary<string, ColumnValue>? statementParameters)
     {

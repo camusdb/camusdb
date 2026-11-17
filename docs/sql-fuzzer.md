@@ -261,6 +261,13 @@ or the ON holds a subquery, and the JOIN ON variant of TLP keeps every join, bec
 to the last ON. The generator does not write a LATERAL derived table that does more than filter one table,
 or a function in FROM that reads a column.
 
+About one TLP check in five, and one NoREC check of rows in five, also prints the select list of the whole
+or optimized query in one `LATERAL` derived table with no FROM, after the whole FROM: `SELECT lx.e0 AS o0
+FROM … CROSS JOIN LATERAL (SELECT expr AS e0) AS lx`. The rows and the output names are the same, so the
+checks compare the evaluation of a LATERAL body of expressions with the same expressions in a select list.
+A select list with an aggregate or a window call, and a SELECT with GROUP BY, HAVING or a set operation,
+prints as written.
+
 About one FROM list in twelve starts with a `VALUES` list (see [VALUES lists in FROM](values-lists.md)):
 `(VALUES (1, 'x'), (CAST(NULL AS int64), 'y')) AS a0 (v0, v1)`, with 1 to 4 rows and 1 to 3 columns of
 type `int64`, `float64`, `string` or `bool`. Every item is a literal of its column's type, and the first

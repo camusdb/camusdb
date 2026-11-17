@@ -610,6 +610,12 @@ internal sealed class StatementGenerator
         return marked ? result : null;
     }
 
+    /// <summary>
+    /// True for about one SELECT in five, for its select list to print in a <c>LATERAL</c> derived table with no
+    /// FROM (see <see cref="SelectStmt.LateralItems"/>); false for a profile without LATERAL joins.
+    /// </summary>
+    public bool ChooseLateralItems() => profile.Allows(StatementFeature.LateralJoins) && random.Chance(0.2);
+
     private FromItem MarkLateral(FromItem from, ref bool marked)
     {
         if (from is not JoinFrom join)

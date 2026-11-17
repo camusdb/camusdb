@@ -95,6 +95,32 @@ internal sealed class NestedLoopJoinOperator
 
             bool matched = false;
 
+            // A LATERAL body of expressions only gives one row or none, with no right-side cursor.
+            if (seek is null && spool is null && joinNode.RightSource.Derived is { LateralExpressions: not null } expressionBody)
+            {
+                QueryResultRow? evaluated = await scanner
+                    .EvaluateLateralExpressionsAsync(expressionBody, joinNode.RightExecutionFilter, plan, leftQualified)
+                    .ConfigureAwait(false);
+
+                if (evaluated is { } rightRow)
+                {
+                    joinLayout      ??= QueryRowMerger.BuildJoinLayout(leftQualified, rightRow.Row, rightAlias);
+                    rightOrdinalMap ??= QueryRowMerger.BuildRightKeyOrdinalMap(rightRow.Row, rightAlias, joinLayout);
+                    QueryRow merged  = pairer.Pair(leftQualified, rightRow.Row, joinLayout, rightOrdinalMap);
+
+                    if (await services.Filterer.MeetWhereAsync(joinNode.OnPredicate, merged, ticket, plan.Database).ConfigureAwait(false))
+                    {
+                        matched = true;
+                        yield return new QueryResultRow(default(ObjectIdValue), merged);
+                    }
+                }
+
+                if (padding is not null && !matched)
+                    yield return new QueryResultRow(default(ObjectIdValue), padding.Pad(leftQualified));
+
+                continue;
+            }
+
             IAsyncEnumerable<QueryResultRow> rightRows = seek is not null
                 ? SeekRightSide(joinNode, seek, seekBounds!, plan, leftQualified)
                 : spool is not null

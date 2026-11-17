@@ -330,6 +330,47 @@ internal sealed class TestGenerator
     }
 
     /// <summary>
+    /// Some NoREC checks print the select list of the optimized query in a LATERAL derived table with no FROM,
+    /// after the whole FROM, with the output names kept. A select list with an aggregate prints as written.
+    /// </summary>
+    [Test]
+    public void SomeSelectListsPrintInALateralDerivedTableWithNoFrom()
+    {
+        int lateralItems = 0;
+
+        for (ulong seed = 1; seed <= 40; seed++)
+        {
+            StatementGenerator generator = new(new FuzzRandom(seed), GeneratorProfile.CamusDB);
+            generator.GenerateSchema();
+            generator.GenerateData();
+
+            for (int i = 0; i < 50; i++)
+            {
+                NoRecCheck check = NoRecOracle.Generate(generator);
+                if (!check.LateralItems)
+                    continue;
+
+                lateralItems++;
+                string sql = CamusSqlPrinter.Instance.Print(check.Optimized);
+                Assert.That(sql, Does.Contain("SELECT lx.e0 AS "), sql);
+                Assert.That(sql, Does.Contain(" CROSS JOIN LATERAL (SELECT "), sql);
+                StringAssert.DoesNotContain("lx.e", CamusSqlPrinter.Instance.Print(check.Reference));
+            }
+        }
+
+        Assert.That(lateralItems, Is.GreaterThan(30), "NoREC checks with a LATERAL select list");
+
+        ColumnExpr c0 = new("a0", "c0", FuzzType.Int64);
+        SelectItem[] items = [new(c0, "o0"), new(new BinaryExpr(BinaryOp.Add, c0, new LiteralExpr(FuzzValue.Of(1L)), FuzzType.Int64), "o1")];
+        Assert.That(CamusSqlPrinter.Instance.Print(new SelectStmt(items, new TableRef("t0", "a0")) { LateralItems = true }),
+            Is.EqualTo("SELECT lx.e0 AS o0, lx.e1 AS o1 FROM t0 AS a0 CROSS JOIN LATERAL (SELECT a0.c0 AS e0, (a0.c0 + 1) AS e1) AS lx"));
+
+        SelectItem[] counted = [new(new AggregateExpr(AggregateFunc.CountStar, null, FuzzType.Int64), "n")];
+        Assert.That(CamusSqlPrinter.Instance.Print(new SelectStmt(counted, new TableRef("t0", "a0")) { LateralItems = true }),
+            Is.EqualTo("SELECT COUNT(*) AS n FROM t0 AS a0"));
+    }
+
+    /// <summary>
     /// A VALUES list appears first in the FROM of some SELECTs and of some UPDATE … FROM and DELETE … USING lists,
     /// prints as <c>(VALUES (…), …) AS a0 (v0, …)</c>, and never appears for a profile without VALUES lists.
     /// </summary>

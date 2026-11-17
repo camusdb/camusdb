@@ -75,6 +75,12 @@ internal sealed class TlpCheck : OracleCheck
     /// </summary>
     public bool LateralJoins { get; init; }
 
+    /// <summary>
+    /// True when the whole query prints its select-list expressions in a <c>LATERAL</c> derived table (see
+    /// <see cref="SelectStmt.LateralItems"/>). The three parts print them as written.
+    /// </summary>
+    public bool LateralItems { get; init; }
+
     public FromItem From { get; }
 
     /// <summary>The output columns of the WHERE, DISTINCT and JOIN ON forms.</summary>
@@ -113,7 +119,7 @@ internal sealed class TlpCheck : OracleCheck
     public (SelectStmt Whole, SelectStmt[] Parts) Build()
     {
         (SelectStmt whole, SelectStmt[] parts) = BuildPlain();
-        return (whole with { CteTables = CteTables, LateralJoins = LateralJoins }, parts);
+        return (whole with { CteTables = CteTables, LateralJoins = LateralJoins, LateralItems = LateralItems }, parts);
     }
 
     private (SelectStmt Whole, SelectStmt[] Parts) BuildPlain()
@@ -288,22 +294,24 @@ internal sealed class TlpCheck : OracleCheck
         if (CteTables is not null)
             yield return new TlpCheck(Kind, From, Items, Predicate, GroupBy, Aggregates);
         if (LateralJoins)
-            yield return new TlpCheck(Kind, From, Items, Predicate, GroupBy, Aggregates) { CteTables = CteTables };
+            yield return new TlpCheck(Kind, From, Items, Predicate, GroupBy, Aggregates) { CteTables = CteTables, LateralItems = LateralItems };
+        if (LateralItems)
+            yield return new TlpCheck(Kind, From, Items, Predicate, GroupBy, Aggregates) { CteTables = CteTables, LateralJoins = LateralJoins };
 
         foreach (Expr p in ExprShrinker.Candidates(Predicate))
-            yield return new TlpCheck(Kind, From, Items, p, GroupBy, Aggregates) { CteTables = CteTables, LateralJoins = LateralJoins };
+            yield return new TlpCheck(Kind, From, Items, p, GroupBy, Aggregates) { CteTables = CteTables, LateralJoins = LateralJoins, LateralItems = LateralItems };
 
         if (Items.Count > 1)
             for (int i = 0; i < Items.Count; i++)
-                yield return new TlpCheck(Kind, From, Items.Where((_, j) => j != i).ToList(), Predicate, GroupBy, Aggregates) { CteTables = CteTables, LateralJoins = LateralJoins };
+                yield return new TlpCheck(Kind, From, Items.Where((_, j) => j != i).ToList(), Predicate, GroupBy, Aggregates) { CteTables = CteTables, LateralJoins = LateralJoins, LateralItems = LateralItems };
 
         if (Aggregates.Count > 1)
             for (int i = 0; i < Aggregates.Count; i++)
-                yield return new TlpCheck(Kind, From, Items, Predicate, GroupBy, Aggregates.Where((_, j) => j != i).ToList()) { CteTables = CteTables, LateralJoins = LateralJoins };
+                yield return new TlpCheck(Kind, From, Items, Predicate, GroupBy, Aggregates.Where((_, j) => j != i).ToList()) { CteTables = CteTables, LateralJoins = LateralJoins, LateralItems = LateralItems };
 
         if (GroupBy.Count > 1 && Kind == TlpVariant.GroupBy)
             for (int i = 0; i < GroupBy.Count; i++)
-                yield return new TlpCheck(Kind, From, Items, Predicate, GroupBy.Where((_, j) => j != i).ToList(), Aggregates) { CteTables = CteTables, LateralJoins = LateralJoins };
+                yield return new TlpCheck(Kind, From, Items, Predicate, GroupBy.Where((_, j) => j != i).ToList(), Aggregates) { CteTables = CteTables, LateralJoins = LateralJoins, LateralItems = LateralItems };
 
         foreach (FromItem from in FromShrinker.Candidates(From, Kind == TlpVariant.JoinOn))
         {
@@ -311,7 +319,7 @@ internal sealed class TlpCheck : OracleCheck
             // would report a "mismatch" that the rule itself causes.
             if (Kind == TlpVariant.JoinOn && from is not JoinFrom { Kind: JoinKind.Inner, On: not null })
                 continue;
-            yield return new TlpCheck(Kind, from, Items, Predicate, GroupBy, Aggregates) { CteTables = CteTables, LateralJoins = LateralJoins };
+            yield return new TlpCheck(Kind, from, Items, Predicate, GroupBy, Aggregates) { CteTables = CteTables, LateralJoins = LateralJoins, LateralItems = LateralItems };
         }
     }
 
@@ -387,6 +395,16 @@ internal sealed class TlpOracle : IOracle
             {
                 CteTables = check.CteTables,
                 LateralJoins = true,
+            };
+        }
+
+        if (generator.ChooseLateralItems())
+        {
+            check = new TlpCheck(check.Kind, check.From, check.Items, check.Predicate, check.GroupBy, check.Aggregates)
+            {
+                CteTables = check.CteTables,
+                LateralJoins = check.LateralJoins,
+                LateralItems = true,
             };
         }
 

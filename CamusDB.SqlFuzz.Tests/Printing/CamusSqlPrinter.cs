@@ -232,6 +232,8 @@ internal sealed class CamusSqlPrinter : ISqlPrinter
         if (select.Distinct)
             sb.Append("DISTINCT ");
 
+        bool lateralItems = PrintsItemsAsLateral(select);
+
         if (select.Items.Count == 0)
             sb.Append('*');
         else
@@ -240,7 +242,10 @@ internal sealed class CamusSqlPrinter : ISqlPrinter
             {
                 if (i > 0)
                     sb.Append(", ");
-                Write(sb, select.Items[i].Expr);
+                if (lateralItems)
+                    sb.Append(LateralItemsAlias).Append(".e").Append(i);
+                else
+                    Write(sb, select.Items[i].Expr);
                 if (select.Items[i].Alias is { } alias)
                     sb.Append(" AS ").Append(alias);
             }
@@ -248,6 +253,19 @@ internal sealed class CamusSqlPrinter : ISqlPrinter
 
         sb.Append(" FROM ");
         WriteFrom(sb, select.From, declared, select.LateralJoins);
+
+        if (lateralItems)
+        {
+            sb.Append(" CROSS JOIN LATERAL (SELECT ");
+            for (int i = 0; i < select.Items.Count; i++)
+            {
+                if (i > 0)
+                    sb.Append(", ");
+                Write(sb, select.Items[i].Expr);
+                sb.Append(" AS e").Append(i);
+            }
+            sb.Append(") AS ").Append(LateralItemsAlias);
+        }
 
         if (select.Where is not null)
         {
@@ -361,6 +379,50 @@ internal sealed class CamusSqlPrinter : ISqlPrinter
                 }
                 break;
         }
+    }
+
+    /// <summary>The alias of the <c>LATERAL</c> derived table of <see cref="SelectStmt.LateralItems"/>; no table alias starts with <c>lx</c>.</summary>
+    internal const string LateralItemsAlias = "lx";
+
+    /// <summary>
+    /// True when <paramref name="select"/> prints its select-list expressions in a <c>LATERAL</c> derived table
+    /// (see <see cref="SelectStmt.LateralItems"/>): each item has an alias, so the output names do not change, and
+    /// no item holds an aggregate or a window call, which a derived table with no FROM cannot compute. A SELECT with
+    /// GROUP BY, HAVING or a set operation prints as written.
+    /// </summary>
+    internal static bool PrintsItemsAsLateral(SelectStmt select)
+    {
+        if (!select.LateralItems || select.Items.Count == 0 || select.GroupBy is { Count: > 0 } || select.Having is not null || select.SetOp is not null)
+            return false;
+
+        foreach (SelectItem item in select.Items)
+        {
+            if (item.Alias is null || HoldsAggregateOrWindow(item.Expr))
+                return false;
+        }
+
+        return true;
+    }
+
+    private static bool HoldsAggregateOrWindow(Expr expression)
+    {
+        Stack<object> pending = new();
+        pending.Push(expression);
+
+        while (pending.TryPop(out object? node))
+        {
+            if (node is AggregateExpr or WindowExpr)
+                return true;
+
+            // An aggregate inside a subquery belongs to that subquery.
+            if (node is SelectStmt or ExistsExpr or InSubqueryExpr)
+                continue;
+
+            foreach (object child in ExprWalker.Children(node))
+                pending.Push(child);
+        }
+
+        return false;
     }
 
     /// <summary>

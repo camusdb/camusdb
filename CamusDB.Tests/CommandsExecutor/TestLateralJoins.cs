@@ -490,6 +490,157 @@ internal class TestLateralJoins : SharedNodeBaseTest
         List<QueryResultRow> copied = await Query(executor, database, db, "SELECT w FROM copied ORDER BY id");
         CollectionAssert.AreEqual(new long[] { 11, 21, 31 }, Longs(copied, "w"));
     }
+
+    /// <summary>
+    /// Each row as text, with the type of each cell, for the columns <paramref name="columns"/> in order. Two
+    /// reads that must give the same rows give the same text.
+    /// </summary>
+    private static string[] Render(List<QueryResultRow> rows, params string[] columns) =>
+        rows.Select(r => string.Join(" | ", columns.Select(c =>
+        {
+            ColumnValue v = r.Row[c];
+            return v.Type == ColumnType.Null ? "NULL" : $"{v.Type}:{v}";
+        }))).ToArray();
+
+    /// <summary>
+    /// The SQL of <paramref name="sql"/> with <c>LIMIT 1</c> added to the end of each LATERAL body that the
+    /// marker <c>/*b*/</c> closes. The limit keeps the body a subquery that runs for each left row, so a test
+    /// can compare the evaluation of a body of expressions with that run.
+    /// </summary>
+    private static string AsSubqueryRuns(string sql) => sql.Replace("/*b*/", " LIMIT 1");
+
+    [Test]
+    public async Task ABodyOfExpressionsRunsNoSubqueryAndGivesTheRowsOfASubqueryRun()
+    {
+        (string db, DatabaseDescriptor database, CommandExecutor executor) = await Seeded();
+        Dictionary<string, ColumnValue> parameters = new() { ["@px"] = new ColumnValue(ColumnType.Float64, 0.25) };
+
+        // v - 50 is zero for item 5, so its zf and wx are NULL.
+        const string sql =
+            "SELECT i.id, d.denom, z.zf, w.wx FROM items i " +
+            "CROSS JOIN LATERAL (SELECT i.v - 50 AS denom/*b*/) AS d " +
+            "CROSS JOIN LATERAL (SELECT CASE WHEN d.denom = 0 THEN NULL ELSE 100.0 / d.denom END AS zf/*b*/) AS z " +
+            "CROSS JOIN LATERAL (SELECT @px + z.zf AS wx/*b*/) AS w ORDER BY i.id";
+
+        List<QueryResultRow> evaluated;
+        using (CorrelatedRunProbe.Observe(out CorrelatedRunProbe probe))
+        {
+            evaluated = await Query(executor, database, db, sql.Replace("/*b*/", ""), parameters);
+            Assert.That(probe.Runs, Is.EqualTo(0), "a body of expressions runs no subquery");
+        }
+
+        List<QueryResultRow> run;
+        using (CorrelatedRunProbe.Observe(out CorrelatedRunProbe probe))
+        {
+            run = await Query(executor, database, db, AsSubqueryRuns(sql), parameters);
+            Assert.That(probe.Runs, Is.GreaterThan(0));
+        }
+
+        CollectionAssert.AreEqual(Render(run, "id", "denom", "zf", "wx"), Render(evaluated, "id", "denom", "zf", "wx"));
+        Assert.That(evaluated, Has.Count.EqualTo(12));
+        Assert.That(evaluated[4].Row["zf"].Type, Is.EqualTo(ColumnType.Null));
+        Assert.That(evaluated[4].Row["wx"].Type, Is.EqualTo(ColumnType.Null));
+        Assert.That(evaluated[0].Row["wx"].FloatValue, Is.EqualTo(0.25 + 100.0 / -40).Within(1e-12));
+    }
+
+    [Test]
+    public async Task ABodyOfExpressionsKeepsTheTypesNamesAndNullsOfASubqueryRun()
+    {
+        (string db, DatabaseDescriptor database, CommandExecutor executor) = await Seeded();
+
+        // m mixes INT64 and FLOAT64 branches, so its column is FLOAT64 and each cell is widened to it.
+        const string sql =
+            "SELECT i.id, c.m, c.s, c.g, c.b, c.n, k.a, k.z FROM items i " +
+            "CROSS JOIN LATERAL (SELECT CASE WHEN i.id > 6 THEN i.id ELSE 0.5 END AS m, " +
+            "CAST(i.v AS STRING) || '-' AS s, i.grp IN (0, 2) AS g, i.v BETWEEN 30 AND 60 AS b, " +
+            "NULLIF(i.grp, 1) AS n/*b*/) AS c " +
+            "CROSS JOIN LATERAL (SELECT i.v + 1, -i.v/*b*/) AS k (a, z) ORDER BY i.id";
+        string[] columns = ["id", "m", "s", "g", "b", "n", "a", "z"];
+
+        List<QueryResultRow> evaluated = await Query(executor, database, db, sql.Replace("/*b*/", ""));
+        List<QueryResultRow> run = await Query(executor, database, db, AsSubqueryRuns(sql));
+
+        CollectionAssert.AreEqual(Render(run, columns), Render(evaluated, columns));
+        Assert.That(evaluated.All(r => r.Row["m"].Type == ColumnType.Float64), Is.True, "every m cell is FLOAT64");
+        Assert.That(evaluated[0].Row["s"].StrValue, Is.EqualTo("10-"));
+        Assert.That(evaluated[0].Row["a"].LongValue, Is.EqualTo(11));
+        Assert.That(evaluated[0].Row["z"].LongValue, Is.EqualTo(-10));
+    }
+
+    [Test]
+    public async Task ALeftJoinOfABodyOfExpressionsPadsTheRowsItsOnRefuses()
+    {
+        (string db, DatabaseDescriptor database, CommandExecutor executor) = await Seeded();
+
+        const string sql =
+            "SELECT i.id, c.d FROM items i LEFT JOIN LATERAL (SELECT i.v * 2 AS d/*b*/) AS c ON c.d > 60 " +
+            "WHERE i.id <= 5 ORDER BY i.id";
+
+        List<QueryResultRow> evaluated = await Query(executor, database, db, sql.Replace("/*b*/", ""));
+        List<QueryResultRow> run = await Query(executor, database, db, AsSubqueryRuns(sql));
+
+        CollectionAssert.AreEqual(Render(run, "id", "d"), Render(evaluated, "id", "d"));
+        CollectionAssert.AreEqual(new long[] { 1, 2, 3, 4, 5 }, Longs(evaluated, "id"));
+        Assert.That(evaluated.Take(3).All(r => r.Row["d"].Type == ColumnType.Null), Is.True);
+        CollectionAssert.AreEqual(new long[] { 80, 100 }, evaluated.Skip(3).Select(r => r.Row["d"].LongValue).ToArray());
+    }
+
+    [Test]
+    public async Task AnErrorInABodyOfExpressionsIsTheErrorOfASubqueryRun()
+    {
+        (string db, DatabaseDescriptor database, CommandExecutor executor) = await Seeded();
+
+        // i.id - 3 is zero for item 3 only.
+        const string sql = "SELECT i.id, c.q FROM items i CROSS JOIN LATERAL (SELECT 100 / (i.id - 3) AS q/*b*/) AS c";
+
+        CamusDBException? evaluated = Assert.ThrowsAsync<CamusDBException>(() => Query(executor, database, db, sql.Replace("/*b*/", "")));
+        CamusDBException? run = Assert.ThrowsAsync<CamusDBException>(() => Query(executor, database, db, AsSubqueryRuns(sql)));
+
+        Assert.That(evaluated!.Code, Is.EqualTo(run!.Code));
+        Assert.That(evaluated.Message, Is.EqualTo(run.Message));
+
+        // With item 3 left out, no row divides by zero.
+        List<QueryResultRow> rows = await Query(executor, database, db,
+            "SELECT i.id, c.q FROM items i CROSS JOIN LATERAL (SELECT 100 / (i.id - 3) AS q) AS c WHERE i.id IN (1, 5) ORDER BY i.id");
+        CollectionAssert.AreEqual(new long[] { -50, 50 }, Longs(rows, "q"));
+    }
+
+    [Test]
+    public async Task ExplainNamesTheColumnsOfABodyOfExpressionsAndOtherBodiesKeepTheSubqueryRun()
+    {
+        (string db, DatabaseDescriptor database, CommandExecutor executor) = await Seeded();
+
+        string expressions = await PlanText(executor, database, db,
+            "EXPLAIN SELECT i.id, c.d, c.e FROM items i CROSS JOIN LATERAL (SELECT i.v * 2 AS d, i.v + 1 AS e) AS c");
+        StringAssert.Contains("lateral=expressions(d, e)", expressions);
+
+        // A LIMIT, a nested subquery that reads the left row and a volatile call each keep the subquery run.
+        foreach (string body in new[]
+        {
+            "SELECT i.v * 2 AS d LIMIT 1",
+            "SELECT (SELECT MAX(x.v) FROM items x WHERE x.grp = i.grp) - i.v AS d",
+            "SELECT i.v + random() AS d",
+        })
+        {
+            string text = await PlanText(executor, database, db, $"EXPLAIN SELECT i.id, c.d FROM items i CROSS JOIN LATERAL ({body}) AS c");
+            StringAssert.Contains(", lateral", text, body);
+            StringAssert.DoesNotContain("lateral=expressions", text, body);
+        }
+
+        // An uncorrelated subquery runs one time, when the body binds, so the body is still a body of expressions.
+        const string uncorrelated =
+            "SELECT i.id, c.d FROM items i CROSS JOIN LATERAL (SELECT (SELECT MAX(v) FROM items) - i.v AS d) AS c ORDER BY i.id";
+        StringAssert.Contains("lateral=expressions(d)", await PlanText(executor, database, db, "EXPLAIN " + uncorrelated));
+
+        List<QueryResultRow> rows = await Query(executor, database, db, uncorrelated);
+        CollectionAssert.AreEqual(Enumerable.Range(1, 12).Select(id => 120L - id * 10).ToArray(), Longs(rows, "d"));
+    }
+
+    private static async Task<string> PlanText(CommandExecutor executor, DatabaseDescriptor database, string db, string sql)
+    {
+        List<QueryResultRow> plan = await Query(executor, database, db, sql);
+        return string.Join("\n", plan.Select(r => string.Join(" ", r.Row.Values.Select(v => v.StrValue))));
+    }
 }
 
 /// <summary>The tests of <see cref="TestLateralJoins"/> on an engine in standalone mode.</summary>

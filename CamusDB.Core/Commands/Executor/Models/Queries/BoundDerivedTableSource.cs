@@ -65,6 +65,13 @@ public sealed record BoundDerivedTableSource(
     /// </summary>
     internal CorrelatedResultCache<QueryResultRow[]>? LateralResults { get; init; }
 
+    /// <summary>
+    /// The direct evaluation of a <see cref="Lateral"/> body that only names expressions of the left row,
+    /// or null for any other body. When set, the join evaluates the expressions for each left row and runs
+    /// no subquery, and <see cref="LateralResults"/> is null: an evaluation costs less than a cache lookup.
+    /// </summary>
+    internal LateralExpressionBody? LateralExpressions { get; init; }
+
     public bool HasColumn(string columnName)
     {
         foreach (DerivedColumnSchema column in Columns)

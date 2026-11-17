@@ -59,6 +59,12 @@ internal sealed class NoRecCheck : OracleCheck
     /// </summary>
     public bool LateralJoins { get; init; }
 
+    /// <summary>
+    /// True when the optimized query prints its select-list expressions in a <c>LATERAL</c> derived table (see
+    /// <see cref="SelectStmt.LateralItems"/>). The reference query prints them as written.
+    /// </summary>
+    public bool LateralItems { get; init; }
+
     public override OracleKind Oracle => OracleKind.NoRec;
 
     public override string Variant => CompareRows ? "norec:rows" : "norec:count";
@@ -68,7 +74,7 @@ internal sealed class NoRecCheck : OracleCheck
     public SelectStmt Optimized => (CompareRows
         ? new SelectStmt(Items, From, Predicate)
         : new SelectStmt([new SelectItem(new AggregateExpr(AggregateFunc.CountStar, null, FuzzType.Int64), "n")], From, Predicate))
-        with { CteTables = CteTables, LateralJoins = LateralJoins };
+        with { CteTables = CteTables, LateralJoins = LateralJoins, LateralItems = LateralItems };
 
     public SelectStmt Reference => CompareRows
         ? new SelectStmt(Items.Append(new SelectItem(Flag, "norec_flag")).ToList(), From)
@@ -113,18 +119,20 @@ internal sealed class NoRecCheck : OracleCheck
         if (CteTables is not null)
             yield return new NoRecCheck(CompareRows, From, Items, Predicate);
         if (LateralJoins)
-            yield return new NoRecCheck(CompareRows, From, Items, Predicate) { CteTables = CteTables };
+            yield return new NoRecCheck(CompareRows, From, Items, Predicate) { CteTables = CteTables, LateralItems = LateralItems };
+        if (LateralItems)
+            yield return new NoRecCheck(CompareRows, From, Items, Predicate) { CteTables = CteTables, LateralJoins = LateralJoins };
         foreach (Expr p in ExprShrinker.Candidates(Predicate))
-            yield return new NoRecCheck(CompareRows, From, Items, p) { CteTables = CteTables, LateralJoins = LateralJoins };
+            yield return new NoRecCheck(CompareRows, From, Items, p) { CteTables = CteTables, LateralJoins = LateralJoins, LateralItems = LateralItems };
         if (CompareRows)
         {
-            yield return new NoRecCheck(false, From, Items, Predicate) { CteTables = CteTables, LateralJoins = LateralJoins };
+            yield return new NoRecCheck(false, From, Items, Predicate) { CteTables = CteTables, LateralJoins = LateralJoins, LateralItems = LateralItems };
             if (Items.Count > 1)
                 for (int i = 0; i < Items.Count; i++)
-                    yield return new NoRecCheck(true, From, Items.Where((_, j) => j != i).ToList(), Predicate) { CteTables = CteTables, LateralJoins = LateralJoins };
+                    yield return new NoRecCheck(true, From, Items.Where((_, j) => j != i).ToList(), Predicate) { CteTables = CteTables, LateralJoins = LateralJoins, LateralItems = LateralItems };
         }
         foreach (FromItem from in FromShrinker.Candidates(From, keepJoin: false))
-            yield return new NoRecCheck(CompareRows, from, Items, Predicate) { CteTables = CteTables, LateralJoins = LateralJoins };
+            yield return new NoRecCheck(CompareRows, from, Items, Predicate) { CteTables = CteTables, LateralJoins = LateralJoins, LateralItems = LateralItems };
     }
 
     public override IEnumerable<string> Describe(ISqlPrinter printer)
@@ -215,6 +223,7 @@ internal sealed class NoRecOracle : IOracle
         {
             CteTables = ctes,
             LateralJoins = lateral is not null,
+            LateralItems = rows && generator.ChooseLateralItems(),
         };
     }
 }

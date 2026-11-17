@@ -298,9 +298,14 @@ public static class PlanRenderer
     {
         string detail = $"on={RenderExpr(node.OnPredicate)}, right={node.RightSource.Alias}";
 
-        // A LATERAL right side runs once for each left row.
-        if (node.RightSource.Derived is { Lateral: not null })
-            detail += ", lateral";
+        // A LATERAL right side runs once for each left row. A body of expressions only is evaluated for
+        // each left row with no subquery run; EXPLAIN names its columns.
+        if (node.RightSource.Derived is { Lateral: not null } lateral)
+        {
+            detail += lateral.LateralExpressions is { } expressions
+                ? $", lateral=expressions({string.Join(", ", expressions.ColumnNames)})"
+                : ", lateral";
+        }
 
         // A range seek reads, for each left row, only the index range its bounds give.
         if (node.RangeSeek is { } seek)

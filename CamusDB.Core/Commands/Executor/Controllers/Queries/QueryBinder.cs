@@ -700,11 +700,18 @@ internal sealed class QueryBinder
         if (derivedSource.ColumnAliases is { } columnAliases)
             columns = DerivedTableSchemaBuilder.WithColumnAliases(columns, columnAliases, derivedSource.Alias, ref innerRowKeys);
 
+        // A body that only names expressions of the left row is evaluated for each left row, with no
+        // subquery run and no kept results.
+        LateralExpressionBody? expressions = body is null ? null : LateralExpressionBody.TryCreate(body, columns);
+
         return new BoundDerivedTableSource(derivedSource, derivedSource.Alias, columns, bodyBound)
         {
             InnerRowKeys = innerRowKeys,
             Lateral = body,
-            LateralResults = body is { ResultsCanBeKept: true } ? new CorrelatedResultCache<QueryResultRow[]>(body.Outer) : null,
+            LateralResults = expressions is null && body is { ResultsCanBeKept: true }
+                ? new CorrelatedResultCache<QueryResultRow[]>(body.Outer)
+                : null,
+            LateralExpressions = expressions,
         };
     }
 
