@@ -102,6 +102,11 @@ The new table's columns are the source query's output columns, with the types th
 to a client. Nothing else is inherited: **indexes, CHECK constraints, NOT NULL, defaults, comments and
 table settings are not copied** from the source table — only the shape of the result.
 
+A statement parameter in the select list has the type of its value, because the statement stores the
+rows it reads with that value: with `@px` a `float64`, `CREATE TABLE t AS SELECT @px * 1.0 AS c FROM v`
+creates a `float64` column. A parameter whose value is NULL gives a `string` column, as a value of
+unknown type does in PostgreSQL; write `CAST(@px AS float64)` to declare another type.
+
 Add `WITH NO DATA` to create the table without loading rows; `WITH DATA` is the default. With
 `IF NOT EXISTS`, an existing table makes the statement a no-op and the source query is never executed.
 

@@ -551,7 +551,19 @@ internal static class DerivedTableSchemaBuilder
     // ExprAllFields (*) is expanded to all readable columns from every source.
     // -------------------------------------------------------------------------
 
-    public static IReadOnlyList<DerivedColumnSchema> Build(SelectQuery query, BoundSelectQuery innerBound)
+    /// <summary>
+    /// The output columns of <paramref name="query"/>, bound as <paramref name="innerBound"/>.
+    ///
+    /// <para><paramref name="parameters"/> are the parameter values of a statement that runs the query now
+    /// and stores its rows, such as <c>CREATE TABLE … AS SELECT</c> or <c>INSERT … SELECT</c>. A parameter
+    /// then has the type of its value, so <c>@p * 1.0</c> is a FLOAT64 column. A parameter with a NULL value,
+    /// or with no value in the map, keeps the String fallback. A caller whose result can outlive the values
+    /// (a cached bind, a derived table inside a plan, prepared-statement metadata) passes none.</para>
+    /// </summary>
+    public static IReadOnlyList<DerivedColumnSchema> Build(
+        SelectQuery query,
+        BoundSelectQuery innerBound,
+        IReadOnlyDictionary<string, ColumnValue>? parameters = null)
     {
         List<DerivedColumnSchema> columns = new(query.Projections.Count);
         QueryRowNameResolver innerResolver = new(innerBound.Sources, innerBound.DerivedSources);
@@ -588,12 +600,12 @@ internal static class DerivedTableSchemaBuilder
             }
 
             string name = QueryProjectionResolver.GetOutputNameFromProjectionExpression(projection.Expression, i);
-            ColumnType type = InferType(projection.Expression, innerBound, innerResolver);
+            ColumnType type = InferType(projection.Expression, innerBound, innerResolver, parameters);
             columns.Add(new DerivedColumnSchema(name, type)
             {
                 RowKey = rowKeys[i],
                 ElementType = type == ColumnType.Array
-                    ? InferArrayElementType(projection.Expression, innerBound, innerResolver)
+                    ? InferArrayElementType(projection.Expression, innerBound, innerResolver, parameters)
                     : null,
             });
         }
@@ -613,12 +625,13 @@ internal static class DerivedTableSchemaBuilder
     private static ColumnType? InferArrayElementType(
         NodeAst expression,
         BoundSelectQuery innerBound,
-        QueryRowNameResolver innerResolver)
+        QueryRowNameResolver innerResolver,
+        IReadOnlyDictionary<string, ColumnValue>? parameters)
     {
         NodeAst target = QueryExpressionClassifier.UnwrapAlias(expression);
 
         if (target.nodeType == NodeType.ArrayLiteral)
-            return InferArrayLiteralElementType(target, innerBound, innerResolver);
+            return InferArrayLiteralElementType(target, innerBound, innerResolver, parameters);
 
         if (innerBound.RowNames.TryGetConditionalResultType(target, out ExpressionType conditional))
             return conditional is { Type: ColumnType.Array, ElementType: not ColumnType.Null } ? conditional.ElementType : null;
@@ -1083,14 +1096,15 @@ internal static class DerivedTableSchemaBuilder
     private static ColumnType InferType(
         NodeAst expression,
         BoundSelectQuery innerBound,
-        QueryRowNameResolver innerResolver)
+        QueryRowNameResolver innerResolver,
+        IReadOnlyDictionary<string, ColumnValue>? parameters)
     {
         NodeAst target = QueryExpressionClassifier.UnwrapAlias(expression);
 
         // Compound aggregate check is hoisted before nodeType dispatch so arithmetic-topped
         // compounds (ExprAdd, ExprDiv, …) are also handled — not just ExprFuncCall-wrapped ones.
         if (QueryExpressionClassifier.IsCompoundAggregateProjection(target))
-            return InferCompoundAggregateType(target, innerBound, innerResolver);
+            return InferCompoundAggregateType(target, innerBound, innerResolver, parameters);
 
         if (target.nodeType == NodeType.BytesLiteral)
             return ColumnType.Bytes;
@@ -1100,6 +1114,16 @@ internal static class DerivedTableSchemaBuilder
         // derived table) keeps the type of its outer column the same way. See RecordedSubqueryType.
         if (RecordedSubqueryType(target) is { } recorded)
             return recorded.Type;
+
+        // A statement parameter has the type of its value, when the caller gave the values.
+        if (target.nodeType == NodeType.Placeholder
+            && target.yytext is { } placeholder
+            && parameters is not null
+            && parameters.TryGetValue(placeholder, out ColumnValue value)
+            && value.Type != ColumnType.Null)
+        {
+            return value.Type;
+        }
 
         // A literal has the type its value evaluates to. `SELECT 1 FROM t` used to declare a String
         // column that carried Int64 cells; a set operation compares the declared types of its
@@ -1134,12 +1158,12 @@ internal static class DerivedTableSchemaBuilder
         if (target.nodeType == NodeType.ExprFuncCall)
         {
             if (QueryExpressionClassifier.IsAggregateProjection(target))
-                return InferAggregateType(target, innerBound, innerResolver);
+                return InferAggregateType(target, innerBound, innerResolver, parameters);
 
             string funcName = target.leftAst!.yytext!.ToLowerInvariant();
 
             if (ScalarFunctionEvaluator.IsRegisteredScalarFunction(funcName))
-                return InferScalarFunctionType(funcName, target.rightAst, innerBound, innerResolver);
+                return InferScalarFunctionType(funcName, target.rightAst, innerBound, innerResolver, parameters);
 
             return ColumnType.String;
         }
@@ -1151,13 +1175,13 @@ internal static class DerivedTableSchemaBuilder
             && target.leftAst is not null && target.rightAst is not null)
         {
             // `jsonb - key` removes a key or an element and stays a document.
-            if (target.nodeType == NodeType.ExprSub && InferArgType(target.leftAst, innerBound, innerResolver) == ColumnType.Jsonb)
+            if (target.nodeType == NodeType.ExprSub && InferArgType(target.leftAst, innerBound, innerResolver, parameters) == ColumnType.Jsonb)
                 return ColumnType.Jsonb;
 
             return TemporalArithmetic.ArithmeticResultType(
                        target.nodeType,
-                       InferArgType(target.leftAst, innerBound, innerResolver),
-                       InferArgType(target.rightAst, innerBound, innerResolver))
+                       InferArgType(target.leftAst, innerBound, innerResolver, parameters),
+                       InferArgType(target.rightAst, innerBound, innerResolver, parameters))
                    ?? ColumnType.String;
         }
 
@@ -1169,8 +1193,8 @@ internal static class DerivedTableSchemaBuilder
         {
             return ConcatAndBitwiseOperators.ResultType(
                        target.nodeType,
-                       InferArgType(target.leftAst, innerBound, innerResolver),
-                       InferArgType(target.rightAst, innerBound, innerResolver))
+                       InferArgType(target.leftAst, innerBound, innerResolver, parameters),
+                       InferArgType(target.rightAst, innerBound, innerResolver, parameters))
                    ?? ColumnType.String;
         }
 
@@ -1178,7 +1202,7 @@ internal static class DerivedTableSchemaBuilder
         {
             return ConcatAndBitwiseOperators.ResultType(
                        NodeType.ExprBitNot,
-                       InferArgType(target.leftAst, innerBound, innerResolver),
+                       InferArgType(target.leftAst, innerBound, innerResolver, parameters),
                        ColumnType.Null)
                    ?? ColumnType.String;
         }
@@ -1187,14 +1211,14 @@ internal static class DerivedTableSchemaBuilder
             return CastScalarFunctions.InferCastReturnType(target.rightAst!);
 
         if (target.nodeType == NodeType.ExprCase)
-            return InferCaseType(target, innerBound, innerResolver);
+            return InferCaseType(target, innerBound, innerResolver, parameters);
 
         if (target.nodeType == NodeType.ExprSubscript)
-            return InferSubscriptType(target.leftAst!, innerBound, innerResolver);
+            return InferSubscriptType(target.leftAst!, innerBound, innerResolver, parameters);
 
         // Unary minus keeps its operand's type: a number or an interval.
         if (target.nodeType == NodeType.ExprNegate)
-            return InferType(target.leftAst!, innerBound, innerResolver);
+            return InferType(target.leftAst!, innerBound, innerResolver, parameters);
 
         if (IsBooleanResult(target.nodeType))
             return ColumnType.Bool;
@@ -1244,11 +1268,12 @@ internal static class DerivedTableSchemaBuilder
         string funcName,
         NodeAst? argumentList,
         BoundSelectQuery innerBound,
-        QueryRowNameResolver innerResolver)
+        QueryRowNameResolver innerResolver,
+        IReadOnlyDictionary<string, ColumnValue>? parameters)
     {
         try
         {
-            return ScalarFunctionEvaluator.InferReturnType(funcName, InferArgListTypes(argumentList, innerBound, innerResolver));
+            return ScalarFunctionEvaluator.InferReturnType(funcName, InferArgListTypes(argumentList, innerBound, innerResolver, parameters));
         }
         catch (CamusDBException)
         {
@@ -1266,7 +1291,8 @@ internal static class DerivedTableSchemaBuilder
     private static ColumnType InferSubscriptType(
         NodeAst arrayOperand,
         BoundSelectQuery innerBound,
-        QueryRowNameResolver innerResolver)
+        QueryRowNameResolver innerResolver,
+        IReadOnlyDictionary<string, ColumnValue>? parameters)
     {
         if (arrayOperand.nodeType == NodeType.Identifier && arrayOperand.yytext is not null)
         {
@@ -1321,7 +1347,8 @@ internal static class DerivedTableSchemaBuilder
     private static ColumnType? InferArrayLiteralElementType(
         NodeAst arrayLiteral,
         BoundSelectQuery innerBound,
-        QueryRowNameResolver innerResolver)
+        QueryRowNameResolver innerResolver,
+        IReadOnlyDictionary<string, ColumnValue>? parameters)
     {
         NodeAst? first = FirstNonNullArrayElement(arrayLiteral.leftAst);
 
@@ -1397,7 +1424,8 @@ internal static class DerivedTableSchemaBuilder
     private static ColumnType InferCaseType(
         NodeAst caseNode,
         BoundSelectQuery innerBound,
-        QueryRowNameResolver innerResolver)
+        QueryRowNameResolver innerResolver,
+        IReadOnlyDictionary<string, ColumnValue>? parameters)
     {
         NodeAst? elseResult = caseNode.extendedOne;
         NodeAst? firstThen = null;
@@ -1407,7 +1435,7 @@ internal static class DerivedTableSchemaBuilder
         // InferArgType, not InferType: it types a literal branch (ELSE 0), which InferType leaves as String.
         void Fold(NodeAst result)
         {
-            ColumnType type = InferArgType(result, innerBound, innerResolver);
+            ColumnType type = InferArgType(result, innerBound, innerResolver, parameters);
             if (type == ColumnType.Null || !allNumeric)
                 return;
 
@@ -1440,7 +1468,7 @@ internal static class DerivedTableSchemaBuilder
         NodeAst? representative = elseResult ?? firstThen;
         return representative is null
             ? ColumnType.String
-            : InferType(representative, innerBound, innerResolver);
+            : InferType(representative, innerBound, innerResolver, parameters);
     }
 
     /// <summary>
@@ -1458,14 +1486,15 @@ internal static class DerivedTableSchemaBuilder
     private static ColumnType InferCompoundAggregateType(
         NodeAst target,
         BoundSelectQuery innerBound,
-        QueryRowNameResolver innerResolver)
+        QueryRowNameResolver innerResolver,
+        IReadOnlyDictionary<string, ColumnValue>? parameters)
     {
         if (target.nodeType == NodeType.ExprFuncCall)
         {
             string funcName = target.leftAst!.yytext!.ToLowerInvariant();
             if (ScalarFunctionEvaluator.IsRegisteredScalarFunction(funcName))
             {
-                ColumnType[] argTypes = InferArgListTypes(target.rightAst, innerBound, innerResolver);
+                ColumnType[] argTypes = InferArgListTypes(target.rightAst, innerBound, innerResolver, parameters);
                 return ScalarFunctionEvaluator.InferReturnType(funcName, argTypes);
             }
 
@@ -1473,28 +1502,29 @@ internal static class DerivedTableSchemaBuilder
         }
 
         // Arithmetic binary op: return the wider numeric type of both operands.
-        ColumnType left  = target.leftAst  is not null ? InferArgType(target.leftAst,  innerBound, innerResolver) : ColumnType.Null;
-        ColumnType right = target.rightAst is not null ? InferArgType(target.rightAst, innerBound, innerResolver) : ColumnType.Null;
+        ColumnType left  = target.leftAst  is not null ? InferArgType(target.leftAst,  innerBound, innerResolver, parameters) : ColumnType.Null;
+        ColumnType right = target.rightAst is not null ? InferArgType(target.rightAst, innerBound, innerResolver, parameters) : ColumnType.Null;
         return WiderNumericType(left, right);
     }
 
     private static ColumnType InferAggregateType(
         NodeAst funcCall,
         BoundSelectQuery innerBound,
-        QueryRowNameResolver innerResolver)
+        QueryRowNameResolver innerResolver,
+        IReadOnlyDictionary<string, ColumnValue>? parameters)
     {
         string funcName = funcCall.leftAst!.yytext!.ToLowerInvariant();
 
         return funcName switch
         {
             "count" => ColumnType.Integer64,
-            "sum" => InferAggregateArgumentType(funcCall, innerBound, innerResolver, fallback: ColumnType.Float64),
+            "sum" => InferAggregateArgumentType(funcCall, innerBound, innerResolver, parameters, fallback: ColumnType.Float64),
             // AVG of NUMERIC stays NUMERIC (Spanner); every other average is Float64, as the
             // aggregator computes it (an integer average is never an integer).
-            "avg" => InferAggregateArgumentType(funcCall, innerBound, innerResolver, fallback: ColumnType.Float64) == ColumnType.Numeric
+            "avg" => InferAggregateArgumentType(funcCall, innerBound, innerResolver, parameters, fallback: ColumnType.Float64) == ColumnType.Numeric
                 ? ColumnType.Numeric
                 : ColumnType.Float64,
-            "min" or "max" => InferAggregateArgumentType(funcCall, innerBound, innerResolver, fallback: ColumnType.String),
+            "min" or "max" => InferAggregateArgumentType(funcCall, innerBound, innerResolver, parameters, fallback: ColumnType.String),
             // A state aggregate declares its result: the return type of its Finish method.
             _ when AggregateFunctionCatalog.IsStateAggregate(funcName) => AggregateFunctionCatalog.ResolveStateAggregate(funcName).ReturnType,
             _ => ColumnType.String,
@@ -1505,6 +1535,7 @@ internal static class DerivedTableSchemaBuilder
         NodeAst funcCall,
         BoundSelectQuery innerBound,
         QueryRowNameResolver innerResolver,
+        IReadOnlyDictionary<string, ColumnValue>? parameters,
         ColumnType fallback)
     {
         if (funcCall.rightAst is null)
@@ -1517,7 +1548,7 @@ internal static class DerivedTableSchemaBuilder
         if (argument.nodeType == NodeType.ExprAllFields)
             return ColumnType.Integer64;
 
-        return InferType(argument, innerBound, innerResolver);
+        return InferType(argument, innerBound, innerResolver, parameters);
     }
 
     /// <summary>
@@ -1529,13 +1560,14 @@ internal static class DerivedTableSchemaBuilder
     private static ColumnType[] InferArgListTypes(
         NodeAst? argList,
         BoundSelectQuery innerBound,
-        QueryRowNameResolver innerResolver)
+        QueryRowNameResolver innerResolver,
+        IReadOnlyDictionary<string, ColumnValue>? parameters)
     {
         if (argList is null)
             return [];
 
         List<ColumnType> types = new();
-        CollectArgTypes(argList, innerBound, innerResolver, types);
+        CollectArgTypes(argList, innerBound, innerResolver, parameters, types);
         return types.ToArray();
     }
 
@@ -1543,20 +1575,21 @@ internal static class DerivedTableSchemaBuilder
         NodeAst argNode,
         BoundSelectQuery innerBound,
         QueryRowNameResolver innerResolver,
+        IReadOnlyDictionary<string, ColumnValue>? parameters,
         List<ColumnType> types)
     {
         if (argNode.nodeType == NodeType.ExprArgumentList)
         {
             if (argNode.leftAst is not null)
-                CollectArgTypes(argNode.leftAst, innerBound, innerResolver, types);
+                CollectArgTypes(argNode.leftAst, innerBound, innerResolver, parameters, types);
 
             if (argNode.rightAst is not null)
-                CollectArgTypes(argNode.rightAst, innerBound, innerResolver, types);
+                CollectArgTypes(argNode.rightAst, innerBound, innerResolver, parameters, types);
 
             return;
         }
 
-        types.Add(InferArgType(argNode, innerBound, innerResolver));
+        types.Add(InferArgType(argNode, innerBound, innerResolver, parameters));
     }
 
     /// <summary>
@@ -1569,7 +1602,8 @@ internal static class DerivedTableSchemaBuilder
     private static ColumnType InferArgType(
         NodeAst arg,
         BoundSelectQuery innerBound,
-        QueryRowNameResolver innerResolver)
+        QueryRowNameResolver innerResolver,
+        IReadOnlyDictionary<string, ColumnValue>? parameters)
     {
         return arg.nodeType switch
         {
@@ -1583,7 +1617,7 @@ internal static class DerivedTableSchemaBuilder
                 : ColumnType.String,
             // All other nodes (bare aggregates, compounds, scalar funcs, casts) go through
             // InferType so type inference is consistent and recursive.
-            _ => InferType(arg, innerBound, innerResolver),
+            _ => InferType(arg, innerBound, innerResolver, parameters),
         };
     }
 

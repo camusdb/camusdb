@@ -1611,7 +1611,11 @@ internal sealed class SelectStatementExecutor
                 exclusivePredicateLocks: !isTimeTravel,
                 suppressCacheHint: true).ConfigureAwait(false);
 
-            IReadOnlyList<DerivedColumnSchema> columns = DerivedTableSchemaBuilder.Build(bound.Query, bound);
+            // The statement stores the rows it reads now, so a parameter takes the type of its value: a
+            // CREATE TABLE … AS SELECT of @p * 1.0 creates a FLOAT64 column. A stored definition (a view
+            // body) keeps no value, so it types a parameter as before.
+            IReadOnlyList<DerivedColumnSchema> columns = DerivedTableSchemaBuilder.Build(
+                bound.Query, bound, StoredDefinitionBind.IsActive ? null : sourceTicket.Parameters);
 
             return new SelectRowSource(
                 columns,
