@@ -77,30 +77,41 @@ internal sealed class QueryProjector
             yield break;
         }
 
-        // Fallback path: a select list that mixes * with other items, so the output set depends on
-        // the input row's columns. The explicit items' row keys depend on those columns too (an item
-        // named like an expanded column must not share its cell), so they are resolved against the
-        // first row and again only if a later row arrives under a different layout.
+        // Star path: a select list that mixes * with other items, so the output set depends on the
+        // input row's columns. The explicit items' row keys depend on those columns too (an item named
+        // like an expanded column must not share its cell), so they are resolved against the first row
+        // and again only if a later row arrives under a different layout. A QueryRow input also gets
+        // its output layout from that same step (StarLayout), so the row it emits is a QueryRow too.
         string[]? starRowKeys = null;
         RowLayout? starKeysLayout = null;
+        StarLayout? starLayout = null;
 
         // Over a windowed SELECT's derived table, a * must not expand to the hidden window columns.
         bool skipHidden = QueryPostScanPipeline.IsWindowedSource(ticket);
 
         await foreach (QueryResultRow resultRow in dataCursor)
         {
-            RowLayout? inputLayout = (resultRow.Row as QueryRow)?.Layout;
+            QueryRow? inputQr = resultRow.Row as QueryRow;
+            RowLayout? inputLayout = inputQr?.Layout;
 
             if (starRowKeys is null || !ReferenceEquals(inputLayout, starKeysLayout))
             {
                 starRowKeys = QueryProjectionResolver.GetRowKeys(ticket.Projection, resultRow.Row.Keys);
                 starKeysLayout = inputLayout;
+                starLayout = inputLayout is null ? null : StarLayout.Build(ticket.Projection, starRowKeys, inputLayout, skipHidden);
             }
 
-            Dictionary<string, ColumnValue> projected = new(ticket.Projection.Count, StringComparer.OrdinalIgnoreCase);
             Dictionary<string, ColumnValue>? parameters = correlated is null
                 ? ticket.Parameters
                 : await RowParametersAsync(ticket, correlated, resultRow.Row, database!).ConfigureAwait(false);
+
+            if (inputQr is not null)
+            {
+                yield return new(resultRow.RowId, starLayout!.Project(ticket, inputQr, starRowKeys, parameters));
+                continue;
+            }
+
+            Dictionary<string, ColumnValue> projected = new(resultRow.Row.Count + ticket.Projection.Count, StringComparer.OrdinalIgnoreCase);
 
             for (int i = 0; i < ticket.Projection.Count; i++)
             {
@@ -239,5 +250,143 @@ internal sealed class QueryProjector
             row,
             parameters,
             ticket.RowNameResolver);
+    }
+
+    /// <summary>
+    /// The output of a select list with <c>*</c> over one input <see cref="RowLayout"/>: the output layout,
+    /// and for each output slot the input slot it copies or the select-list item that computes it. Built one
+    /// time for each input layout, so a row costs one value array and no key hashing.
+    ///
+    /// <para>The output is the same as the dictionary that the star path builds for a dictionary row, in
+    /// keys, key order and values. A key takes the position of its first write and the value of its last
+    /// write: that is the case of a column that two <c>*</c> items expand, or of two input slots with one
+    /// name. A hidden window column is left out when <c>skipHidden</c> is true. The output layout has no
+    /// alias names, because the dictionary has only the keys it writes; a join input's bare-name aliases
+    /// therefore do not resolve on the output row, the same as before.</para>
+    ///
+    /// <para>The object is immutable after <see cref="Build"/>, and one projection loop owns it.</para>
+    /// </summary>
+    private sealed class StarLayout
+    {
+        private readonly RowLayout output;
+
+        // For each output slot: the input slot it copies, or -1 when a select-list item computes it.
+        private readonly int[] copyFrom;
+
+        // For each select-list item: the output slot it writes, or -1 for a * item.
+        private readonly int[] itemSlot;
+
+        private StarLayout(RowLayout output, int[] copyFrom, int[] itemSlot)
+        {
+            this.output = output;
+            this.copyFrom = copyFrom;
+            this.itemSlot = itemSlot;
+        }
+
+        public static StarLayout Build(IReadOnlyList<NodeAst> projection, string[] rowKeys, RowLayout input, bool skipHidden)
+        {
+            Dictionary<string, int> slotOf = new(input.Count + projection.Count, StringComparer.OrdinalIgnoreCase);
+            List<string> names = new(input.Count + projection.Count);
+            List<int> copyFrom = new(input.Count + projection.Count);
+            int[] itemSlot = new int[projection.Count];
+
+            for (int i = 0; i < projection.Count; i++)
+            {
+                if (projection[i].nodeType == NodeType.ExprAllFields)
+                {
+                    itemSlot[i] = -1;
+
+                    for (int ordinal = 0; ordinal < input.Count; ordinal++)
+                    {
+                        string name = input.OutputNames[ordinal];
+
+                        if (skipHidden && WindowQueryRewriter.IsHiddenColumn(name))
+                            continue;
+
+                        if (slotOf.TryGetValue(name, out int existing))
+                        {
+                            copyFrom[existing] = ordinal;
+                            continue;
+                        }
+
+                        slotOf.Add(name, names.Count);
+                        names.Add(name);
+                        copyFrom.Add(ordinal);
+                    }
+
+                    continue;
+                }
+
+                string key = rowKeys[i];
+
+                if (slotOf.TryGetValue(key, out int slot))
+                {
+                    copyFrom[slot] = -1;
+                    itemSlot[i] = slot;
+                    continue;
+                }
+
+                slotOf.Add(key, names.Count);
+                itemSlot[i] = names.Count;
+                names.Add(key);
+                copyFrom.Add(-1);
+            }
+
+            // A later write to a slot wins, so a * that expands after an item with the same key copies
+            // the input cell into that slot, and the item's value is not kept.
+            for (int i = 0; i < projection.Count; i++)
+            {
+                if (itemSlot[i] >= 0 && copyFrom[itemSlot[i]] >= 0)
+                    itemSlot[i] = -2;
+            }
+
+            return new StarLayout(RowLayout.ForColumns(names), copyFrom.ToArray(), itemSlot);
+        }
+
+        /// <summary>
+        /// The output row for <paramref name="input"/>. Each item is evaluated in select-list order, as in the
+        /// dictionary path, so an error of an item comes from the same item.
+        /// </summary>
+        public QueryRow Project(QueryTicket ticket, QueryRow input, string[] rowKeys, Dictionary<string, ColumnValue>? parameters)
+        {
+            ColumnValue[] values = new ColumnValue[output.Count];
+
+            for (int i = 0; i < itemSlot.Length; i++)
+            {
+                int slot = itemSlot[i];
+
+                if (slot == -1)
+                    continue;
+
+                ColumnValue value = EvalItem(ticket, ticket.Projection![i], input, rowKeys[i], parameters);
+
+                if (slot >= 0)
+                    values[slot] = value;
+            }
+
+            for (int slot = 0; slot < copyFrom.Length; slot++)
+            {
+                if (copyFrom[slot] >= 0)
+                    values[slot] = input.GetColumnValue(copyFrom[slot]);
+            }
+
+            return new QueryRow(input.RowId, output, values);
+        }
+
+        private static ColumnValue EvalItem(
+            QueryTicket ticket,
+            NodeAst ast,
+            QueryRow input,
+            string rowKey,
+            Dictionary<string, ColumnValue>? parameters)
+        {
+            if (QueryExpressionClassifier.IsAggregateProjection(ast)
+                || QueryExpressionClassifier.IsCompoundAggregateProjection(ast))
+            {
+                return input[rowKey];
+            }
+
+            return SqlExecutor.EvalExpr(QueryExpressionClassifier.UnwrapAlias(ast), input, parameters, ticket.RowNameResolver);
+        }
     }
 }

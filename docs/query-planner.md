@@ -639,7 +639,10 @@ holds the check.
 - **`HavingFilter`** → `QueryFilterer.FilterHavingResultset` — evaluates HAVING against aggregated rows
   in the `QueryHavingWorkspace` scope (so `HAVING x > 0` resolves an aggregate alias `x`, and
   `HAVING a.k > 0` the group key `a.k` under the qualified text the predicate uses).
-- **`ReduceToProjections`** → `QueryProjector`.
+- **`ReduceToProjections`** → `QueryProjector` — without `GROUP BY`, emits each row as a `QueryRow` (a
+  value array with one `RowLayout` that all rows share). With a `*` in the select list, the output layout
+  depends on the input columns, so the projector builds it one time for each input layout; a dictionary
+  input row then gives a dictionary output row. A `GROUP BY` query emits dictionary rows.
 - **`Distinct`** → `QueryDistincter` — dedups output tuples; NULLs compare equal.
 - **`Limit`** → `QueryLimiter` — skips OFFSET, stops after LIMIT.
 
