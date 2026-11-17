@@ -9,6 +9,8 @@ using Kommander;
 using Kommander.Data;
 using Kommander.System;
 using Microsoft.Extensions.Hosting;
+using CamusDB.Core.CommandsExecutor;
+using CamusDB.Core.Diagnostics;
 using CamusDB.Core.Storage.Kv;
 
 namespace CamusDB.App.Services;
@@ -29,7 +31,10 @@ namespace CamusDB.App.Services;
 ///
 /// <para>Once the hand-off is over, whatever its outcome, the service closes the
 /// <see cref="PeerConnectionGate"/>, which ends the streams peers hold to the node. Without that the web
-/// server would wait for them until the host shutdown timeout.</para>
+/// server would wait for them until the host shutdown timeout. It closes the gate only once the
+/// node's client connections have gone: the web server stops accepting and closes them after
+/// <see cref="StoppingAsync"/> returns, and a request still running on one may need the peers. A
+/// commit cut off from them was left unresolved, and its client waited 15 seconds for an answer.</para>
 /// </summary>
 public sealed class LeadershipHandoffService : IHostedLifecycleService
 {
@@ -39,15 +44,30 @@ public sealed class LeadershipHandoffService : IHostedLifecycleService
     /// </summary>
     public static readonly TimeSpan Budget = TimeSpan.FromSeconds(8);
 
+    /// <summary>
+    /// The longest the node waits for its client connections to go before it ends its peers'
+    /// streams anyway. The host shutdown timeout aborts whatever is still open after that.
+    /// </summary>
+    public static readonly TimeSpan ClientDrainBudget = TimeSpan.FromSeconds(10);
+
     private readonly EmbeddedKahuna kahuna;
+
+    private readonly CommandExecutor executor;
 
     private readonly PeerConnectionGate peers;
 
     private readonly ILogger<LeadershipHandoffService> logger;
 
-    public LeadershipHandoffService(EmbeddedKahuna kahuna, PeerConnectionGate peers, ILogger<LeadershipHandoffService> logger)
+    private Task peersClosed = Task.CompletedTask;
+
+    public LeadershipHandoffService(
+        EmbeddedKahuna kahuna,
+        CommandExecutor executor,
+        PeerConnectionGate peers,
+        ILogger<LeadershipHandoffService> logger)
     {
         this.kahuna = kahuna;
+        this.executor = executor;
         this.peers = peers;
         this.logger = logger;
     }
@@ -72,12 +92,16 @@ public sealed class LeadershipHandoffService : IHostedLifecycleService
         }
         finally
         {
-            int aborted = peers.Close();
-            logger.LogInformation("Closed {Connections} peer connections before stopping", aborted);
+            // Not awaited: the web server starts closing the client connections only once this method
+            // has returned.
+            ClientConnectionRegistry clients = executor.QueryActivity.Connections;
+            peersClosed = Task.Run(() => ClosePeersOnceClientsHaveGoneAsync(
+                () => clients.Count, peers, ClientDrainBudget, logger));
         }
     }
 
-    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    // Runs after the web server has stopped, by which time the peer streams have ended.
+    public Task StopAsync(CancellationToken cancellationToken) => peersClosed;
 
     public Task StoppedAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
@@ -189,6 +213,32 @@ public sealed class LeadershipHandoffService : IHostedLifecycleService
 
         logger.LogWarning("Could not hand off leadership of partition {PartitionId}; it will elect a new leader", partitionId);
         return false;
+    }
+
+    /// <summary>
+    /// Waits until no client connection is open, or <paramref name="budget"/> has passed, then
+    /// closes <paramref name="peers"/>. Returns how many peer connections it aborted.
+    /// </summary>
+    public static async Task<int> ClosePeersOnceClientsHaveGoneAsync(
+        Func<int> openClients,
+        PeerConnectionGate peers,
+        TimeSpan budget,
+        ILogger logger)
+    {
+        DateTime deadline = DateTime.UtcNow + budget;
+        while (openClients() > 0 && DateTime.UtcNow < deadline)
+            await Task.Delay(20).ConfigureAwait(false);
+
+        int stillOpen = openClients();
+        int aborted = peers.Close();
+
+        if (stillOpen > 0)
+            logger.LogWarning("Closed {Connections} peer connections before stopping with {Clients} client connections still open",
+                aborted, stillOpen);
+        else
+            logger.LogInformation("Closed {Connections} peer connections before stopping", aborted);
+
+        return aborted;
     }
 
     /// <summary>Starts the candidate list at a position that depends on the partition.</summary>
