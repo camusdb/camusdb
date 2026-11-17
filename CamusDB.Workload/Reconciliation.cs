@@ -44,7 +44,8 @@ public sealed record ReconciliationResult(
     ScanProbeResult? ScanProbe = null,
     IReadOnlyList<AggregateRead>? Aggregates = null,
     TokenResult? Tokens = null,
-    Elle.QuiescentResult? Elle = null)
+    Elle.QuiescentResult? Elle = null,
+    Tpch.TpchResult? Tpch = null)
 {
     // BalanceConserved is the bank-transfer atomicity invariant: SUM(balance) must be unchanged after a
     // transfer run. It is never waived — unlike conflicts, an atomicity break is a correctness failure a
@@ -81,6 +82,10 @@ public sealed record ReconciliationResult(
     // the run produced, every access path agrees with the primary key, and no row exists that no
     // write produced. Null for every other shape; a violation is never waived.
     //
+    // Tpch is the TPC-H shape's verdict (see TpchOperation): every execution of every query returned the
+    // rows of its reference, and every enabled query was verified at least once inside the measured
+    // window. Null for every other shape; a mismatch is never waived.
+    //
     // Aggregates records how each verification read went — value, client-observed time, attempts — so
     // scan-time growth is visible run to run instead of surfacing only once a read crosses a deadline.
 
@@ -92,7 +97,8 @@ public sealed record ReconciliationResult(
         && (RowAttribution is null || RowAttribution.Passed)
         && (ScanProbe is null || ScanProbe.Passed)
         && (Tokens is null || Tokens.Passed)
-        && (Elle is null || Elle.Passed);
+        && (Elle is null || Elle.Passed)
+        && (Tpch is null || Tpch.Passed);
 }
 
 /// <summary>

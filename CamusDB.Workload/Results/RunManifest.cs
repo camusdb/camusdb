@@ -80,4 +80,9 @@ public sealed record RunManifest(
     /// write latency of one is not comparable to the other's, and the summary's
     /// <c>ExchangesPerWriteTxn</c> says what the mode actually achieved against the server it met.</summary>
     bool Pipeline = false,
-    string TxnMode = "explicit");
+    string TxnMode = "explicit",
+
+    /// <summary>The TPC-H scale factor and query selection of a <c>tpch</c> run, null for every other shape.
+    /// Two runs at different scales, or over different query sets, measure different work.</summary>
+    string? TpchScale = null,
+    string? TpchQueries = null);
