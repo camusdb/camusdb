@@ -26,6 +26,10 @@ namespace CamusDB.App.Services;
 /// before it stops any hosted service: the web server is still listening and every peer stream is
 /// still up. It is bounded by <see cref="Budget"/>, and what it could not hand off is left to an
 /// election, as before. The system partition cannot be handed off and is left to an election too.</para>
+///
+/// <para>Once the hand-off is over, whatever its outcome, the service closes the
+/// <see cref="PeerConnectionGate"/>, which ends the streams peers hold to the node. Without that the web
+/// server would wait for them until the host shutdown timeout.</para>
 /// </summary>
 public sealed class LeadershipHandoffService : IHostedLifecycleService
 {
@@ -37,11 +41,14 @@ public sealed class LeadershipHandoffService : IHostedLifecycleService
 
     private readonly EmbeddedKahuna kahuna;
 
+    private readonly PeerConnectionGate peers;
+
     private readonly ILogger<LeadershipHandoffService> logger;
 
-    public LeadershipHandoffService(EmbeddedKahuna kahuna, ILogger<LeadershipHandoffService> logger)
+    public LeadershipHandoffService(EmbeddedKahuna kahuna, PeerConnectionGate peers, ILogger<LeadershipHandoffService> logger)
     {
         this.kahuna = kahuna;
+        this.peers = peers;
         this.logger = logger;
     }
 
@@ -62,6 +69,11 @@ public sealed class LeadershipHandoffService : IHostedLifecycleService
             // A failed hand-off costs an election, which is what every stop cost before; it must not
             // keep the node from stopping.
             logger.LogWarning(e, "Leadership hand-off failed; the partitions this node leads will elect new leaders");
+        }
+        finally
+        {
+            int aborted = peers.Close();
+            logger.LogInformation("Closed {Connections} peer connections before stopping", aborted);
         }
     }
 

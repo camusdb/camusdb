@@ -285,6 +285,8 @@ builder.WebHost.ConfigureKestrel(kestrel =>
         kestrel.ListenAnyIP(config.RaftPort, o =>
         {
             o.Protocols = HttpProtocols.Http2;
+            // Lets a stopping node end its peers' streams once it has handed off its leadership.
+            CamusDB.App.Services.PeerConnectionGate.Use(o);
             if (string.IsNullOrEmpty(config.RaftCertificate))
                 return;
 
@@ -590,14 +592,17 @@ if (config.IsClusterMode)
     builder.Services.AddNodeTransportGate();
 
     // A stopping node hands its partition leadership to its peers before the web server stops, so its
-    // partitions do not sit leaderless for an election timeout. See LeadershipHandoffService.
+    // partitions do not sit leaderless for an election timeout, then ends the streams its peers hold
+    // to it. See LeadershipHandoffService and PeerConnectionGate.
+    builder.Services.AddSingleton<CamusDB.App.Services.PeerConnectionGate>();
     builder.Services.AddHostedService<CamusDB.App.Services.LeadershipHandoffService>();
 
     // The web server waits for its open requests before the graceful shutdown below can run, for up to
-    // the host's shutdown timeout, 30 seconds by default. Peers keep their Raft and Kahuna streams to
-    // this node open for good, so in a cluster it always waited the full 30 seconds: as long as the
-    // grace period a Kubernetes pod gets by default, which killed every node before it closed its
-    // databases. 15 seconds covers the hand-off and leaves the graceful shutdown the rest.
+    // the host's shutdown timeout, 30 seconds by default: as long as the grace period a Kubernetes pod
+    // gets by default. Peers never end their streams to a node, so before the gate above ended them
+    // every stop waited the full 30 seconds and was killed before it closed its databases. 15 seconds
+    // bounds the wait should anything else keep a request open, and leaves the graceful shutdown the
+    // rest of the grace period.
     builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(15));
 
     // The authentication middleware finds the peer policy here; its absence means peers are not
