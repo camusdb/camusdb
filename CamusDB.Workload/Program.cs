@@ -14,6 +14,7 @@ using CamusDB.Workload.Metrics;
 using CamusDB.Workload.Operations;
 using CamusDB.Workload.Results;
 using CamusDB.Workload.Scheduling;
+using CamusDB.Workload.Tpch;
 using CamusDB.Workload.Util;
 using CamusDB.Workload.Workload;
 using CommandLine;
@@ -67,6 +68,18 @@ public static class Program
             Console.Error.WriteLine(shapeError);
             return 2;
         }
+        if (o.Workload is not ("accounts" or "tpch"))
+        {
+            Console.Error.WriteLine(
+                $"init --workload must be accounts or tpch (got '{o.Workload}'); every other shape sets its own table up during run.");
+            return 2;
+        }
+        bool tpch = o.Workload == "tpch";
+        if (tpch && TpchGenerator.ScaleError(o.TpchScale) is string scaleError)
+        {
+            Console.Error.WriteLine($"--tpch-scale: {scaleError}");
+            return 2;
+        }
 
         Dataset dataset = new(o.Seed, o.Rows, o.PayloadBytes, o.Tables);
         await using CamusConnection conn = await OpenSingleAsync(o, ct).ConfigureAwait(false);
@@ -75,9 +88,33 @@ public static class Program
         await dataset.EnsureSchemaAsync(conn, ct).ConfigureAwait(false);
         Console.WriteLine($"Seeding {o.Rows} rows over {dataset.Tables} table(s) (batch {o.Batch})...");
         await dataset.SeedAsync(conn, o.Batch, ct).ConfigureAwait(false);
+
+        if (tpch)
+        {
+            // A statement of the load carries up to 1,400 rows and the closing counts scan whole tables,
+            // so the load connections get a deadline of their own rather than the point-operation one.
+            int loadTimeout = Math.Max(o.RequestTimeout ?? 0, TpchLoadRequestTimeoutSeconds);
+            TpchGenerator generator = new(o.Seed, o.TpchScale);
+            Console.WriteLine(
+                $"Loading TPC-H at scale {TpchGenerator.ScaleText(o.TpchScale)}: {generator.Orders:N0} orders, " +
+                $"{generator.Parts:N0} parts, {generator.Customers:N0} customers, {generator.Suppliers:N0} suppliers " +
+                $"over {o.TpchLoadConnections} connection(s)...");
+            await TpchLoader.LoadAsync(
+                () => OpenSingleAsync(o, ct, loadTimeout), generator, o.Seed, o.TpchLoadConnections, Console.WriteLine, ct)
+                .ConfigureAwait(false);
+        }
+
         Console.WriteLine("Init complete.");
         return 0;
     }
+
+    /// <summary>Per-request deadline of the TPC-H load connections, unless --request-timeout is longer.</summary>
+    private const int TpchLoadRequestTimeoutSeconds = 120;
+
+    /// <summary>Per-request deadline of a TPC-H run when --request-timeout is not given. The client's own
+    /// default is 10 seconds, which most of the 22 queries exceed at any useful scale; 600 seconds is also
+    /// where the latency histogram's range ends.</summary>
+    private const int TpchRequestTimeoutSeconds = 600;
 
     /// <summary>
     /// The message for a dataset shape that cannot be seeded, or null when the shape is sound. A table
@@ -227,10 +264,38 @@ public static class Program
             Console.Error.WriteLine($"--isolation must be read_committed or serializable (got '{o.Isolation}').");
             return RunOutcome.Rejected;
         }
-        if (o.Workload is not ("accounts" or "bank" or "fanout" or "append" or "rw" or "predicate" or "tokens"))
+        if (o.Workload is not ("accounts" or "bank" or "fanout" or "append" or "rw" or "predicate" or "tokens" or "tpch"))
         {
-            Console.Error.WriteLine($"--workload must be accounts, bank, fanout, append, rw, predicate or tokens (got '{o.Workload}').");
+            Console.Error.WriteLine($"--workload must be accounts, bank, fanout, append, rw, predicate, tokens or tpch (got '{o.Workload}').");
             return RunOutcome.Rejected;
+        }
+        bool tpch = o.Workload == "tpch";
+        IReadOnlyList<TpchQuery> tpchQueries = [];
+        if (tpch)
+        {
+            if (o.ReadPercent != 100)
+            {
+                Console.Error.WriteLine($"--workload tpch is read-only: pass --read-percent 100 --write-percent 0 (got {o.ReadPercent}/{o.WritePercent}).");
+                return RunOutcome.Rejected;
+            }
+            if (o.Mode != "closed")
+            {
+                Console.Error.WriteLine(
+                    "--workload tpch needs --mode closed: its queries differ in cost by orders of magnitude, so a fixed " +
+                    "arrival rate describes no load; --workers is the number of concurrent query streams.");
+                return RunOutcome.Rejected;
+            }
+            if (TpchGenerator.ScaleError(o.TpchScale) is string scaleError)
+            {
+                Console.Error.WriteLine($"--tpch-scale: {scaleError}");
+                return RunOutcome.Rejected;
+            }
+            if (!TpchQueries.TryParseSelection(o.TpchQueries, out tpchQueries, out string? selectionError))
+            {
+                Console.Error.WriteLine($"--tpch-queries: {selectionError}");
+                return RunOutcome.Rejected;
+            }
+            o.RequestTimeout ??= TpchRequestTimeoutSeconds;
         }
         bool elleShape = o.Workload is "append" or "rw" or "predicate";
         if (!ElleTxnModes.TryParse(o.TxnMode, out ElleTxnMode txnMode))
@@ -472,6 +537,72 @@ public static class Program
             tokenLedger = new Metrics.TokenLedger(o.Tokens);
         }
 
+        // The TPC-H shape checks the load against what the generator recorded and takes the reference
+        // answer of every query here, on a quiet cluster and before warm-up. Everything the measured
+        // window executes is compared with these answers.
+        TpchOperation? tpchOperation = null;
+        List<TpchReference> tpchReferences = [];
+        if (tpch)
+        {
+            string seedText = o.Seed.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            string scaleText = TpchGenerator.ScaleText(o.TpchScale);
+            try
+            {
+                await using CamusConnection tpchSetup = await OpenSingleAsync(
+                    o, ct, Math.Max(o.ReconcileRequestTimeout, o.RequestTimeout ?? 0)).ConfigureAwait(false);
+
+                TpchMeta? meta = await TpchLoader.ReadMetaAsync(tpchSetup, ct).ConfigureAwait(false);
+                if (meta is null)
+                {
+                    Console.Error.WriteLine("The TPC-H tables are not loaded. Run `init --workload tpch` first.");
+                    return RunOutcome.Rejected;
+                }
+                if (meta.Seed != seedText || meta.Scale != scaleText)
+                {
+                    Console.Error.WriteLine(
+                        $"The database holds TPC-H data for seed {meta.Seed} and scale {meta.Scale}, " +
+                        $"the run asked for seed {seedText} and scale {scaleText}.");
+                    return RunOutcome.Rejected;
+                }
+
+                Console.WriteLine($"TPC-H reference pass: {tpchQueries.Count} query(ies) at scale {scaleText}...");
+                tpchReferences = await TpchOperation
+                    .CaptureReferencesAsync(tpchSetup, tpchQueries, Console.WriteLine, ct).ConfigureAwait(false);
+
+                List<string> loadFailures = await TpchOperation
+                    .VerifyLoadAsync(tpchSetup, meta.Facts, tpchReferences, ct).ConfigureAwait(false);
+                if (loadFailures.Count > 0)
+                {
+                    Console.Error.WriteLine("The TPC-H data does not match what the load recorded:");
+                    foreach (string failure in loadFailures)
+                        Console.Error.WriteLine($"  ✗ {failure}");
+                    return new RunOutcome(1, null, false);
+                }
+            }
+            catch (InvalidOperationException ex) when (!ct.IsCancellationRequested)
+            {
+                Console.Error.WriteLine($"TPC-H setup failed: {ex.Message}");
+                return new RunOutcome(1, null, false);
+            }
+
+            Directory.CreateDirectory(o.Output);
+            await File.WriteAllTextAsync(
+                Path.Combine(o.Output, "tpch-reference.json"),
+                System.Text.Json.JsonSerializer.Serialize(
+                    tpchReferences.Select(r => new
+                    {
+                        query = r.Query.Name,
+                        rows = r.Result.Rows.Count,
+                        digest = r.Result.Digest,
+                        milliseconds = Math.Round(r.Milliseconds, 3),
+                        firstRows = r.Result.Rows.Take(5).Select(TpchResultComparer.Render).ToList(),
+                    }),
+                    new System.Text.Json.JsonSerializerOptions { WriteIndented = true }),
+                ct).ConfigureAwait(false);
+
+            tpchOperation = new TpchOperation(connections, tpchReferences);
+        }
+
         // The in-window scan-visibility probe (see ScanProbe). Started here, before warm-up, and stopped
         // after drain: a short count during warm-up is exactly as wrong as one inside the window. Its
         // connections are its own — one per gateway, routing off, on the probe's deadline.
@@ -574,7 +705,8 @@ public static class Program
         else
             writeOperation = new WriteOperation(connections, dataset, o.WritesPerTransaction, locking, isolation, pipeline: o.Pipeline);
 
-        IReadOperation readOperation = appendOperation as IReadOperation
+        IReadOperation readOperation = tpchOperation as IReadOperation
+            ?? appendOperation as IReadOperation
             ?? registerOperation as IReadOperation
             ?? predicateOperation as IReadOperation
             ?? tokenOperation as IReadOperation
@@ -745,6 +877,35 @@ public static class Program
 
         if (transferLedger is not null)
             await transferLedger.WriteAsync(o.Output, dataset, o.Rows, ct).ConfigureAwait(false);
+
+        // The per-query figures and the TPC-H verdict come from the operation's own journal, cut to the
+        // measured window. Like the measured artifacts above they are written before reconciliation.
+        TpchResult? tpchResult = null;
+        if (tpchOperation is not null)
+        {
+            (TpchRunReport tpchReport, tpchResult) = TpchReport.Build(
+                TpchGenerator.ScaleText(o.TpchScale), o.Seed.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                tpchReferences, tpchOperation.Executions, tpchOperation.MismatchCount, metrics.MeasureStartUtc, measuredSeconds);
+
+            System.Text.Json.JsonSerializerOptions indented = new() { WriteIndented = true };
+            await File.WriteAllTextAsync(
+                Path.Combine(o.Output, "tpch.json"), System.Text.Json.JsonSerializer.Serialize(tpchReport, indented), ct)
+                .ConfigureAwait(false);
+            if (tpchOperation.MismatchCount > 0)
+                await File.WriteAllLinesAsync(
+                    Path.Combine(o.Output, "tpch-mismatches.jsonl"),
+                    tpchOperation.Mismatches.Select(m => System.Text.Json.JsonSerializer.Serialize(m)), ct).ConfigureAwait(false);
+
+            Console.WriteLine(
+                $"TPC-H: {(tpchResult.Passed ? "PASS" : "FAIL")} — {tpchResult.QueriesChecked} of {tpchResult.QueriesEnabled} " +
+                $"query(ies) verified in the window, {tpchResult.Verified:N0} verified execution(s) " +
+                $"({tpchReport.QueriesPerHour:N0} per hour), {tpchResult.Errors:N0} error(s), " +
+                $"{tpchResult.Mismatches:N0} mismatch(es) -> tpch.json");
+            foreach (TpchQueryStats q in tpchReport.Queries)
+                Console.WriteLine(
+                    $"  {q.Query}: {q.Verified,6:N0} ok  p50 {q.P50Ms,10:N1} ms  p99 {q.P99Ms,10:N1} ms  max {q.MaxMs,10:N1} ms" +
+                    (q.Errors + q.Mismatches > 0 ? $"  ({q.Errors} error(s), {q.Mismatches} mismatch(es))" : ""));
+        }
 
         // Time anchor for aligning intervals.csv (second 0 == MeasureStartUtc) with wall-clock event
         // streams. Kept as a small standalone artifact so it can be added without disturbing the
@@ -923,6 +1084,15 @@ public static class Program
                 $"{quiescent.RealtimeStaleFinals:N0} real-time stale final(s)" +
                 (quiescent.CountMismatches > 0 ? $", {quiescent.CountMismatches:N0} COUNT(*) disagreement(s)" : "") +
                 (quiescent.Status == "verified" ? "" : $" — {quiescent.Status}"));
+        }
+
+        if (tpchResult is not null)
+        {
+            reconciliation = reconciliation with
+            {
+                Tpch = tpchResult,
+                Failures = reconciliation.Failures.Concat(tpchResult.Failures).ToList(),
+            };
         }
 
         if (reconciliation.RowAttribution is RowAttributionResult rowResult)
@@ -1231,7 +1401,13 @@ public static class Program
         Runtime: Environment.Version.ToString(),
         Os: Environment.OSVersion.ToString(),
         ProcessorCount: Environment.ProcessorCount,
-        ClientPackageVersion: ClientPackageVersion());
+        ClientPackageVersion: ClientPackageVersion(),
+        TpchScale: o.Workload == "tpch" ? TpchGenerator.ScaleText(o.TpchScale) : null,
+        TpchQueries: o.Workload == "tpch"
+            ? (TpchQueries.TryParseSelection(o.TpchQueries, out IReadOnlyList<TpchQuery> selected, out _)
+                ? string.Join(",", selected.Select(q => q.Number))
+                : o.TpchQueries)
+            : null);
 
     /// <summary>
     /// The client library version actually loaded, read from the assembly rather than written down.
