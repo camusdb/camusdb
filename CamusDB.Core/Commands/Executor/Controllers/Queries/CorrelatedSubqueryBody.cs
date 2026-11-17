@@ -40,8 +40,9 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// name or a known type mismatch fails the statement over an empty outer table too.</para>
 ///
 /// <para>An outer name inside a derived table or a set operation of the body is replaced too, see
-/// <see cref="SubqueryScopeAnalyzer"/>. An outer name in an argument of a table function in FROM is not,
-/// so such a statement fails with an error, not with a wrong answer.</para>
+/// <see cref="SubqueryScopeAnalyzer"/>, and so is an outer name in an argument of a table function in FROM.
+/// A derived table is not a nested subquery here, so a body whose function reads an outer value still binds
+/// once, and the function reads the placeholder value when it runs.</para>
 /// </summary>
 internal sealed class CorrelatedSubqueryBody
 {

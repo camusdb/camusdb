@@ -636,6 +636,61 @@ internal class TestLateralJoins : SharedNodeBaseTest
         CollectionAssert.AreEqual(Enumerable.Range(1, 12).Select(id => 120L - id * 10).ToArray(), Longs(rows, "d"));
     }
 
+    [Test]
+    public async Task AFunctionInTheFromOfASubqueryReadsTheRowAroundIt()
+    {
+        (string db, DatabaseDescriptor database, CommandExecutor executor) = await Seeded();
+
+        // grp is 0, 1 or 2, so each item gets the numbers 1 to grp; an item of group 0 gets none.
+        List<QueryResultRow> direct = await Query(executor, database, db,
+            "SELECT i.id, g AS n FROM items i CROSS JOIN LATERAL generate_series(1, i.grp) g ORDER BY i.id, n");
+        Assert.That(direct, Has.Count.EqualTo(12));
+
+        List<QueryResultRow> body = await Query(executor, database, db,
+            "SELECT i.id, s.n FROM items i CROSS JOIN LATERAL (SELECT g AS n FROM generate_series(1, i.grp) g) AS s ORDER BY i.id, s.n");
+        CollectionAssert.AreEqual(Render(direct, "id", "n"), Render(body, "id", "n"));
+
+        // A left join keeps an item of group 0, whose series is empty.
+        List<QueryResultRow> padded = await Query(executor, database, db,
+            "SELECT i.id, s.n FROM items i LEFT JOIN LATERAL (SELECT g AS n FROM generate_series(1, i.grp) g) AS s ON true " +
+            "WHERE i.id <= 4 ORDER BY i.id, s.n");
+        CollectionAssert.AreEqual(new long[] { 1, 2, 2, 3, 4 }, Longs(padded, "id"));
+        Assert.That(padded[3].Row["n"].Type, Is.EqualTo(ColumnType.Null));
+
+        List<QueryResultRow> scalar = await Query(executor, database, db,
+            "SELECT i.id, (SELECT SUM(g) FROM generate_series(1, i.grp) g) AS total FROM items i ORDER BY i.id");
+        CollectionAssert.AreEqual(
+            Enumerable.Range(1, 12).Select(id => (id % 3) switch { 0 => "NULL", 1 => "Integer64:1", _ => "Integer64:3" }).ToArray(),
+            scalar.Select(r => r.Row["total"].Type == ColumnType.Null ? "NULL" : $"{r.Row["total"].Type}:{r.Row["total"].LongValue}").ToArray());
+
+        List<QueryResultRow> exists = await Query(executor, database, db,
+            "SELECT i.id FROM items i WHERE EXISTS (SELECT 1 FROM generate_series(1, i.grp) g WHERE g = 2) ORDER BY i.id");
+        CollectionAssert.AreEqual(new long[] { 2, 5, 8, 11 }, Longs(exists, "id"));
+
+        List<QueryResultRow> membership = await Query(executor, database, db,
+            "SELECT i.id FROM items i WHERE i.grp IN (SELECT g FROM generate_series(i.grp, i.grp + 1) g WHERE g > 1) ORDER BY i.id");
+        CollectionAssert.AreEqual(new long[] { 2, 5, 8, 11 }, Longs(membership, "id"));
+    }
+
+    [Test]
+    public async Task AnUnknownNameInAFunctionInTheFromOfASubqueryIsStillAnUnknownColumn()
+    {
+        (string db, DatabaseDescriptor database, CommandExecutor executor) = await Seeded();
+
+        CamusDBException? scalar = Assert.ThrowsAsync<CamusDBException>(() => Query(executor, database, db,
+            "SELECT i.id, (SELECT COUNT(*) FROM generate_series(1, i.nope) g) AS c FROM items i"));
+        Assert.That(scalar!.Code, Is.EqualTo(CamusDBErrorCodes.UnknownColumn));
+
+        CamusDBException? lateral = Assert.ThrowsAsync<CamusDBException>(() => Query(executor, database, db,
+            "SELECT i.id, s.n FROM items i CROSS JOIN LATERAL (SELECT g AS n FROM generate_series(1, x.grp) g) AS s"));
+        Assert.That(lateral!.Code, Is.EqualTo(CamusDBErrorCodes.UnknownColumn));
+
+        // The function is the only item of the FROM of the statement, so it has no row to read.
+        CamusDBException? top = Assert.ThrowsAsync<CamusDBException>(() => Query(executor, database, db,
+            "SELECT g FROM generate_series(1, grp) g"));
+        Assert.That(top!.Code, Is.EqualTo(CamusDBErrorCodes.UnknownColumn));
+    }
+
     private static async Task<string> PlanText(CommandExecutor executor, DatabaseDescriptor database, string db, string sql)
     {
         List<QueryResultRow> plan = await Query(executor, database, db, sql);

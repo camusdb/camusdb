@@ -145,6 +145,10 @@ internal sealed class QueryBinder
     /// does not have, so its bind alone can fail with an unknown alias. Then its names come from its select
     /// list (<see cref="DeclaredNamesAsync"/>). The bind of the subquery itself checks it later, with the
     /// outer names in scope.</para>
+    ///
+    /// <para>A function in FROM declares the column names of its call, and binds nothing here: its names do
+    /// not depend on its arguments, and an argument can name the query around the subquery, which a bind of
+    /// the call alone would refuse as an unknown column.</para>
     /// </summary>
     internal async Task<NameScope> BindNameScopeAsync(DatabaseDescriptor database, QuerySource source)
     {
@@ -162,6 +166,12 @@ internal sealed class QueryBinder
             {
                 pending.Push(join.Right);
                 pending.Push(join.Left);
+                continue;
+            }
+
+            if (current is DerivedTableSource { Function: { } call } function)
+            {
+                declared.Add((function.Alias, call.ColumnNames));
                 continue;
             }
 

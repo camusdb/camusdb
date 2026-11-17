@@ -42,7 +42,10 @@ before the first row.
 An argument can also name a column of an item to the left of the function in the same `FROM`, as in
 `FROM t, generate_series(1, t.n) AS g`. Such a call is `LATERAL`, with or without the keyword, as in
 PostgreSQL: it runs one time for each row of `t`, with that row's `n`. See
-[LATERAL](./joins.md#lateral). A function that is the only item of its `FROM` can name no column.
+[LATERAL](./joins.md#lateral). In a subquery or a `LATERAL` derived table, an argument can also name a
+column of the query around it, as in `CROSS JOIN LATERAL (SELECT g FROM generate_series(1, t.n) g) s`
+or `EXISTS (SELECT 1 FROM generate_series(1, t.n) g WHERE g = 2)`. A function that is the only item of
+the `FROM` of a statement can name no column.
 
 These arguments are refused:
 
