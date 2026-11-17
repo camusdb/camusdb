@@ -190,6 +190,27 @@ public sealed class QueryRowNameResolver
     }
 
     /// <summary>
+    /// The alias of the one source that a bare column name reads, by the rule of
+    /// <see cref="ResolveRowLookupKey"/>. False when no source has the column or more than one has it;
+    /// <see cref="ResolveRowLookupKey"/> throws for those names.
+    ///
+    /// <para><see cref="Controllers.Queries.JoinPredicateQualifier"/> uses the alias to write
+    /// <c>alias.column</c> in place of the bare name, so the join planner reads the source of a
+    /// column from its text.</para>
+    /// </summary>
+    internal bool TryGetBareColumnOwner(string columnName, out string alias)
+    {
+        if (columnNameToAliases.TryGetValue(columnName, out List<string>? aliases) && aliases.Count == 1)
+        {
+            alias = aliases[0];
+            return true;
+        }
+
+        alias = "";
+        return false;
+    }
+
+    /// <summary>
     /// Marks this resolver as shared: from now on the lookup memo is read-only. Call exactly once,
     /// after binding has resolved every identifier the statement references and before the resolver
     /// is published to the bound-query cache. Publication through the cache's internal lock makes the

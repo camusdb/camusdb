@@ -73,12 +73,14 @@ internal sealed class QueryBinder
         HashSet<string> aliases = new(StringComparer.OrdinalIgnoreCase);
 
         await CollectBoundSourcesAsync(database, query.Source, sources, derivedSources, aliases, nested).ConfigureAwait(false);
-        ValidateJoinPredicates(query.Source, sources, derivedSources);
-        RefuseAggregateOverWorkTable(query, derivedSources);
 
         QueryRowNameResolver rowNames = new(sources, derivedSources);
-        BoundSelectQuery bound = new(query, sources, rowNames, derivedSources);
-        ValidateQuery(query, rowNames, ResolveOrderByPositions(bound));
+        QuerySource source = BindJoinPredicates(query.Source, sources, derivedSources, rowNames);
+        RefuseAggregateOverWorkTable(query, derivedSources);
+
+        ValidateQuery(query, rowNames, ResolveOrderByPositions(new BoundSelectQuery(query, sources, rowNames, derivedSources)));
+
+        BoundSelectQuery bound = new(QualifyJoinFilter(query, source, rowNames), sources, rowNames, derivedSources);
 
         // The statement checks run here, before any row is read, so an unknown function, a known type
         // mismatch, a non-boolean condition, or a CASE, COALESCE, IFNULL or IF with no common type fails
@@ -103,9 +105,15 @@ internal sealed class QueryBinder
         HashSet<string> aliases = new(StringComparer.OrdinalIgnoreCase);
 
         await CollectBoundSourcesAsync(database, query.Source, sources, derivedSources, aliases, nested).ConfigureAwait(false);
-        ValidateJoinPredicates(query.Source, sources, derivedSources);
 
         QueryRowNameResolver rowNames = new(sources, derivedSources);
+
+        // The WHERE stays as written: the caller evaluates the WHERE of the body it holds, with a
+        // resolver that also reads the outer query.
+        QuerySource source = BindJoinPredicates(query.Source, sources, derivedSources, rowNames);
+
+        if (!ReferenceEquals(source, query.Source))
+            query = query with { Source = source };
 
         QueryLimiter.RefuseNegativeLiteral(query);
 
@@ -920,33 +928,86 @@ internal sealed class QueryBinder
         }
     }
 
-    private static void ValidateJoinPredicates(
+    /// <summary>
+    /// Validates the <c>ON</c> of each join against the sources of its two inputs, and returns the
+    /// tree with each bare column name of an <c>ON</c> qualified (<see cref="JoinPredicateQualifier"/>).
+    /// The tree is the same instance when no <c>ON</c> has a bare name.
+    ///
+    /// <para>An <c>ON</c> reads only the sources of its join, so a bare name there resolves in that
+    /// scope: in <c>a JOIN b ON x = y JOIN c ON …</c> the name <c>x</c> is a column of <c>a</c> or
+    /// <c>b</c>, also when <c>c</c> has a column <c>x</c>. Evaluation resolves a name against every
+    /// source of the query, where that <c>x</c> has two owners, so the qualified name is the one that
+    /// evaluation can read.</para>
+    /// </summary>
+    /// <param name="rowNames">The resolver of the whole query, which evaluation uses.</param>
+    private static QuerySource BindJoinPredicates(
         QuerySource source,
         IReadOnlyList<BoundTableSource> allSources,
-        IReadOnlyList<BoundDerivedTableSource> allDerivedSources)
+        IReadOnlyList<BoundDerivedTableSource> allDerivedSources,
+        QueryRowNameResolver rowNames)
     {
         switch (source)
         {
             case JoinSource joinSource:
-                ValidateJoinPredicates(joinSource.Left, allSources, allDerivedSources);
+                QuerySource left = BindJoinPredicates(joinSource.Left, allSources, allDerivedSources, rowNames);
 
                 List<BoundTableSource> inScopeTables = new();
                 List<BoundDerivedTableSource> inScopeDerived = new();
                 CollectBoundSourcesFromSubtree(joinSource.Left, allSources, allDerivedSources, inScopeTables, inScopeDerived);
                 CollectBoundSourcesFromSubtree(joinSource.Right, allSources, allDerivedSources, inScopeTables, inScopeDerived);
                 ValidateNoAggregateInPreAggregateScope(joinSource.OnPredicate, "JOIN ON");
-                ValidateExpression(joinSource.OnPredicate, new QueryRowNameResolver(inScopeTables, inScopeDerived));
-                return;
+
+                QueryRowNameResolver scope = new(inScopeTables, inScopeDerived);
+                ValidateExpression(joinSource.OnPredicate, scope);
+
+                NodeAst onPredicate = JoinPredicateQualifier.Qualify(joinSource.OnPredicate, scope, rowNames);
+
+                return ReferenceEquals(left, joinSource.Left) && ReferenceEquals(onPredicate, joinSource.OnPredicate)
+                    ? joinSource
+                    : joinSource with { Left = left, OnPredicate = onPredicate };
 
             case TableSource:
             case DerivedTableSource:
-                return;
+                return source;
 
             default:
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInput,
                     $"Unsupported query source: {source.GetType().Name}");
         }
+    }
+
+    /// <summary>
+    /// The query that the join planner reads: <paramref name="source"/> in place of the source tree, each
+    /// bare column name of the <c>WHERE</c> qualified, and the equi-join conjuncts of a FROM list
+    /// hoisted into its joins (<see cref="CommaJoinNormalizer.HoistResolvedNames"/>). Returns
+    /// <paramref name="query"/> itself for a query with one source and for a join with no bare name,
+    /// so the bound-query cache still sees the instance it created.
+    ///
+    /// <para>Called after <see cref="ValidateQuery"/>, so a name with no owner or with two owners
+    /// fails there with the error of the statement as written. The select list, GROUP BY, HAVING and
+    /// ORDER BY stay as written: they name the output columns, and no join reads a source from them.</para>
+    /// </summary>
+    private static SelectQuery QualifyJoinFilter(SelectQuery query, QuerySource source, QueryRowNameResolver rowNames)
+    {
+        if (source is not JoinSource)
+            return query;
+
+        BoundPredicate? where = query.Where;
+
+        if (where is not null)
+        {
+            NodeAst qualified = JoinPredicateQualifier.Qualify(where.Expression, rowNames, rowNames);
+
+            if (!ReferenceEquals(qualified, where.Expression))
+                where = new BoundPredicate(qualified);
+        }
+
+        (source, where) = CommaJoinNormalizer.HoistResolvedNames(source, where);
+
+        return ReferenceEquals(source, query.Source) && ReferenceEquals(where, query.Where)
+            ? query
+            : query with { Source = source, Where = where };
     }
 
     private static void CollectBoundSourcesFromSubtree(

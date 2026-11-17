@@ -25,7 +25,10 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// every uncorrelated subquery of the select list, the HAVING and the JOIN ON predicates, <c>EXISTS</c>
 /// included. It leaves each correlated subquery of the WHERE and of the select list for the last stage,
 /// and refuses one in the HAVING or a JOIN ON, which have no per-row stage.</item>
-/// <item><see cref="QueryBinder"/> opens the sources and resolves names.</item>
+/// <item><see cref="QueryBinder"/> opens the sources and resolves names. For a join it also writes
+/// the source of each bare column name into the <c>ON</c> and <c>WHERE</c> predicates
+/// (<see cref="JoinPredicateQualifier"/>), so its query is the one the last stage and the planner
+/// read.</item>
 /// <item><see cref="ExistsSubqueryPreparer"/> prepares the EXISTS subqueries of the WHERE and every
 /// correlated subquery of the WHERE and the select list. It runs last because a correlated subquery binds
 /// against the outer sources the previous stage produced.</item>
@@ -111,10 +114,13 @@ internal sealed class SelectBindPipeline
 
         ConstantDivisionCheck.CheckSelect(asWritten);
 
+        // The binder qualifies the bare column names of a join's predicates, so the query it bound is
+        // the one the last stage prepares. A stage that started from the query before the bind would
+        // drop those names again.
         (selectQuery, ExistsSubqueryRegistry? existsRegistry) = await existsSubqueryPreparer
             .PrepareAsync(
                 database,
-                selectQuery,
+                boundQuery.Query,
                 boundQuery.Sources,
                 boundQuery.DerivedSources,
                 ticket,

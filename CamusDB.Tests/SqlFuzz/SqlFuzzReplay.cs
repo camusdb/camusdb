@@ -803,6 +803,36 @@ internal sealed class SqlFuzzReplay
     }
 
     /// <summary>
+    /// Two spellings of one statement have the same plan: the same EXPLAIN rows, with the operators,
+    /// their details and the shape id. Used for a join written with bare and with qualified column
+    /// names, where equal rows do not show that the bare form lost its join keys.
+    /// </summary>
+    public async Task AssertSamePlan(string sqlA, string sqlB)
+    {
+        Assert.That(await PlanText("EXPLAIN " + sqlB), Is.EqualTo(await PlanText("EXPLAIN " + sqlA)));
+    }
+
+    private async Task<string> PlanText(string explain)
+    {
+        SqlFuzzRows plan = await Query(explain);
+        int node = IndexOfColumn(plan, "node");
+        int detail = IndexOfColumn(plan, "detail");
+
+        return string.Join("\n", plan.Rows.Select(row => row[node].StrValue + " | " + row[detail].StrValue));
+    }
+
+    private static int IndexOfColumn(SqlFuzzRows rows, string name)
+    {
+        for (int i = 0; i < rows.Columns.Count; i++)
+        {
+            if (rows.Columns[i] == name)
+                return i;
+        }
+
+        throw new AssertionException($"The result has no column '{name}'");
+    }
+
+    /// <summary>
     /// The error-classification rule for one statement, on the entry point the campaign used:
     /// <c>query</c> (a read in a read-only snapshot, with every row also written in the HTTP JSON row
     /// format), <c>analyze</c> (a read in a read-write transaction) or <c>write</c>. The statement must

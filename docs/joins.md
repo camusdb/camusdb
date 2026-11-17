@@ -78,6 +78,30 @@ One limit follows from the rewrite:
   the preserved table on the left: `C LEFT JOIN (...)` through a derived table, or reorder the
   chain.
 
+## Column names in join predicates
+
+A join predicate can name a column with no qualifier when exactly one table of the statement has
+a column of that name. The two statements below are one statement to the planner, and they get the
+same plan:
+
+```sql
+SELECT o_orderkey FROM customer, orders WHERE c_custkey = o_custkey AND c_mktsegment = 'BUILDING';
+SELECT o_orderkey FROM customer, orders
+WHERE customer.c_custkey = orders.o_custkey AND customer.c_mktsegment = 'BUILDING';
+```
+
+- The binder gives each bare name of an `ON` or a `WHERE` its table and writes it as
+  `alias.column`. The planner reads the table of a column from that qualifier, so a bare name is a
+  hash, merge or index lookup key, a range seek bound and an expression key like a qualified name.
+- `EXPLAIN` shows the qualified name, also when the statement has the bare name.
+- A name in an `ON` is a column of the tables of that join only, as in PostgreSQL. In
+  `a JOIN b ON x = y JOIN c ON …` the name `x` is a column of `a` or of `b`, also when `c` has a
+  column `x`.
+- A name that two tables in scope have is refused as ambiguous (`CADB0400`), and a name that no
+  table has is an unknown column (`CADB0404`).
+- The select list, `GROUP BY`, `HAVING` and `ORDER BY` keep the names as written; see
+  [Output column names](#output-column-names).
+
 ## Output column names
 
 A join names its output columns as PostgreSQL does:
@@ -100,6 +124,13 @@ A join names its output columns as PostgreSQL does:
 `FROM A, B`. When every join of the `FROM` clause is a cross join, the planner runs the same
 equi-join hoist the comma form uses, so a `WHERE a.x = b.x` still becomes an `ON` predicate. A
 cross join that sits among `ON` joins becomes an inner join on the literal `TRUE`.
+
+The hoist moves each `WHERE` conjunct `left.column = right.column` into the `ON` of the join where
+the later of its two tables enters. It needs the table of each column. Query creation runs it when
+every column comparison of the `WHERE` is qualified. When one has a bare name, the binder runs it,
+after it gives each bare name its table (see
+[Column names in join predicates](#column-names-in-join-predicates)). Both paths run the same hoist
+over the conjuncts in `WHERE` order, so the tree does not depend on how the names are written.
 
 ## LATERAL
 
@@ -184,8 +215,8 @@ SELECT s.id, sd.tex
   hash table. With no key, such a join runs as a nested loop that tests every pair, or as a hash join
   on its other keys that tests the expression for each pair.
 - An expression can use literals, columns of its own side named with their aliases, arithmetic,
-  `CAST`, `CASE` and functions that are not volatile. A parameter, a subquery, an unqualified column
-  name or a column of the other side gives no key. Two plain columns are a key as before.
+  `CAST`, `CASE` and functions that are not volatile. A parameter, a subquery or a column of the
+  other side gives no key. Two plain columns are a key as before.
 - The static type of the expression must be the type of the other side, by the rule for two columns
   (see [Limits](#limits)). `t.f = n.n * 0.5` is a key for a `FLOAT64` column `f`. `t.k = n.n * 1.0`
   is no key for an `INT64` column `k`.

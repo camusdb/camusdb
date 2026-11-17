@@ -20,7 +20,7 @@ It runs as its own CI job, `.github/workflows/sql-fuzz-nightly.yml`.
 | Error classification | Every error is a `CamusDBException` with a specific code. Every statement finishes within the statement time limit. The rows of every successful read serialize to the HTTP JSON row format. | A raw `OverflowException`, `ArgumentException` or `NullReferenceException`. The internal-error code `CADB0099`. A hang. A value that a client cannot receive. |
 | TLP (ternary logic partitioning) | For a predicate `p`, the queries with `WHERE p`, `WHERE NOT p` and `WHERE p IS NULL` together return exactly the rows of the query with no WHERE. Variants: aggregates (MIN of the MINs, MAX of the MAXs, SUM of the SUMs, SUM of the COUNTs), DISTINCT, GROUP BY, HAVING, and the ON predicate of an INNER join. | NULL handling, three-valued logic, NaN and -0.0, a comparison that is neither TRUE, FALSE nor NULL in a consistent way. |
 | NoREC | `SELECT COUNT(*) FROM … WHERE p` equals `SELECT SUM(CASE WHEN p THEN 1 ELSE 0 END) FROM …`. The first form lets the planner use indexes and pushdown. The second form evaluates `p` on every row of a full scan. A variant compares the rows too. | A seek with wrong bounds, a probe that loses a key, a predicate pushed to the wrong side of a join. |
-| Plan equivalence | One query returns the same rows, with the same output shape, under every plan: each `@{FORCE_INDEX=…}` choice of each source, each engine configuration and forced join operator (see below), and, for a one-table query, a full scan of the primary rows. | An index or a join operator that returns other rows than a scan. |
+| Plan equivalence | One query returns the same rows, with the same output shape, under every plan: each `@{FORCE_INDEX=…}` choice of each source, each engine configuration and forced join operator (see below), for a one-table query a full scan of the primary rows, and for a join the form with bare column names (see below). | An index or a join operator that returns other rows than a scan. A bare column name that the join planner does not use as a key. |
 | DML integrity | After each write, the table is exactly the table the rule expects: the affected-row count, every proposed and assigned value cell by cell, no other row added, changed or lost, and no change at all after a failure. The full scan, every index (its keys and its INCLUDE payload) and the large-value cells agree. In an explicit transaction, every write has its effect inside the transaction; a failed statement aborts the transaction (later statements fail with `CADB0824`, COMMIT fails with `CADB0824`, and the committed rows are as they were before); a transaction with no failure commits exactly the state it saw at its end. | Twin rows, orphan index entries, rows missing from an index, stale covering payloads, orphan or lost large-value cells, a wrong value or affected-row count, an UPSERT that skipped its insert or its update, an `UPDATE … FROM` that changed a row its list matched twice, a failed statement that changed data. |
 
 ### FLOAT64 sums
@@ -72,6 +72,16 @@ The planner can serve it with a range seek on an index of that column (see
 [Range seek](joins.md#range-seek)). The `force-nested-loop` arm never seeks, so plan equivalence
 compares the seek with the plain nested loop, and the `index-batch-1` and `plan-cache` arms run the
 seek under their own settings.
+
+A join whose `ON` or `WHERE` names a column that only one source of its `FROM` has also runs in a
+second form, with no qualifier on each such column (`plan:bare-names`). The engine gives a bare name
+its source when it binds the statement (see
+[Column names in join predicates](joins.md#column-names-in-join-predicates)), so the two forms must
+return the same rows and show the same `EXPLAIN`, shape id included. A bare name that lost its join
+key returns the same rows through a nested loop, so the `EXPLAIN` comparison is the part that finds
+it (`plan:bare-names:plan`). The oracle makes the check only for a query that has such a column. The
+generated tables share the names `c0`, `c1`, …, so the column is one that the wider of two tables
+has, or a column of a `VALUES` list.
 
 A configuration name is no evidence that a check compared two different plans. So each passed check
 also takes the EXPLAIN of both plans, and the report gives the count of checks whose second plan had

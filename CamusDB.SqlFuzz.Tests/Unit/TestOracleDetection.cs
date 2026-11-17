@@ -308,6 +308,60 @@ internal sealed class TestOracleDetection
         }
     }
 
+    // -- Plan equivalence: bare column names ----------------------------------------------------
+
+    private static readonly IReadOnlyDictionary<string, IReadOnlyList<string>> TableColumns =
+        new Dictionary<string, IReadOnlyList<string>> { ["t0"] = ["c0", "c1", "c2"] };
+
+    /// <summary>
+    /// <c>(VALUES (1), (2), (5)) AS v (v0) JOIN t0 AS a0 ON v.v0 = a0.c1 WHERE a0.c1 &gt; 1</c>: each column
+    /// name belongs to one source, so the bare form writes <c>ON v0 = c1 WHERE c1 &gt; 1</c>.
+    /// </summary>
+    private static SelectStmt JoinWithUniqueColumnNames()
+    {
+        ValuesRef values = new("v", [("v0", FuzzType.Int64)],
+            [[new LiteralExpr(FuzzValue.Of(1L))], [new LiteralExpr(FuzzValue.Of(2L))], [new LiteralExpr(FuzzValue.Of(5L))]]);
+
+        JoinFrom join = new(values, JoinKind.Inner, T0,
+            new BinaryExpr(BinaryOp.Eq, new ColumnExpr("v", "v0", FuzzType.Int64), C1, FuzzType.Bool));
+
+        return new SelectStmt([new SelectItem(C0), new SelectItem(C2)], join, P);
+    }
+
+    private static bool IsBareForm(string sql) => !sql.Contains("a0.c1", StringComparison.Ordinal);
+
+    /// <summary>
+    /// The bare-name form passes on the real engine, which means equal rows and one EXPLAIN for the two
+    /// forms, and a bare form that loses a row is reported.
+    /// </summary>
+    [Test]
+    public Task PlanEquivalenceReportsABareNameFormThatChangesTheRows() =>
+        AssertDetects(new PlanEquivalenceCheck(JoinWithUniqueColumnNames(), TableColumns), runner,
+            (sql, o) => IsBareForm(sql) && !sql.StartsWith("EXPLAIN", StringComparison.Ordinal) ? FaultyExecutor.DropLastRow(o) : null,
+            "plan:bare-names:mismatch");
+
+    /// <summary>Equal rows through another plan are reported: a bare name that lost its join key gives the same rows through a nested loop.</summary>
+    [Test]
+    public Task PlanEquivalenceReportsABareNameFormWithAnotherPlan() =>
+        AssertDetects(new PlanEquivalenceCheck(JoinWithUniqueColumnNames(), TableColumns), runner,
+            (sql, o) => IsBareForm(sql) && sql.StartsWith("EXPLAIN", StringComparison.Ordinal) ? FaultyExecutor.DropLastRow(o) : null,
+            "plan:bare-names:plan");
+
+    /// <summary>A join of a table with itself has no column of one source only, so it has no bare-name form and its check compares nothing.</summary>
+    [Test]
+    public async Task PlanEquivalenceHasNoBareNameFormForAJoinOfATableWithItself()
+    {
+        JoinFrom join = new(T0, JoinKind.Inner, new TableRef("t0", "a1"),
+            new BinaryExpr(BinaryOp.Eq, C1, new ColumnExpr("a1", "c1", FuzzType.Int64), FuzzType.Bool));
+        SelectStmt query = new([new SelectItem(C0)], join, P);
+
+        Assert.That(PlanEquivalenceCheck.HasBareNameForm(query, TableColumns), Is.False);
+        Assert.That(PlanEquivalenceCheck.HasBareNameForm(JoinWithUniqueColumnNames(), TableColumns), Is.True);
+
+        CheckResult result = await new PlanEquivalenceCheck(query, TableColumns).RunAsync(new CheckContext(runner));
+        Assert.That(result.Status, Is.EqualTo(CheckStatus.Skip), result.Detail);
+    }
+
     [Test]
     public Task PlanEquivalenceReportsAHintThatChangesTheRows() =>
         AssertDetects(new PlanEquivalenceCheck(new SelectStmt([new SelectItem(C0)], T0, P), "a0", "t0_i0", null), runner,

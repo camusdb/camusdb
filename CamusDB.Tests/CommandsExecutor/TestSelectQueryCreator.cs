@@ -6,11 +6,14 @@
  * file that was distributed with this source code.
  */
 
+using System.Collections.Generic;
+
 using NUnit.Framework;
 
 using CamusDB.Core;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
+using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -478,6 +481,47 @@ public class TestSelectQueryCreator
         Assert.AreEqual("u2.id", outerJoin.OnPredicate.leftAst!.yytext);
         Assert.AreEqual("p.user_id", outerJoin.OnPredicate.rightAst!.yytext);
         Assert.IsNull(query.Where);
+    }
+
+    /// <summary>
+    /// Query creation has no catalog, so it cannot give a table to a bare column name. A column
+    /// comparison with a bare side stops the hoist for the whole list: every join keeps the
+    /// cross-join literal and the WHERE keeps all its conjuncts, also the qualified one, so the
+    /// binder can run one hoist over all of them in WHERE order.
+    /// </summary>
+    [Test]
+    public void CreateSelectQuery_CommaJoinWithABareColumnComparison_LeavesTheHoistToTheBinder()
+    {
+        SelectQuery query = ParseSelectQuery(
+            "SELECT r.id FROM robots r, user_robots u, posts p "
+            + "WHERE r.id = u.robots_id AND amount = user_id AND u.amount > 10");
+
+        JoinSource outerJoin = (JoinSource)query.Source;
+        JoinSource innerJoin = (JoinSource)outerJoin.Left;
+
+        Assert.AreSame(NodeAst.True, outerJoin.OnPredicate);
+        Assert.AreSame(NodeAst.True, innerJoin.OnPredicate);
+
+        List<NodeAst> conjuncts = [];
+        PredicateAnalyzer.CollectAndConjuncts(query.Where!.Expression, conjuncts);
+
+        Assert.AreEqual(3, conjuncts.Count);
+        Assert.AreEqual("r.id", conjuncts[0].leftAst!.yytext);
+        Assert.AreEqual("amount", conjuncts[1].leftAst!.yytext);
+        Assert.AreEqual(NodeType.ExprGreaterThan, conjuncts[2].nodeType);
+    }
+
+    /// <summary>A bare name outside a column comparison does not stop the hoist: no join conjunct needs its table.</summary>
+    [Test]
+    public void CreateSelectQuery_CommaJoinWithABareFilterColumn_StillHoistsTheQualifiedConjunct()
+    {
+        SelectQuery query = ParseSelectQuery(
+            "SELECT r.id FROM robots r, user_robots u WHERE r.id = u.robots_id AND amount > 10");
+
+        JoinSource join = (JoinSource)query.Source;
+
+        Assert.AreEqual(NodeType.ExprEquals, join.OnPredicate.nodeType);
+        Assert.AreEqual(NodeType.ExprGreaterThan, query.Where!.Expression.nodeType);
     }
 
     [Test]

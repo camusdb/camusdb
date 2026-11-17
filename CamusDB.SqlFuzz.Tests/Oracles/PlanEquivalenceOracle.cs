@@ -29,6 +29,15 @@ internal enum PlanSource
     /// query. The check confirms with EXPLAIN that the baseline is a full scan of the primary rows.
     /// </summary>
     FullScan,
+
+    /// <summary>
+    /// The same join with no qualifier on each column that only one source of its FROM has, in the ON
+    /// and WHERE predicates. The engine gives such a name its source when it binds the statement, so
+    /// the two forms are one statement: the rows must be equal, and so must the whole EXPLAIN. A bare
+    /// name that the join planner cannot place gives the same rows through a nested loop, which only
+    /// the EXPLAIN comparison finds.
+    /// </summary>
+    BareNames,
 }
 
 /// <summary>
@@ -41,6 +50,9 @@ internal sealed class PlanEquivalenceCheck : OracleCheck
 {
     private readonly ArmSpec? arm;
 
+    /// <summary>The column names of each table of the round, for <see cref="PlanSource.BareNames"/>; null for the other sources.</summary>
+    private readonly IReadOnlyDictionary<string, IReadOnlyList<string>>? tableColumns;
+
     public PlanEquivalenceCheck(SelectStmt query, string? hintAlias, string? hintIndex, ArmSpec? arm, bool fullScan = false)
     {
         Query = query;
@@ -48,6 +60,15 @@ internal sealed class PlanEquivalenceCheck : OracleCheck
         HintIndex = hintIndex;
         this.arm = arm;
         Source = fullScan ? PlanSource.FullScan : arm is not null ? PlanSource.Arm : PlanSource.Hint;
+    }
+
+    /// <summary>A <see cref="PlanSource.BareNames"/> check of <paramref name="query"/>.</summary>
+    /// <param name="tableColumns">The column names of each table of the round, by table name.</param>
+    public PlanEquivalenceCheck(SelectStmt query, IReadOnlyDictionary<string, IReadOnlyList<string>> tableColumns)
+    {
+        Query = query;
+        this.tableColumns = tableColumns;
+        Source = PlanSource.BareNames;
     }
 
     public SelectStmt Query { get; }
@@ -66,6 +87,7 @@ internal sealed class PlanEquivalenceCheck : OracleCheck
     {
         PlanSource.Arm => "plan:arm:" + arm!.Name,
         PlanSource.FullScan => "plan:full-scan",
+        PlanSource.BareNames => "plan:bare-names",
         _ => HintIndex == "pk" ? "plan:hint:pk" : "plan:hint:index",
     };
 
@@ -79,8 +101,73 @@ internal sealed class PlanEquivalenceCheck : OracleCheck
             Items = Query.Items.Append(new SelectItem(new CaseExpr(
                 [new CaseBranch(Query.Where!, new LiteralExpr(FuzzValue.Of(1L)))], new LiteralExpr(FuzzValue.Of(0L)), FuzzType.Int64), "pe_flag")).ToList(),
         },
+        PlanSource.BareNames => WithBareNames(Query, tableColumns!, out _),
         _ => Query,
     };
+
+    /// <summary>True when <paramref name="query"/> has a column that <see cref="PlanSource.BareNames"/> can write with no qualifier.</summary>
+    public static bool HasBareNameForm(SelectStmt query, IReadOnlyDictionary<string, IReadOnlyList<string>> tableColumns)
+    {
+        WithBareNames(query, tableColumns, out bool changed);
+        return changed;
+    }
+
+    /// <summary>
+    /// <paramref name="query"/> with no qualifier on each column of an ON or of the WHERE that exactly one
+    /// source of the FROM has. A nested SELECT stays as it is: it is another scope. The select list
+    /// stays too, so the output names are the same.
+    /// </summary>
+    private static SelectStmt WithBareNames(SelectStmt query, IReadOnlyDictionary<string, IReadOnlyList<string>> tableColumns, out bool changed)
+    {
+        // The alias of the source that has each column name, or null for a name that two sources have.
+        Dictionary<string, string?> owner = new(StringComparer.OrdinalIgnoreCase);
+
+        foreach ((string alias, IEnumerable<string> columns) in SourceColumns(query.From, tableColumns))
+            foreach (string column in columns)
+                owner[column] = owner.ContainsKey(column) ? null : alias;
+
+        bool any = false;
+
+        Expr Bare(Expr expression) => ExprWalker.Rewrite(expression, node =>
+        {
+            if (node is not ColumnExpr { Source: { } source } column || !owner.TryGetValue(column.Column, out string? alias) || alias != source)
+                return null;
+
+            any = true;
+            return column with { Source = null };
+        });
+
+        FromItem BareOn(FromItem from) => from is JoinFrom join
+            ? join with { Left = BareOn(join.Left), On = join.On is null ? null : Bare(join.On) }
+            : from;
+
+        SelectStmt bare = query with { From = BareOn(query.From), Where = query.Where is null ? null : Bare(query.Where) };
+        changed = any;
+        return bare;
+    }
+
+    /// <summary>The alias and the column names of each source of a FROM clause.</summary>
+    private static IEnumerable<(string Alias, IEnumerable<string> Columns)> SourceColumns(
+        FromItem from, IReadOnlyDictionary<string, IReadOnlyList<string>> tableColumns)
+    {
+        FromItem? current = from;
+
+        while (current is not null)
+        {
+            FromItem item = current is JoinFrom join ? join.Right : current;
+            current = (current as JoinFrom)?.Left;
+
+            if (item is TableRef table)
+                yield return (table.Alias, tableColumns.TryGetValue(table.Table, out IReadOnlyList<string>? columns) ? columns : []);
+            else if (item is ValuesRef values)
+                yield return (values.Alias, values.Columns.Select(c => c.Name));
+        }
+    }
+
+    /// <summary>A check of <paramref name="query"/> with the plan source of this check, for a simpler form of it.</summary>
+    private PlanEquivalenceCheck With(SelectStmt query, bool fullScan = false) => Source == PlanSource.BareNames
+        ? new PlanEquivalenceCheck(query, tableColumns!)
+        : new PlanEquivalenceCheck(query, HintAlias, HintIndex, arm, fullScan);
 
     private static FromItem WithHint(FromItem from, string alias, string index) => from switch
     {
@@ -99,6 +186,9 @@ internal sealed class PlanEquivalenceCheck : OracleCheck
             return CheckResult.FromBadOutcome(first);
 
         IStatementExecutor executor = await SecondExecutorAsync(context).ConfigureAwait(false);
+
+        if (Source == PlanSource.BareNames && !HasBareNameForm(Query, tableColumns!))
+            return CheckResult.Skip("every column of the predicates belongs to two sources or to none");
 
         if (Source == PlanSource.FullScan)
         {
@@ -136,6 +226,18 @@ internal sealed class PlanEquivalenceCheck : OracleCheck
             if (problem is not null)
                 return CheckResult.Fail(Variant + ":mismatch", problem);
         }
+
+        if (Source == PlanSource.BareNames)
+        {
+            string qualified = await context.ExplainAsync(context.Engine, Query).ConfigureAwait(false);
+            string bare = await context.ExplainAsync(context.Engine, Second).ConfigureAwait(false);
+
+            // A plan that new statistics changed between the two EXPLAINs is not a difference of the
+            // two forms, so the first form is planned again before the check fails.
+            if (bare != qualified && qualified == await context.ExplainAsync(context.Engine, Query).ConfigureAwait(false))
+                return CheckResult.Fail(Variant + ":plan", $"the form with bare names has another plan\nqualified names:\n{qualified}\nbare names:\n{bare}");
+        }
+
         return CheckResult.Pass;
     }
 
@@ -152,18 +254,20 @@ internal sealed class PlanEquivalenceCheck : OracleCheck
 
     public override IEnumerable<OracleCheck> Simplify()
     {
+        bool fullScan = Source == PlanSource.FullScan;
+
         if (Query.Where is not null)
         {
-            if (Source != PlanSource.FullScan)
-                yield return new PlanEquivalenceCheck(Query with { Where = null }, HintAlias, HintIndex, arm);
+            if (!fullScan)
+                yield return With(Query with { Where = null });
             foreach (Expr p in ExprShrinker.Candidates(Query.Where))
-                yield return new PlanEquivalenceCheck(Query with { Where = p }, HintAlias, HintIndex, arm, Source == PlanSource.FullScan);
+                yield return With(Query with { Where = p }, fullScan);
         }
         if (Query.Items.Count > 1)
             for (int i = 0; i < Query.Items.Count; i++)
-                yield return new PlanEquivalenceCheck(Query with { Items = Query.Items.Where((_, j) => j != i).ToList() }, HintAlias, HintIndex, arm, Source == PlanSource.FullScan);
+                yield return With(Query with { Items = Query.Items.Where((_, j) => j != i).ToList() }, fullScan);
         foreach (FromItem from in FromShrinker.Candidates(Query.From, keepJoin: false))
-            yield return new PlanEquivalenceCheck(Query with { From = from }, HintAlias, HintIndex, arm, Source == PlanSource.FullScan);
+            yield return With(Query with { From = from }, fullScan);
     }
 
     public override IEnumerable<string> Describe(ISqlPrinter printer)
@@ -184,13 +288,17 @@ internal sealed class PlanEquivalenceCheck : OracleCheck
         int runs = arm?.Name == "plan-cache" ? 2 : 1;
         for (int run = 0; run < runs; run++)
             writer.Line($"await SqlFuzzReplay.AssertSameRows(db, {TestWriter.Literal(printer.Print(Query))},\n            {other}, {TestWriter.Literal(printer.Print(Second))});");
+
+        if (Source == PlanSource.BareNames)
+            writer.Line($"await db.AssertSamePlan({TestWriter.Literal(printer.Print(Query))},\n            {TestWriter.Literal(printer.Print(Second))});");
     }
 }
 
 /// <summary>
 /// Makes plan-equivalence checks: for each query, every configuration arm, every index hint of every
-/// source, and the full-scan baseline of a one-table query. The arms are built once per round, after
-/// the data and any ANALYZE, and share the round's database.
+/// source, the full-scan baseline of a one-table query, and the bare-name form of a join that has a
+/// column of one source only. The arms are built once per round, after the data and any ANALYZE, and
+/// share the round's database.
 ///
 /// <para><b>Coverage.</b> A configuration name is no evidence that a check compared two different
 /// plans: an arm that turns off hash joins changes only queries that picked a hash join. So each passed
@@ -256,6 +364,9 @@ internal sealed class PlanEquivalenceOracle : IOracle
     public async Task RunRoundAsync(RoundContext round)
     {
         StatementGenerator generator = round.Generator;
+        Dictionary<string, IReadOnlyList<string>> tableColumns = generator.State.Tables.ToDictionary(
+            t => t.Name, t => (IReadOnlyList<string>)t.Columns.Select(c => c.Name).ToList(), StringComparer.Ordinal);
+
         for (int i = 0; i < round.CheckCount && !round.ShouldStop; i++)
         {
             (FromItem from, ExprScope scope) = generator.GenerateFrom(SelectOptions.Comparable with { AllowHints = false });
@@ -270,13 +381,17 @@ internal sealed class PlanEquivalenceOracle : IOracle
             if (from is TableRef && query.Where is not null)
                 checks.Add(new PlanEquivalenceCheck(query, null, null, null, fullScan: true));
 
+            // Only a query with a column to write bare gets the check, so the variant never skips.
+            if (from is JoinFrom && PlanEquivalenceCheck.HasBareNameForm(query, tableColumns))
+                checks.Add(new PlanEquivalenceCheck(query, tableColumns));
+
             string? defaultPath = null;
             foreach (PlanEquivalenceCheck check in checks)
             {
                 CheckResult result = await round.RunAsync(check).ConfigureAwait(false);
                 if (result.Status == CheckStatus.Fail || round.ShouldStop)
                     break;
-                if (result.Status != CheckStatus.Pass || check.Source == PlanSource.FullScan)
+                if (result.Status != CheckStatus.Pass || check.Source is PlanSource.FullScan or PlanSource.BareNames)
                     continue;
 
                 IReadOnlyList<string> plans = await check.PlansAsync(round.Checks).ConfigureAwait(false);

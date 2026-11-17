@@ -21,6 +21,10 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// the side, arithmetic, <c>CAST</c>, <c>CASE</c>, comparisons and logical operators inside a
 /// <c>CASE</c>, and calls of functions that are not volatile. A subquery, a window call or an
 /// unqualified name is refused. A refusal is always safe: the caller keeps the plain plan.</para>
+///
+/// <para>The binder qualifies each bare name of a join predicate that one source has
+/// (<see cref="JoinPredicateQualifier"/>), so a column of a bound statement arrives here with its
+/// alias, however the statement wrote it.</para>
 /// </summary>
 internal static class JoinSideExpressions
 {

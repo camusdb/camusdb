@@ -265,7 +265,12 @@ Binding, in order:
 2. **Detect duplicate aliases** — `CamusDBException(InvalidInput)` on reuse.
 3. **Build `QueryRowNameResolver`** — records which alias owns which columns. A column unique across all
    sources may be referenced unqualified; a name in multiple sources requires `alias.column`, else
-   "ambiguous column."
+   "ambiguous column." For a join, the binder then writes that owner into the predicates
+   (`JoinPredicateQualifier`): each bare column name of an `ON` or of the `WHERE` becomes
+   `alias.column`, and the equi-join hoist of a `FROM` list runs on the qualified `WHERE`
+   (`CommaJoinNormalizer.HoistResolvedNames`). Every planner stage that reads the source of a column
+   from its qualifier therefore gets the same input for a bare and for a qualified name. See
+   [`docs/joins.md`](./joins.md#column-names-in-join-predicates).
 4. **Validate projections, GROUP BY, ORDER BY** — every referenced column must resolve.
 5. **Projection/grouping consistency** — non-aggregate projected columns in a grouped query must appear
    in `GROUP BY`.
