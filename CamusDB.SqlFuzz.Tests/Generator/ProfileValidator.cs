@@ -137,6 +137,9 @@ internal static class ProfileValidator
             case FunctionExpr { Name: "nullif" }:
                 need(profile.Allows(ExprFeature.NullIf), "NULLIF");
                 break;
+            case FunctionExpr { Name: "greatest" or "least" }:
+                need(profile.Allows(ExprFeature.GreatestLeast), "GREATEST and LEAST");
+                break;
             case FunctionExpr f:
                 need(profile.AllowsFunction(f.Name), $"the function {f.Name}");
                 break;

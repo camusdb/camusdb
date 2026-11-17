@@ -83,10 +83,10 @@ internal static class ConditionalResultTypes
 
     /// <summary>
     /// True for the node shapes this class types: a CASE (simple, searched, or an IF, which the parser
-    /// builds as a searched CASE with one WHEN), and a call to COALESCE, IFNULL or NVL.
+    /// builds as a searched CASE with one WHEN), and a call to COALESCE, IFNULL, NVL, GREATEST or LEAST.
     /// </summary>
     internal static bool IsConditional(NodeAst node) =>
-        node.nodeType == NodeType.ExprCase || IsCoalesceCall(node);
+        node.nodeType == NodeType.ExprCase || IsCommonTypeCall(node);
 
     /// <summary>The construct name an error uses for <paramref name="node"/>.</summary>
     internal static string ConstructName(NodeAst node) =>
@@ -98,6 +98,22 @@ internal static class ConditionalResultTypes
     internal static bool IsIf(NodeAst node) =>
         node.nodeType == NodeType.ExprCase && string.Equals(node.yytext, "IF", StringComparison.Ordinal);
 
+    /// <summary>
+    /// True for a call whose result type is the common type of its arguments: COALESCE, IFNULL and NVL
+    /// (<see cref="IsCoalesceCall"/>), and GREATEST and LEAST, which run every argument and return one of
+    /// them (<see cref="Functions.ExtremumScalarFunctions"/>).
+    /// </summary>
+    internal static bool IsCommonTypeCall(NodeAst node) =>
+        IsCoalesceCall(node)
+        || (node.nodeType == NodeType.ExprFuncCall
+            && node.leftAst?.yytext is { } name
+            && (name.Equals("greatest", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("least", StringComparison.OrdinalIgnoreCase)));
+
+    /// <summary>
+    /// True for a call to COALESCE, IFNULL or NVL, which stops at its first argument that is not NULL, so the
+    /// arguments after it do not run.
+    /// </summary>
     internal static bool IsCoalesceCall(NodeAst node) =>
         node.nodeType == NodeType.ExprFuncCall
         && node.leftAst?.yytext is { } name
@@ -646,7 +662,7 @@ internal static class ConditionalResultTypes
                     ? caseType with { IsStringLiteral = false }
                     : null;
 
-            case NodeType.ExprFuncCall when IsCoalesceCall(target):
+            case NodeType.ExprFuncCall when IsCommonTypeCall(target):
                 return Combine(target, lookup, throwOnConflict: false, out bool callComplete, calls == CallTyping.BuiltIn) is { } callType && callComplete
                     ? callType with { IsStringLiteral = false }
                     : null;

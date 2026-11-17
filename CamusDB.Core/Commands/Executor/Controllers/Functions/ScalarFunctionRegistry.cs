@@ -58,6 +58,7 @@ internal sealed class ScalarFunctionRegistry
         JsonbScalarFunctions.Register(registry);
         CastScalarFunctions.Register(registry);
         NullScalarFunctions.Register(registry);
+        ExtremumScalarFunctions.Register(registry);
         RegexScalarFunctions.Register(registry);
         SessionScalarFunctions.Register(registry);
         SequenceScalarFunctions.Register(registry);

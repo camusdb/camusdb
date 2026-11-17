@@ -443,6 +443,47 @@ internal sealed class TestGenerator
         Assert.That(expressionSides, Is.GreaterThan(5), "join equalities with an expression on one side");
     }
 
+    /// <summary>
+    /// Some generated SELECTs call GREATEST or LEAST, print the call by its name, and give it two or three
+    /// arguments; a profile without the feature writes neither.
+    /// </summary>
+    [Test]
+    public void SomeExpressionsCallGreatestOrLeast()
+    {
+        int calls = 0;
+
+        for (ulong seed = 1; seed <= 40; seed++)
+        {
+            StatementGenerator generator = new(new FuzzRandom(seed), GeneratorProfile.CamusDB);
+            generator.GenerateSchema();
+            generator.GenerateData();
+
+            for (int i = 0; i < 50; i++)
+            {
+                string sql = CamusSqlPrinter.Instance.Print(generator.GenerateSelect(SelectOptions.Comparable));
+                if (sql.Contains("greatest(", StringComparison.Ordinal) || sql.Contains("least(", StringComparison.Ordinal))
+                    calls++;
+            }
+        }
+
+        Assert.That(calls, Is.GreaterThan(20), "SELECTs that call GREATEST or LEAST");
+
+        GeneratorProfile without = GeneratorProfile.CamusDB.WithoutFeatures(ExprFeature.GreatestLeast);
+        for (ulong seed = 1; seed <= 10; seed++)
+        {
+            StatementGenerator generator = new(new FuzzRandom(seed), without);
+            generator.GenerateSchema();
+            generator.GenerateData();
+
+            for (int i = 0; i < 50; i++)
+            {
+                string sql = CamusSqlPrinter.Instance.Print(generator.GenerateSelect(SelectOptions.Comparable));
+                StringAssert.DoesNotContain("greatest(", sql);
+                StringAssert.DoesNotContain("least(", sql);
+            }
+        }
+    }
+
     [Test]
     public void ValuesListsAppearInSelectsAndJoinedWrites()
     {

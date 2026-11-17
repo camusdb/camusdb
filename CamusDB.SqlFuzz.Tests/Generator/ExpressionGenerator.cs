@@ -614,10 +614,10 @@ internal sealed class ExpressionGenerator
         return Leaf(FuzzType.Jsonb, scope);
     }
 
-    /// <summary>CASE, COALESCE or NULLIF with every branch of exactly <paramref name="type"/>.</summary>
+    /// <summary>CASE, COALESCE, NULLIF, GREATEST or LEAST with every branch of exactly <paramref name="type"/>.</summary>
     private Expr? Conditional(FuzzType type, ExprScope scope, int depth)
     {
-        int roll = random.Next(3);
+        int roll = random.Next(4);
         if (roll == 0 && profile.Allows(ExprFeature.Case))
         {
             int count = random.Between(1, 2);
@@ -633,6 +633,17 @@ internal sealed class ExpressionGenerator
 
         if (roll == 2 && profile.Allows(ExprFeature.NullIf) && FuzzTypes.IsOrderable(type))
             return new FunctionExpr("nullif", [Generate(type, scope, depth + 1), Generate(type, scope, depth + 1)], type);
+
+        // Two or three arguments of one orderable type: a NULL argument is left out, and the result is NULL only
+        // when every argument is NULL.
+        if (roll == 3 && profile.Allows(ExprFeature.GreatestLeast) && FuzzTypes.IsOrderable(type))
+        {
+            int count = random.Between(2, 3);
+            List<Expr> arguments = new(count);
+            for (int i = 0; i < count; i++)
+                arguments.Add(Generate(type, scope, depth + 1));
+            return new FunctionExpr(random.NextBool() ? "greatest" : "least", arguments, type);
+        }
 
         return null;
     }

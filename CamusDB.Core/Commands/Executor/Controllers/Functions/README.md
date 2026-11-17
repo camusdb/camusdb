@@ -23,6 +23,7 @@ Built-in function groups. Each lowercase name in the second column is a register
 | `IdScalarFunctions` | `gen_id` — generates a new ObjectId |
 | `UuidScalarFunctions` | `gen_uuid_v4`, `gen_uuid_v7` |
 | `NullScalarFunctions` | `coalesce`, `ifnull` / `nvl`, `nullif` |
+| `ExtremumScalarFunctions` | `greatest`, `least` — the largest or smallest argument, with NULL arguments left out (PostgreSQL rule; MySQL returns NULL for any NULL argument); the result has the common type of the arguments, as for `coalesce` |
 | `JsonScalarFunctions` | `json_valid`, `json_type`, `json_extract`, `json_value`, `json_contains`, `json_array_length` |
 | `RegexScalarFunctions` | `regexp_like`, `regexp_match`, `regexp_matches`, `regexp_replace`, `regexp_count`, `regexp_instr`, `regexp_substr`, `regexp_split_to_array`, `regexp_split_to_table` |
 | `VectorScalarFunctions` | `vector_dims`, `octet_length`, `l2_distance`, `inner_product`, `cosine_distance` |

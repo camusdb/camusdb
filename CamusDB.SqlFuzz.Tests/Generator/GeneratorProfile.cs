@@ -13,6 +13,7 @@ internal enum ExprFeature
     Case,
     Coalesce,
     NullIf,
+    GreatestLeast,
     InList,
     Between,
     Like,

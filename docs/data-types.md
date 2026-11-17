@@ -897,6 +897,22 @@ before the row is evaluated, so stopping does not stop them.
 `IF` is a reserved word, so `IF NOT EXISTS` and `IF EXISTS` in DDL do not change. `EXPLAIN` shows
 `IF(…)`.
 
+#### GREATEST and LEAST
+
+`GREATEST(a, b, …)` returns the largest of its arguments, and `LEAST(a, b, …)` the smallest, as in
+PostgreSQL:
+
+- A call takes one argument or more. A call with no argument fails.
+- A NULL argument is left out. The result is NULL only when every argument is NULL, so
+  `GREATEST(NULL, 2, 1)` is `2`. MySQL returns NULL when any argument is NULL; CamusDB does not.
+- The result has the common type of the arguments, by the rule above for `CASE` and `COALESCE`. So
+  `GREATEST(3, 2.5)` is the `float64` `3`, and `GREATEST(int_col, float_col)` is a `float64` also in a row
+  where `float_col` is NULL. Two arguments with no common type, such as `GREATEST(1, 'a')`, fail with
+  `CADB0400` when the statement is bound.
+- The values compare as `<` and `>` compare them: `NaN` is above `Infinity`, and strings compare in the
+  string order, so `LEAST('apple', 'Cherry')` is `'Cherry'`. Of two equal values the first one wins.
+- Every argument runs, because each one can be the result.
+
 To declare `string(N)` / `array(T)` over HTTP, the create-table column carries `maxLength` and
 `arrayElementType` fields alongside `type`.
 
