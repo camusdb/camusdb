@@ -335,7 +335,8 @@ public sealed class TestHashJoinExecutor : SharedNodeBaseTest
     public async Task HashJoin_BuildCapFallback_StillCorrect()
     {
         // A cap of 1 means the build phase is exceeded immediately — falls back to nested-loop.
-        HJFixture f = await SetupOrdersItems(options: Options with { HashJoinMaxBuildRows = 1 });
+        // The cap applies only with spill off; with spill on, the build goes to the Grace hash join.
+        HJFixture f = await SetupOrdersItems(options: Options with { SpillEnabled = false, HashJoinMaxBuildRows = 1 });
 
         List<QueryResultRow> rows = await Run(f,
             "SELECT o.name, li.product " +

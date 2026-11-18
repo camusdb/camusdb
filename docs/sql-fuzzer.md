@@ -42,7 +42,7 @@ compares a result with itself.
 | Arm | Options |
 |---|---|
 | `heuristic-planner` | `CostBasedAccessPathEnabled = false, CostBasedJoinOrderEnabled = false` |
-| `no-hash-join` | `HashJoinMaxBuildRows = 0`: hash joins fall back to nested loops |
+| `no-hash-join` | `SpillEnabled = false, HashJoinMaxBuildRows = 0`: hash joins fall back to nested loops. The cap applies only with spill off, so the arm turns spill off |
 | `grace-hash-join` | `SpillEnabled = true, ForceSpillThresholdRows = 1` |
 | `index-batch-1` | `IndexScanFetchBatchSize = 1` |
 | `plan-cache` | `PlanCacheEnabled = true` |

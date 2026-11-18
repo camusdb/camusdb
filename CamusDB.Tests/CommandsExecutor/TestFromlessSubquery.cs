@@ -488,8 +488,9 @@ internal sealed class TestFromlessSubquery : BaseTest
         foreach (CamusDBOptions options in new[]
         {
             Options,
-            Options with { HashJoinMaxBuildRows = 0 },
-            Options with { SpillEnabled = true, ForceSpillThresholdRows = 1 },
+            Options with { SpillEnabled = false },
+            Options with { SpillEnabled = false, HashJoinMaxBuildRows = 0 },
+            Options with { ForceSpillThresholdRows = 1 },
             Options with { PlanCacheEnabled = true },
             Options with { BoundQueryCacheEnabled = false },
             Options with { CostBasedJoinOrderEnabled = false, CostBasedAccessPathEnabled = false },

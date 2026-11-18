@@ -675,8 +675,9 @@ applies the `PostJoinFilter`, then hands the cursor to `QueryPostScanPipeline.Ap
   columns; stream the probe side and look up each row. A key can be an expression of one side
   (`JoinEquiJoinAnalyzer` matches it, `JoinKeyExpressionList` computes it for each row from the key
   column list of that side); such a node is never a merge join or a broadcast probe. See
-  [`joins.md`](./joins.md#expression-keys). Falls back to nested-loop if the build
-  side exceeds `HashJoinMaxBuildRows`. Build side is the smaller estimated input for an inner
+  [`joins.md`](./joins.md#expression-keys). A build side that passes the spill caps runs as a
+  Grace hash join. With spill off, it falls back to nested-loop if the build side exceeds
+  `HashJoinMaxBuildRows`. Build side is the smaller estimated input for an inner
   join and always the right input for a left outer join. Left outer: a probe row with a NULL key,
   no bucket, or no bucket row that passes `ON` is padded at once. The Grace path applies the same
   rule per partition (a probe row is unmatched overall exactly when it is unmatched in its own

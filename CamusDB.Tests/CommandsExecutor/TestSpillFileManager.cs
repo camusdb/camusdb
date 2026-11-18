@@ -376,7 +376,7 @@ public sealed class TestSpillFileManager
     {
         CamusDBOptions defaults = CamusDBOptions.Default;
 
-        Assert.That(defaults.SpillEnabled, Is.False);
+        Assert.That(defaults.SpillEnabled, Is.True);
         Assert.That(defaults.SpillThresholdRows, Is.EqualTo(500_000));
         Assert.That(defaults.SpillMergeFanIn, Is.EqualTo(16));
         Assert.That(defaults.ForceSpillThresholdRows, Is.Null);

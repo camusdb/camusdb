@@ -83,9 +83,9 @@ internal sealed class QueryAggregator
     }
 
     /// <summary>
-    /// Aggregates grouped rows. When <see cref="context.Options.SpillEnabled"/> is <c>false</c>
-    /// (the default), all groups are accumulated in a single in-memory dictionary — same as the
-    /// original implementation. When spilling is enabled rows fold into accumulators until the
+    /// Aggregates grouped rows. When <see cref="context.Options.SpillEnabled"/> is <c>false</c>,
+    /// all groups are accumulated in a single in-memory dictionary — same as the
+    /// original implementation. When spilling is enabled (the default) rows fold into accumulators until the
     /// distinct group count reaches <see cref="context.Options.SpillEffectiveThreshold"/> or the
     /// estimated group bytes reach <see cref="CamusDBOptions.SpillEffectiveThresholdBytes"/>; if
     /// overflow occurs the remaining rows are partitioned into <see cref="context.Options.SpillMergeFanIn"/> spill files by

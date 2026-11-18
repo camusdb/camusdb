@@ -481,11 +481,11 @@ public class TestSetOperationsPlans : SetOperationsTestBase
         (string Sql, string Node)[] forms =
         [
             ("SELECT x FROM a UNION ALL SELECT y FROM b", "union(all)"),
-            ("SELECT x FROM a UNION SELECT y FROM b", "union(distinct: hash)"),
-            ("SELECT x FROM a INTERSECT SELECT y FROM b", "intersect(hash)"),
-            ("SELECT x FROM a INTERSECT ALL SELECT y FROM b", "intersect(all, hash)"),
-            ("SELECT x FROM a EXCEPT SELECT y FROM b", "except(hash)"),
-            ("SELECT x FROM a EXCEPT ALL SELECT y FROM b", "except(all, hash)"),
+            ("SELECT x FROM a UNION SELECT y FROM b", "union(distinct: hash, spill)"),
+            ("SELECT x FROM a INTERSECT SELECT y FROM b", "intersect(hash, spill)"),
+            ("SELECT x FROM a INTERSECT ALL SELECT y FROM b", "intersect(all, hash, spill)"),
+            ("SELECT x FROM a EXCEPT SELECT y FROM b", "except(hash, spill)"),
+            ("SELECT x FROM a EXCEPT ALL SELECT y FROM b", "except(all, hash, spill)"),
         ];
 
         foreach ((string sql, string node) in forms)
@@ -517,10 +517,38 @@ public class TestSetOperationsPlans : SetOperationsTestBase
             "EXPLAIN SELECT x FROM a UNION ALL SELECT y FROM b EXCEPT SELECT 1"));
         string all = string.Join(" | ", lines);
 
-        Assert.AreEqual(1, lines.Count(l => l == "except(hash)"), all);
+        Assert.AreEqual(1, lines.Count(l => l == "except(hash, spill)"), all);
         Assert.AreEqual(1, lines.Count(l => l == "union(all)"), all);
         Assert.AreEqual(2, lines.Count(l => l == "operand(left)"), all);
-        Assert.That(lines.IndexOf("except(hash)"), Is.LessThan(lines.IndexOf("union(all)")), all);
+        Assert.That(lines.IndexOf("except(hash, spill)"), Is.LessThan(lines.IndexOf("union(all)")), all);
+    }
+
+    /// <summary>
+    /// With spill off, the hash tables of a set operation stay in memory, so no label has the
+    /// <c>spill</c> suffix. The default engine has spill on, so this needs its own engine.
+    /// </summary>
+    [Test]
+    public async Task Explain_SpillOff_LabelsHaveNoSpillSuffix()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) =
+            await CreateDatabase(Options with { SpillEnabled = false });
+        await SeedTwoTables(executor, database, dbname);
+
+        (string Sql, string Node)[] forms =
+        [
+            ("SELECT x FROM a UNION ALL SELECT y FROM b", "union(all)"),
+            ("SELECT x FROM a UNION SELECT y FROM b", "union(distinct: hash)"),
+            ("SELECT x FROM a INTERSECT SELECT y FROM b", "intersect(hash)"),
+            ("SELECT x FROM a INTERSECT ALL SELECT y FROM b", "intersect(all, hash)"),
+            ("SELECT x FROM a EXCEPT SELECT y FROM b", "except(hash)"),
+            ("SELECT x FROM a EXCEPT ALL SELECT y FROM b", "except(all, hash)"),
+        ];
+
+        foreach ((string sql, string node) in forms)
+        {
+            List<string> lines = Lines(await ExecQuery(executor, database, dbname, "EXPLAIN " + sql));
+            Assert.That(lines, Does.Contain(node), string.Join(" | ", lines));
+        }
     }
 
     [Test]

@@ -165,7 +165,7 @@ the distinct left rows that it returned, so it does not return one twice.
 
 ### Spill to disk
 
-With `spill_enabled` on, the hash tables spill to disk by the rules of
+With `spill_enabled` on (the default), the hash tables spill to disk by the rules of
 [spill-to-disk.md](./spill-to-disk.md):
 
 - `UNION` spills as `DISTINCT` does.
@@ -206,7 +206,7 @@ that it did.
 EXPLAIN SELECT x FROM a WHERE x > 1 UNION SELECT y FROM b ORDER BY 1
 
 node         detail
-union        distinct: hash
+union        distinct: hash, spill
 operand      left
 project
 filter       x > 1

@@ -463,7 +463,7 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 # ── Query execution ───────────────────────────────────────────────────────────
 # index_scan_fetch_batch_size: 64        # row ids buffered from a non-covering index scan before one batched row fetch (>= 1)
 # max_query_parallelism: 1               # span workers per full table scan; 1 = sequential. Results and row order never change
-# hash_join_max_build_rows: 1000000      # rows a hash-join build side may hold before it falls back to nested loop; applies only while spill is off (>= 1)
+# hash_join_max_build_rows: 1000000      # rows a hash-join build side may hold before it falls back to nested loop; applies only while spill is off; spill is on by default (>= 1)
 # broadcast_join_max_build_rows: 10000   # largest hash-join build side shipped to remote probe fragments; 0 disables broadcast joins
 # net_weight: 0.01                       # planner cost per byte sent over the network; 0 disables network costing
 #
@@ -477,12 +477,13 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 # borrowed_decode: adaptive              # adaptive | force_eager | force_borrowed
 
 # ── Spill-to-disk ─────────────────────────────────────────────────────────────
-# With spill_enabled false, every blocking operator (sort, GROUP BY, DISTINCT, hash join,
-# derived-table materialization, DELETE/UPDATE row buffers) stays in memory. With it true, an operator
-# writes sorted runs or partitioned rows to temp files under {data_dir}/tmp/spill/ once its buffer
-# reaches spill_threshold_rows or spill_threshold_bytes. Spill files are deleted when the operator finishes, is cancelled or
-# fails; files left by a crash are removed at the next startup. See docs/spill-to-disk.md.
-# spill_enabled: false
+# With spill_enabled true (the default), a blocking operator (sort, GROUP BY, DISTINCT, hash join,
+# derived-table materialization, DELETE/UPDATE row buffers) writes sorted runs or partitioned rows to
+# temp files under {data_dir}/tmp/spill/ once its buffer reaches spill_threshold_rows or
+# spill_threshold_bytes. With it false, every blocking operator stays in memory with no cap. Spill
+# files are deleted when the operator finishes, is cancelled or fails; files left by a crash are
+# removed at the next startup. See docs/spill-to-disk.md.
+# spill_enabled: true
 # spill_threshold_rows: 500000     # per-operator row cap before spilling; must be > 0
 # spill_threshold_bytes: 268435456 # per-operator cap on estimated bytes in memory before spilling (256 MiB); <= 0 = no byte cap
 # spill_merge_fan_in: 16           # run readers open at once in a k-way merge; must be > 0

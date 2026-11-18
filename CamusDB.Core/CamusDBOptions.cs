@@ -22,7 +22,7 @@ namespace CamusDB.Core;
 /// concurrently instead of serializing on global state.</para>
 ///
 /// <para>Override with a <c>with</c> expression rather than assignment:
-/// <c>CamusDBOptions.Default with { SpillEnabled = true }</c>. Values that are genuinely fixed (the
+/// <c>CamusDBOptions.Default with { SpillThresholdRows = 10_000 }</c>. Values that are genuinely fixed (the
 /// primary-key index name, hard format limits) are not here — they are compile-time constants on
 /// <see cref="CamusDBConstants"/>.</para>
 /// </summary>
@@ -744,9 +744,10 @@ public sealed record CamusDBOptions
 
     /// <summary>
     /// Maximum number of rows the hash-join build phase may materialise before degrading, used
-    /// only when <see cref="SpillEnabled"/> is <c>false</c>: the build falls back to a nested-loop
-    /// join for correctness. When spill is enabled the build instead routes to the Grace/hybrid
-    /// hash join once it exceeds <see cref="SpillEffectiveThreshold"/>, so this cap does not apply.
+    /// only when <see cref="SpillEnabled"/> is set to <c>false</c> (spill is on by default): the
+    /// build falls back to a nested-loop join for correctness. With spill on, the build routes to
+    /// the Grace hash join once it passes <see cref="SpillEffectiveThreshold"/> rows or
+    /// <see cref="SpillEffectiveThresholdBytes"/> estimated bytes, so this cap does not apply.
     /// Default: 1_000_000 rows.
     /// </summary>
     [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
@@ -1520,17 +1521,21 @@ public sealed record CamusDBOptions
     // ──────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Gates all spill-to-disk behaviour. When <c>false</c> (default), blocking query operators
-    /// keep today's unbounded in-memory buffers — callers accept the OOM risk on large inputs.
-    /// When <c>true</c>, each blocking operator spills sorted runs to temp files once its buffer
-    /// exceeds <see cref="SpillThresholdRows"/>. If the temp store is unwritable and spill is
-    /// required, <see cref="CamusDBErrorCodes.SpillStorageUnavailable"/> is thrown instead of
-    /// silently buffering unbounded memory.
+    /// Gates all spill-to-disk behaviour. When <c>true</c> (default), each blocking operator writes
+    /// sorted runs or partitioned rows to temp files once its buffer reaches
+    /// <see cref="SpillThresholdRows"/> rows or <see cref="SpillThresholdBytes"/> estimated bytes.
+    /// If the temp store is unwritable and spill is required,
+    /// <see cref="CamusDBErrorCodes.SpillStorageUnavailable"/> is thrown, and the operator does not
+    /// buffer unbounded memory. When <c>false</c>, blocking operators keep unbounded in-memory
+    /// buffers, so a large input can exhaust the process heap, and a hash-join build past
+    /// <see cref="HashJoinMaxBuildRows"/> falls back to a nested-loop join. The browser playground
+    /// sets it to <c>false</c>, because its file system is in memory and a spill there frees no
+    /// memory.
     ///
-    /// Default: <c>false</c>.
+    /// Default: <c>true</c>.
     /// </summary>
     [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
-    public bool SpillEnabled { get; init; } = false;
+    public bool SpillEnabled { get; init; } = true;
 
     /// <summary>
     /// Per-operator in-memory row cap before the operator begins spilling to disk.

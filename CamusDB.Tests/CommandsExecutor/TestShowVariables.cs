@@ -145,19 +145,19 @@ internal sealed class TestShowVariables : BaseTest
     {
         (string defaultDb, DatabaseDescriptor _, CommandExecutor defaultEngine) = await CreateDatabase();
         (string spillDb, DatabaseDescriptor _, CommandExecutor spillEngine) =
-            await CreateDatabase(Options with { SpillEnabled = true, SpillThresholdRows = 1234 });
+            await CreateDatabase(Options with { SpillEnabled = false, SpillThresholdRows = 1234 });
 
-        QueryResultRow offRow = Single(await QueryAsync(defaultEngine, defaultDb, "SHOW VARIABLES"), "spill_enabled");
-        List<QueryResultRow> onRows = await QueryAsync(spillEngine, spillDb, "SHOW VARIABLES");
+        QueryResultRow onRow = Single(await QueryAsync(defaultEngine, defaultDb, "SHOW VARIABLES"), "spill_enabled");
+        List<QueryResultRow> offRows = await QueryAsync(spillEngine, spillDb, "SHOW VARIABLES");
 
-        Assert.AreEqual("false", Cell(offRow, "value"));
-        Assert.AreEqual("true", Cell(Single(onRows, "spill_enabled"), "value"));
-        Assert.AreEqual("1234", Cell(Single(onRows, "spill_threshold_rows"), "value"));
+        Assert.AreEqual("true", Cell(onRow, "value"));
+        Assert.AreEqual("false", Cell(Single(offRows, "spill_enabled"), "value"));
+        Assert.AreEqual("1234", Cell(Single(offRows, "spill_threshold_rows"), "value"));
 
         // `default` is the shipped value on both engines — it is what the setting would be if nothing
         // overrode it, so an overridden setting must show a value that differs from it.
-        QueryResultRow overridden = Single(onRows, "spill_enabled");
-        Assert.AreEqual("false", Cell(overridden, "default"));
+        QueryResultRow overridden = Single(offRows, "spill_enabled");
+        Assert.AreEqual("true", Cell(overridden, "default"));
         Assert.AreNotEqual(Cell(overridden, "default"), Cell(overridden, "value"));
     }
 

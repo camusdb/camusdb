@@ -1023,11 +1023,12 @@ public class ConfigDefinition
     /// <summary>
     /// Enables spill-to-disk for blocking query operators (sort, GROUP BY, DISTINCT,
     /// hash join, derived-table materialization, DELETE/UPDATE row buffers).
-    /// When <c>false</c> (default), every operator keeps its in-memory path; when <c>true</c>,
-    /// each operator spills sorted runs or partitioned rows to temp files once its buffer exceeds
-    /// <see cref="SpillThresholdRows"/>. Maps to <c>CamusDBOptions.SpillEnabled</c>.
+    /// When <c>true</c> (default), each operator spills sorted runs or partitioned rows to temp
+    /// files once its buffer reaches <see cref="SpillThresholdRows"/> rows or
+    /// <see cref="SpillThresholdBytes"/> estimated bytes; when <c>false</c>, every operator keeps
+    /// its in-memory path. Maps to <c>CamusDBOptions.SpillEnabled</c>.
     /// </summary>
-    public bool SpillEnabled { get; set; } = false;
+    public bool SpillEnabled { get; set; } = true;
 
     /// <summary>
     /// Per-operator in-memory row cap before the operator begins spilling to disk.

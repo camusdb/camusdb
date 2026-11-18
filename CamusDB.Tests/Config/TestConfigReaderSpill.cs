@@ -56,7 +56,7 @@ public sealed class TestConfigReaderSpill
     {
         ConfigDefinition config = new ConfigReader().Read("mode: standalone");
 
-        Assert.That(config.SpillEnabled,       Is.False,              "default spill_enabled must be false");
+        Assert.That(config.SpillEnabled,       Is.True,               "default spill_enabled must be true");
         Assert.That(config.SpillThresholdRows, Is.EqualTo(500_000),   "default spill_threshold_rows must be 500000");
         Assert.That(config.SpillMergeFanIn,    Is.EqualTo(16),        "default spill_merge_fan_in must be 16");
     }
@@ -160,7 +160,7 @@ public sealed class TestConfigReaderSpill
     {
         CamusDBOptions resolved = ConfigResolver.Resolve(new ConfigReader().Read("mode: standalone"));
 
-        Assert.That(resolved.SpillEnabled,       Is.False,            "omitted spill_enabled must default to false");
+        Assert.That(resolved.SpillEnabled,       Is.True,             "omitted spill_enabled must default to true");
         Assert.That(resolved.SpillThresholdRows, Is.EqualTo(500_000), "omitted spill_threshold_rows must default to 500000");
         Assert.That(resolved.SpillMergeFanIn,    Is.EqualTo(16),      "omitted spill_merge_fan_in must default to 16");
     }

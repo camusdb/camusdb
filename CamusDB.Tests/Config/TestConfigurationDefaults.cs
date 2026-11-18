@@ -107,7 +107,7 @@ public class TestConfigurationDefaults
         Assert.AreEqual(5_000, CamusDBOptions.Default.ReplicationWaitDeadlineMs, nameof(CamusDBOptions.Default.ReplicationWaitDeadlineMs));
         Assert.AreEqual(64, CamusDBOptions.Default.MaxIdentifierLength, nameof(CamusDBOptions.Default.MaxIdentifierLength));
         Assert.AreEqual(512, CamusDBOptions.Default.MaxColumnsPerTable, nameof(CamusDBOptions.Default.MaxColumnsPerTable));
-        Assert.AreEqual(false, CamusDBOptions.Default.SpillEnabled, nameof(CamusDBOptions.Default.SpillEnabled));
+        Assert.AreEqual(true, CamusDBOptions.Default.SpillEnabled, nameof(CamusDBOptions.Default.SpillEnabled));
         Assert.AreEqual(500_000, CamusDBOptions.Default.SpillThresholdRows, nameof(CamusDBOptions.Default.SpillThresholdRows));
         Assert.AreEqual(256L * 1024 * 1024, CamusDBOptions.Default.SpillThresholdBytes, nameof(CamusDBOptions.Default.SpillThresholdBytes));
         Assert.AreEqual(16, CamusDBOptions.Default.SpillMergeFanIn, nameof(CamusDBOptions.Default.SpillMergeFanIn));

@@ -499,8 +499,9 @@ of its own; the join line names it (`build=li`).
 
 `build=li` means `line_items` is materialized into the in-memory hash table; `orders` is
 streamed as the probe side. The planner chose `li` as the build side because it estimated
-fewer rows than `orders`. When the build side exceeds `HashJoinMaxBuildRows` (default 1 000 000)
-the executor falls back to nested-loop join for that query.
+fewer rows than `orders`. When the build side passes the spill caps (500 000 rows or 256 MiB of
+estimated bytes by default), the join runs as a Grace hash join over spill files. With spill off, a
+build side above `HashJoinMaxBuildRows` (default 1 000 000) falls back to a nested-loop join.
 
 ---
 

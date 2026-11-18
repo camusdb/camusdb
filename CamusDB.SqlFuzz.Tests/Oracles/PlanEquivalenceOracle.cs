@@ -319,7 +319,7 @@ internal sealed class PlanEquivalenceOracle : IOracle
     [
         new("heuristic-planner", o => o with { CostBasedAccessPathEnabled = false, CostBasedJoinOrderEnabled = false },
             "CostBasedAccessPathEnabled = false, CostBasedJoinOrderEnabled = false"),
-        new("no-hash-join", o => o with { HashJoinMaxBuildRows = 0 }, "HashJoinMaxBuildRows = 0"),
+        new("no-hash-join", o => o with { SpillEnabled = false, HashJoinMaxBuildRows = 0 }, "SpillEnabled = false, HashJoinMaxBuildRows = 0"),
         new("grace-hash-join", o => o with { SpillEnabled = true, ForceSpillThresholdRows = 1 }, "SpillEnabled = true, ForceSpillThresholdRows = 1"),
         new("index-batch-1", o => o with { IndexScanFetchBatchSize = 1 }, "IndexScanFetchBatchSize = 1"),
         new("plan-cache", o => o with { PlanCacheEnabled = true }, "PlanCacheEnabled = true"),

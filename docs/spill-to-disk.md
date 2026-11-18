@@ -7,10 +7,10 @@ heap. Spill-to-disk lets each of these operators offload its buffer to temporary
 grows past a configured threshold, trading memory for disk so a large statement completes instead
 of OOM-ing the node.
 
-The feature is **off by default** and is gated by a single flag. When it is off, every operator
-keeps its original in-memory buffer and behaves exactly as before. When it is on but an operator's
-input stays under the threshold, that operator also stays entirely in memory — the spill machinery
-only engages once a buffer actually overflows.
+The feature is **on by default** and is gated by a single flag. When an operator's input stays
+under the caps, that operator stays entirely in memory — the spill machinery only engages once a
+buffer overflows. When the flag is off, every operator keeps its in-memory buffer with no cap. The
+[design notes](#design-notes) list the other differences between the two settings.
 
 ## What spills, and what doesn't
 
@@ -190,7 +190,7 @@ Spill is controlled by these knobs, settable in `config.yml` as `spill_enabled` 
 
 | Knob | YAML key | Default | Meaning |
 |---|---|---|---|
-| `SpillEnabled` | `spill_enabled` | `false` | Master switch. When `false`, no operator spills and behavior is identical to pre-spill CamusDB. |
+| `SpillEnabled` | `spill_enabled` | `true` | Master switch. When `false`, no operator spills, and a hash-join build past `HashJoinMaxBuildRows` runs as a nested-loop join. |
 | `SpillThresholdRows` | `spill_threshold_rows` | `500_000` | Per-operator in-memory row cap before that operator begins spilling. |
 | `SpillThresholdBytes` | `spill_threshold_bytes` | `268435456` (256 MiB) | Per-operator cap on the estimated bytes in memory before that operator begins spilling. Checked beside the row cap. `<= 0` removes it. |
 | `SpillMergeFanIn` | `spill_merge_fan_in` | `16` | Maximum simultaneously-open spill runs during a merge pass; more runs trigger a multi-pass merge. |
@@ -199,6 +199,9 @@ Spill is controlled by these knobs, settable in `config.yml` as `spill_enabled` 
 When `SpillEnabled` is `false`, the threshold, fan-in and total-bytes knobs are ignored. This includes
 the byte cap: without spill an operator has nowhere to put its rows, so the spill-off behavior does
 not change.
+
+The browser playground sets `SpillEnabled = false`. Its file system is in memory, so a spill file
+there frees no memory and adds only the cost to encode and decode the rows.
 
 ## Errors
 
@@ -221,7 +224,8 @@ other queries release their spill files or when disk space is freed.
 
 ## Known limitations
 
-With `SpillEnabled` off, this does not apply — behavior is unchanged from a build without spill.
+These limits apply with `SpillEnabled` on. With it off, no operator spills and no operator has a
+memory cap.
 
 - **The caps are per operator. A statement has no cap of its own.** A statement with several retaining operators,
   and several statements at once, can hold a multiple of `SpillThresholdBytes`.
@@ -238,8 +242,23 @@ With `SpillEnabled` off, this does not apply — behavior is unchanged from a bu
 
 ## Design notes
 
-- **Off is byte-identical.** With `SpillEnabled = false`, and with it on but under threshold, each
-  operator keeps its exact original in-memory path. Spill is purely additive.
+- **Under the caps, spill on returns the same rows as spill off.** An operator whose input stays
+  under both caps keeps its rows in memory and writes no file. These are the differences between the
+  two settings below the caps:
+  - Each retaining operator estimates the bytes of each row that it keeps, to check
+    `SpillThresholdBytes`. The measured cost is within the noise.
+  - The hash-join build goes to the Grace hash join at the row cap or the byte cap. With spill off,
+    it holds up to `HashJoinMaxBuildRows` rows (1,000,000) and then runs as a nested-loop join. The
+    byte cap stops a build of three short columns (about 500 estimated bytes for each row) near
+    530,000 rows, and a build of rows with a 4,000-character string near 31,000 rows. In a
+    measurement, the Grace path took 1.25 times (750,000 short rows) to 2.3 times (36,000 wide rows)
+    as long as the in-memory join.
+  - A nested-loop join keeps its right side with no row cap, and that buffer spills. With spill off,
+    it keeps at most `HashJoinMaxBuildRows` rows and reads a larger right side again for each left
+    row.
+  - The planner does not use the bounded top-k when `LIMIT + OFFSET` is above the row threshold. The
+    external merge sort runs instead. In a measurement it was not slower than the top-k.
+  - The EXPLAIN labels of `UNION`, `INTERSECT` and `EXCEPT` end in `, spill`.
 - **Correctness first.** `GROUP BY` never writes or merges partial accumulators. The
   accumulators built before the overflow stay in memory and move with their partition, and only the
   rows that arrive after the overflow go to disk, so each group is accumulated once, in input order.

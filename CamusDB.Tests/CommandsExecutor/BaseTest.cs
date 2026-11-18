@@ -164,7 +164,7 @@ public abstract class BaseTest
     /// <summary>
     /// Hook for a fixture to state the configuration it needs, applied once per test before anything is
     /// constructed. Override with a <c>with</c> expression — e.g.
-    /// <c>defaults with { SpillEnabled = true }</c> — instead of assigning to a static and restoring it
+    /// <c>defaults with { SpillThresholdRows = 10_000 }</c> — instead of assigning to a static and restoring it
     /// in tear-down. Configuration is fixed when a component is built, so setting it afterwards has no
     /// effect on an engine that already exists.
     /// </summary>
