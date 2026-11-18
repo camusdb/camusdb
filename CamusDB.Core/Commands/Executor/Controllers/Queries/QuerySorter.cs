@@ -35,10 +35,10 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// <see cref="context.Options.SpillMergeFanIn"/> simultaneously-open readers per merge pass.
 ///
 /// <b>Computed ordering keys</b> (any ORDER BY clause carrying an expression) are evaluated
-/// exactly once per row. The two computed-key paths that never spill — the bounded retention and
-/// the flag-off full sort — keep the keys beside the rows (<see cref="RankedRow"/>) and emit the
-/// input rows untouched. The spill-capable full sort materializes the keys as internal
-/// <c>~sort</c> carrier columns so they round-trip through spill files without recomputation;
+/// exactly once per row. The bounded retention and the full sort keep the keys beside the rows
+/// (<see cref="RankedRow"/>) and emit the input rows untouched while their entries stay under the
+/// spill caps. A path that passes a cap materializes the keys it already holds as internal
+/// <c>~sort</c> carrier columns, so they round-trip through spill files without recomputation;
 /// <see cref="SortKeyCarrier"/> keeps that attachment positional for <see cref="QueryRow"/>
 /// inputs and strips it before any row leaves the operator.
 ///
@@ -152,22 +152,67 @@ internal sealed class QuerySorter
             yield break;
         }
 
-        // With spill disabled the full sort buffers every row in memory regardless, so the
-        // evaluated keys can ride beside the rows exactly as the bounded retention's do: no
-        // carrier column is attached, no strip copy is made, and each row keeps whatever backing
-        // it arrived with — a positional (QueryRow) row stays positional for the projector and
-        // the wire serializers downstream.
-        if (!context.Options.SpillEnabled)
+        await foreach (QueryResultRow row in SortByComputedKeysAsync(ticket, ticket.OrderBy, dataCursor, context, cancellationToken).ConfigureAwait(false))
+            yield return row;
+    }
+
+    /// <summary>
+    /// The full sort of an ordering with a computed key. Each key is evaluated once per row, and the
+    /// keys stay beside the rows (<see cref="RankedRow"/>) while the buffered entries are under the
+    /// row cap (<see cref="CamusDBOptions.SpillEffectiveThreshold"/>) and the byte cap
+    /// (<see cref="CamusDBOptions.SpillEffectiveThresholdBytes"/>). An input that ends under both caps
+    /// is sorted in memory, and its rows leave with the backing they arrived with: a positional
+    /// (<see cref="QueryRow"/>) row stays positional for the projector and the wire serializers. So
+    /// below the caps a sort with spill enabled does the same work as one with spill disabled, which
+    /// has no caps.
+    ///
+    /// <para>When the buffered entries reach a cap, the keys already evaluated become <c>~sort</c>
+    /// carrier columns (<see cref="SortKeyCarrier"/>), and the buffered entries, then the rest of the
+    /// input, go to the external sort. The carrier columns round-trip through the spill files with no
+    /// format change, so no key is evaluated again, and the external sort orders on them with the
+    /// comparer of an ordinary column sort. The hand-over releases each entry as it passes it on, so it
+    /// holds about one buffer of rows. The external sort charges the carrier rows to its own caps, so
+    /// its buffer stays under them even where its estimate of a carrier row differs from the estimate
+    /// of the entry.</para>
+    /// </summary>
+    private static async IAsyncEnumerable<QueryResultRow> SortByComputedKeysAsync(
+        QueryTicket ticket,
+        IReadOnlyList<QueryOrderBy> orderBy,
+        IAsyncEnumerable<QueryResultRow> dataCursor,
+        QueryExecutionContext context,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        bool canSpill = context.Options.SpillEnabled;
+        int rowCap = context.Options.SpillEffectiveThreshold;
+        long byteCap = context.Options.SpillEffectiveThresholdBytes;
+
+        List<RankedRow> buffered = new();
+        long bufferedBytes = 0;
+        bool overflowed = false;
+
+        await using IAsyncEnumerator<RankedRow> entries = EvaluateSortKeysAsync(
+            ticket, orderBy, dataCursor, cancellationToken).GetAsyncEnumerator(cancellationToken);
+
+        while (await entries.MoveNextAsync().ConfigureAwait(false))
         {
-            List<RankedRow> buffered = new();
+            RankedRow entry = entries.Current;
+            buffered.Add(entry);
 
-            await foreach (RankedRow entry in EvaluateSortKeysAsync(
-                ticket, ticket.OrderBy, dataCursor, cancellationToken).ConfigureAwait(false))
+            if (!canSpill)
+                continue;
+
+            bufferedBytes += RowMemoryEstimator.Estimate(entry.Row) + RowMemoryEstimator.EstimateKey(entry.Keys);
+
+            if (buffered.Count >= rowCap || bufferedBytes >= byteCap)
             {
-                buffered.Add(entry);
+                overflowed = true;
+                break;
             }
+        }
 
-            buffered.Sort(new RankedRowComparer(ticket.OrderBy));
+        if (!overflowed)
+        {
+            buffered.Sort(new RankedRowComparer(orderBy));
 
             foreach (RankedRow entry in buffered)
                 yield return entry.Row;
@@ -175,30 +220,28 @@ internal sealed class QuerySorter
             yield break;
         }
 
-        // The full sort can spill, so every ordering key becomes a materialized column on the row:
-        // the existing spill encoder round-trips it with no format change, and the comparer below
-        // is the same one an ordinary column sort uses — including its NULL placement, its
-        // multi-key walk and its direction handling. The carrier keeps positional rows positional
-        // (see SortKeyCarrier), so the value-only spill format and the comparer's ordinal fast
-        // path both survive the attach, and the strip hands back the input's own layout.
-        List<QueryOrderBy> materializedOrder = BuildMaterializedOrder(ticket.OrderBy);
+        // A cap was reached. The array takes over the entries so the list can let go of its own
+        // storage, and the resume clears each array slot once it has passed the entry on.
+        RankedRow[] held = buffered.ToArray();
+        buffered.Clear();
+        buffered.TrimExcess();
 
-        SortKeyCarrier carrier = new(ticket.OrderBy.Count);
+        SortKeyCarrier carrier = new(orderBy.Count);
+        QueryResultRowOrderComparer carrierComparer = new(BuildMaterializedOrder(orderBy));
 
-        IAsyncEnumerable<QueryResultRow> keyed = AttachSortKeysAsync(
-            ticket, ticket.OrderBy, dataCursor, carrier, cancellationToken);
+        IAsyncEnumerable<QueryResultRow> keyed = AttachRankedKeysAsync(ResumeAsync(held, entries), carrier, cancellationToken);
 
-        await foreach (QueryResultRow row in SortByKeys(keyed, materializedOrder, context, cancellationToken).ConfigureAwait(false))
+        await foreach (QueryResultRow row in SortWithPossibleSpillAsync(keyed, carrierComparer, context, cancellationToken).ConfigureAwait(false))
             yield return carrier.Strip(row);
     }
 
     /// <summary>
-    /// A row paired with its evaluated ordering keys, one per ORDER BY clause. Used by the two
-    /// computed-key paths that do not write rows to disk: the bounded retention (at most k alive)
-    /// and the spill-disabled full sort (everything buffered in memory anyway). Keys held here
-    /// do not become row columns, so the row itself travels untouched — except when a bounded
-    /// retention passes its byte cap and hands its entries to the spilling selection, which attaches
-    /// these same keys as carrier columns (<see cref="SelectRankedWithSpillAsync"/>).
+    /// A row paired with its evaluated ordering keys, one per ORDER BY clause. Both computed-key paths
+    /// hold their rows this way: the bounded retention (at most k alive) and the full sort
+    /// (<see cref="SortByComputedKeysAsync"/>). Keys held here do not become row columns, so the row
+    /// travels untouched. The keys become carrier columns only when a path passes a spill cap and hands
+    /// its entries to a spilling operator: the spilling selection (<see cref="SelectRankedWithSpillAsync"/>)
+    /// or the external sort.
     /// </summary>
     private readonly record struct RankedRow(QueryResultRow Row, ColumnValue[] Keys);
 
@@ -230,9 +273,14 @@ internal sealed class QuerySorter
 
     /// <summary>
     /// Evaluates every ordering key <b>once per input row</b> and pairs the row with its key array,
-    /// without touching the row itself. Key evaluation is shared with
-    /// <see cref="AttachSortKeysAsync"/> through <see cref="EvaluateKey"/>, so the bounded and
-    /// full-sort paths compute identical keys for identical rows.
+    /// without touching the row itself. The bounded retention and the full sort both take their keys
+    /// from here (through <see cref="EvaluateKey"/>), so they compute identical keys for identical rows.
+    ///
+    /// <para>An evaluation inside the comparer would call the expression O(n log n) times instead of
+    /// n. For a distance over 768 dimensions that is the difference between a scan and a stall, and a
+    /// non-deterministic expression could then give one row two different keys in two comparisons.
+    /// When a path spills, the keys go to disk as carrier columns, so a spilled key is not evaluated
+    /// again either.</para>
     /// </summary>
     private static async IAsyncEnumerable<RankedRow> EvaluateSortKeysAsync(
         QueryTicket ticket,
@@ -390,7 +438,7 @@ internal sealed class QuerySorter
     /// The spilling selection a computed-key bounded retention hands over to. The keys were evaluated
     /// once, when each row entered the retention, so they are attached as carrier columns from the
     /// entries (<see cref="SortKeyCarrier.Attach"/>), never evaluated again, and the selection orders on
-    /// them exactly as the spill-capable full computed sort does. The returned entries carry the
+    /// them exactly as the external sort of a full computed sort does after its hand-over. The returned entries carry the
     /// stripped row only; their key arrays are empty, because no comparison follows.
     /// </summary>
     private static async IAsyncEnumerable<RankedRow> SelectRankedWithSpillAsync(
@@ -696,42 +744,10 @@ internal sealed class QuerySorter
     }
 
     /// <summary>
-    /// Evaluates every ordering key <b>once per input row</b> and attaches the results as internal
-    /// carrier columns through <paramref name="carrier"/>.
-    ///
-    /// <para>Evaluating inside the comparer instead would call the expression O(n log n) times rather
-    /// than n — for a distance over 768 dimensions that is the difference between a scan and a
-    /// stall — and it would let one row's key be computed differently on two comparisons if the
-    /// expression were ever non-deterministic.</para>
-    ///
-    /// <para>The carrier travels as an ordinary column, so the existing spill encoder and k-way merge
-    /// round-trip it with no format change, and a spilled key is never recomputed. Only the
-    /// spill-capable full sort pays the attach copy here: the bounded retention and the
-    /// spill-disabled full sort never write rows to disk, so they take
-    /// <see cref="EvaluateSortKeysAsync"/> instead, and an ordinary column sort keeps the
-    /// slot-native comparison path untouched.</para>
-    /// </summary>
-    private static async IAsyncEnumerable<QueryResultRow> AttachSortKeysAsync(
-        QueryTicket ticket,
-        IReadOnlyList<QueryOrderBy> orderBy,
-        IAsyncEnumerable<QueryResultRow> cursor,
-        SortKeyCarrier carrier,
-        [EnumeratorCancellation] CancellationToken cancellationToken)
-    {
-        await foreach (QueryResultRow row in cursor.WithCancellation(cancellationToken).ConfigureAwait(false))
-        {
-            ColumnValue[] keys = new ColumnValue[orderBy.Count];
-
-            for (int i = 0; i < orderBy.Count; i++)
-                keys[i] = EvaluateKey(ticket, orderBy[i], row);
-
-            yield return carrier.Attach(row, keys);
-        }
-    }
-
-    /// <summary>
-    /// Attaches, and later removes, the materialized ordering-key columns of the spill-capable
-    /// full computed sort — keeping a positional row positional across the whole round trip.
+    /// Attaches, and later removes, the materialized ordering-key columns of a computed-key path that
+    /// spills — keeping a positional row positional across the whole round trip. A path attaches them
+    /// only once its entries pass a spill cap, so a sort that stays in memory pays no attach or strip
+    /// copy, and an ordinary column sort keeps the slot-native comparison path untouched.
     ///
     /// <para>A <see cref="QueryRow"/> input gets a positional carrier: one carrier
     /// <see cref="RowLayout"/> (the input's columns followed by the <c>~sort</c> keys) is built
@@ -849,9 +865,9 @@ internal sealed class QuerySorter
 
     /// <summary>
     /// The one definition of an ordering key's value: a column clause reads the row, an expression
-    /// clause evaluates per row. Both the carrier columns of the full sort and the key arrays of
-    /// the bounded retention come from here, so the two paths cannot compute different keys for
-    /// the same row.
+    /// clause evaluates per row. The key arrays of the bounded retention and of the full sort come
+    /// from here, and so do the carrier columns made from them, so the two paths cannot compute
+    /// different keys for the same row.
     /// </summary>
     private static ColumnValue EvaluateKey(QueryTicket ticket, QueryOrderBy clause, QueryResultRow row) =>
         clause.Expression is null

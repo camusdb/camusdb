@@ -280,6 +280,28 @@ internal sealed class TestOrderByExpressionExecution : SharedNodeBaseTest
             Assert.IsFalse(row.Row.Keys.Any(k => k.StartsWith('~')), "carrier survived the spill round trip");
     }
 
+    [Test]
+    [NonParallelizable]
+    public async Task SpillOnUnderTheThreshold_ReturnsTheSameRowsAsSpillOff()
+    {
+        // Spill on with the shipped thresholds: four rows stay far under both caps, so the sort keeps
+        // its keys beside the rows and must return exactly what the spill-off engine returns.
+        (DatabaseDescriptor offDb, CommandExecutor offExecutor) = await SetupNames(Options with { SpillEnabled = false });
+        (DatabaseDescriptor onDb, CommandExecutor onExecutor) = await SetupNames(Options with { SpillEnabled = true });
+
+        const string sql = "SELECT * FROM t ORDER BY length(name) DESC";
+
+        List<QueryResultRow> off = await Select(offExecutor, offDb, sql);
+        List<QueryResultRow> on = await Select(onExecutor, onDb, sql);
+
+        CollectionAssert.AreEqual(new[] { "dddd", "ccc", "bb", "a" }, off.Select(r => r.Row["name"].StrValue).ToArray());
+        CollectionAssert.AreEqual(off.Select(r => r.Row["name"].StrValue).ToArray(), on.Select(r => r.Row["name"].StrValue).ToArray());
+        CollectionAssert.AreEqual(off.Select(r => r.Row["n"].LongValue).ToArray(), on.Select(r => r.Row["n"].LongValue).ToArray());
+
+        foreach (QueryResultRow row in on)
+            Assert.IsFalse(row.Row.Keys.Any(k => k.StartsWith('~')), "SELECT * must not expose an internal sort key");
+    }
+
     // ── The key is materialized once per row, not once per comparison ────────
 
     [Test]

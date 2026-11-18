@@ -502,6 +502,213 @@ public sealed class TestQuerySorterSpill
     }
 
     // ──────────────────────────────────────────────────────────────────────────
+    // Full computed sort: keys beside the rows until a spill cap
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// With spill on and an input under both caps, a full computed sort holds its keys beside the
+    /// rows, as it does with spill off. Each row leaves as the same object that came in: no carrier
+    /// copy and no strip copy, and no spill file.
+    /// </summary>
+    [Test]
+    public async Task ComputedOrdering_SpillOnUnderTheCaps_ReturnsTheInputRowObjects()
+    {
+        RowLayout layout = RowLayout.ForColumns(["a", "b"]);
+
+        List<QueryResultRow> input = new(12);
+        for (long i = 0; i < 12; i++)
+            input.Add(new(default, new QueryRow(default, layout, [new(ColumnType.Integer64, (12 - i) % 5), new(ColumnType.Integer64, i)])));
+
+        QueryTicket ticket = MakeTicket(
+            new QueryOrderBy("k", OrderType.Ascending, Identifier("a")),
+            new QueryOrderBy("b", OrderType.Ascending));
+
+        CamusDB.Core.Diagnostics.StatementProbe probe = new();
+        QueryExecutionContext spillOnUnderCaps = new(
+            CamusDBOptions.Default with { SpillEnabled = true, ForceSpillThresholdRows = 1000 },
+            spillDirectory: _dataDir, probe: probe);
+
+        List<QueryResultRow> reference = await new QuerySorter().SortResultset(ticket, ToAsync(input), SpillOff).ToListAsync();
+        List<QueryResultRow> sorted = await new QuerySorter().SortResultset(ticket, ToAsync(input), spillOnUnderCaps).ToListAsync();
+
+        Assert.That(sorted.Select(r => r.Row["b"].LongValue),
+            Is.EqualTo(reference.Select(r => r.Row["b"].LongValue)).AsCollection);
+
+        HashSet<object> inputRows = new(input.Select(r => (object)r.Row), ReferenceEqualityComparer.Instance);
+
+        foreach (QueryResultRow row in sorted)
+            Assert.IsTrue(inputRows.Contains(row.Row), "a row under the caps must leave as the input row object");
+
+        Assert.IsFalse(probe.Spilled, "an input under the caps must not spill");
+        Assert.AreEqual(0, SpillFileCount());
+    }
+
+    /// <summary>
+    /// A full computed sort of wide rows with the row cap out of reach passes the byte cap, hands its
+    /// entries to the external sort, and returns the in-memory order with no carrier column and no
+    /// file left behind.
+    /// </summary>
+    [Test]
+    public async Task ComputedOrdering_PastTheByteCap_MatchesInMemoryAndDeletesItsFiles()
+    {
+        QueryTicket ticket = MakeTicket(
+            new QueryOrderBy("k", OrderType.Descending, Identifier("n")),
+            new QueryOrderBy("tie", OrderType.Ascending));
+
+        CamusDB.Core.Diagnostics.StatementProbe probe = new();
+
+        List<QueryResultRow> reference = await new QuerySorter().SortResultset(ticket, ToAsync(WideRows("shuffled")), SpillOff).ToListAsync();
+        List<QueryResultRow> spilled = await new QuerySorter().SortResultset(ticket, ToAsync(WideRows("shuffled")), SpillOnBytes(8 * 1024, probe)).ToListAsync();
+
+        Assert.IsTrue(probe.Spilled, "200 rows of 1 KiB pass an 8 KiB cap");
+        Assert.AreEqual(200, spilled.Count);
+        Assert.That(spilled.Select(r => r.Row["tie"].LongValue),
+            Is.EqualTo(reference.Select(r => r.Row["tie"].LongValue)).AsCollection);
+
+        foreach (QueryResultRow row in spilled)
+            Assert.That(row.Row.Keys.Any(static key => key.StartsWith('~')), Is.False, "carrier columns must not leak");
+
+        Assert.AreEqual(0, SpillFileCount(), "the external sort's files are deleted when it ends");
+    }
+
+    /// <summary>
+    /// A computed key is evaluated once per input row on every path: spill off, spill on under the
+    /// caps, and spill on past the row cap, where the keys already evaluated become carrier columns at
+    /// the hand-over. The row counts its reads of the key column, which only the key expression makes.
+    /// </summary>
+    [TestCase("off")]
+    [TestCase("under-caps")]
+    [TestCase("past-row-cap")]
+    public async Task ComputedOrdering_EvaluatesEachKeyOncePerRow(string path)
+    {
+        int[] keyReads = [0];
+
+        List<QueryResultRow> input = new(20);
+        for (long i = 0; i < 20; i++)
+            input.Add(new(default, new KeyReadCountingRow(keyReads, "a", new()
+            {
+                ["a"] = new(ColumnType.Integer64, (20 - i) % 7),
+                ["b"] = new(ColumnType.Integer64, i),
+            })));
+
+        QueryTicket ticket = MakeTicket(
+            new QueryOrderBy("k", OrderType.Ascending, Identifier("a")),
+            new QueryOrderBy("b", OrderType.Ascending));
+
+        QueryExecutionContext context = path switch
+        {
+            "off" => SpillOff,
+            "under-caps" => SpillOn(1000),
+            _ => SpillOn(3, 2),
+        };
+
+        List<QueryResultRow> sorted = await new QuerySorter().SortResultset(ticket, ToAsync(input), context).ToListAsync();
+
+        Assert.AreEqual(20, sorted.Count);
+        Assert.AreEqual(20, keyReads[0], "the key expression must read each input row exactly once");
+        Assert.AreEqual(0, SpillFileCount());
+    }
+
+    /// <summary>A full computed sort that throws after the hand-over to the external sort deletes its spill files.</summary>
+    [Test]
+    public async Task ComputedOrdering_ExceptionAfterTheHandOver_NoSpillFilesRemain()
+    {
+        QueryTicket ticket = MakeTicket(new QueryOrderBy("k", OrderType.Descending, Identifier("n")));
+
+        try
+        {
+            await new QuerySorter()
+                .SortResultset(ticket, ThrowingCursor(NumericRows(10), throwAfter: 7), SpillOn(2))
+                .ToListAsync();
+            Assert.Fail("Expected exception was not thrown");
+        }
+        catch (InvalidOperationException) { }
+
+        Assert.That(SpillFileCount(), Is.EqualTo(0), "all spill files deleted when the cursor throws after the hand-over");
+    }
+
+    /// <summary>A full computed sort cancelled while it returns rows from spill runs deletes its spill files.</summary>
+    [Test]
+    public async Task ComputedOrdering_CancelledAfterTheHandOver_NoSpillFilesRemain()
+    {
+        QueryTicket ticket = MakeTicket(new QueryOrderBy("k", OrderType.Ascending, Identifier("n")));
+        using CancellationTokenSource cts = new();
+        int yielded = 0;
+
+        try
+        {
+            await foreach (QueryResultRow _ in new QuerySorter()
+                .SortResultset(ticket, ToAsync(NumericRows(20)), SpillOn(2))
+                .WithCancellation(cts.Token))
+            {
+                if (++yielded == 3)
+                    cts.Cancel();
+            }
+        }
+        catch (OperationCanceledException) { }
+
+        Assert.That(yielded, Is.EqualTo(3), "the sort must stop at the cancellation");
+        Assert.That(SpillFileCount(), Is.EqualTo(0), "all spill files deleted on cancellation after the hand-over");
+    }
+
+    /// <summary>
+    /// Test-only row that counts its lookups of one column, so a test can prove how many times a key
+    /// expression read each row. Every other read passes through to the inner dictionary.
+    /// </summary>
+    private sealed class KeyReadCountingRow : IReadOnlyDictionary<string, ColumnValue>
+    {
+        private readonly int[] reads;
+
+        private readonly string countedColumn;
+
+        private readonly Dictionary<string, ColumnValue> inner;
+
+        public KeyReadCountingRow(int[] reads, string countedColumn, Dictionary<string, ColumnValue> inner)
+        {
+            this.reads = reads;
+            this.countedColumn = countedColumn;
+            this.inner = inner;
+        }
+
+        public ColumnValue this[string key]
+        {
+            get
+            {
+                NoteRead(key);
+                return inner[key];
+            }
+        }
+
+        public IEnumerable<string> Keys => inner.Keys;
+
+        public IEnumerable<ColumnValue> Values => inner.Values;
+
+        public int Count => inner.Count;
+
+        public bool ContainsKey(string key)
+        {
+            NoteRead(key);
+            return inner.ContainsKey(key);
+        }
+
+        public bool TryGetValue(string key, [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)] out ColumnValue value)
+        {
+            NoteRead(key);
+            return inner.TryGetValue(key, out value);
+        }
+
+        public IEnumerator<KeyValuePair<string, ColumnValue>> GetEnumerator() => inner.GetEnumerator();
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+
+        private void NoteRead(string key)
+        {
+            if (string.Equals(key, countedColumn, StringComparison.Ordinal))
+                Interlocked.Increment(ref reads[0]);
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
     // Helpers
     // ──────────────────────────────────────────────────────────────────────────
 

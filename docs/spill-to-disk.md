@@ -53,6 +53,11 @@ its current buffer to a spill file and continues. A sort writes each buffer as a
 other operators write partitions or a single overflow file depending on their strategy. The caps
 apply **per operator instance**: two operators in the same query each get their own budget.
 
+A sort on an `ORDER BY` expression computes each key once per row and keeps the keys beside the
+rows while its buffer is under both caps. When the buffer reaches a cap, the keys become extra
+columns of their rows, so they go to the spill files with the rows and are not computed again. A
+sort that stays under the caps does the same work with spill on as with spill off.
+
 The byte cap exists because a row count does not bound the heap. Ten thousand narrow rows and ten
 thousand rows that each hold a 64 KiB string differ by three orders of magnitude. The bytes are an
 estimate, charged per buffered row from what the row already holds:
