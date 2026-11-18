@@ -175,6 +175,14 @@ where it is read, as `(WITH RECURSIVE name AS (…) SELECT * FROM name) AS alias
 The T-SQL forms `CROSS APPLY` and `OUTER APPLY` are not supported. Write `CROSS JOIN LATERAL (…)` and
 `LEFT JOIN LATERAL (…) ON true`.
 
+## Functions in FROM
+
+See [set-returning functions](set-returning-functions.md#how-it-runs).
+
+| Statement | CamusDB | PostgreSQL | Why |
+|---|---|---|---|
+| `SELECT COUNT(*) FROM generate_series(1, 5000001)` | `CADB0561` | `5000001` | A statement has no time limit, so one short statement over a series of a trillion rows would run for hours. The cluster setting `max_table_function_rows` (5,000,000 rows) stops one read of a function in `FROM`. A `LIMIT` that stops the read early keeps it under the limit. The setting can be raised, and `0` turns the limit off. |
+
 ## NULL in ORDER BY
 
 NULL sorts as the smallest value, the GoogleSQL rule: it comes first in ascending order and last in

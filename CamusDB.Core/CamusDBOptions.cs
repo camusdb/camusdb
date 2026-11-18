@@ -1780,8 +1780,8 @@ public sealed record CamusDBOptions
     /// Most rows one response of a buffered transport may hold: <c>/execute-sql-query</c>,
     /// <c>/query</c>, and the RETURNING rows that the stream endpoints collect before their commit. These
     /// transports keep the whole result in memory before they send the first byte, so without a bound
-    /// one short statement such as <c>SELECT * FROM generate_series(1, 1000000000)</c> fills the managed
-    /// heap and the process dies with no error to the caller. A result past the cap is refused with
+    /// one short statement such as <c>SELECT * FROM a, b</c> over two tables of 100,000 rows fills the
+    /// managed heap and the process dies with no error to the caller. A result past the cap is refused with
     /// <see cref="CamusDBErrorCodes.ResultSetTooLarge"/> and its transaction is rolled back.
     ///
     /// <para>The streaming transports (<c>/execute-sql-query-stream</c> and the gRPC query stream) send
@@ -1828,6 +1828,26 @@ public sealed record CamusDBOptions
     /// </summary>
     [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public long MaxRecursiveCteRows { get; init; } = 10_000_000;
+
+    /// <summary>
+    /// Most rows that one read of a function in <c>FROM</c>, such as <c>generate_series</c>, may make.
+    /// One short statement can ask for a series of a trillion rows, and a statement has no time limit,
+    /// so without this limit an aggregate, a sort or a filter over that series runs for hours.
+    /// The count includes the rows that a filter then drops, because each row costs the work to make it.
+    /// The row past the limit fails the statement with
+    /// <see cref="CamusDBErrorCodes.TableFunctionRowLimitExceeded"/>.
+    /// <para>The count applies to each read. A <c>LIMIT</c> that stops the read early keeps the read under
+    /// the limit, so <c>LIMIT 10</c> over a larger series returns its rows. A join that reads the function
+    /// again starts a new count. The check runs while the rows are made, because the value of a parameter
+    /// argument is known only then.</para>
+    /// <para>The leaf scan reads the value from its database's options at the start of each read, so a
+    /// change applies to the next statement. Cluster scope: a node with another value would fail a
+    /// statement that another node runs.</para>
+    /// <para><c>&lt;= 0</c> — limit is disabled.</para>
+    /// Default: <c>5000000</c>.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
+    public long MaxTableFunctionRows { get; init; } = 5_000_000;
 
     /// <summary>
     /// Most explicit transactions (<c>/start-transaction</c>, gRPC <c>BeginTransaction</c> and the

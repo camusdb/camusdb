@@ -912,6 +912,9 @@ public class ConfigDefinition
     /// <summary>Most rows one run of a recursive CTE may make. &lt;= 0 disables. Default 10 000 000.</summary>
     public long MaxRecursiveCteRows { get; set; } = 10_000_000;
 
+    /// <summary>Most rows one read of a function in FROM may make. &lt;= 0 disables. Default 5 000 000.</summary>
+    public long MaxTableFunctionRows { get; set; } = 5_000_000;
+
     /// <summary>Most explicit transactions open at one time on this node. &lt;= 0 disables. Default 10 000.</summary>
     public int MaxOpenExplicitTransactions { get; set; } = 10_000;
 

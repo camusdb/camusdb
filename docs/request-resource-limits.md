@@ -14,6 +14,7 @@ For every limit, a value of `0` or less disables it. All of them are runtime set
 | `max_statement_bytes` | `8388608` (8 MiB) | Inline SQL text that one statement may send to the parser | CADB0557, HTTP 413 |
 | `max_recursive_cte_iterations` | `10000` | Steps of one `WITH RECURSIVE` query that make rows | CADB0560, HTTP 400 |
 | `max_recursive_cte_rows` | `10000000` | Rows that one run of a `WITH RECURSIVE` query makes | CADB0560, HTTP 400 |
+| `max_table_function_rows` | `5000000` | Rows that one read of a function in `FROM` makes | CADB0561, HTTP 400 |
 | `max_open_explicit_transactions` | `10000` | Explicit transactions open at one time on this node | CADB0558, HTTP 503 |
 | `max_client_connections` | `10000` | Client connections open at one time on this node | The connection is closed |
 | `max_databases` | `10000` | Databases in the registry | CADB0408, HTTP 500 |
@@ -27,12 +28,34 @@ limits stop it with **CADB0560** (`RecursiveQueryLimitExceeded`), and the messag
 These two settings are cluster settings: every node must give the same answer to the same statement.
 See [recursive queries](common-table-expressions.md#recursive-queries).
 
+## Functions in FROM
+
+A function in `FROM`, such as `generate_series`, makes its rows without a table, so one short
+statement can ask for a trillion rows. Memory does not stop it, because the rows stream and the
+blocking operators spill to disk. A statement has no time limit, so
+`SELECT count(*) FROM generate_series(1, 1000000000000)` would run for hours.
+
+`max_table_function_rows` stops it. The row past the limit fails the statement with **CADB0561**
+(`TableFunctionRowLimitExceeded`), and the message names the function and the setting.
+
+- The count applies to one read. When a join reads the function again, the count starts again.
+- The count includes the rows that a `WHERE` filter then drops, because each row costs the work to
+  make it.
+- A `LIMIT` that stops the read early keeps the read under the limit. `LIMIT 10` over a series of a
+  billion rows returns its 10 rows. A `LIMIT` above an `ORDER BY`, a `GROUP BY` or an aggregate
+  does not stop the read, because these operators read every row first.
+- The check runs while the rows are made, because the value of a parameter argument is known only
+  then.
+
+This setting is a cluster setting: every node must give the same answer to the same statement. See
+[set-returning functions](set-returning-functions.md#how-it-runs).
+
 ## Buffered results
 
 `/execute-sql-query` and `/query` keep the whole result in memory, and send it only after the last
-row. Without a cap, one short statement such as
-`SELECT * FROM generate_series(1, 1000000000)` grows the heap until the process dies. A dead process
-returns no error and leaves a cluster with one node fewer.
+row. Without a cap, one short statement such as `SELECT * FROM a, b` over two tables of 100,000
+rows grows the heap until the process dies. A dead process returns no error and leaves a cluster with
+one node fewer.
 
 When a result passes either cap, the node stops the read and returns **CADB0556**
 (`ResultSetTooLarge`). The check runs before the commit, so the statement's transaction is rolled
@@ -98,8 +121,8 @@ The result is the same as the scan, including the rules for `NULL` items and mix
 
 - There is no per-client rate limit. Put a rate-limiting proxy in front of a node that faces an
   untrusted network.
-- There is no statement timeout. A statement that reads a large table and returns few rows, such as
-  `SELECT count(*) FROM generate_series(1, 1000000000000)`, uses CPU until it ends or until the
+- There is no statement timeout. A statement that reads many rows and returns few, such as
+  `SELECT count(*) FROM a, b` over two tables of 100,000 rows, uses CPU until it ends or until the
   client disconnects.
 - Backup and restore write outside the disk-space admission gate. With authentication off, the
   node accepts these requests from loopback only.

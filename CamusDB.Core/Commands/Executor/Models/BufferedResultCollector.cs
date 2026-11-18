@@ -19,8 +19,8 @@ namespace CamusDB.Core.CommandsExecutor.Models;
 /// <para>Why a transport bound and not an engine bound: the same cursor feeds the streaming
 /// transports, which hold one row at a time and must stay unbounded. Only a consumer that keeps
 /// every row can run the node out of memory, so the consumer enforces the cap. Without it, one
-/// statement of a few bytes, such as <c>SELECT * FROM generate_series(1, 1000000000)</c>, grows the
-/// managed heap until the process dies, with no error to the caller and no rollback.</para>
+/// statement of a few bytes, such as <c>SELECT * FROM a, b</c> over two tables of 100,000 rows, grows
+/// the managed heap until the process dies, with no error to the caller and no rollback.</para>
 ///
 /// <para>Callers must collect <b>before</b> they commit, as they already do so that a serializable
 /// retry can restart. The refusal then rolls the statement back, and a client is never told that a

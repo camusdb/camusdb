@@ -119,6 +119,7 @@ public class TestConfigurationDefaults
         Assert.AreEqual(32, CamusDBOptions.Default.MaxIndexColumns, nameof(CamusDBOptions.Default.MaxIndexColumns));
         Assert.AreEqual(4096, CamusDBOptions.Default.MaxIndexIncludeTupleBytes, nameof(CamusDBOptions.Default.MaxIndexIncludeTupleBytes));
         Assert.AreEqual(10_000, CamusDBOptions.Default.MaxTablesPerDatabase, nameof(CamusDBOptions.Default.MaxTablesPerDatabase));
+        Assert.AreEqual(5_000_000L, CamusDBOptions.Default.MaxTableFunctionRows, nameof(CamusDBOptions.Default.MaxTableFunctionRows));
         Assert.AreEqual(2_621_440, CamusDBConstants.DefaultStringMaxLength, nameof(CamusDBConstants.DefaultStringMaxLength));
         Assert.AreEqual(10_485_760, CamusDBConstants.DefaultBytesMaxLength, nameof(CamusDBConstants.DefaultBytesMaxLength));
         Assert.AreEqual(65_535, CamusDBConstants.MaxCommentLength, nameof(CamusDBConstants.MaxCommentLength));

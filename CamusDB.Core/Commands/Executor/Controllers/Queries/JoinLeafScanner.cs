@@ -562,6 +562,10 @@ internal sealed class JoinLeafScanner
     /// Cancellation is checked every <see cref="TableFunction.CancellationCheckInterval"/> rows (each row
     /// for an extension function, whose values can be slow), because a filter that rejects every row
     /// would otherwise loop without ever reaching a consumer that checks it.</para>
+    /// <para>The row past <see cref="CamusDBOptions.MaxTableFunctionRows"/> fails the statement with
+    /// <see cref="CamusDBErrorCodes.TableFunctionRowLimitExceeded"/>. The count starts at zero for each
+    /// read, and it includes the rows that the filter drops. A consumer that stops early, such as a
+    /// <c>LIMIT</c>, ends the read before the limit.</para>
     /// </summary>
     private async IAsyncEnumerable<QueryResultRow> ScanTableFunction(
         BoundDerivedTableSource source,
@@ -585,11 +589,20 @@ internal sealed class JoinLeafScanner
         int checkInterval = function.CancellationCheckInterval;
         int untilCheck = checkInterval;
 
+        long maxRows = plan.Database.Options.MaxTableFunctionRows;
+        long made = 0;
+
         // The foreach disposes the function's enumerator when the consumer stops early (a LIMIT, a
         // cancel, an error above this scan), which is what runs a finally block in an extension's
         // iterator method.
         foreach (ColumnValue[] values in function.GenerateRows(arguments))
         {
+            if (++made > maxRows && maxRows > 0)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.TableFunctionRowLimitExceeded,
+                    $"Function '{call.FunctionName}' in FROM made more than {maxRows} rows (max_table_function_rows). " +
+                    "Narrow the arguments, add a LIMIT that stops the read, or raise the setting");
+
             if (--untilCheck == 0)
             {
                 untilCheck = checkInterval;

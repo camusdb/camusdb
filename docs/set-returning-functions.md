@@ -91,6 +91,11 @@ A view over a series survives a restart. `SHOW CREATE VIEW` prints the call as i
 - **The rows are streamed.** The function makes each row when the next operator asks for it. A
   million-row series does not become a list in memory, and `LIMIT 10` over a billion-row series
   returns at once. When a join reads the series again, the function makes the rows again.
+- **Row limit.** One read of the function makes at most `max_table_function_rows` rows (default
+  5,000,000). The row past the limit fails the statement with `CADB0561`. The count includes the
+  rows that a `WHERE` filter drops. A `LIMIT` that stops the read early keeps it under the limit,
+  but a `LIMIT` above an `ORDER BY`, a `GROUP BY` or an aggregate does not, because these operators
+  read every row first. See [`request-resource-limits.md`](./request-resource-limits.md#functions-in-from).
 - **No storage access.** The function reads no table. It takes no lock, adds nothing to a
   Serializable read set, and needs no privilege. A table joined to it still needs `SELECT` on that
   table. See [`sql-authentication.md`](./sql-authentication.md).

@@ -746,6 +746,16 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string RecursiveQueryLimitExceeded = "CADB0560";
 
+    /// <summary>
+    /// One read of a function in <c>FROM</c>, such as <c>generate_series</c>, made more rows than
+    /// <see cref="CamusDBOptions.MaxTableFunctionRows"/> allows. The count includes the rows that a filter
+    /// then dropped. Without the limit, one short statement over a huge series runs for hours, because a
+    /// statement has no time limit. The message names the function and the setting. Narrow the
+    /// arguments, add a <c>LIMIT</c> that stops the read before the limit, or raise the setting. Not
+    /// retryable as is. Maps to HTTP 400 and gRPC <c>RESOURCE_EXHAUSTED</c>.
+    /// </summary>
+    public const string TableFunctionRowLimitExceeded = "CADB0561";
+
     public const string InvalidConfig = "CADB0600";
 
     /// <summary>
@@ -1280,6 +1290,7 @@ public static class CamusDBErrorCodes
         ReturningResultTooLarge => 400,
         ResultSetTooLarge => 400,
         RecursiveQueryLimitExceeded => 400,
+        TableFunctionRowLimitExceeded => 400,
         StatementTooLarge => 413,
         ConcurrencyLimitExceeded => 503,
         QueryNotFound => 404,

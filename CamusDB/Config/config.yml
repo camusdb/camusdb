@@ -322,6 +322,7 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 # max_buffered_result_bytes: 268435456    # estimated bytes one buffered response holds (CADB0556)
 # max_recursive_cte_iterations: 10000     # steps of one WITH RECURSIVE query that make rows (CADB0560)
 # max_recursive_cte_rows: 10000000        # rows one run of a WITH RECURSIVE query makes (CADB0560)
+# max_table_function_rows: 5000000        # rows one read of a function in FROM makes (CADB0561)
 # max_open_explicit_transactions: 10000   # explicit transactions open at one time on this node (CADB0558)
 # max_client_connections: 10000           # client connections on the HTTP, HTTPS and gRPC listeners
 # cluster_activity_max_concurrent_fan_outs: 8   # concurrent SHOW CLUSTER QUERIES/CONNECTIONS (CADB0558)
