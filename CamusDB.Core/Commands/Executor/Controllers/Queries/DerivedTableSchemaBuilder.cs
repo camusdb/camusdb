@@ -518,10 +518,11 @@ internal static class DerivedTableSchemaBuilder
         new("detail",         ColumnType.String),
         new("estimated_rows", ColumnType.Integer64),
         new("estimated_cost", ColumnType.Float64),
+        new("depth",          ColumnType.Integer64),
     ];
 
     // EXPLAIN (ANALYZE): the plain EXPLAIN schema plus the measured runtime columns emitted by
-    // ExplainExecutor.ExplainAnalyzeQuery.
+    // ExplainExecutor.ExplainAnalyzeQuery. New columns go at the end, so a column keeps its position.
     internal static readonly IReadOnlyList<DerivedColumnSchema> ExplainAnalyzeSchema =
     [
         new("stage",           ColumnType.String),
@@ -534,6 +535,8 @@ internal static class DerivedTableSchemaBuilder
         new("actual_time_ms",  ColumnType.Float64),
         new("kv_lookups",      ColumnType.Integer64),
         new("kv_scan_entries", ColumnType.Integer64),
+        new("estimate_trace",  ColumnType.String),
+        new("depth",           ColumnType.Integer64),
     ];
 
     // ANALYZE TABLE: a single summary row. Column names/types must match the dictionary keys

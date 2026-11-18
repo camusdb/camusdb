@@ -60,24 +60,28 @@ public static class PlanRenderer
     }
 
     /// <summary>
-    /// Walks the plan tree depth-first (parent before children), yielding (name, detail) per node.
-    /// Used by both <see cref="Render"/> and the EXPLAIN result-set executor.
+    /// Walks the plan tree depth-first (parent before children), yielding (name, detail, depth) per node.
+    /// The root has depth 0, and each child is one level deeper than its parent: the extra children of a
+    /// node (see <see cref="ExtraChildren"/>) and its <see cref="PhysicalPlanNode.Input"/> alike. The rows
+    /// alone do not show where the subtree of an extra child ends, so EXPLAIN emits the depth as a column.
+    /// Used by the EXPLAIN result-set executor.
     /// </summary>
-    public static IEnumerable<(string Name, string Detail)> WalkNodes(PhysicalPlanNode root, QueryPlan plan)
+    public static IEnumerable<(string Name, string Detail, int Depth)> WalkNodes(PhysicalPlanNode root, QueryPlan plan)
     {
-        return WalkNodesInner(root, plan);
+        return WalkNodesInner(root, plan, 0);
     }
 
-    private static IEnumerable<(string Name, string Detail)> WalkNodesInner(PhysicalPlanNode node, QueryPlan plan)
+    private static IEnumerable<(string Name, string Detail, int Depth)> WalkNodesInner(PhysicalPlanNode node, QueryPlan plan, int depth)
     {
-        yield return SplitNodeLine(GetRenderLine(node, plan));
+        (string name, string detail) = SplitNodeLine(GetRenderLine(node, plan));
+        yield return (name, detail, depth);
 
         foreach ((PhysicalPlanNode child, QueryPlan childPlan) in ExtraChildren(node, plan))
-            foreach (var item in WalkNodesInner(child, childPlan))
+            foreach (var item in WalkNodesInner(child, childPlan, depth + 1))
                 yield return item;
 
         if (node.Input is not null)
-            foreach (var item in WalkNodesInner(node.Input, plan))
+            foreach (var item in WalkNodesInner(node.Input, plan, depth + 1))
                 yield return item;
     }
 

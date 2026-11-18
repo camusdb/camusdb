@@ -41,7 +41,8 @@ timestamp, as the `SELECT` does.
 
 > **FROM-less limitation:** a [FROM-less `SELECT`](./fromless-select.md) has no plan tree, so
 > plain `EXPLAIN` renders a fixed `constant-source` → `project` (→ `limit`) shape rather than a
-> costed plan, and `EXPLAIN (ANALYZE)` is rejected (there is no table access to measure — use
+> costed plan. As for any plan, the rows come parent first (`limit`, `project`, `constant-source`),
+> each with its `depth`, and `EXPLAIN (ANALYZE)` is rejected (there is no table access to measure — use
 > plain `EXPLAIN`). Unlike a real query, `EXPLAIN` of a FROM-less `SELECT` does **not**
 > pre-materialize its projection subqueries; they appear only as their output column names.
 > A FROM-less `SELECT` with a `WHERE` is different: it runs as a query over one row, so it has a real
@@ -60,6 +61,7 @@ timestamp, as the `SELECT` does.
 | `detail`         | `STRING`  | Node-specific key facts (see table below) |
 | `estimated_rows` | `INT64`   | Cost-model estimate of the node's output cardinality. `NULL` when the plan was not costed. |
 | `estimated_cost` | `FLOAT64` | Cost-model weighted cost for the node (unitless; lower is cheaper). `NULL` when not costed. |
+| `depth`          | `INT64`   | The level of the node in the plan tree. The root is `0`, and each child is one level deeper than its parent. `NULL` on the [trailing informational rows](#trailing-informational-rows) and on the span rows. |
 
 `estimated_rows` / `estimated_cost` come from the cost model. Estimates use table statistics —
 row counts, per-column min/max, and (after `ANALYZE`) equi-depth histograms and distinct-value
@@ -240,7 +242,11 @@ The step sent rows 1, 2 and 3 (it locked row 1 and skipped rows 2 and 3), and th
 
 ## Canonical node names
 
-One row is emitted per physical plan node, in depth-first order (parent before children).
+One row is emitted per physical plan node, in depth-first order (parent before children). The
+`depth` column gives the level of each row. A node can have more than one child: a set operation has
+its two `operand` rows, and a join can have a `derived-table-scan` row for its right input (see
+[Derived tables and CTEs](#derived-tables-and-ctes)) before its left input. The row order alone does
+not show where the subtree of the first child ends, so a client that draws the tree must read `depth`.
 
 | Node name                | When it appears | Key detail fields |
 |--------------------------|-----------------|-------------------|
@@ -418,8 +424,8 @@ The `year >= 2020` predicate drives an index range scan; `name = 'Bishop'` canno
 the index and appears as a residual `filter` above the scan.
 
 > **Tree depth in result rows:** the `node` column contains the bare node name with no leading
-> spaces. Parent-before-child row order conveys tree depth; indentation is not present in the
-> actual result set.
+> spaces. The `depth` column gives the level that the indentation shows here: `0` for the root, `1`
+> for its child, and so on.
 
 ---
 

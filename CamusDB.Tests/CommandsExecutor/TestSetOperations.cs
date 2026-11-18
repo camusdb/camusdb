@@ -523,6 +523,45 @@ public class TestSetOperationsPlans : SetOperationsTestBase
         Assert.That(lines.IndexOf("except(hash, spill)"), Is.LessThan(lines.IndexOf("union(all)")), all);
     }
 
+    [Test]
+    public async Task Explain_PutsEachOperandOneLevelUnderItsSetOperation()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await SeedTwoTables(executor, database, dbname);
+
+        List<QueryResultRow> rows = await ExecQuery(executor, database, dbname,
+            "EXPLAIN SELECT x FROM a UNION ALL SELECT y FROM b EXCEPT SELECT 1");
+        string all = string.Join(" | ", rows.Select(r => $"{r.Row["node"].StrValue}@{(r.Row.TryGetValue("depth", out ColumnValue? d) ? d.LongValue : -1)}"));
+
+        long Depth(int i) => rows[i].Row["depth"].LongValue;
+        string Node(int i) => rows[i].Row["node"].StrValue!;
+
+        Assert.AreEqual(0, Depth(0), all);
+
+        int operands = 0;
+        for (int i = 0; i < rows.Count; i++)
+        {
+            if (Node(i) != "operand")
+                continue;
+
+            operands++;
+
+            // The set operation is the nearest row before it that is one level up.
+            int parent = i - 1;
+            while (parent >= 0 && Depth(parent) >= Depth(i))
+                parent--;
+
+            Assert.That(parent, Is.GreaterThanOrEqualTo(0), all);
+            Assert.AreEqual(Depth(i) - 1, Depth(parent), all);
+            Assert.That(Node(parent), Is.AnyOf("union", "except"), all);
+
+            // The operand's own plan starts right under it.
+            Assert.AreEqual(Depth(i) + 1, Depth(i + 1), all);
+        }
+
+        Assert.AreEqual(4, operands, all);
+    }
+
     /// <summary>
     /// With spill off, the hash tables of a set operation stay in memory, so no label has the
     /// <c>spill</c> suffix. The default engine has spill on, so this needs its own engine.

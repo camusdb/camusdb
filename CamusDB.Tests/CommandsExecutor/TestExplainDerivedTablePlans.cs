@@ -213,6 +213,56 @@ public sealed class TestExplainDerivedTablePlans : SharedNodeBaseTest
         Assert.That(IndexOf(plan, "filter", "v > 60"), Is.GreaterThan(view));
     }
 
+    [TestCase("EXPLAIN ")]
+    [TestCase("EXPLAIN (ANALYZE) ")]
+    public async Task EachRowHasTheDepthOfItsNodeSoTheRightPlanEndsBeforeTheLeftInput(string explain)
+    {
+        (string db, DatabaseDescriptor database, CommandExecutor executor) = await Seeded();
+
+        const string sql =
+            "SELECT g.name, d.n FROM groups g LEFT JOIN (SELECT grp, COUNT(*) AS n FROM items WHERE v > 30 GROUP BY grp) d ON d.grp = g.id";
+
+        List<QueryResultRow> rows = await Query(executor, database, db, explain + sql);
+        List<(string Node, string Detail, long? Depth)> plan = rows
+            .Select(r => (r.Row["node"].StrValue!, r.Row["detail"].StrValue!,
+                r.Row.TryGetValue("depth", out ColumnValue? depth) && depth.Type == ColumnType.Integer64 ? depth.LongValue : (long?)null))
+            .ToList();
+        string all = string.Join("\n", plan);
+
+        int join = plan.FindIndex(l => l.Node.EndsWith("join", System.StringComparison.Ordinal));
+        int d = plan.FindIndex(l => l.Node == "derived-table-scan" && l.Detail.StartsWith("alias=d", System.StringComparison.Ordinal));
+        int groups = plan.FindIndex(l => l.Node == "table-scan" && l.Detail.StartsWith("table=groups", System.StringComparison.Ordinal));
+        int items = plan.FindIndex(l => l.Node == "table-scan" && l.Detail.StartsWith("table=items", System.StringComparison.Ordinal));
+
+        Assert.That(join, Is.GreaterThanOrEqualTo(0), all);
+        Assert.That(plan[0].Depth, Is.EqualTo(0), all);
+
+        // The right derived table is one level under the join, and the plan of its query under it.
+        Assert.That(plan[d].Depth, Is.EqualTo(plan[join].Depth + 1), all);
+        Assert.That(items, Is.GreaterThan(d), all);
+        for (int i = d + 1; i <= items; i++)
+            Assert.That(plan[i].Depth, Is.GreaterThan(plan[d].Depth), all);
+
+        // The left input comes after that plan, back at the level of the derived table.
+        Assert.That(groups, Is.GreaterThan(items), all);
+        Assert.That(plan[groups].Depth, Is.EqualTo(plan[d].Depth), all);
+
+        // Parent first: each operator row is at most one level under the row before it. The rows about
+        // the whole plan and the span rows describe no node, so they have no depth.
+        for (int i = 0; i < plan.Count; i++)
+        {
+            if (plan[i].Node is "plan-info" or "distribution" or "cache" or "gather-span" or "broadcast-span")
+            {
+                Assert.That(plan[i].Depth, Is.Null, all);
+                continue;
+            }
+
+            Assert.That(plan[i].Depth, Is.Not.Null, all);
+            if (i > 0 && plan[i - 1].Depth is { } previous)
+                Assert.That(plan[i].Depth, Is.LessThanOrEqualTo(previous + 1), all);
+        }
+    }
+
     [Test]
     public async Task ALateralBodyKeepsItsOneLine()
     {

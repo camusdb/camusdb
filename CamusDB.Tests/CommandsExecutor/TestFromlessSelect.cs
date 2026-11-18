@@ -385,6 +385,20 @@ public sealed class TestFromlessSelect : SharedNodeBaseTest
     }
 
     [Test]
+    public async Task Explain_ComesParentFirstWithTheDepthOfEachRow()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        List<QueryResultRow> rows = await ExecQuery(executor, database, dbname, "EXPLAIN SELECT 1 LIMIT 5");
+        CollectionAssert.AreEqual(new[] { "limit", "project", "constant-source" }, rows.Select(r => r.Row["node"].StrValue).ToArray());
+        CollectionAssert.AreEqual(new long[] { 0, 1, 2 }, rows.Select(r => r.Row["depth"].LongValue).ToArray());
+
+        rows = await ExecQuery(executor, database, dbname, "EXPLAIN SELECT 1");
+        CollectionAssert.AreEqual(new[] { "project", "constant-source" }, rows.Select(r => r.Row["node"].StrValue).ToArray());
+        CollectionAssert.AreEqual(new long[] { 0, 1 }, rows.Select(r => r.Row["depth"].LongValue).ToArray());
+    }
+
+    [Test]
     public async Task ExplainAnalyze_Rejected()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();

@@ -369,7 +369,7 @@ public sealed class TestPositionalResultRows : SharedNodeBaseTest
         (IReadOnlyList<DerivedColumnSchema> schema, List<QueryResultRow> rows) =
             await ExecQuery(executor, database, dbname, "EXPLAIN SELECT * FROM orders");
 
-        string[] expectedNames = ["stage", "node", "detail", "estimated_rows", "estimated_cost"];
+        string[] expectedNames = ["stage", "node", "detail", "estimated_rows", "estimated_cost", "depth"];
         Assert.AreEqual(expectedNames.Length, schema.Count, "EXPLAIN must expose its plan column schema");
         for (int i = 0; i < expectedNames.Length; i++)
             Assert.AreEqual(expectedNames[i], schema[i].Name, $"schema[{i}].Name");
@@ -400,6 +400,7 @@ public sealed class TestPositionalResultRows : SharedNodeBaseTest
         [
             "stage", "node", "detail", "estimated_rows", "estimated_cost",
             "actual_rows", "rows_read", "actual_time_ms", "kv_lookups", "kv_scan_entries",
+            "estimate_trace", "depth",
         ];
         Assert.AreEqual(expectedNames.Length, schema.Count, "EXPLAIN (ANALYZE) must expose its runtime column schema");
         for (int i = 0; i < expectedNames.Length; i++)

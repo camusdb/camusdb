@@ -125,13 +125,13 @@ internal sealed class ExplainExecutor
     /// <summary>Renders one result row per plan node, plus the trailing plan-info, distribution and cache rows.</summary>
     private IEnumerable<QueryResultRow> RenderPlan(QueryPlan plan, string stage)
     {
-        // Zip rendered (name, detail) pairs with plan nodes so we can emit cost estimates.
+        // Zip rendered (name, detail, depth) lines with plan nodes so we can emit cost estimates.
         List<PhysicalPlanNode> orderedNodes = WalkNodesOrdered(plan.Root);
-        List<(string Name, string Detail)> rendered = PlanRenderer.WalkNodes(plan.Root, plan).ToList();
+        List<(string Name, string Detail, int Depth)> rendered = PlanRenderer.WalkNodes(plan.Root, plan).ToList();
 
         for (int i = 0; i < rendered.Count; i++)
         {
-            (string name, string detail) = rendered[i];
+            (string name, string detail, int depth) = rendered[i];
             PhysicalPlanNode? physNode = i < orderedNodes.Count ? orderedNodes[i] : null;
 
             long? estRows = physNode?.EstimatedCardinality;
@@ -148,6 +148,7 @@ internal sealed class ExplainExecutor
                 { "estimated_cost", estCost is not null
                     ? new ColumnValue(ColumnType.Float64, estCost.Value)
                     : ColumnValue.Null },
+                { "depth",          new ColumnValue(ColumnType.Integer64, depth) },
             });
         }
 
@@ -322,13 +323,13 @@ internal sealed class ExplainExecutor
             plan.Root.Stats = new();
         plan.Root.Stats.ElapsedMs = sw.Elapsed.TotalMilliseconds;
 
-        // Zip the rendered (name, detail) pairs with the node objects in the same DFS order.
+        // Zip the rendered (name, detail, depth) lines with the node objects in the same DFS order.
         List<PhysicalPlanNode> orderedNodes = WalkNodesOrdered(plan.Root);
-        List<(string Name, string Detail)> rendered = PlanRenderer.WalkNodes(plan.Root, plan).ToList();
+        List<(string Name, string Detail, int Depth)> rendered = PlanRenderer.WalkNodes(plan.Root, plan).ToList();
 
         for (int i = 0; i < rendered.Count; i++)
         {
-            (string name, string detail) = rendered[i];
+            (string name, string detail, int depth) = rendered[i];
             PhysicalPlanNode? physNode = i < orderedNodes.Count ? orderedNodes[i] : null;
 
             // FilterNode is folded into the scan (ExecutionFilter); it never appears in StepNodes
@@ -376,6 +377,7 @@ internal sealed class ExplainExecutor
                 { "estimate_trace",    physNode?.EstimateTrace is { } estimateTrace
                     ? new ColumnValue(ColumnType.String, EstimateTraceJson.Render(estimateTrace))
                     : ColumnValue.Null },
+                { "depth",             new ColumnValue(ColumnType.Integer64, depth) },
             });
 
             // A gather that ran carries per-span actuals: one gather-span row per placement
@@ -906,6 +908,8 @@ internal sealed class ExplainExecutor
     /// feeding a <c>project</c> that lists the output column names, plus a <c>limit</c> row
     /// when <c>LIMIT</c>/<c>OFFSET</c> is present. There is no cost model here — the source always
     /// produces exactly one row — so <c>estimated_rows</c> is a static 1/0 and cost is null.
+    /// As for every other plan, the rows come parent first: <c>limit</c>, <c>project</c>, then
+    /// <c>constant-source</c>, each one level deeper than the row before it.
     /// </summary>
     private static IEnumerable<QueryResultRow> RenderFromlessPlan(NodeAst selectAst, string stage)
     {
@@ -916,14 +920,16 @@ internal sealed class ExplainExecutor
         for (int i = 0; i < projections.Count; i++)
             names.Add(QueryProjectionResolver.GetOutputNameFromProjectionExpression(projections[i], i));
 
-        yield return FromlessRow(stage, "constant-source", "1 row", 1);
-        yield return FromlessRow(stage, "project", "columns: " + string.Join(", ", names), 1);
+        int depth = 0;
 
         if (selectAst.extendedThree is not null || selectAst.extendedFour is not null)
-            yield return FromlessRow(stage, "limit", DescribeLimitOffset(selectAst), null);
+            yield return FromlessRow(stage, "limit", DescribeLimitOffset(selectAst), null, depth++);
+
+        yield return FromlessRow(stage, "project", "columns: " + string.Join(", ", names), 1, depth++);
+        yield return FromlessRow(stage, "constant-source", "1 row", 1, depth);
     }
 
-    private static QueryResultRow FromlessRow(string stage, string node, string detail, long? estimatedRows)
+    private static QueryResultRow FromlessRow(string stage, string node, string detail, long? estimatedRows, int depth)
     {
         return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
         {
@@ -934,6 +940,7 @@ internal sealed class ExplainExecutor
                 ? new ColumnValue(ColumnType.Integer64, estimatedRows.Value)
                 : ColumnValue.Null },
             { "estimated_cost", ColumnValue.Null },
+            { "depth",          new ColumnValue(ColumnType.Integer64, depth) },
         });
     }
 
