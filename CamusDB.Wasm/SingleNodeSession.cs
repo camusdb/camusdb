@@ -76,10 +76,13 @@ internal sealed class SingleNodeSession : IAsyncDisposable
 
         // The free-disk write guard is off: the browser's in-memory file system reports 0 bytes
         // free, so every write would be refused. Nothing here is written to a disk anyway.
+        // Spill-to-disk is off for the same reason: a spill file in that file system stays in
+        // memory, so a spill frees no memory and only adds the cost to encode and decode the rows.
         CamusDBOptions options = CamusDBOptions.Default with
         {
             DataDirectory = "/camusdb",
             MinFreeDiskBytes = 0,
+            SpillEnabled = false,
         };
 
         EmbeddedKahuna node = new(nodeOptions, NullLoggerFactory.Instance);
