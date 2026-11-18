@@ -8,6 +8,7 @@
 using System.Runtime.CompilerServices;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
@@ -26,9 +27,13 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 ///
 /// <para><b>Memory.</b> The rows go into a <see cref="SpillableRowList"/>, which writes them to a
 /// spill file past the spill threshold when spilling is on. When spilling is off the spool holds
-/// at most <see cref="CamusDBOptions.HashJoinMaxBuildRows"/> rows, the same cap the hash build has
-/// in that mode; a right side larger than that is dropped from the spool and every later left row
-/// reads it from storage again, which is the behavior without a spool.</para>
+/// at most <see cref="CamusDBOptions.HashJoinMaxBuildRows"/> rows and
+/// <see cref="CamusDBOptions.HashJoinMaxBuildBytes"/> estimated bytes
+/// (<see cref="RowMemoryEstimator"/>), the same caps the hash build has in that mode; a right side
+/// larger than that is dropped from the spool and every later left row reads it from storage
+/// again, which is the behavior without a spool. The byte cap matters most after a hash build
+/// falls back to this join: without it, the wide rows that stopped the build would fill the
+/// spool instead.</para>
 ///
 /// <para><b>What may be spooled.</b> Only a base-table right side whose pushed filter calls no
 /// volatile function. A derived table is already materialized once per plan, and a volatile
@@ -87,6 +92,13 @@ internal sealed class NestedLoopInnerSpool : IAsyncDisposable
 
         SpillableRowList? filling = new(context);
         int memoryCap = context.Options.SpillEnabled ? int.MaxValue : Math.Max(0, context.Options.HashJoinMaxBuildRows);
+
+        // With spill on, the list itself moves its rows to disk at the spill byte cap. With spill
+        // off, the spool counts the estimated bytes and gives up at the hash build's byte cap.
+        long byteCap = context.Options.SpillEnabled || context.Options.HashJoinMaxBuildBytes <= 0
+            ? long.MaxValue
+            : context.Options.HashJoinMaxBuildBytes;
+        long memoryBytes = 0;
         bool completed = false;
 
         try
@@ -95,7 +107,7 @@ internal sealed class NestedLoopInnerSpool : IAsyncDisposable
             {
                 if (filling is not null)
                 {
-                    if (filling.Count >= memoryCap)
+                    if (filling.Count >= memoryCap || memoryBytes >= byteCap)
                     {
                         await filling.DisposeAsync().ConfigureAwait(false);
                         filling = null;
@@ -103,6 +115,9 @@ internal sealed class NestedLoopInnerSpool : IAsyncDisposable
                     }
                     else
                     {
+                        if (byteCap != long.MaxValue)
+                            memoryBytes += RowMemoryEstimator.Estimate(row);
+
                         await filling.AddAsync(row, cancellationToken).ConfigureAwait(false);
                     }
                 }

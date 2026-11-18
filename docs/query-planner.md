@@ -666,7 +666,8 @@ applies the `PostJoinFilter`, then hands the cursor to `QueryPostScanPipeline.Ap
   A base-table right side is read from storage once, on the first left row, and kept for the
   other left rows (`NestedLoopInnerSpool`: in memory, or in a spill file when spilling is on).
   It is read again for each left row when its filter calls a volatile function, or when spilling
-  is off and it has more than `HashJoinMaxBuildRows` rows.
+  is off and it has more than `HashJoinMaxBuildRows` rows or `HashJoinMaxBuildBytes` estimated
+  bytes.
   Left outer: a left row whose inner scan accepted no pair is emitted once, padded.
 - `IndexNestedLoopJoinNode` → for each left row, probe the right index (unique → point lookup;
   non-unique → equality-prefix scan). A NULL lookup value is never probed. Left outer: a NULL
@@ -677,7 +678,7 @@ applies the `PostJoinFilter`, then hands the cursor to `QueryPostScanPipeline.Ap
   column list of that side); such a node is never a merge join or a broadcast probe. See
   [`joins.md`](./joins.md#expression-keys). A build side that passes the spill caps runs as a
   Grace hash join. With spill off, it falls back to nested-loop if the build side exceeds
-  `HashJoinMaxBuildRows`. Build side is the smaller estimated input for an inner
+  `HashJoinMaxBuildRows` rows or `HashJoinMaxBuildBytes` estimated bytes. Build side is the smaller estimated input for an inner
   join and always the right input for a left outer join. Left outer: a probe row with a NULL key,
   no bucket, or no bucket row that passes `ON` is padded at once. The Grace path applies the same
   rule per partition (a probe row is unmatched overall exactly when it is unmatched in its own

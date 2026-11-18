@@ -1125,6 +1125,13 @@ public class ConfigDefinition
     public int HashJoinMaxBuildRows { get; set; } = 1_000_000;
 
     /// <summary>
+    /// Estimated bytes the hash-join build phase may hold before it falls back to nested-loop,
+    /// applied only while spill is disabled. <c>&lt;= 0</c> removes the byte limit. Default 1 GiB.
+    /// Maps to <c>CamusDBOptions.HashJoinMaxBuildBytes</c>.
+    /// </summary>
+    public long HashJoinMaxBuildBytes { get; set; } = 1L * 1024 * 1024 * 1024;
+
+    /// <summary>
     /// Weight per byte shipped over the network in the planner's network cost model; 0 disables
     /// network costing. Must be &gt;= 0. Default 0.01. Maps to <c>CamusDBOptions.NetWeight</c>.
     /// </summary>

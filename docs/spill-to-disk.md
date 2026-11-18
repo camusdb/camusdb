@@ -190,7 +190,7 @@ Spill is controlled by these knobs, settable in `config.yml` as `spill_enabled` 
 
 | Knob | YAML key | Default | Meaning |
 |---|---|---|---|
-| `SpillEnabled` | `spill_enabled` | `true` | Master switch. When `false`, no operator spills, and a hash-join build past `HashJoinMaxBuildRows` runs as a nested-loop join. |
+| `SpillEnabled` | `spill_enabled` | `true` | Master switch. When `false`, no operator spills, and a hash-join build past `HashJoinMaxBuildRows` rows or `HashJoinMaxBuildBytes` estimated bytes runs as a nested-loop join. |
 | `SpillThresholdRows` | `spill_threshold_rows` | `500_000` | Per-operator in-memory row cap before that operator begins spilling. |
 | `SpillThresholdBytes` | `spill_threshold_bytes` | `268435456` (256 MiB) | Per-operator cap on the estimated bytes in memory before that operator begins spilling. Checked beside the row cap. `<= 0` removes it. |
 | `SpillMergeFanIn` | `spill_merge_fan_in` | `16` | Maximum simultaneously-open spill runs during a merge pass; more runs trigger a multi-pass merge. |
@@ -199,6 +199,19 @@ Spill is controlled by these knobs, settable in `config.yml` as `spill_enabled` 
 When `SpillEnabled` is `false`, the threshold, fan-in and total-bytes knobs are ignored. This includes
 the byte cap: without spill an operator has nowhere to put its rows, so the spill-off behavior does
 not change.
+
+Two settings apply only when `SpillEnabled` is `false`. They limit the hash-join build, because that
+operator has a fallback that needs no disk:
+
+| Knob | YAML key | Default | Meaning |
+|---|---|---|---|
+| `HashJoinMaxBuildRows` | `hash_join_max_build_rows` | `1_000_000` | Rows a hash-join build may hold. Past it, the join runs as a nested-loop join. |
+| `HashJoinMaxBuildBytes` | `hash_join_max_build_bytes` | `1073741824` (1 GiB) | Estimated bytes a hash-join build may hold. Past it, the join runs as a nested-loop join. `<= 0` removes it. |
+
+A nested-loop join keeps its right side in memory under the same two limits, and reads a larger
+right side again for each left row. The byte limit is high enough that a build of narrow rows
+(about 500 estimated bytes each) reaches the row limit first. It stops a build of rows with a
+4,000-character string near 124,000 rows.
 
 The browser playground sets `SpillEnabled = false`. Its file system is in memory, so a spill file
 there frees no memory and adds only the cost to encode and decode the rows.
@@ -248,14 +261,18 @@ memory cap.
   - Each retaining operator estimates the bytes of each row that it keeps, to check
     `SpillThresholdBytes`. The measured cost is within the noise.
   - The hash-join build goes to the Grace hash join at the row cap or the byte cap. With spill off,
-    it holds up to `HashJoinMaxBuildRows` rows (1,000,000) and then runs as a nested-loop join. The
-    byte cap stops a build of three short columns (about 500 estimated bytes for each row) near
+    it holds up to `HashJoinMaxBuildRows` rows (1,000,000) or `HashJoinMaxBuildBytes` estimated
+    bytes (1 GiB), and then runs as a nested-loop join. Each
+    such run adds one to `join.nested_loop_fallbacks` in
+    [`SHOW ENGINE STATS`](engine-stats.md#join-fallbacks) and writes a warning to the server log, at
+    most one each minute.
+    The byte cap stops a build of three short columns (about 500 estimated bytes for each row) near
     530,000 rows, and a build of rows with a 4,000-character string near 31,000 rows. In a
     measurement, the Grace path took 1.25 times (750,000 short rows) to 2.3 times (36,000 wide rows)
     as long as the in-memory join.
   - A nested-loop join keeps its right side with no row cap, and that buffer spills. With spill off,
-    it keeps at most `HashJoinMaxBuildRows` rows and reads a larger right side again for each left
-    row.
+    it keeps at most `HashJoinMaxBuildRows` rows and `HashJoinMaxBuildBytes` estimated bytes, and
+    reads a larger right side again for each left row.
   - The planner does not use the bounded top-k when `LIMIT + OFFSET` is above the row threshold. The
     external merge sort runs instead. In a measurement it was not slower than the top-k.
   - The EXPLAIN labels of `UNION`, `INTERSECT` and `EXCEPT` end in `, spill`.

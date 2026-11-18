@@ -74,6 +74,7 @@ public class TestConfigurationDefaults
         Assert.AreEqual(2048, CamusDBOptions.Default.SqlParserCacheMaxEntries, nameof(CamusDBOptions.Default.SqlParserCacheMaxEntries));
         Assert.AreEqual(60, CamusDBOptions.Default.SqlParserCacheSweepSeconds, nameof(CamusDBOptions.Default.SqlParserCacheSweepSeconds));
         Assert.AreEqual(1_000_000, CamusDBOptions.Default.HashJoinMaxBuildRows, nameof(CamusDBOptions.Default.HashJoinMaxBuildRows));
+        Assert.AreEqual(1L << 30, CamusDBOptions.Default.HashJoinMaxBuildBytes, nameof(CamusDBOptions.Default.HashJoinMaxBuildBytes));
         Assert.AreEqual("~pk", CamusDBConstants.PrimaryKeyInternalName, nameof(CamusDBConstants.PrimaryKeyInternalName));
         Assert.IsFalse(CamusDBOptions.Default.KeyRangeShardingEnabled, nameof(CamusDBOptions.Default.KeyRangeShardingEnabled));
         Assert.AreEqual(1, CamusDBOptions.Default.ClusterPartitionCount, nameof(CamusDBOptions.Default.ClusterPartitionCount));

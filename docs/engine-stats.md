@@ -43,7 +43,7 @@ shows how to find what it lines up with.
 | column | meaning |
 |---|---|
 | `node` | the local Raft endpoint this row came from |
-| `source` | which meter published it: `kommander` or `kahuna` |
+| `source` | which meter published it: `kommander` or `kahuna`; `camusdb` for a count that CamusDB keeps itself |
 | `metric` | instrument name as the library publishes it |
 | `tags` | canonical `k=v` pairs, comma-separated and key-sorted; empty when the metric is untagged |
 | `kind` | `counter`, `histogram`, or `gauge` |
@@ -151,6 +151,26 @@ report the state of their table:
 |---|---|
 | `statement_stats.shapes` | shapes held now (gauge) |
 | `statement_stats.dropped` | new shapes refused because the table was full (counter); a value that moves means `SHOW STATEMENT STATS` is incomplete |
+
+### Join fallbacks
+
+With `spill_enabled` off, a hash join whose build side passes `hash_join_max_build_rows` rows or
+`hash_join_max_build_bytes` estimated bytes runs as a nested-loop join. That join compares each row of one side with every row of the other, and
+the plan still shows a hash join. One `camusdb` row counts these runs:
+
+| metric | tells you |
+|---|---|
+| `join.nested_loop_fallbacks` | hash joins that ran as a nested-loop join since the process started (counter); a value that grows means some joins take time in proportion to the product of their two sides |
+
+The row is present when `spill_enabled` is off, or when a fallback ran since the process started. With
+spill on, a large build goes to the Grace hash join and the fallback does not run. The count is for
+each run of the join, so a statement that runs one join more than once adds more than one.
+
+Each fallback also writes a warning to the server log, at most one each minute. The warning names the
+database, the right side of the join and the limit that the build passed, and gives the number of
+fallbacks since the previous warning.
+It holds no SQL text. To find the statement, run it with [`EXPLAIN (ANALYZE)`](explain.md) and look for
+`ran=nested-loop-fallback`, or look for slow joins in the [slow query log](slow-query-log.md).
 
 ## Related
 

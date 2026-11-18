@@ -76,7 +76,8 @@ internal sealed class QueryJoinExecutor : IJoinNodeExecutor
     internal void ApplyOptions(CamusDBOptions next) => services.Options = next;
 
     public QueryJoinExecutor(QueryExecutor queryExecutor, CamusDBOptions options, StatisticsManager? stats = null, PlanCache? planCache = null,
-        ILogger<ICamusDB>? logger = null, IQueryFragmentTransport? fragmentTransport = null, DistributedQueryMetrics? distributedMetrics = null)
+        ILogger<ICamusDB>? logger = null, IQueryFragmentTransport? fragmentTransport = null, DistributedQueryMetrics? distributedMetrics = null,
+        JoinFallbackMetrics? joinFallbacks = null)
     {
         services = new JoinExecutionServices(options)
         {
@@ -86,6 +87,7 @@ internal sealed class QueryJoinExecutor : IJoinNodeExecutor
             Logger = logger,
             FragmentTransport = fragmentTransport,
             DistributedMetrics = distributedMetrics,
+            JoinFallbacks = joinFallbacks ?? new JoinFallbackMetrics(),
         };
 
         this.planCache = planCache;

@@ -745,13 +745,38 @@ public sealed record CamusDBOptions
     /// <summary>
     /// Maximum number of rows the hash-join build phase may materialise before degrading, used
     /// only when <see cref="SpillEnabled"/> is set to <c>false</c> (spill is on by default): the
-    /// build falls back to a nested-loop join for correctness. With spill on, the build routes to
+    /// build falls back to a nested-loop join for correctness. The build also falls back when it
+    /// passes <see cref="HashJoinMaxBuildBytes"/>. With spill on, the build routes to
     /// the Grace hash join once it passes <see cref="SpillEffectiveThreshold"/> rows or
     /// <see cref="SpillEffectiveThresholdBytes"/> estimated bytes, so this cap does not apply.
     /// Default: 1_000_000 rows.
     /// </summary>
     [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int HashJoinMaxBuildRows { get; init; } = 1_000_000;
+
+    /// <summary>
+    /// Estimated bytes the hash-join build phase may hold before it falls back to a nested-loop
+    /// join, used only when <see cref="SpillEnabled"/> is <c>false</c>. The build falls back when it
+    /// passes this limit or <see cref="HashJoinMaxBuildRows"/>. The row limit alone leaves the heap
+    /// open to wide rows: a row with a long string can be a thousand times the size of a narrow row.
+    /// The bytes are the estimate that the spill byte cap uses for the build
+    /// (<c>JoinHashTable.EstimateAddedBytes</c>).
+    ///
+    /// <para>The nested-loop join keeps its right side in memory under the same two limits when
+    /// spill is off. This applies to the join that a fallback runs and to a nested-loop join that the
+    /// planner chose. Past either limit it reads the right side again for each left row, so the
+    /// fallback cannot move the build's memory into that buffer.</para>
+    ///
+    /// <para>The default is high enough that a build of narrow rows (about 500 estimated bytes
+    /// each) reaches the row limit first, so the limit changes only builds of wide rows: a row of
+    /// about 8.6 KB stops the build near 124,000 rows. With spill on, the build goes to the Grace
+    /// hash join at <see cref="SpillEffectiveThresholdBytes"/> and this limit does not apply.
+    /// <c>&lt;= 0</c> removes the byte limit and leaves only the row limit.</para>
+    ///
+    /// Default: <c>1 GiB</c>.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
+    public long HashJoinMaxBuildBytes { get; init; } = 1L * 1024 * 1024 * 1024;
 
     /// <summary>
     /// Opt a table's row and eligible secondary-index key spaces into Kahuna key-range routing
@@ -1528,7 +1553,8 @@ public sealed record CamusDBOptions
     /// <see cref="CamusDBErrorCodes.SpillStorageUnavailable"/> is thrown, and the operator does not
     /// buffer unbounded memory. When <c>false</c>, blocking operators keep unbounded in-memory
     /// buffers, so a large input can exhaust the process heap, and a hash-join build past
-    /// <see cref="HashJoinMaxBuildRows"/> falls back to a nested-loop join. The browser playground
+    /// <see cref="HashJoinMaxBuildRows"/> rows or <see cref="HashJoinMaxBuildBytes"/> estimated bytes
+    /// falls back to a nested-loop join. The browser playground
     /// sets it to <c>false</c>, because its file system is in memory and a spill there frees no
     /// memory.
     ///

@@ -204,6 +204,7 @@ public class ConfigReader
         "max_query_parallelism",
         "broadcast_join_max_build_rows",
         "hash_join_max_build_rows",
+        "hash_join_max_build_bytes",
         "net_weight",
         "slot_backed_decode",
         "borrowed_decode",

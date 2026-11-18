@@ -224,9 +224,10 @@ internal sealed class SelectStatementExecutor
 
     /// <summary>
     /// Collects the engine-maintained (non-meter) counter rows <c>SHOW ENGINE STATS</c> merges
-    /// with the meter snapshot: the TTL scheduler's totals and — only when distributed query
-    /// execution is enabled, per the statement's all-or-nothing rule — the
-    /// <c>distributed.*</c> counters.
+    /// with the meter snapshot: the TTL scheduler's totals, the <c>distributed.*</c> counters
+    /// (only when distributed query execution is enabled, per the statement's all-or-nothing
+    /// rule), and the count of hash joins that ran as a nested-loop join (see
+    /// <see cref="JoinFallbackMetricsReporter.Build"/> for when that row is present).
     /// </summary>
     private IReadOnlyList<EngineMetricRow>? BuildEngineCounterRows()
     {
@@ -247,10 +248,12 @@ internal sealed class SelectStatementExecutor
             ]
             : null;
 
-        if (ttlRows is null && distributedRows is null && statsRows is null)
+        IReadOnlyList<EngineMetricRow>? joinRows = JoinFallbackMetricsReporter.Build(queryExecutor.JoinFallbacks, options.SpillEnabled);
+
+        if (ttlRows is null && distributedRows is null && statsRows is null && joinRows is null)
             return null;
 
-        return [.. ttlRows ?? [], .. distributedRows ?? [], .. statsRows ?? []];
+        return [.. ttlRows ?? [], .. distributedRows ?? [], .. statsRows ?? [], .. joinRows ?? []];
     }
 
     /// <summary>

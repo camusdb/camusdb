@@ -94,6 +94,13 @@ internal sealed class QueryExecutor
     /// </summary>
     internal DistributedQueryMetrics DistributedMetrics { get; } = new();
 
+    /// <summary>
+    /// The count of hash joins that ran as a nested-loop join, for <c>SHOW ENGINE STATS</c>, and the
+    /// rate limit of their warning. Owned here so the join operators and the statement that reports
+    /// the count use one instance.
+    /// </summary>
+    internal JoinFallbackMetrics JoinFallbacks { get; } = new();
+
     public QueryExecutor(ILogger<ICamusDB> logger, CamusDBOptions options, StatisticsManager? stats = null, IKahuna? kahuna = null, IQueryFragmentTransport? fragmentTransport = null)
     {
         this.logger = logger;
@@ -103,7 +110,7 @@ internal sealed class QueryExecutor
         PlanCache = new PlanCache(options.PlanCacheMaxEntries);
         queryPlanner = new QueryPlanner(stats, PlanCache, options);
         queryAggregator = new QueryAggregator(stats);
-        queryJoinExecutor = new QueryJoinExecutor(this, options, stats, PlanCache, logger, fragmentTransport, DistributedMetrics);
+        queryJoinExecutor = new QueryJoinExecutor(this, options, stats, PlanCache, logger, fragmentTransport, DistributedMetrics, JoinFallbacks);
         this.queryScanner = new(logger, fragmentTransport, DistributedMetrics);
     }
 

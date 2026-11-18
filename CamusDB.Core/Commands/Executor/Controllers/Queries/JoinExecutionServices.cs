@@ -44,6 +44,12 @@ internal sealed class JoinExecutionServices
     public DistributedQueryMetrics? DistributedMetrics { get; init; }
 
     /// <summary>
+    /// The count and the warning rate limit of the hash joins that ran as a nested-loop join. An
+    /// executor built without one gets its own, which <c>SHOW ENGINE STATS</c> does not read.
+    /// </summary>
+    public JoinFallbackMetrics JoinFallbacks { get; init; } = new();
+
+    /// <summary>
     /// The configuration snapshot currently published to the engine.
     /// <para>
     /// <see cref="QueryJoinExecutor.ApplyOptions"/> is the only writer. Reference assignment is

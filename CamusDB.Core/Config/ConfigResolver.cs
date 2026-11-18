@@ -306,6 +306,7 @@ public static class ConfigResolver
         MaxQueryParallelism = config.MaxQueryParallelism,
         BroadcastJoinMaxBuildRows = config.BroadcastJoinMaxBuildRows,
         HashJoinMaxBuildRows = config.HashJoinMaxBuildRows,
+        HashJoinMaxBuildBytes = config.HashJoinMaxBuildBytes,
         NetWeight = config.NetWeight,
         SlotBackedDecode = config.SlotBackedDecode,
         BorrowedDecode = config.ParseBorrowedDecode(),

@@ -465,6 +465,7 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 # index_scan_fetch_batch_size: 64        # row ids buffered from a non-covering index scan before one batched row fetch (>= 1)
 # max_query_parallelism: 1               # span workers per full table scan; 1 = sequential. Results and row order never change
 # hash_join_max_build_rows: 1000000      # rows a hash-join build side may hold before it falls back to nested loop; applies only while spill is off; spill is on by default (>= 1)
+# hash_join_max_build_bytes: 1073741824  # estimated bytes a hash-join build side may hold before it falls back to nested loop; applies only while spill is off (<= 0 = no byte limit)
 # broadcast_join_max_build_rows: 10000   # largest hash-join build side shipped to remote probe fragments; 0 disables broadcast joins
 # net_weight: 0.01                       # planner cost per byte sent over the network; 0 disables network costing
 #

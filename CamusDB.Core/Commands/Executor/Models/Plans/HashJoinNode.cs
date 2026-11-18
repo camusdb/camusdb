@@ -42,8 +42,9 @@ public enum HashJoinBuildSide { Right, Left }
 /// pair is joined in memory. Skewed partitions that still exceed the threshold are recursively
 /// repartitioned; beyond the recursion depth limit a nested-loop join over the partition files
 /// is used as a bounded-memory backstop.
-/// When spill is disabled and the build exceeds <c>CamusDBOptions.HashJoinMaxBuildRows</c>,
-/// the executor falls back to nested-loop (full-scan fallback, no spill).
+/// When spill is disabled and the build exceeds <c>CamusDBOptions.HashJoinMaxBuildRows</c> rows
+/// or <c>CamusDBOptions.HashJoinMaxBuildBytes</c> estimated bytes, the executor falls back to
+/// nested-loop (full-scan fallback, no spill).
 ///
 /// <see cref="CanDecomposeToLocalPlusMerge"/> is false and
 /// <see cref="PhysicalPlanNode.OutputOrdering"/> is null: hash join does not preserve order.

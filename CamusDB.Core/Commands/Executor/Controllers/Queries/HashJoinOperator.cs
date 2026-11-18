@@ -14,6 +14,7 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Util.ObjectIds;
+using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
@@ -30,7 +31,9 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// <para>A build that does not fit its cap routes to a fallback instead of growing without
 /// bound — the Grace hash join when spilling is enabled, a nested-loop scan when it is not. Both
 /// re-scan the build from scratch, which costs about twice the reads on this rare path, and that
-/// is accepted for the simplicity.</para>
+/// is accepted for the simplicity. Each nested-loop fallback adds one to a count that
+/// <c>SHOW ENGINE STATS</c> reports and writes a rate-limited warning
+/// (<see cref="JoinFallbackMetrics"/>).</para>
 ///
 /// <para>The broadcast decision happens after the build exists, so it gates on the build's
 /// <b>actual</b> row count rather than a cardinality estimate — interior-node estimates are
@@ -88,9 +91,13 @@ internal sealed class HashJoinOperator
     ///     <see cref="CamusDBOptions.SpillEffectiveThresholdBytes"/> estimated bytes
     ///     (<see cref="JoinHashTable.EstimateAddedBytes"/>); overflow of either routes to
     ///     <see cref="GraceHashJoinOperator.GraceHashJoinAsync"/>.</item>
-    ///   <item>When spill is disabled, the cap is <see cref="CamusDBOptions.HashJoinMaxBuildRows"/>;
-    ///     overflow routes to a full nested-loop scan.</item>
+    ///   <item>When spill is disabled, the caps are <see cref="CamusDBOptions.HashJoinMaxBuildRows"/>
+    ///     rows and <see cref="CamusDBOptions.HashJoinMaxBuildBytes"/> estimated bytes, with the same
+    ///     estimate; overflow of either routes to a full nested-loop scan.</item>
     /// </list>
+    ///
+    /// The second value names the cap that stopped the build, so the fallback warning can name
+    /// the setting to raise. It is <see cref="BuildLimit.None"/> when the table is returned.
     ///
     /// On cap overflow the build scan is abandoned; the fallback re-scans the build side from
     /// scratch (~2× cost on this rare path). This is intentional: correctness over complexity.
@@ -106,7 +113,7 @@ internal sealed class HashJoinOperator
     /// column names such as <c>o.id</c>). Stored rows are already qualified — at probe
     /// time they are passed directly as the left arg to <c>MergeRows</c>.
     /// </summary>
-    private async Task<JoinHashTable?> BuildHashTable(
+    private async Task<(JoinHashTable? Table, BuildLimit StoppedBy)> BuildHashTable(
         HashJoinNode joinNode,
         QueryPlan plan,
         HashJoinBuildSide buildSide)
@@ -122,11 +129,14 @@ internal sealed class HashJoinOperator
             ? context.Options.SpillEffectiveThreshold
             : context.Options.HashJoinMaxBuildRows;
 
-        // With spill enabled the build also stops at the byte cap, so a build of wide rows routes to
-        // Grace before it holds the row cap's worth of them. With spill disabled the byte cap does
-        // not apply: the nested-loop fallback is the only way out, and the row cap still selects it.
-        bool capBytes = context.Options.SpillEnabled && context.Options.SpillThresholdBytes > 0;
-        long byteCap = capBytes ? context.Options.SpillEffectiveThresholdBytes : long.MaxValue;
+        // The build also stops at a byte cap, so a build of wide rows does not hold the row cap's
+        // worth of them: with spill on it routes to Grace, with spill off it falls back to the
+        // nested-loop join. A setting of zero or less removes the byte cap.
+        long byteSetting = context.Options.SpillEnabled
+            ? context.Options.SpillThresholdBytes
+            : context.Options.HashJoinMaxBuildBytes;
+        bool capBytes = byteSetting > 0;
+        long byteCap = capBytes ? byteSetting : long.MaxValue;
         long buildBytes = 0;
 
         int rowCount = 0;
@@ -142,7 +152,8 @@ internal sealed class HashJoinOperator
 
             await foreach (QueryResultRow row in ReadRightSide(joinNode, plan, tree, scanner).ConfigureAwait(false))
             {
-                if (rowCount >= buildCap || buildBytes >= byteCap) return null;
+                if (rowCount >= buildCap) return (null, BuildLimit.Rows);
+                if (buildBytes >= byteCap) return (null, BuildLimit.Bytes);
 
                 if (!JoinKeyExtractor.TryExtractKeyInto(row.Row, buildKeys, keyScratch)) continue;
 
@@ -163,7 +174,8 @@ internal sealed class HashJoinOperator
 
             await foreach (QueryResultRow leftRow in tree.ExecuteNode(joinNode.Input!, plan).ConfigureAwait(false))
             {
-                if (rowCount >= buildCap || buildBytes >= byteCap) return null;
+                if (rowCount >= buildCap) return (null, BuildLimit.Rows);
+                if (buildBytes >= byteCap) return (null, BuildLimit.Bytes);
 
                 IReadOnlyDictionary<string, ColumnValue> qualified;
                 string leftAlias = JoinAliasMetadata.ResolveLeftAlias(joinNode.Input!, leftRow);
@@ -187,7 +199,20 @@ internal sealed class HashJoinOperator
             }
         }
 
-        return table;
+        return (table, BuildLimit.None);
+    }
+
+    /// <summary>The cap that stopped a hash-join build, if one did.</summary>
+    private enum BuildLimit
+    {
+        /// <summary>The build finished under both caps.</summary>
+        None,
+
+        /// <summary>The build reached its row cap.</summary>
+        Rows,
+
+        /// <summary>The build reached its byte cap, estimated as the rows were added.</summary>
+        Bytes,
     }
 
     /// <summary>
@@ -201,6 +226,38 @@ internal sealed class HashJoinOperator
         joinNode.RightPhysicalNode is { } rightInput
             ? tree.ExecuteNode(rightInput, plan)
             : scanner.ScanJoinRightSource(joinNode.BuildSource, joinNode.BuildExecutionFilter, plan, joinNode.Stats);
+
+    /// <summary>
+    /// Counts a nested-loop fallback for <c>SHOW ENGINE STATS</c> and writes a warning, at most one
+    /// each <see cref="JoinFallbackMetrics.LogIntervalMs"/> for this engine. The plan of the
+    /// statement still shows a hash join, so the count and the warning are the signs of the fallback
+    /// outside <c>EXPLAIN ANALYZE</c>. The warning names the database and the right side of the
+    /// join. It holds no SQL text and no value from the statement, because a literal can be private
+    /// data.
+    /// </summary>
+    private void NoteNestedLoopFallback(HashJoinNode joinNode, QueryPlan plan, BuildLimit stoppedBy)
+    {
+        if (!services.JoinFallbacks.NoteNestedLoopFallback(out long notLogged) || services.Logger is not { } logger)
+            return;
+
+        BoundJoinRightSource right = joinNode.BuildSource;
+        CamusDBOptions options = plan.Database.Options;
+
+        (string setting, long limit) = stoppedBy == BuildLimit.Bytes
+            ? ("hash_join_max_build_bytes", options.HashJoinMaxBuildBytes)
+            : ("hash_join_max_build_rows", (long)options.HashJoinMaxBuildRows);
+
+        logger.LogWarning(
+            "A hash join in database {Database} ran as a nested-loop join, which compares each row of one side with every row of the other. " +
+            "Its build side passed {Setting} ({Limit}) and spill_enabled is off. " +
+            "Right side of the join: {RightSide}. Other fallbacks since the previous warning: {NotLogged}. " +
+            "Turn on spill_enabled, or raise that setting",
+            plan.Database.Name,
+            setting,
+            limit,
+            right.Table?.Table.Name ?? right.Alias,
+            notLogged);
+    }
 
     internal async IAsyncEnumerable<QueryResultRow> ExecuteHashJoin(
         HashJoinNode joinNode,
@@ -221,7 +278,7 @@ internal sealed class HashJoinOperator
         using CancellationTokenSource? linked = JoinCancellation.Link(plan, ct);
         CancellationToken token = JoinCancellation.Effective(plan, linked);
 
-        JoinHashTable? hashTable = await BuildHashTable(joinNode, plan, buildSide).ConfigureAwait(false);
+        (JoinHashTable? hashTable, BuildLimit stoppedBy) = await BuildHashTable(joinNode, plan, buildSide).ConfigureAwait(false);
 
         if (hashTable is null)
         {
@@ -243,6 +300,8 @@ internal sealed class HashJoinOperator
             // plan shows; its output passes through this method and is counted there.
             if (joinNode.Stats is { } fallbackStats)
                 fallbackStats.RanAs = "nested-loop-fallback";
+
+            NoteNestedLoopFallback(joinNode, plan, stoppedBy);
 
             NestedLoopJoinNode fallback = new(joinNode.Input!, joinNode.BuildSource, joinNode.OnPredicate!)
             {

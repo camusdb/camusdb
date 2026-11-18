@@ -109,7 +109,7 @@ reports a join row this way:
     side is empty. It reads the right side again for every left row (`rows_read` is left rows ×
     right rows, and the detail shows `ran=nested-loop-rescan`) in two cases: the right-side
     filter calls a volatile function, or spilling is off and the right side has more rows than
-    `HashJoinMaxBuildRows`.
+    `HashJoinMaxBuildRows` or more estimated bytes than `HashJoinMaxBuildBytes`.
   - A `nested-loop-join` with `lateral` runs its `LATERAL` derived table for each left row. With
     `lateral=expressions(<columns>)` it evaluates the expressions of the derived table on each left
     row and runs no subquery. See [LATERAL](joins.md#lateral).
@@ -151,7 +151,7 @@ A join row's detail can also show two values that only execution knows:
 | Suffix | Meaning |
 |--------|---------|
 | `ran=grace-hash` | The hash build was larger than the spill threshold, so the join ran as a Grace hash join. |
-| `ran=nested-loop-fallback` | The hash build was larger than `HashJoinMaxBuildRows` with spilling off, so the join ran as a nested-loop join. |
+| `ran=nested-loop-fallback` | The hash build was larger than `HashJoinMaxBuildRows` rows or `HashJoinMaxBuildBytes` estimated bytes with spilling off, so the join ran as a nested-loop join. [`SHOW ENGINE STATS`](engine-stats.md#join-fallbacks) counts these runs, and each run writes a rate-limited warning to the server log. |
 | `ran=nested-loop-rescan` | The nested-loop join read its right side again for every left row, instead of one time (see above). |
 | `ran=broadcast` | The build was small enough to ship, so the join probed the other side span by span. One `broadcast-span` row follows for each span. |
 | `probe-memo-hits=<n>` | The index nested-loop join answered `n` probes from its memo of earlier probes: outer rows whose key an earlier outer row had already probed, or whose key another outer row of the same probe page probes. A hit reads nothing, so `kv_lookups`, `kv_scan_entries` and `rows_read` count the distinct keys only. The marker appears only when `n` is above zero. |
@@ -501,7 +501,8 @@ of its own; the join line names it (`build=li`).
 streamed as the probe side. The planner chose `li` as the build side because it estimated
 fewer rows than `orders`. When the build side passes the spill caps (500 000 rows or 256 MiB of
 estimated bytes by default), the join runs as a Grace hash join over spill files. With spill off, a
-build side above `HashJoinMaxBuildRows` (default 1 000 000) falls back to a nested-loop join.
+build side above `HashJoinMaxBuildRows` (default 1 000 000) or `HashJoinMaxBuildBytes` estimated
+bytes (default 1 GiB) falls back to a nested-loop join.
 
 ---
 
