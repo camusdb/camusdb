@@ -13,7 +13,8 @@ using CamusDB.MicroBenchmarks;
 // BenchmarkDotNet job, and `probe exprscan` runs the statement-depth measurements in
 // ExpressionDepthProbes, and `probe jsonbsize <dir>` prints the jsonb space table of
 // JsonbCodecBenchmarks, and `probe inlinefn` prints the compile times and the retained memory of
-// InlineFunctionBenchmarks; everything else is handed to the switcher unchanged.
+// InlineFunctionBenchmarks, and `probe spill` compares statements with spill-to-disk on and off in
+// SpillDefaultProbes; everything else is handed to the switcher unchanged.
 if (args.Length > 0 && args[0] == "probe" && args.Length > 1 && args[1] is "exprscan" or "exprchild")
     return await ExpressionDepthProbes.RunAsync(args);
 
@@ -22,6 +23,9 @@ if (args.Length > 2 && args[0] == "probe" && args[1] == "jsonbsize")
 
 if (args.Length > 1 && args[0] == "probe" && args[1] == "inlinefn")
     return InlineFunctionBenchmarks.RunProbe();
+
+if (args.Length > 1 && args[0] == "probe" && args[1] == "spill")
+    return await SpillDefaultProbes.RunAsync(args);
 
 if (args.Length > 0 && args[0] == "probe")
     return await InsertRestoreProbes.RunAsync(args);
