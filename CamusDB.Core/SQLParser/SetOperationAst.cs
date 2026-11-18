@@ -198,7 +198,7 @@ internal static class SetOperationAst
     }
 
     /// <summary>The Select wrapper of a set operation with no clause of its own.</summary>
-    private static bool IsPlainWrapper(NodeAst node) =>
+    internal static bool IsPlainWrapper(NodeAst node) =>
         node.nodeType == NodeType.Select
         && node.rightAst?.nodeType == NodeType.SetOperationReference
         && node.leftAst?.nodeType == NodeType.ExprAllFields

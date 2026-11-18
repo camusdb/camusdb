@@ -450,6 +450,26 @@ internal sealed class ExistsSubqueryPreparer
     }
 
     /// <summary>
+    /// Prepares a scalar subquery inside a <c>LATERAL</c> body of expressions, whose only link to the left row is
+    /// the hidden placeholders of that body (see <see cref="LateralExpressionBody"/>). It binds one time, with no
+    /// outer reference of its own; each run gets the placeholder values through its parameters.
+    /// </summary>
+    internal Task<CorrelatedSubqueryBody> PrepareParameterSubqueryAsync(
+        DatabaseDescriptor database,
+        NodeAst select,
+        ExecuteSQLTicket ticket) =>
+        CorrelatedSubqueryBody.PrepareAsync(
+            subqueryExecutor,
+            database,
+            select,
+            selectQueryCreator.CreateSelectQuery(select),
+            outerReferences: [],
+            outerSources: [],
+            outerDerivedSources: [],
+            ticket,
+            isExistsBody: false);
+
+    /// <summary>
     /// Prepares a correlated body in the fast form when it fits, and as a <see cref="CorrelatedSubqueryBody"/>
     /// otherwise. Both forms check the body here, so an error does not depend on the outer rows.
     /// </summary>

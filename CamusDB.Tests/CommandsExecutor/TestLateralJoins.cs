@@ -614,11 +614,17 @@ internal class TestLateralJoins : SharedNodeBaseTest
             "EXPLAIN SELECT i.id, c.d, c.e FROM items i CROSS JOIN LATERAL (SELECT i.v * 2 AS d, i.v + 1 AS e) AS c");
         StringAssert.Contains("lateral=expressions(d, e)", expressions);
 
-        // A LIMIT, a nested subquery that reads the left row and a volatile call each keep the subquery run.
+        // A scalar subquery that reads the left row runs for each left row, but the body does not.
+        StringAssert.Contains("lateral=expressions(d)", await PlanText(executor, database, db,
+            "EXPLAIN SELECT i.id, c.d FROM items i CROSS JOIN LATERAL (SELECT (SELECT MAX(x.v) FROM items x WHERE x.grp = i.grp) - i.v AS d) AS c"));
+
+        // A LIMIT, an EXISTS that reads the left row, a subquery whose own nested subquery reads the left row and
+        // a volatile call each keep the subquery run.
         foreach (string body in new[]
         {
             "SELECT i.v * 2 AS d LIMIT 1",
-            "SELECT (SELECT MAX(x.v) FROM items x WHERE x.grp = i.grp) - i.v AS d",
+            "SELECT EXISTS (SELECT 1 FROM items x WHERE x.grp = i.grp AND x.id > i.id) AS d",
+            "SELECT (SELECT MAX(x.v) FROM items x WHERE x.grp = (SELECT i.grp)) AS d",
             "SELECT i.v + random() AS d",
         })
         {
@@ -634,6 +640,217 @@ internal class TestLateralJoins : SharedNodeBaseTest
 
         List<QueryResultRow> rows = await Query(executor, database, db, uncorrelated);
         CollectionAssert.AreEqual(Enumerable.Range(1, 12).Select(id => 120L - id * 10).ToArray(), Longs(rows, "d"));
+    }
+
+    /// <summary>
+    /// The outcome of <paramref name="sql"/>: its rows rendered, or the code and the text of its error. Two forms of
+    /// one statement compare equal only when both give the same rows or both fail with the same error.
+    /// </summary>
+    private static async Task<string[]> Outcome(
+        CommandExecutor executor, DatabaseDescriptor database, string db, string sql, params string[] columns)
+    {
+        try
+        {
+            return Render(await Query(executor, database, db, sql), columns);
+        }
+        catch (CamusDBException error)
+        {
+            return [$"error {error.Code}: {error.Message}"];
+        }
+    }
+
+    /// <summary>
+    /// The SQL of <paramref name="sql"/> with each <c>/*v*/(VALUES …) AS name (columns)/*v*/</c> written as a
+    /// derived table over the same list with a <c>LIMIT</c>, a body that runs for each left row.
+    /// </summary>
+    private static string ValuesAsSubqueryRuns(string sql)
+    {
+        string[] parts = sql.Split("/*v*/");
+        for (int i = 1; i < parts.Length; i += 2)
+        {
+            string list = parts[i];
+            int alias = list.LastIndexOf(") AS ", System.StringComparison.Ordinal);
+            string values = list[..(alias + 1)];
+            string name = list[(alias + 5)..];
+            parts[i] = $"(SELECT * FROM {values} AS w_{name} LIMIT 1000) AS {name.Split(' ')[0]}";
+        }
+
+        return string.Concat(parts);
+    }
+
+    [Test]
+    public async Task AValuesListOfExpressionsGivesTheRowsOfASubqueryRun()
+    {
+        (string db, DatabaseDescriptor database, CommandExecutor executor) = await Seeded();
+
+        // Column m mixes INT64 and FLOAT64 rows, so each cell is FLOAT64; column t mixes a string and a NULL.
+        const string sql =
+            "SELECT i.id, s.slot, s.m, s.t FROM items i CROSS JOIN LATERAL /*v*/(VALUES " +
+            "('a', i.v, CAST(i.id AS STRING)), ('b', i.v / 4.0, NULL), ('c', CASE WHEN i.grp = 0 THEN NULL ELSE i.grp END, 'x' || CAST(i.id AS STRING))" +
+            ") AS s (slot, m, t)/*v*/ ORDER BY i.id, s.slot";
+        string[] columns = ["id", "slot", "m", "t"];
+
+        List<QueryResultRow> evaluated;
+        using (CorrelatedRunProbe.Observe(out CorrelatedRunProbe probe))
+        {
+            evaluated = await Query(executor, database, db, sql.Replace("/*v*/", ""));
+            Assert.That(probe.Runs, Is.EqualTo(0), "a VALUES list of expressions runs no subquery");
+        }
+
+        List<QueryResultRow> run;
+        using (CorrelatedRunProbe.Observe(out CorrelatedRunProbe probe))
+        {
+            run = await Query(executor, database, db, ValuesAsSubqueryRuns(sql));
+            Assert.That(probe.Runs, Is.GreaterThan(0));
+        }
+
+        CollectionAssert.AreEqual(Render(run, columns), Render(evaluated, columns));
+        Assert.That(evaluated, Has.Count.EqualTo(36));
+        Assert.That(evaluated.All(r => r.Row["m"].Type is ColumnType.Float64 or ColumnType.Null), Is.True, "every m cell is FLOAT64 or NULL");
+        Assert.That(evaluated[1].Row["m"].FloatValue, Is.EqualTo(2.5));
+        Assert.That(evaluated[1].Row["t"].Type, Is.EqualTo(ColumnType.Null));
+
+        StringAssert.Contains("lateral=expressions(slot, m, t)", await PlanText(executor, database, db, "EXPLAIN " + sql.Replace("/*v*/", "")));
+    }
+
+    [Test]
+    public async Task AScalarSubqueryOfAValuesListRunsOnceForEachValueItReads()
+    {
+        (string db, DatabaseDescriptor database, CommandExecutor executor) = await Seeded();
+
+        // The subquery reads only i.grp, which has 3 values; tag is 'red' for items 2 and 4 only, so the second
+        // subquery gives NULL (no row) for every other item.
+        const string sql =
+            "SELECT i.id, s.slot, s.h, s.tag FROM items i CROSS JOIN LATERAL /*v*/(VALUES " +
+            "('top', i.v + COALESCE((SELECT MAX(x.v) FROM items x WHERE x.grp = i.grp), 128), 'none'), " +
+            "('mid', 0, COALESCE((SELECT t.tag FROM tags t WHERE t.item_id = i.id AND t.tag = 'red'), 'none'))" +
+            ") AS s (slot, h, tag)/*v*/ ORDER BY i.id, s.slot";
+        string[] columns = ["id", "slot", "h", "tag"];
+
+        string explain = await PlanText(executor, database, db, "EXPLAIN " + sql.Replace("/*v*/", ""));
+        StringAssert.Contains("lateral=expressions(slot, h, tag)", explain);
+
+        List<QueryResultRow> evaluated;
+        using (CorrelatedRunProbe.Observe(out CorrelatedRunProbe probe))
+        {
+            evaluated = await Query(executor, database, db, sql.Replace("/*v*/", ""));
+
+            // 3 runs of the first subquery (one for each group) and 12 of the second (one for each item).
+            Assert.That(probe.Runs, Is.EqualTo(15));
+            Assert.That(probe.Hits, Is.EqualTo(9));
+        }
+
+        List<QueryResultRow> run = await Query(executor, database, db, ValuesAsSubqueryRuns(sql));
+
+        CollectionAssert.AreEqual(Render(run, columns), Render(evaluated, columns));
+        Assert.That(evaluated, Has.Count.EqualTo(24));
+
+        // Item 1 is in group 1, whose largest v is 100 (item 10).
+        Assert.That(evaluated[1].Row["h"].LongValue, Is.EqualTo(110));
+        CollectionAssert.AreEqual(
+            new[] { "none", "red", "none", "red" },
+            evaluated.Where(r => r.Row["slot"].StrValue == "mid").Take(4).Select(r => r.Row["tag"].StrValue).ToArray());
+    }
+
+    [Test]
+    public async Task AScalarSubqueryOfABodyOfExpressionsKeepsTheTypeAndTheNullOfASubqueryRun()
+    {
+        (string db, DatabaseDescriptor database, CommandExecutor executor) = await Seeded();
+
+        // The subquery finds no row, so it is a FLOAT64 NULL: COALESCE takes the FLOAT64 type and 7 becomes 7.0,
+        // so the division gives 3.5, not 3.
+        // The second body has no subquery: a FLOAT64 NULL before the value makes the COALESCE FLOAT64 there too.
+        const string sql =
+            "SELECT i.id, c.q, c.n, k.r FROM items i CROSS JOIN LATERAL (SELECT " +
+            "COALESCE((SELECT CAST(MAX(x.v) AS FLOAT64) FROM items x WHERE x.grp = i.grp AND x.id > 100), 7) / 2 AS q, " +
+            "(SELECT x.v FROM items x WHERE x.id = i.id + 100) AS n/*b*/) AS c " +
+            "CROSS JOIN LATERAL (SELECT COALESCE(CAST(NULL AS FLOAT64), i.grp) / 2 AS r/*b*/) AS k ORDER BY i.id";
+        string[] columns = ["id", "q", "n", "r"];
+
+        List<QueryResultRow> evaluated = await Query(executor, database, db, sql.Replace("/*b*/", ""));
+        List<QueryResultRow> run = await Query(executor, database, db, AsSubqueryRuns(sql));
+
+        CollectionAssert.AreEqual(Render(run, columns), Render(evaluated, columns));
+        Assert.That(evaluated.All(r => r.Row["q"].Type == ColumnType.Float64 && r.Row["q"].FloatValue == 3.5), Is.True);
+        Assert.That(evaluated.All(r => r.Row["n"].Type == ColumnType.Null), Is.True);
+        Assert.That(evaluated[0].Row["r"].Type, Is.EqualTo(ColumnType.Float64));
+        Assert.That(evaluated[0].Row["r"].FloatValue, Is.EqualTo(0.5));
+
+        string explain = await PlanText(executor, database, db, "EXPLAIN " + sql.Replace("/*b*/", ""));
+        StringAssert.Contains("lateral=expressions(q, n)", explain);
+        StringAssert.Contains("lateral=expressions(r)", explain);
+    }
+
+    [Test]
+    public async Task AScalarSubqueryOfAValuesListThatGivesTwoRowsFailsAsInASubqueryRun()
+    {
+        (string db, DatabaseDescriptor database, CommandExecutor executor) = await Seeded();
+
+        // Item 4 has two tags. The run form binds the list for each row and runs each subquery then, also one in a
+        // CASE branch that the row does not take, so the error comes for item 4 in both forms.
+        const string sql =
+            "SELECT i.id, s.k, s.tag FROM items i CROSS JOIN LATERAL /*v*/(VALUES " +
+            "(1, CASE WHEN i.id = 4 THEN 'four' ELSE (SELECT t.tag FROM tags t WHERE t.item_id = i.id) END), (2, 'x')" +
+            ") AS s (k, tag)/*v*/ WHERE i.id IN (2, 4) ORDER BY i.id, s.k";
+
+        StringAssert.Contains("lateral=expressions(k, tag)", await PlanText(executor, database, db, "EXPLAIN " + sql.Replace("/*v*/", "")));
+
+        string[] evaluated = await Outcome(executor, database, db, sql.Replace("/*v*/", ""), "id", "k", "tag");
+        string[] run = await Outcome(executor, database, db, ValuesAsSubqueryRuns(sql), "id", "k", "tag");
+
+        CollectionAssert.AreEqual(run, evaluated);
+        Assert.That(evaluated, Has.Length.EqualTo(1));
+        StringAssert.Contains("Scalar subquery returned more than one row", evaluated[0]);
+
+        // Without item 4 no subquery gives two rows.
+        List<QueryResultRow> rows = await Query(executor, database, db, sql.Replace("/*v*/", "").Replace("IN (2, 4)", "IN (2, 9)"));
+        CollectionAssert.AreEqual(new long[] { 2, 2, 9, 9 }, Longs(rows, "id"));
+        CollectionAssert.AreEqual(new long[] { 1, 2, 1, 2 }, Longs(rows, "k"));
+        CollectionAssert.AreEqual(new[] { "red", "x", "green", "x" }, Strings(rows, "tag"));
+    }
+
+    [Test]
+    public async Task ABodyWhoseScalarSubqueryCannotBindFailsAsInASubqueryRun()
+    {
+        (string db, DatabaseDescriptor database, CommandExecutor executor) = await Seeded();
+
+        // A scalar subquery of two columns. Over no left row and over some left rows, the two forms give the
+        // same outcome.
+        foreach (string filter in new[] { "i.id < 0", "i.id <= 2" })
+        {
+            string sql =
+                "SELECT i.id, s.k FROM items i CROSS JOIN LATERAL /*v*/(VALUES " +
+                "((SELECT x.v, x.id FROM items x WHERE x.id = i.id)), (5)) AS s (k)/*v*/ " +
+                $"WHERE {filter} ORDER BY i.id, s.k";
+
+            string[] evaluated = await Outcome(executor, database, db, sql.Replace("/*v*/", ""), "id", "k");
+            string[] run = await Outcome(executor, database, db, ValuesAsSubqueryRuns(sql), "id", "k");
+
+            CollectionAssert.AreEqual(run, evaluated, filter);
+        }
+    }
+
+    [Test]
+    public async Task ALeftJoinOfAValuesListPadsTheLeftRowsWhoseRowsTheOnRefuses()
+    {
+        (string db, DatabaseDescriptor database, CommandExecutor executor) = await Seeded();
+
+        const string sql =
+            "SELECT i.id, s.k, s.d FROM items i LEFT JOIN LATERAL /*v*/(VALUES " +
+            "(1, i.v * 2), (2, (SELECT MAX(x.v) FROM items x WHERE x.grp = i.grp))) AS s (k, d)/*v*/ ON s.d > 100 " +
+            "WHERE i.id <= 6 ORDER BY i.id, s.k";
+        string[] columns = ["id", "k", "d"];
+
+        List<QueryResultRow> evaluated = await Query(executor, database, db, sql.Replace("/*v*/", ""));
+        List<QueryResultRow> run = await Query(executor, database, db, ValuesAsSubqueryRuns(sql));
+
+        CollectionAssert.AreEqual(Render(run, columns), Render(evaluated, columns));
+
+        // k = 1 passes only for item 6 (v * 2 = 120). k = 2 is the largest v of the group: 100 for group 1
+        // (items 1 and 4), which fails, and 110 or 120 for the other groups. So items 1 and 4 are padded.
+        CollectionAssert.AreEqual(
+            new[] { "1:NULL", "2:2", "3:2", "4:NULL", "5:2", "6:1", "6:2" },
+            evaluated.Select(r => $"{r.Row["id"].LongValue}:{(r.Row["k"].Type == ColumnType.Null ? "NULL" : r.Row["k"].LongValue.ToString())}").ToArray());
     }
 
     [Test]

@@ -113,8 +113,9 @@ reports a join row this way:
     filter calls a volatile function, or spilling is off and the right side has more rows than
     `HashJoinMaxBuildRows` or more estimated bytes than `HashJoinMaxBuildBytes`.
   - A `nested-loop-join` with `lateral` runs its `LATERAL` derived table for each left row. With
-    `lateral=expressions(<columns>)` it evaluates the expressions of the derived table on each left
-    row and runs no subquery. See [LATERAL](joins.md#lateral).
+    `lateral=expressions(<columns>)` it evaluates the expressions of the derived table, or of each row
+    of its `VALUES` list, on each left row and does not run the derived table. A scalar subquery inside
+    those expressions still runs for each distinct value it reads. See [LATERAL](joins.md#lateral).
   - A `nested-loop-join` with `range-seek=<index>(<bounds>)` keeps nothing in memory. For each left
     row it reads only the index range that the left row's bounds give, so `kv_scan_entries` counts
     the index entries of all those ranges and `rows_read` the right rows fetched. See

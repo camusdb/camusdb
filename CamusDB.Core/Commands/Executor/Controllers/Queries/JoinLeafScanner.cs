@@ -110,16 +110,17 @@ internal sealed class JoinLeafScanner
         derivedTableExecutor.StreamLateral(plan.Database, source, plan.Ticket, executionFilter, leftRow);
 
     /// <summary>
-    /// The one row of a <c>LATERAL</c> body of expressions only for one left row, or null when the right
-    /// filter drops it; see <see cref="DerivedTableExecutor.EvaluateLateralExpressionsAsync"/>.
+    /// Adds the rows of a <c>LATERAL</c> body of expressions only for one left row to <paramref name="output"/>,
+    /// less the rows the right filter drops; see <see cref="DerivedTableExecutor.EvaluateLateralExpressionsAsync"/>.
     /// </summary>
-    internal ValueTask<QueryResultRow?> EvaluateLateralExpressionsAsync(
+    internal ValueTask EvaluateLateralExpressionsAsync(
         BoundDerivedTableSource source,
         NodeAst? executionFilter,
         QueryPlan plan,
         IReadOnlyDictionary<string, ColumnValue> leftRow,
+        List<QueryResultRow> output,
         LateralExpressionBody.ParameterBuffer parameterBuffer) =>
-        derivedTableExecutor.EvaluateLateralExpressionsAsync(plan.Database, source, plan.Ticket, executionFilter, leftRow, parameterBuffer);
+        derivedTableExecutor.EvaluateLateralExpressionsAsync(plan.Database, source, plan.Ticket, executionFilter, leftRow, output, parameterBuffer);
 
     internal async IAsyncEnumerable<QueryResultRow> ScanBoundTable(
         BoundTableSource source,

@@ -147,10 +147,13 @@ internal sealed class DerivedTableExecutor
         CorrelatedSubqueryBody body = source.Lateral
             ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"Derived table '{source.Alias}' is not LATERAL");
 
-        // A body of expressions only: one row, keyed by the column row keys, with no subquery run.
+        // A body of expressions only: one row for each branch, keyed by the column row keys, with no run of the body.
         if (source.LateralExpressions is not null)
         {
-            if (await EvaluateLateralExpressionsAsync(database, source, outerTicket, executionFilter, leftRow).ConfigureAwait(false) is { } row)
+            List<QueryResultRow> evaluated = [];
+            await EvaluateLateralExpressionsAsync(database, source, outerTicket, executionFilter, leftRow, evaluated).ConfigureAwait(false);
+
+            foreach (QueryResultRow row in evaluated)
                 yield return row;
 
             yield break;
@@ -188,41 +191,53 @@ internal sealed class DerivedTableExecutor
     }
 
     /// <summary>
-    /// The one row of a <c>LATERAL</c> body of expressions only (<see cref="BoundDerivedTableSource.LateralExpressions"/>)
-    /// for one left row, or null when <paramref name="executionFilter"/> drops it. It widens the cells and
-    /// applies the filter as <see cref="StreamLateral"/> does for the rows of a run, with no async iterator,
-    /// because the nested-loop join calls it once for each left row.
+    /// Adds the rows of a <c>LATERAL</c> body of expressions only (<see cref="BoundDerivedTableSource.LateralExpressions"/>)
+    /// for one left row to <paramref name="output"/>: one row for each branch of the body, less the rows that
+    /// <paramref name="executionFilter"/> drops. It widens the cells and applies the filter as
+    /// <see cref="StreamLateral"/> does for the rows of a run, with no async iterator, because the nested-loop
+    /// join calls it once for each left row. The caller clears <paramref name="output"/> between left rows.
     /// </summary>
-    public async ValueTask<QueryResultRow?> EvaluateLateralExpressionsAsync(
+    public async ValueTask EvaluateLateralExpressionsAsync(
         DatabaseDescriptor database,
         BoundDerivedTableSource source,
         QueryTicket outerTicket,
         NodeAst? executionFilter,
         IReadOnlyDictionary<string, ColumnValue> leftRow,
+        List<QueryResultRow> output,
         LateralExpressionBody.ParameterBuffer? parameterBuffer = null)
     {
         LateralExpressionBody expressions = source.LateralExpressions
             ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"Derived table '{source.Alias}' is not a LATERAL body of expressions");
 
         ColumnValue[] outerValues = source.Lateral!.Outer.For(leftRow, rowKeysAreQualified: true);
-        QueryResultRow row = expressions.Evaluate(outerValues, outerTicket.Parameters, parameterBuffer);
+        int first = output.Count;
+
+        await expressions.EvaluateAsync(
+            database, outerValues, outerTicket.TxnState, outerTicket.Parameters, parameterBuffer, output, outerTicket.CancellationToken).ConfigureAwait(false);
 
         (string RowKey, ColumnType Type)[] numericColumns = expressions.NumericColumns;
+        bool qualify = executionFilter is not null && outerTicket.RowNameResolver is { } resolver && resolver.UsesQualifiedRowKeys();
+        int kept = first;
 
-        if (numericColumns.Length > 0)
-            row = NumericWidening.WidenToDeclaredTypes(row, numericColumns);
+        for (int i = first; i < output.Count; i++)
+        {
+            QueryResultRow row = output[i];
 
-        if (executionFilter is null)
-            return row;
+            if (numericColumns.Length > 0)
+                row = NumericWidening.WidenToDeclaredTypes(row, numericColumns);
 
-        IReadOnlyDictionary<string, ColumnValue> evalRow = outerTicket.RowNameResolver is { } resolver
-                                                           && resolver.UsesQualifiedRowKeys()
-            ? QueryRowMerger.QualifyRow(row.Row, source.Alias)
-            : row.Row;
+            if (executionFilter is not null)
+            {
+                IReadOnlyDictionary<string, ColumnValue> evalRow = qualify ? QueryRowMerger.QualifyRow(row.Row, source.Alias) : row.Row;
 
-        return await queryFilterer.MeetWhereAsync(executionFilter, evalRow, outerTicket, database).ConfigureAwait(false)
-            ? row
-            : null;
+                if (!await queryFilterer.MeetWhereAsync(executionFilter, evalRow, outerTicket, database).ConfigureAwait(false))
+                    continue;
+            }
+
+            output[kept++] = row;
+        }
+
+        output.RemoveRange(kept, output.Count - kept);
     }
 
     private static async IAsyncEnumerable<QueryResultRow> KeptRows(QueryResultRow[] rows)

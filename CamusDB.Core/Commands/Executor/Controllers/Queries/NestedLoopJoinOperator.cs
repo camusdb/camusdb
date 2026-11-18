@@ -68,6 +68,7 @@ internal sealed class NestedLoopJoinOperator
         Dictionary<string, int>? rightOrdinalMap = null;
         JoinRowPairer pairer = new();
         LateralExpressionBody.ParameterBuffer? lateralParameters = null;
+        List<QueryResultRow>? lateralRows = null;
         JoinRangeSeek? seek = joinNode.RangeSeek;
 
         // A seek reads the right rows through its index, and such a row also decodes the index's key
@@ -99,15 +100,21 @@ internal sealed class NestedLoopJoinOperator
 
             bool matched = false;
 
-            // A LATERAL body of expressions only gives one row or none, with no right-side cursor.
+            // A LATERAL body of expressions only gives a fixed number of rows (one for each branch of a VALUES
+            // list), less the rows the right filter drops, with no right-side cursor.
             if (seek is null && spool is null && joinNode.RightSource.Derived is { LateralExpressions: not null } expressionBody)
             {
-                QueryResultRow? evaluated = await scanner
-                    .EvaluateLateralExpressionsAsync(expressionBody, joinNode.RightExecutionFilter, plan, leftQualified, lateralParameters ??= new())
+                lateralRows ??= [];
+                lateralRows.Clear();
+
+                await scanner
+                    .EvaluateLateralExpressionsAsync(expressionBody, joinNode.RightExecutionFilter, plan, leftQualified, lateralRows, lateralParameters ??= new())
                     .ConfigureAwait(false);
 
-                if (evaluated is { } rightRow)
+                // An index loop: the list is reused for the next left row, after these rows are paired.
+                for (int r = 0; r < lateralRows.Count; r++)
                 {
+                    QueryResultRow rightRow = lateralRows[r];
                     joinLayout      ??= QueryRowMerger.BuildJoinLayout(leftQualified, rightRow.Row, rightAlias);
                     rightOrdinalMap ??= QueryRowMerger.BuildRightKeyOrdinalMap(rightRow.Row, rightAlias, joinLayout);
                     QueryRow merged  = pairer.Pair(leftQualified, rightRow.Row, joinLayout, rightOrdinalMap);
