@@ -45,7 +45,8 @@ public sealed record ReconciliationResult(
     IReadOnlyList<AggregateRead>? Aggregates = null,
     TokenResult? Tokens = null,
     Elle.QuiescentResult? Elle = null,
-    Tpch.TpchResult? Tpch = null)
+    Tpch.TpchResult? Tpch = null,
+    Tpcc.TpccResult? Tpcc = null)
 {
     // BalanceConserved is the bank-transfer atomicity invariant: SUM(balance) must be unchanged after a
     // transfer run. It is never waived — unlike conflicts, an atomicity break is a correctness failure a
@@ -98,7 +99,8 @@ public sealed record ReconciliationResult(
         && (ScanProbe is null || ScanProbe.Passed)
         && (Tokens is null || Tokens.Passed)
         && (Elle is null || Elle.Passed)
-        && (Tpch is null || Tpch.Passed);
+        && (Tpch is null || Tpch.Passed)
+        && (Tpcc is null || Tpcc.Passed);
 }
 
 /// <summary>

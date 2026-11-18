@@ -61,7 +61,7 @@ public sealed class InitOptions : CommonOptions
     [Option("batch", Default = 500, HelpText = "Rows per seeding transaction.")]
     public int Batch { get; set; }
 
-    [Option("workload", Default = "accounts", HelpText = "accounts (default) seeds only the workload dataset every shape needs. tpch also creates and loads the TPC-H tables at --tpch-scale, after that dataset.")]
+    [Option("workload", Default = "accounts", HelpText = "accounts (default) seeds only the workload dataset every shape needs. tpch also creates and loads the TPC-H tables at --tpch-scale, after that dataset. tpcc also creates and loads the TPC-C tables for --tpcc-warehouses at --tpcc-scale.")]
     public string Workload { get; set; } = "accounts";
 
     [Option("tpch-scale", Default = 0.01, HelpText = "TPC-H scale factor for --workload tpch: 1 is about 8.66 million rows, 0.01 (default) about 86,000. At least 0.01.")]
@@ -69,6 +69,15 @@ public sealed class InitOptions : CommonOptions
 
     [Option("tpch-load-connections", Default = 8, HelpText = "Connections the TPC-H load spreads its INSERT statements over.")]
     public int TpchLoadConnections { get; set; }
+
+    [Option("tpcc-warehouses", Default = 1, HelpText = "TPC-C warehouses for --workload tpcc. One warehouse at --tpcc-scale 1 is about 500,000 rows, plus 100,000 items shared by all.")]
+    public int TpccWarehouses { get; set; }
+
+    [Option("tpcc-scale", Default = 1.0, HelpText = "Fraction of the specified TPC-C cardinalities to load for --workload tpcc: 1 (default) is 100,000 items and 3,000 customers and orders per district; 0.1 is a tenth of each. Between 0.01 and 1. Not a TPC-C scale; it exists so a test can load in seconds.")]
+    public double TpccScale { get; set; }
+
+    [Option("tpcc-load-connections", Default = 8, HelpText = "Connections the TPC-C load spreads its INSERT statements over.")]
+    public int TpccLoadConnections { get; set; }
 }
 
 /// <summary>
@@ -170,7 +179,7 @@ public sealed class RunOptions : CommonOptions
     [Option("pipeline", Default = false, HelpText = "Send each write transaction as pipelined frames instead of one round trip per statement: [BEGIN, reads] then [updates, conditional COMMIT] — two exchanges per transaction instead of six on the bank shape. Applies to the accounts, bank and fanout shapes over gRPC against a server that reads the pipeline contract; elsewhere the client falls back to one exchange per step and summary.json's exchangesPerWriteTxn shows it. Recorded in manifest.json; runs that differ here are different clients.")]
     public bool Pipeline { get; set; }
 
-    [Option("workload", Default = "accounts", HelpText = "Write shape: accounts (shard-disjoint read-modify-write, conflict-free), bank (contended transfers within the dataset with a conserved SUM(balance) invariant), fanout (bank transfers whose two legs always land in different tables; needs --tables >= 2), append (Elle list-append transactions on a separate table, recorded to history.edn for an Elle check; reads become read-only list-append transactions), rw (Elle rw-register transactions: blind writes and point reads of single rows, recorded to history.edn for the rw-register checker), predicate (group reads by predicate and single-row writes, recorded as register reads of every key the predicate can match, for the rw-register checker), or tokens (each write deletes a token row and inserts its successor in one transaction on a separate table of --tokens rows, checked per slot after the run; reads look a slot up in a read-only transaction and must find exactly one row), or tpch (read-only: every operation is one of the 22 TPC-H queries over the tables loaded by init --workload tpch, compared with a reference answer taken before the measured window; needs --read-percent 100 and --mode closed).")]
+    [Option("workload", Default = "accounts", HelpText = "Write shape: accounts (shard-disjoint read-modify-write, conflict-free), bank (contended transfers within the dataset with a conserved SUM(balance) invariant), fanout (bank transfers whose two legs always land in different tables; needs --tables >= 2), append (Elle list-append transactions on a separate table, recorded to history.edn for an Elle check; reads become read-only list-append transactions), rw (Elle rw-register transactions: blind writes and point reads of single rows, recorded to history.edn for the rw-register checker), predicate (group reads by predicate and single-row writes, recorded as register reads of every key the predicate can match, for the rw-register checker), or tokens (each write deletes a token row and inserts its successor in one transaction on a separate table of --tokens rows, checked per slot after the run; reads look a slot up in a read-only transaction and must find exactly one row), or tpch (read-only: every operation is one of the 22 TPC-H queries over the tables loaded by init --workload tpch, compared with a reference answer taken before the measured window; needs --read-percent 100 and --mode closed), or tpcc (every operation is one of the five TPC-C transactions in the standard mix over the tables loaded by init --workload tpcc, with no think time; the consistency conditions of the specification are checked before and after the run; needs --write-percent 100).")]
     public string Workload { get; set; } = "accounts";
 
     [Option("txn-mode", Default = "explicit", HelpText = "Elle shapes (append, rw, predicate): how a transaction reaches the server. explicit = BEGIN, one round trip per statement, COMMIT; autocommit = no BEGIN, every statement its own transaction (so every Elle transaction is one step long); pipeline = the statements of a transaction as pipelined frames with BEGIN in the first and the commit in the last.")]
@@ -226,6 +235,12 @@ public sealed class RunOptions : CommonOptions
 
     [Option("tpch-queries", Default = "", HelpText = "TPC-H workload: the queries to run, as numbers and ranges (1,3,6 or 1-6,14). Empty runs all 22.")]
     public string TpchQueries { get; set; } = "";
+
+    [Option("tpcc-warehouses", Default = 1, HelpText = "TPC-C workload: the warehouses the database was loaded with by init --workload tpcc. Worker i is bound to warehouse i mod warehouses, so fewer workers than warehouses leaves some idle.")]
+    public int TpccWarehouses { get; set; }
+
+    [Option("tpcc-scale", Default = 1.0, HelpText = "TPC-C workload: the fraction the database was loaded at by init --workload tpcc. The run refuses a database loaded with other warehouses, scale or seed.")]
+    public double TpccScale { get; set; }
 
     [Option("tokens", Default = 2000L, HelpText = "Token workload: tokens in workload_tokens, one row per slot. Fewer tokens means more moves racing for the same row.")]
     public long Tokens { get; set; }

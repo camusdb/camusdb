@@ -85,4 +85,6 @@ public sealed record RunManifest(
     /// <summary>The TPC-H scale factor and query selection of a <c>tpch</c> run, null for every other shape.
     /// Two runs at different scales, or over different query sets, measure different work.</summary>
     string? TpchScale = null,
-    string? TpchQueries = null);
+    string? TpchQueries = null,
+    string? TpccWarehouses = null,
+    string? TpccScale = null);

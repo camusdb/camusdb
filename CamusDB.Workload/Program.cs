@@ -14,6 +14,7 @@ using CamusDB.Workload.Metrics;
 using CamusDB.Workload.Operations;
 using CamusDB.Workload.Results;
 using CamusDB.Workload.Scheduling;
+using CamusDB.Workload.Tpcc;
 using CamusDB.Workload.Tpch;
 using CamusDB.Workload.Util;
 using CamusDB.Workload.Workload;
@@ -68,10 +69,16 @@ public static class Program
             Console.Error.WriteLine(shapeError);
             return 2;
         }
-        if (o.Workload is not ("accounts" or "tpch"))
+        if (o.Workload is not ("accounts" or "tpch" or "tpcc"))
         {
             Console.Error.WriteLine(
-                $"init --workload must be accounts or tpch (got '{o.Workload}'); every other shape sets its own table up during run.");
+                $"init --workload must be accounts, tpch or tpcc (got '{o.Workload}'); every other shape sets its own table up during run.");
+            return 2;
+        }
+        bool tpcc = o.Workload == "tpcc";
+        if (tpcc && TpccScale.Error(o.TpccWarehouses, o.TpccScale) is string tpccError)
+        {
+            Console.Error.WriteLine($"--tpcc-warehouses / --tpcc-scale: {tpccError}");
             return 2;
         }
         bool tpch = o.Workload == "tpch";
@@ -102,6 +109,18 @@ public static class Program
             await TpchLoader.LoadAsync(
                 () => OpenSingleAsync(o, ct, loadTimeout), generator, o.Seed, o.TpchLoadConnections, Console.WriteLine, ct)
                 .ConfigureAwait(false);
+        }
+
+        if (tpcc)
+        {
+            int loadTimeout = Math.Max(o.RequestTimeout ?? 0, TpchLoadRequestTimeoutSeconds);
+            TpccScale scale = new(o.TpccWarehouses, o.TpccScale);
+            Console.WriteLine(
+                $"Loading TPC-C: {scale.Warehouses:N0} warehouse(s) at scale {scale.FractionText} ({scale.Items:N0} items, " +
+                $"{scale.Customers:N0} customers and orders per district) over {o.TpccLoadConnections} connection(s)...");
+            await TpccLoader.LoadAsync(
+                () => OpenSingleAsync(o, ct, loadTimeout), new TpccGenerator(o.Seed, scale), o.Seed, o.TpccLoadConnections,
+                Console.WriteLine, ct).ConfigureAwait(false);
         }
 
         Console.WriteLine("Init complete.");
@@ -264,10 +283,26 @@ public static class Program
             Console.Error.WriteLine($"--isolation must be read_committed or serializable (got '{o.Isolation}').");
             return RunOutcome.Rejected;
         }
-        if (o.Workload is not ("accounts" or "bank" or "fanout" or "append" or "rw" or "predicate" or "tokens" or "tpch"))
+        if (o.Workload is not ("accounts" or "bank" or "fanout" or "append" or "rw" or "predicate" or "tokens" or "tpch" or "tpcc"))
         {
-            Console.Error.WriteLine($"--workload must be accounts, bank, fanout, append, rw, predicate, tokens or tpch (got '{o.Workload}').");
+            Console.Error.WriteLine($"--workload must be accounts, bank, fanout, append, rw, predicate, tokens, tpch or tpcc (got '{o.Workload}').");
             return RunOutcome.Rejected;
+        }
+        bool tpcc = o.Workload == "tpcc";
+        if (tpcc)
+        {
+            if (o.WritePercent != 100)
+            {
+                Console.Error.WriteLine(
+                    "--workload tpcc draws each operation from its own five-transaction mix: pass --read-percent 0 --write-percent 100 " +
+                    $"(got {o.ReadPercent}/{o.WritePercent}).");
+                return RunOutcome.Rejected;
+            }
+            if (TpccScale.Error(o.TpccWarehouses, o.TpccScale) is string tpccError)
+            {
+                Console.Error.WriteLine($"--tpcc-warehouses / --tpcc-scale: {tpccError}");
+                return RunOutcome.Rejected;
+            }
         }
         bool tpch = o.Workload == "tpch";
         IReadOnlyList<TpchQuery> tpchQueries = [];
@@ -603,6 +638,61 @@ public static class Program
             tpchOperation = new TpchOperation(connections, tpchReferences);
         }
 
+        // The TPC-C shape evaluates the consistency conditions here, before warm-up. A database that breaks
+        // one already cannot say anything about this run, and the figures it reads are what the final
+        // check measures the run's commits from.
+        TpccOperation? tpccOperation = null;
+        TpccLedger? tpccLedger = null;
+        TpccScale? tpccScale = null;
+        IReadOnlyDictionary<long, TpccBaseline> tpccBaselines = new Dictionary<long, TpccBaseline>();
+        if (tpcc)
+        {
+            tpccScale = new TpccScale(o.TpccWarehouses, o.TpccScale);
+            string seedText = o.Seed.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            try
+            {
+                await using CamusConnection tpccSetup = await OpenSingleAsync(o, ct, o.ReconcileRequestTimeout).ConfigureAwait(false);
+
+                TpccMeta? meta = await TpccLoader.ReadMetaAsync(tpccSetup, ct).ConfigureAwait(false);
+                if (meta is null)
+                {
+                    Console.Error.WriteLine("The TPC-C tables are not loaded. Run `init --workload tpcc` first.");
+                    return RunOutcome.Rejected;
+                }
+                if (meta.Seed != seedText || meta.Warehouses != tpccScale.Warehouses || meta.Scale != tpccScale.FractionText)
+                {
+                    Console.Error.WriteLine(
+                        $"The database holds TPC-C data for seed {meta.Seed}, {meta.Warehouses} warehouse(s) and scale {meta.Scale}; " +
+                        $"the run asked for seed {seedText}, {tpccScale.Warehouses} warehouse(s) and scale {tpccScale.FractionText}.");
+                    return RunOutcome.Rejected;
+                }
+
+                Console.WriteLine($"TPC-C consistency check before the run: {tpccScale.Warehouses:N0} warehouse(s)...");
+                System.Diagnostics.Stopwatch checkTime = System.Diagnostics.Stopwatch.StartNew();
+                TpccCheck before = await TpccCheck
+                    .RunAsync(tpccSetup, tpccScale, null, null, TimeSpan.FromMinutes(2), ct).ConfigureAwait(false);
+                if (before.Consistency.Violations > 0)
+                {
+                    Console.Error.WriteLine("The TPC-C data breaks a consistency condition before the run:");
+                    foreach (TpccConditionSummary c in before.Summaries(withLedger: false).Where(c => c.Violations > 0))
+                        Console.Error.WriteLine($"  ✗ {c.Name} ({c.Rule}): {c.Violations:N0} of {c.Checked:N0}; first: {c.Examples.FirstOrDefault()}");
+                    return new RunOutcome(1, null, false);
+                }
+                tpccBaselines = before.Baselines;
+                Console.WriteLine(
+                    $"  {before.Summaries(withLedger: false).Sum(c => c.Checked):N0} case(s) of {before.Consistency.Conditions.Count} " +
+                    $"condition(s) hold ({checkTime.Elapsed.TotalSeconds:F1}s).");
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                Console.Error.WriteLine($"TPC-C setup failed: {ex.GetType().Name}: {ex.Message}");
+                return new RunOutcome(1, null, false);
+            }
+
+            tpccLedger = new TpccLedger(tpccScale.Warehouses);
+            tpccOperation = new TpccOperation(connections, tpccScale, tpccLedger, o.Seed, locking, isolation);
+        }
+
         // The in-window scan-visibility probe (see ScanProbe). Started here, before warm-up, and stopped
         // after drain: a short count during warm-up is exactly as wrong as one inside the window. Its
         // connections are its own — one per gateway, routing off, on the probe's deadline.
@@ -691,7 +781,9 @@ public static class Program
             ? new TokenOperation(connections, tokenLedger!, locking, isolation)
             : null;
         IWriteOperation writeOperation;
-        if (appendOperation is not null)
+        if (tpccOperation is not null)
+            writeOperation = tpccOperation;
+        else if (appendOperation is not null)
             writeOperation = appendOperation;
         else if (registerOperation is not null)
             writeOperation = registerOperation;
@@ -1003,7 +1095,7 @@ public static class Program
         // downgrade the verdict to "could not verify".
         // An Elle shape's unknown commits wrote only to its own table, so they cannot widen the band
         // for the seeded rows. The seeded rows must be exactly as they were.
-        long datasetIndeterminate = elleShape || tokens ? 0 : writeOperation.IndeterminateTxns;
+        long datasetIndeterminate = elleShape || tokens || tpcc ? 0 : writeOperation.IndeterminateTxns;
 
         ReconciliationResult reconciliation;
         try
@@ -1093,6 +1185,56 @@ public static class Program
                 Tpch = tpchResult,
                 Failures = reconciliation.Failures.Concat(tpchResult.Failures).ToList(),
             };
+        }
+
+        // The TPC-C verdict: the consistency conditions of the final state, the ledger bands, and what the
+        // transactions saw while they ran. Read after the drain, like the other shapes' final checks.
+        if (tpccOperation is not null)
+        {
+            TpccCheck? after = null;
+            string? checkError = null;
+            try
+            {
+                await using CamusConnection tpccVerify = await OpenSingleAsync(o, ct, o.ReconcileRequestTimeout).ConfigureAwait(false);
+                after = await TpccCheck
+                    .RunAsync(tpccVerify, tpccScale!, tpccBaselines, tpccLedger, TimeSpan.FromSeconds(Math.Max(1, o.ReconcileTimeout)), ct)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                checkError = $"{ex.GetType().Name}: {ex.Message}";
+            }
+
+            (TpccRunReport tpccReport, TpccResult tpccResult) = TpccReport.Build(
+                tpccScale!, o.Seed.ToString(System.Globalization.CultureInfo.InvariantCulture), tpccOperation.Executions,
+                tpccOperation.AnomalyCount, after, checkError, metrics.MeasureStartUtc, measuredSeconds);
+
+            System.Text.Json.JsonSerializerOptions indented = new() { WriteIndented = true };
+            await File.WriteAllTextAsync(
+                Path.Combine(o.Output, "tpcc.json"), System.Text.Json.JsonSerializer.Serialize(tpccReport, indented), ct)
+                .ConfigureAwait(false);
+            if (tpccOperation.AnomalyCount > 0)
+                await File.WriteAllLinesAsync(
+                    Path.Combine(o.Output, "tpcc-anomalies.jsonl"),
+                    tpccOperation.Anomalies.Select(a => System.Text.Json.JsonSerializer.Serialize(a)), ct).ConfigureAwait(false);
+
+            reconciliation = reconciliation with
+            {
+                Tpcc = tpccResult,
+                Failures = reconciliation.Failures.Concat(tpccResult.Failures).ToList(),
+            };
+
+            Console.WriteLine(
+                $"TPC-C: {(tpccResult.Passed ? "PASS" : "FAIL")} — {tpccResult.Committed:N0} commit(s) in the window " +
+                $"({tpccReport.NewOrdersPerMinute:N0} New-Orders per minute, {tpccReport.TransactionsPerSecond:N1} transactions/s), " +
+                $"{tpccResult.Undecided:N0} undecided, {tpccResult.Conflicts:N0} conflict(s) past the retries, {tpccResult.Errors:N0} error(s), " +
+                $"{tpccResult.Anomalies:N0} anomaly(ies); {tpccResult.ConditionViolations:N0} violation(s) in " +
+                $"{tpccResult.ConditionsChecked:N0} consistency case(s)" +
+                (tpccResult.Status == "verified" ? "" : $" — {tpccResult.Status}") + " -> tpcc.json");
+            foreach (TpccTransactionStats t in tpccReport.Transactions)
+                Console.WriteLine(
+                    $"  {t.Transaction,-12}: {t.Committed,8:N0} ok  p50 {t.P50Ms,8:N1} ms  p99 {t.P99Ms,8:N1} ms  max {t.MaxMs,8:N1} ms  " +
+                    $"{t.Retries:N0} retry(ies)" + (t.RolledBack > 0 ? $"  {t.RolledBack:N0} rolled back" : ""));
         }
 
         if (reconciliation.RowAttribution is RowAttributionResult rowResult)
@@ -1407,7 +1549,9 @@ public static class Program
             ? (TpchQueries.TryParseSelection(o.TpchQueries, out IReadOnlyList<TpchQuery> selected, out _)
                 ? string.Join(",", selected.Select(q => q.Number))
                 : o.TpchQueries)
-            : null);
+            : null,
+        TpccWarehouses: o.Workload == "tpcc" ? o.TpccWarehouses.ToString(System.Globalization.CultureInfo.InvariantCulture) : null,
+        TpccScale: o.Workload == "tpcc" ? o.TpccScale.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture) : null);
 
     /// <summary>
     /// The client library version actually loaded, read from the assembly rather than written down.

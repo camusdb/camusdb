@@ -136,6 +136,8 @@ public static class RunComparison
         Check("txnMode", m1.TxnMode, m2.TxnMode, blocking: false);
         Check("tpch-scale", m1.TpchScale, m2.TpchScale, blocking: true);
         Check("tpch-queries", m1.TpchQueries, m2.TpchQueries, blocking: true);
+        Check("tpcc-warehouses", m1.TpccWarehouses, m2.TpccWarehouses, blocking: true);
+        Check("tpcc-scale", m1.TpccScale, m2.TpccScale, blocking: true);
         Check("routing-nodes", m1.RoutingNodes, m2.RoutingNodes, blocking: false);
         Check("measured-seconds", baseline.Summary.MeasuredSeconds, candidate.Summary.MeasuredSeconds, blocking: false);
 
