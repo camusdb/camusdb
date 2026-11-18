@@ -986,8 +986,12 @@ internal abstract class SQLExecutorBaseCreator
             ? null
             : EvalExpr(expr.leftAst, row, parameters, rowNameResolver, queryRow);
 
-        foreach (NodeAst clause in EnumerateWhenClauses(expr.rightAst!))
+        // The clause array is built at the first evaluation of this node and reused for each row.
+        NodeAst[] clauses = NodeShapes.WhenClausesOf(expr);
+
+        for (int i = 0; i < clauses.Length; i++)
         {
+            NodeAst clause = clauses[i];
             bool matched;
             if (operand is null)
             {
@@ -1175,38 +1179,13 @@ internal abstract class SQLExecutorBaseCreator
     };
 
     /// <summary>
-    /// Flattens the left-recursive <see cref="NodeType.ExprCaseWhenList"/> chain that a CASE's WHEN
-    /// clauses parse into, yielding each <see cref="NodeType.ExprCaseWhen"/> in source order (top to
-    /// bottom). The list is built left-associatively — <c>((c1 c2) c3)</c> — so the leftmost clause is
-    /// the deepest node; walking the left spine first restores first-match ordering. A single-clause
-    /// CASE has no wrapper node (the grammar collapses it to the bare <see cref="NodeType.ExprCaseWhen"/>).
-    /// This is the one place WHEN ordering is defined; every site that visits CASE branches reuses it.
+    /// The WHEN clauses of a CASE WHEN list, as <see cref="NodeType.ExprCaseWhen"/> nodes in source
+    /// order. <see cref="NodeShapes.BuildWhenClauses"/> defines the order. This builds a new array on
+    /// each call, so the row evaluator reads the cached array of <see cref="NodeShapes.WhenClausesOf"/>
+    /// instead.
     /// </summary>
-    internal static IEnumerable<NodeAst> EnumerateWhenClauses(NodeAst whenList)
-    {
-        if (whenList.nodeType != NodeType.ExprCaseWhenList)
-        {
-            yield return whenList;
-            yield break;
-        }
-
-        // Walk down the left spine, then yield bottom-up. Iterative, so the number of WHEN clauses
-        // cannot overflow the stack, and each clause costs constant time rather than one nested
-        // iterator per level above it.
-        Stack<NodeAst> spine = new();
-        NodeAst node = whenList;
-
-        while (node.nodeType == NodeType.ExprCaseWhenList)
-        {
-            spine.Push(node);
-            node = node.leftAst!;
-        }
-
-        yield return node;
-
-        while (spine.Count > 0)
-            yield return spine.Pop().rightAst!;
-    }
+    internal static IReadOnlyList<NodeAst> EnumerateWhenClauses(NodeAst whenList) =>
+        NodeShapes.BuildWhenClauses(whenList);
 
     protected static void GetColumnConstraintList(NodeAst constraintsList, List<(ColumnConstraintType, ColumnValue?)> constraintTypes)
     {

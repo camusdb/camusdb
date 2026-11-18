@@ -28,7 +28,7 @@ namespace CamusDB.Core.SQLParser;
 /// on a statement that holds two distinct errors: which of them is reported can change.</para>
 ///
 /// <para><b>Trap.</b> A list whose consumer walks only the left spine cannot be rebalanced. The
-/// <c>CASE</c> WHEN list is such a list (see <c>SQLExecutorBaseCreator.EnumerateWhenClauses</c>), and
+/// <c>CASE</c> WHEN list is such a list (see <see cref="NodeShapes.BuildWhenClauses"/>), and
 /// so it is left alone and bounded by <see cref="StatementDepthGuard"/> instead.</para>
 /// </summary>
 internal static class ExpressionChains

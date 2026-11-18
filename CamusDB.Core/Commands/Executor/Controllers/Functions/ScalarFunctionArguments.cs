@@ -22,52 +22,43 @@ internal static class ScalarFunctionArguments
         QueryRowNameResolver? rowNameResolver);
 
     /// <summary>
-    /// Evaluates a call's arguments in source order.
-    ///
-    /// <para>Deliberately not recursive. A nested call such as <c>abs(abs(abs(x)))</c> re-enters the
-    /// expression evaluator once per level through this method, so every frame here is paid once per
-    /// level of nesting; a separate recursive walk over the argument list added one more. The common
-    /// single-argument call skips the list walk entirely.</para>
+    /// Evaluates the arguments of the argument list <paramref name="argumentAst"/> in source order. It
+    /// flattens the list on each call, so it suits a statement that runs one time, such as <c>CALL</c>.
+    /// The row evaluator uses <see cref="EvaluateArguments"/> with the cached argument nodes of
+    /// <see cref="NodeShapes.CallOf"/>.
     /// </summary>
     public static IReadOnlyList<ColumnValue> EvaluateArgumentList(
         NodeAst? argumentAst,
         IReadOnlyDictionary<string, ColumnValue> row,
         Dictionary<string, ColumnValue>? parameters,
         QueryRowNameResolver? rowNameResolver,
-        EvaluateExpressionDelegate evaluateExpression)
-    {
-        if (argumentAst is null)
-            return [];
-
-        if (argumentAst.nodeType != NodeType.ExprArgumentList)
-            return new List<ColumnValue>(1) { evaluateExpression(argumentAst, row, parameters, rowNameResolver) };
-
-        List<NodeAst> argumentNodes = [];
-        ExpressionChains.Flatten(argumentAst, NodeType.ExprArgumentList, argumentNodes);
-
-        List<ColumnValue> argumentList = new(argumentNodes.Count);
-
-        for (int i = 0; i < argumentNodes.Count; i++)
-            argumentList.Add(evaluateExpression(argumentNodes[i], row, parameters, rowNameResolver));
-
-        return argumentList;
-    }
+        EvaluateExpressionDelegate evaluateExpression) =>
+        EvaluateArguments(NodeShapes.BuildArguments(argumentAst), row, parameters, rowNameResolver, evaluateExpression);
 
     /// <summary>
-    /// The argument nodes of a call, in source order, for a function that decides which of them run. Not
-    /// recursive, for the reason <see cref="EvaluateArgumentList"/> gives: this runs for each row.
+    /// Evaluates <paramref name="argumentNodes"/> in source order into a new array. The array is the
+    /// one allocation for each call: a function can keep its argument list, so the list is not reused.
+    ///
+    /// <para>Not recursive. A nested call such as <c>abs(abs(abs(x)))</c> re-enters the expression
+    /// evaluator one time per level through this method, so each frame here is paid one time per level
+    /// of nesting.</para>
     /// </summary>
-    public static List<NodeAst> ArgumentNodes(NodeAst? argumentAst)
+    public static IReadOnlyList<ColumnValue> EvaluateArguments(
+        NodeAst[] argumentNodes,
+        IReadOnlyDictionary<string, ColumnValue> row,
+        Dictionary<string, ColumnValue>? parameters,
+        QueryRowNameResolver? rowNameResolver,
+        EvaluateExpressionDelegate evaluateExpression)
     {
-        if (argumentAst is null)
+        if (argumentNodes.Length == 0)
             return [];
 
-        if (argumentAst.nodeType != NodeType.ExprArgumentList)
-            return new List<NodeAst>(1) { argumentAst };
+        ColumnValue[] values = new ColumnValue[argumentNodes.Length];
 
-        List<NodeAst> argumentNodes = [];
-        ExpressionChains.Flatten(argumentAst, NodeType.ExprArgumentList, argumentNodes);
-        return argumentNodes;
+        for (int i = 0; i < argumentNodes.Length; i++)
+            values[i] = evaluateExpression(argumentNodes[i], row, parameters, rowNameResolver);
+
+        return values;
     }
 
     public static void ValidateExactArity(string functionName, int expectedArity, int actualArity)
@@ -87,9 +78,10 @@ internal static class ScalarFunctionArguments
 
     public static ColumnValue? PropagateNull(IReadOnlyList<ColumnValue> arguments)
     {
-        foreach (ColumnValue argument in arguments)
+        // An indexed loop: a foreach over the interface allocates an enumerator for each row.
+        for (int i = 0; i < arguments.Count; i++)
         {
-            if (argument.Type == ColumnType.Null)
+            if (arguments[i].Type == ColumnType.Null)
                 return ColumnValue.Null;
         }
 

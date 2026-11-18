@@ -57,6 +57,19 @@ public sealed class NodeAst
 
     public string? yytext;
 
+    /// <summary>
+    /// A flat view of this node's own subtree that the row evaluator builds at the first evaluation
+    /// and reuses for each later row: the argument array and lower-case name of a function call, or
+    /// the WHEN clause array of a CASE. <see cref="NodeShapes"/> owns it; read it only through that
+    /// class.
+    ///
+    /// <para>The value depends only on the subtree, which is immutable once the parser returns it.
+    /// Two statements that share a cached tree can build it at the same time; each builds an equal
+    /// value, and the last write wins. A node built by copying another node's fields starts with no
+    /// shape, so a copy with a changed child never reads a stale one.</para>
+    /// </summary>
+    internal object? shape;
+
     public NodeAst(
         NodeType nodeType,
         NodeAst? leftAst,
