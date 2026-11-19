@@ -48,6 +48,16 @@ public sealed class OrphanTableRecord
     public OrphanKind Kind { get; set; }
 
     /// <summary>
+    /// True for the contents a materialized-view refresh replaced. They are derived data that a
+    /// <c>REFRESH</c> rebuilds, and their former name belongs to the live materialized view, so
+    /// <c>SHOW ORPHAN TABLES</c> does not list them. The collector reclaims them after the retention
+    /// window like a dropped table, and <c>RELINK</c> by id still recovers them unless their id is the
+    /// one the live view uses. False on every other record, and on records written before the field
+    /// existed.
+    /// </summary>
+    public bool ReplacedMaterializedViewContents { get; set; }
+
+    /// <summary>
     /// For <see cref="OrphanKind.RetiredContents"/>, the still-live relation whose contents these
     /// were. Empty for a dropped table.
     /// </summary>

@@ -1899,6 +1899,15 @@ internal sealed partial class SchemaDdlService
 
             if (liveWithId is not null)
             {
+                // The first contents of a materialized view live under the view's own id, so the
+                // contents a refresh replaced can have the id the live view still uses. Nothing can
+                // reattach them under a second name.
+                if (record is { ReplacedMaterializedViewContents: true })
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.OrphanNotFound,
+                        $"Orphan id '{ticket.OrphanTableId}' holds contents that a refresh of materialized view " +
+                        $"'{liveWithId.Name}' replaced, and the view still uses that id, so they cannot be relinked");
+
                 if (!string.Equals(liveWithId.Name, ticket.NewTableName, StringComparison.OrdinalIgnoreCase))
                     throw new CamusDBException(
                         CamusDBErrorCodes.TableAlreadyExists,

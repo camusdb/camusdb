@@ -190,6 +190,8 @@ internal static class ContentsRetirementStore
                 byte[] orphanBytes = MetaJsonSerializer.Serialize(new OrphanTableRecord
                 {
                     TableId = retiredStorageId,
+                    // Not listed by SHOW ORPHAN TABLES; see the field.
+                    ReplacedMaterializedViewContents = true,
                     FormerName = view.Name ?? "",
                     DroppedAt = entry.Ts,
                     Schema = previous,
