@@ -333,4 +333,48 @@ public sealed class TestUpdatableViews : SharedNodeBaseTest
             CamusDBErrorCodes.ViewNotUpdatable, "WITH CHECK OPTION");
         Assert.IsFalse(database.Schema.Views.ContainsKey("agg"));
     }
+
+    /// <summary>
+    /// As in PostgreSQL, <c>CREATE VIEW … WITH CHECK OPTION</c> checks the view's own body only. A
+    /// check-option view over a view that cannot be written through is created, and every write through
+    /// it is refused at the write, which is where the rule is enforced.
+    /// </summary>
+    [Test]
+    public async Task ACheckOptionOverAnUnwritableInnerViewIsRefusedAtTheFirstWrite()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await Seed();
+
+        await ExecDdl(database, executor, dbname,
+            "CREATE VIEW spent AS SELECT customer, SUM(total) AS total FROM orders GROUP BY customer");
+        await ExecDdl(database, executor, dbname,
+            "CREATE VIEW big_spent AS SELECT customer, total FROM spent WHERE total > 25 WITH CHECK OPTION");
+
+        Refused(() => Write(database, executor, dbname, "INSERT INTO big_spent (customer, total) VALUES ('initech', 50)"),
+            CamusDBErrorCodes.ViewNotUpdatable);
+        Refused(() => Write(database, executor, dbname, "UPDATE big_spent SET total = 60 WHERE customer = 'acme'"),
+            CamusDBErrorCodes.ViewNotUpdatable);
+    }
+
+    /// <summary>
+    /// A replace of the inner view can make a check-option view above it unwritable after it was
+    /// created. The replace is allowed, and the writes through the outer view are refused from then on.
+    /// </summary>
+    [Test]
+    public async Task ReplacingTheInnerViewWithAnUnwritableBodyRefusesLaterWrites()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await Seed();
+
+        await ExecDdl(database, executor, dbname,
+            "CREATE VIEW totals AS SELECT customer, total FROM orders");
+        await ExecDdl(database, executor, dbname,
+            "CREATE VIEW acme_totals AS SELECT customer, total FROM totals WHERE customer = 'acme' WITH CHECK OPTION");
+
+        Assert.AreEqual(1, await Write(database, executor, dbname, "UPDATE acme_totals SET total = 11 WHERE total = 10"));
+
+        await ExecDdl(database, executor, dbname,
+            "CREATE OR REPLACE VIEW totals AS SELECT customer, SUM(total) AS total FROM orders GROUP BY customer");
+
+        Refused(() => Write(database, executor, dbname, "UPDATE acme_totals SET total = 12 WHERE total = 11"),
+            CamusDBErrorCodes.ViewNotUpdatable);
+    }
 }

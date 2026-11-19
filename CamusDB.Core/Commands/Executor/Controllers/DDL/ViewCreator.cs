@@ -84,7 +84,11 @@ internal sealed class ViewCreator
         ViewDefinitionLimits.Require(database.Options, viewName, definition);
 
         // A check option is a promise about writes through the view, so, as in PostgreSQL, only a view
-        // that can be written through may make it. Refused here rather than at the first write.
+        // that can be written through may make it. This checks the view's own body only, as
+        // PostgreSQL does: when the body reads another view, only that view's column names are read
+        // here, and an inner view that cannot be written through is refused at the first write. A
+        // check of the whole chain here could not hold anyway, since a later replace of the inner view
+        // can make it unwritable.
         if (checkOption != CheckOptionKind.None)
         {
             try
