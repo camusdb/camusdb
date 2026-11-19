@@ -377,6 +377,9 @@ internal sealed class NonQueryStatementDispatcher
             (ast, ViewWriteContext.Current) = await UpdatableViewRewriter.RewriteAsync(
                 database, ast, sql => SQLParserProcessor.Parse(sql, sqlParserCache), executor.OwnerPrincipalResolver).ConfigureAwait(false);
 
+        // UPDATE ... SET column = DEFAULT takes the table's default for the column; see UpdateDefaults.
+        (ast, ticket) = UpdateDefaults.Resolve(database.Schema, ast, ticket);
+
         switch (ast.nodeType)
         {
             case NodeType.Insert:

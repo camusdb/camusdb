@@ -85,10 +85,21 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
         // statement that names it — including the implicit all-columns form — is refused rather
         // than having its value silently replaced, unless it says OVERRIDING SYSTEM VALUE.
         // OVERRIDING USER VALUE instead discards what it supplies for every identity column.
-        IReadOnlySet<string>? ignoredColumns = SequenceDefaults.ApplyIdentityRules(
-            database.Schema, table.Schema, fields, InsertOverridingClause.Of(ast));
+        // A position where every row writes DEFAULT supplies no value, so it does not count as naming
+        // the column: GENERATED ALWAYS AS IDENTITY accepts DEFAULT, as in PostgreSQL.
+        (bool[] anyDefault, bool[] allDefault) = DefaultPositions(ast.extendedOne, fields.Count);
 
-        InsertRowShaper shaper = InsertRowShaper.Create(table.Schema, fields, ignoredColumns);
+        List<string> suppliedFields = new(fields.Count);
+        for (int i = 0; i < fields.Count; i++)
+        {
+            if (!allDefault[i])
+                suppliedFields.Add(fields[i]);
+        }
+
+        IReadOnlySet<string>? ignoredColumns = SequenceDefaults.ApplyIdentityRules(
+            database.Schema, table.Schema, suppliedFields, InsertOverridingClause.Of(ast));
+
+        InsertRowShaper shaper = InsertRowShaper.Create(table.Schema, fields, ignoredColumns, anyDefault);
 
         // Every value this statement will draw from a sequence is reserved here, in one call per
         // sequence, before the first row is shaped: the row count is known from the VALUES list and
@@ -265,6 +276,63 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
         }
 
         return rows;
+    }
+
+    /// <summary>
+    /// For each target position, whether some VALUES row writes <c>DEFAULT</c> there, and whether
+    /// every row does. A row with the wrong number of values is skipped here; shaping reports it.
+    /// </summary>
+    /// <remarks>Iterative over the rows for the reason <see cref="CountValueRows"/> is.</remarks>
+    private static (bool[] Any, bool[] All) DefaultPositions(NodeAst batchListAst, int fieldCount)
+    {
+        bool[] any = new bool[fieldCount];
+        bool[] all = new bool[fieldCount];
+        Array.Fill(all, true);
+
+        List<bool> row = new(fieldCount);
+        Stack<NodeAst> pending = new();
+        pending.Push(batchListAst);
+
+        while (pending.Count > 0)
+        {
+            NodeAst node = pending.Pop();
+
+            if (node.nodeType == NodeType.InsertBatchList)
+            {
+                if (node.rightAst is not null)
+                    pending.Push(node.rightAst);
+                if (node.leftAst is not null)
+                    pending.Push(node.leftAst);
+                continue;
+            }
+
+            row.Clear();
+            CollectDefaultFlags(node, row);
+
+            for (int i = 0; i < fieldCount; i++)
+            {
+                bool isDefault = i < row.Count && row[i];
+                any[i] |= isDefault;
+                all[i] &= isDefault;
+            }
+        }
+
+        return (any, all);
+    }
+
+    /// <summary>Appends, in value order, whether each value of one VALUES row is <c>DEFAULT</c>.</summary>
+    private static void CollectDefaultFlags(NodeAst node, List<bool> into)
+    {
+        if (node.nodeType == NodeType.ExprList)
+        {
+            if (node.leftAst is not null)
+                CollectDefaultFlags(node.leftAst, into);
+            if (node.rightAst is not null)
+                CollectDefaultFlags(node.rightAst, into);
+            return;
+        }
+
+        into.Add(node.nodeType == NodeType.ExprDefault);
     }
 
     /// <summary>
