@@ -63,6 +63,8 @@ internal sealed class MaterializedViewCreator
         (ViewDefinition definition, ColumnInfo[] columns, ConstraintInfo[] constraints) =
             await DeriveRelationAsync(executor, database, bodyAst, columnAliasList, ticket).ConfigureAwait(false);
 
+        ViewDefinitionLimits.Require(database.Options, viewName, definition);
+
         // Allocated before the delta so every node applies the id the proposer chose, exactly as an
         // ordinary CREATE TABLE does.
         DatabaseRegistry registry = await registryTask.ConfigureAwait(false);

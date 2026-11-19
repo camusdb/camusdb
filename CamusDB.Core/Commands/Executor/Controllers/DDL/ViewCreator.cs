@@ -82,6 +82,8 @@ internal sealed class ViewCreator
         ViewDefinition definition = await BuildDefinitionAsync(
             executor, database, bodyAst, ticket, columnAliasList, checkOption).ConfigureAwait(false);
 
+        ViewDefinitionLimits.Require(database.Options, viewName, definition);
+
         if (existing is not null)
         {
             // A replace rewrites an existing view's body; it does not re-create the object, so it must

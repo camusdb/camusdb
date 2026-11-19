@@ -323,6 +323,12 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 # max_recursive_cte_iterations: 10000     # steps of one WITH RECURSIVE query that make rows (CADB0560)
 # max_recursive_cte_rows: 10000000        # rows one run of a WITH RECURSIVE query makes (CADB0560)
 # max_table_function_rows: 5000000        # rows one read of a function in FROM makes (CADB0561)
+# max_view_definition_bytes: 1048576      # bytes of one normalized view body, checked at CREATE (CADB0562)
+# max_view_definition_nodes: 200000       # syntax-tree nodes of one view body, checked at CREATE (CADB0562)
+# max_view_output_columns: 1600           # output columns of one view, checked at CREATE (CADB0562)
+# max_view_direct_dependencies: 1000      # relations one view body reads directly, checked at CREATE (CADB0562)
+# max_view_expanded_nodes: 2000000        # syntax-tree nodes the view expansion of one statement makes (CADB0562)
+# max_view_expanded_relations: 10000      # view references the expansion of one statement substitutes (CADB0562)
 # max_open_explicit_transactions: 10000   # explicit transactions open at one time on this node (CADB0558)
 # max_client_connections: 10000           # client connections on the HTTP, HTTPS and gRPC listeners
 # cluster_activity_max_concurrent_fan_outs: 8   # concurrent SHOW CLUSTER QUERIES/CONNECTIONS (CADB0558)

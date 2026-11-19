@@ -978,6 +978,24 @@ public class ConfigDefinition
     /// </summary>
     public int MaxViewExpansionDepth { get; set; } = 32;
 
+    /// <summary>Most bytes of one normalized view body, checked at CREATE. &lt;= 0 disables. Default 1 MiB.</summary>
+    public long MaxViewDefinitionBytes { get; set; } = 1024 * 1024;
+
+    /// <summary>Most syntax-tree nodes of one view body, checked at CREATE. &lt;= 0 disables. Default 200 000.</summary>
+    public long MaxViewDefinitionNodes { get; set; } = 200_000;
+
+    /// <summary>Most output columns of one view, checked at CREATE. &lt;= 0 disables. Default 1600.</summary>
+    public int MaxViewOutputColumns { get; set; } = 1_600;
+
+    /// <summary>Most relations one view body reads directly, checked at CREATE. &lt;= 0 disables. Default 1000.</summary>
+    public int MaxViewDirectDependencies { get; set; } = 1_000;
+
+    /// <summary>Most syntax-tree nodes the view expansion of one statement produces. &lt;= 0 disables. Default 2 000 000.</summary>
+    public long MaxViewExpandedNodes { get; set; } = 2_000_000;
+
+    /// <summary>Most view references the expansion of one statement substitutes. &lt;= 0 disables. Default 10 000.</summary>
+    public int MaxViewExpandedRelations { get; set; } = 10_000;
+
     /// <summary>
     /// Free-space watermark (bytes) on the data directory's volume below which new user DML is
     /// refused with CADB0536; reads, DDL, and internal transactions stay admitted. &lt;= 0 disables.

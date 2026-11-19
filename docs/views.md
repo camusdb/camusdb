@@ -222,6 +222,23 @@ CREATE OR REPLACE VIEW b AS SELECT id FROM a;
 
 Nesting is additionally capped at `max_view_expansion_depth` (default 32) as a backstop.
 
+### Size limits
+
+Depth does not bound how much a view expands to. When each of ten views reads the one below it
+twice, a read of the top view expands 1024 copies of the bottom one. `max_view_expanded_relations`
+and `max_view_expanded_nodes` bound the expansion of one statement; `CREATE VIEW` expands the views
+its body reads under the same budget, so a definition like that is refused when it is created:
+
+```sql
+CREATE VIEW v10 AS SELECT a.id FROM v9 a JOIN v9 b ON a.id = b.id;
+-- ERROR (CADB0562): Expanding the views of this statement substitutes more than 10000 view
+--                   references (max_view_expanded_relations) ...
+```
+
+One definition is also bounded at `CREATE`: its size (`max_view_definition_bytes`,
+`max_view_definition_nodes`), its output columns (`max_view_output_columns`), and the relations it
+reads directly (`max_view_direct_dependencies`). See [Configuration](#configuration).
+
 ---
 
 ## Reading through a view
@@ -389,6 +406,12 @@ Specifics:
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `max_view_expansion_depth` | 32 | Backstop on view-over-view nesting depth. |
+| `max_view_expanded_relations` | 10000 | View references that expanding one statement may substitute, counting a view as often as it is expanded. |
+| `max_view_expanded_nodes` | 2000000 | Syntax-tree nodes that expanding the views of one statement may produce. |
+| `max_view_definition_bytes` | 1048576 | Bytes of one normalized view or materialized-view body, checked at `CREATE`. |
+| `max_view_definition_nodes` | 200000 | Syntax-tree nodes of one view body, checked at `CREATE`. |
+| `max_view_output_columns` | 1600 | Output columns of one view or materialized view, checked at `CREATE`. |
+| `max_view_direct_dependencies` | 1000 | Relations one view body reads directly, checked at `CREATE`. |
 | `materialized_view_refresh_chunk_rows` | 10000 | Rows written per transaction while rebuilding a materialized view. |
 | `materialized_view_refresh_enabled` | true | Set false to refuse refreshes on a node that should not run bulk work. `WITH NO DATA` still works. |
 | `materialized_view_refresh_takeover_attempts` | 3 | How many times a refresh interrupted by a crash or a leadership change is restarted for you. 0 restarts none of them and only reclaims the abandoned storage. |

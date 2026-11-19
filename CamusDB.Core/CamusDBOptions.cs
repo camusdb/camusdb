@@ -1423,6 +1423,69 @@ public sealed record CamusDBOptions
     public int MaxViewExpansionDepth { get; init; } = 32;
 
     /// <summary>
+    /// Most bytes the normalized SQL of one view or materialized-view body may have. Checked at
+    /// <c>CREATE</c> and <c>CREATE OR REPLACE</c>, where the author can fix it, and refused with
+    /// <see cref="CamusDBErrorCodes.ViewComplexityLimitExceeded"/>. Read per statement.
+    /// <para><c>&lt;= 0</c> — limit is disabled.</para>
+    /// Default: <c>1048576</c> (1 MiB).
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
+    public long MaxViewDefinitionBytes { get; init; } = 1024 * 1024;
+
+    /// <summary>
+    /// Most syntax-tree nodes one view or materialized-view body may have, checked at <c>CREATE</c>.
+    /// Bytes alone do not bound the work of a body: a short text can be a deep or wide tree.
+    /// <para><c>&lt;= 0</c> — limit is disabled.</para>
+    /// Default: <c>200000</c>.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
+    public long MaxViewDefinitionNodes { get; init; } = 200_000;
+
+    /// <summary>
+    /// Most output columns one view or materialized view may have, checked at <c>CREATE</c>. Matches
+    /// PostgreSQL's per-relation column limit.
+    /// <para><c>&lt;= 0</c> — limit is disabled.</para>
+    /// Default: <c>1600</c>.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
+    public int MaxViewOutputColumns { get; init; } = 1_600;
+
+    /// <summary>
+    /// Most relations — tables, views and materialized views — one view body may read directly,
+    /// checked at <c>CREATE</c>. Every dependency is an edge that drop, rename and cycle checks walk.
+    /// <para><c>&lt;= 0</c> — limit is disabled.</para>
+    /// Default: <c>1000</c>.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
+    public int MaxViewDirectDependencies { get; init; } = 1_000;
+
+    /// <summary>
+    /// Most syntax-tree nodes the expansion of the views one statement reads may produce, counting
+    /// every body as often as it is expanded.
+    ///
+    /// <para>This and <see cref="MaxViewExpandedRelations"/> are what bound a view graph that is
+    /// shallow but wide: when each level reads the level below twice, ten levels expand 1024 copies
+    /// of the bottom view, and <see cref="MaxViewExpansionDepth"/> — which bounds nesting only — never
+    /// trips. Each view is charged before its body is copied, so the statement fails with
+    /// <see cref="CamusDBErrorCodes.ViewComplexityLimitExceeded"/> before the memory is spent. The
+    /// same budget applies when <c>CREATE VIEW</c> binds a body that reads other views, so an
+    /// adversarial definition is refused when it is created.</para>
+    /// <para><c>&lt;= 0</c> — limit is disabled.</para>
+    /// Default: <c>2000000</c>.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
+    public long MaxViewExpandedNodes { get; init; } = 2_000_000;
+
+    /// <summary>
+    /// Most view references the expansion of one statement may substitute, counting a view as often
+    /// as it is expanded. See <see cref="MaxViewExpandedNodes"/>.
+    /// <para><c>&lt;= 0</c> — limit is disabled.</para>
+    /// Default: <c>10000</c>.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
+    public int MaxViewExpandedRelations { get; init; } = 10_000;
+
+    /// <summary>
     /// Rows written per transaction while a materialized-view <c>REFRESH</c> populates its new
     /// contents.
     ///

@@ -1155,7 +1155,9 @@ internal sealed class SelectStatementExecutor
             // requirement: reading through a view is a read of the view, whatever the outer statement
             // goes on to do with the rows.
             (viewName, view) => ViewAuthorization.Require(
-                database, viewName, view, Privilege.Select));
+                database, viewName, view, Privilege.Select),
+            options.MaxViewExpandedNodes,
+            options.MaxViewExpandedRelations);
 
     /// <summary>
     /// Plans and starts one SELECT statement whose AST has been expanded: a FROM-less projection, a join

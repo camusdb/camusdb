@@ -8,6 +8,7 @@
 
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using System.Runtime.CompilerServices;
 using CamusDB.Core.SQLParser;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
@@ -45,28 +46,118 @@ internal static class ViewExpander
     /// table, so nothing downstream can check the caller against the view object. Passing null skips
     /// the check and is for callers that have already made it.
     /// </param>
+    /// <param name="maxNodes">
+    /// Most syntax-tree nodes the expansion may produce, counting each body as often as it is expanded;
+    /// <c>&lt;= 0</c> for no limit. See <see cref="CamusDBOptions.MaxViewExpandedNodes"/>.
+    /// </param>
+    /// <param name="maxRelations">
+    /// Most view references the expansion may substitute; <c>&lt;= 0</c> for no limit. See
+    /// <see cref="CamusDBOptions.MaxViewExpandedRelations"/>.
+    /// </param>
     public static NodeAst Expand(
         Schema schema,
         NodeAst ast,
         int maxDepth,
         Func<string, NodeAst> parseBody,
-        Action<string, ViewSchema>? authorize = null)
+        Action<string, ViewSchema>? authorize = null,
+        long maxNodes = 0,
+        long maxRelations = 0)
     {
         // The overwhelmingly common case is a statement with no views at all; a whole-tree walk that
         // allocates nothing when there is nothing to do keeps this off the hot path's conscience.
         if (schema.Views.Count == 0)
             return ast;
 
-        return Rewrite(schema, ast, [], maxDepth, parseBody, authorize);
+        return Rewrite(schema, ast, new Expansion(maxDepth, parseBody, authorize, maxNodes, maxRelations));
     }
 
-    private static NodeAst Rewrite(
-        Schema schema,
-        NodeAst node,
-        List<string> expansionStack,
+    /// <summary>
+    /// The state of one statement's expansion: the views being expanded right now (for the cycle and
+    /// depth checks), and what the expansion has cost so far against its budget.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Budget.</b> Depth bounds nesting only. A graph in which
+    /// each level reads the level below twice expands 2^n copies of the bottom view at depth n, so a
+    /// handful of short definitions can turn one later read into unbounded CPU and memory. The budget
+    /// counts every substitution and every node it copies, however the graph is shaped.</para>
+    ///
+    /// <para><b>Charged before the copy.</b> A view is charged its body's node count before the body
+    /// is rewritten — the rewrite is what allocates — so a statement over budget fails before it spends
+    /// the memory.</para>
+    /// </remarks>
+    private sealed class Expansion(
         int maxDepth,
         Func<string, NodeAst> parseBody,
-        Action<string, ViewSchema>? authorize)
+        Action<string, ViewSchema>? authorize,
+        long maxNodes,
+        long maxRelations)
+    {
+        public readonly List<string> Stack = [];
+
+        public readonly int MaxDepth = maxDepth;
+
+        public readonly Func<string, NodeAst> ParseBody = parseBody;
+
+        public readonly Action<string, ViewSchema>? Authorize = authorize;
+
+        private long nodes;
+
+        private long relations;
+
+        public void Charge(string viewName, long bodyNodes)
+        {
+            relations++;
+            if (maxRelations > 0 && relations > maxRelations)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.ViewComplexityLimitExceeded,
+                    $"Expanding the views of this statement substitutes more than {maxRelations} view references " +
+                    $"(max_view_expanded_relations), at view '{viewName}'. A view graph in which views read " +
+                    "other views more than once multiplies at every level; simplify the views, or raise the setting.");
+
+            nodes += bodyNodes;
+            if (maxNodes > 0 && nodes > maxNodes)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.ViewComplexityLimitExceeded,
+                    $"Expanding the views of this statement produces more than {maxNodes} syntax-tree nodes " +
+                    $"(max_view_expanded_nodes), at view '{viewName}'. Simplify the views, or raise the setting.");
+        }
+    }
+
+    /// <summary>
+    /// The node count of each parsed body. A parsed body is shared from the parser cache and never
+    /// changes, so its count is computed once per instance and reused by every expansion of it.
+    /// </summary>
+    private static readonly ConditionalWeakTable<NodeAst, StrongBox<long>> bodyNodeCounts = new();
+
+    /// <summary>
+    /// The stored form of each parsed body resolved against a schema, reused by every reference to the
+    /// same view until the schema changes. Safe to share: a <see cref="NodeAst"/> is immutable, and
+    /// the expansion builds new nodes around it rather than editing it. Keyed by the body instance, and
+    /// checked against the schema instance and version, because one SQL text can be a body in two
+    /// databases, and a rename changes what its ids resolve to.
+    /// </summary>
+    private static readonly ConditionalWeakTable<NodeAst, ResolvedBody> resolvedBodies = new();
+
+    private sealed record ResolvedBody(WeakReference<Schema> Schema, long SchemaVersion, string ViewName, NodeAst Resolved);
+
+    private static long CountBodyNodes(NodeAst body)
+        => bodyNodeCounts.GetValue(body, static b => new StrongBox<long>(SQLParser.NodeAstWalk.Count(b))).Value;
+
+    private static NodeAst ResolveBody(Schema schema, NodeAst body, string viewName)
+    {
+        if (resolvedBodies.TryGetValue(body, out ResolvedBody? cached)
+            && cached.SchemaVersion == schema.SchemaVersion
+            && string.Equals(cached.ViewName, viewName, StringComparison.Ordinal)
+            && cached.Schema.TryGetTarget(out Schema? cachedSchema)
+            && ReferenceEquals(cachedSchema, schema))
+            return cached.Resolved;
+
+        NodeAst resolved = DDL.StoredBodyBinder.ResolveStoredForm(schema, body, viewName);
+        resolvedBodies.AddOrUpdate(body, new ResolvedBody(new WeakReference<Schema>(schema), schema.SchemaVersion, viewName, resolved));
+        return resolved;
+    }
+
+    private static NodeAst Rewrite(Schema schema, NodeAst node, Expansion expansion)
     {
         NodeAst? left = node.leftAst;
         NodeAst? right = node.rightAst;
@@ -80,18 +171,18 @@ internal static class ViewExpander
         // Only the FROM slot of a SELECT can name a relation; rewriting there (rather than at every
         // identifier) is what keeps a column that happens to share a view's name from being rewritten.
         if (node.nodeType == NodeType.Select && right is not null)
-            right = RewriteFrom(schema, right, expansionStack, maxDepth, parseBody, authorize);
+            right = RewriteFrom(schema, right, expansion);
 
-        left = RewriteChild(schema, left, expansionStack, maxDepth, parseBody, authorize);
-        one = RewriteChild(schema, one, expansionStack, maxDepth, parseBody, authorize);
-        two = RewriteChild(schema, two, expansionStack, maxDepth, parseBody, authorize);
-        three = RewriteChild(schema, three, expansionStack, maxDepth, parseBody, authorize);
-        four = RewriteChild(schema, four, expansionStack, maxDepth, parseBody, authorize);
-        five = RewriteChild(schema, five, expansionStack, maxDepth, parseBody, authorize);
-        six = RewriteChild(schema, six, expansionStack, maxDepth, parseBody, authorize);
+        left = RewriteChild(schema, left, expansion);
+        one = RewriteChild(schema, one, expansion);
+        two = RewriteChild(schema, two, expansion);
+        three = RewriteChild(schema, three, expansion);
+        four = RewriteChild(schema, four, expansion);
+        five = RewriteChild(schema, five, expansion);
+        six = RewriteChild(schema, six, expansion);
 
         if (node.nodeType != NodeType.Select)
-            right = RewriteChild(schema, right, expansionStack, maxDepth, parseBody, authorize);
+            right = RewriteChild(schema, right, expansion);
 
         if (ReferenceEquals(left, node.leftAst) && ReferenceEquals(right, node.rightAst) &&
             ReferenceEquals(one, node.extendedOne) && ReferenceEquals(two, node.extendedTwo) &&
@@ -103,32 +194,28 @@ internal static class ViewExpander
             node.nodeType, left, right, one, two, three, four, five, node.yytext, six, node.extendedSeven);
     }
 
-    private static NodeAst? RewriteChild(
-        Schema schema, NodeAst? child, List<string> expansionStack, int maxDepth, Func<string, NodeAst> parseBody,
-        Action<string, ViewSchema>? authorize)
-        => child is null ? null : Rewrite(schema, child, expansionStack, maxDepth, parseBody, authorize);
+    private static NodeAst? RewriteChild(Schema schema, NodeAst? child, Expansion expansion)
+        => child is null ? null : Rewrite(schema, child, expansion);
 
     /// <summary>
     /// Rewrites the FROM clause: substitutes any relation name that resolves to a view, and recurses
     /// through joins and derived tables.
     /// </summary>
-    private static NodeAst RewriteFrom(
-        Schema schema, NodeAst from, List<string> expansionStack, int maxDepth, Func<string, NodeAst> parseBody,
-        Action<string, ViewSchema>? authorize)
+    private static NodeAst RewriteFrom(Schema schema, NodeAst from, Expansion expansion)
     {
         switch (from.nodeType)
         {
             case NodeType.Identifier:
                 // A bare identifier in FROM position carries no alias of its own, so the view's name
                 // becomes the alias — that is what keeps `SELECT v.col FROM v` resolving.
-                return TrySubstitute(schema, from.yytext, from.yytext, expansionStack, maxDepth, parseBody, authorize) ?? from;
+                return TrySubstitute(schema, from.yytext, from.yytext, expansion) ?? from;
 
             case NodeType.TableReference:
                 {
                     string? name = from.leftAst?.yytext;
                     string? alias = from.rightAst?.yytext ?? name;
 
-                    NodeAst? substituted = TrySubstitute(schema, name, alias, expansionStack, maxDepth, parseBody, authorize);
+                    NodeAst? substituted = TrySubstitute(schema, name, alias, expansion);
                     if (substituted is not null)
                     {
                         // The two hint kinds are not alike, and treating them alike refused something
@@ -161,7 +248,7 @@ internal static class ViewExpander
 
             case NodeType.DerivedTableReference:
                 {
-                    NodeAst inner = Rewrite(schema, from.leftAst!, expansionStack, maxDepth, parseBody, authorize);
+                    NodeAst inner = Rewrite(schema, from.leftAst!, expansion);
                     return ReferenceEquals(inner, from.leftAst)
                         ? from
                         : new NodeAst(NodeType.DerivedTableReference, inner, from.rightAst, from.extendedOne, from.extendedTwo, from.extendedThree, from.extendedFour, null, from.yytext);
@@ -171,8 +258,8 @@ internal static class ViewExpander
                 {
                     // Each operand is a complete SELECT with a FROM of its own, so a view named in
                     // either one is expanded, and checked against the caller, like a view in any FROM.
-                    NodeAst l = Rewrite(schema, from.leftAst!, expansionStack, maxDepth, parseBody, authorize);
-                    NodeAst r = Rewrite(schema, from.rightAst!, expansionStack, maxDepth, parseBody, authorize);
+                    NodeAst l = Rewrite(schema, from.leftAst!, expansion);
+                    NodeAst r = Rewrite(schema, from.rightAst!, expansion);
 
                     return ReferenceEquals(l, from.leftAst) && ReferenceEquals(r, from.rightAst)
                         ? from
@@ -181,9 +268,9 @@ internal static class ViewExpander
 
             case NodeType.Join:
                 {
-                    NodeAst l = RewriteFrom(schema, from.leftAst!, expansionStack, maxDepth, parseBody, authorize);
-                    NodeAst r = RewriteFrom(schema, from.rightAst!, expansionStack, maxDepth, parseBody, authorize);
-                    NodeAst? on = RewriteChild(schema, from.extendedOne, expansionStack, maxDepth, parseBody, authorize);
+                    NodeAst l = RewriteFrom(schema, from.leftAst!, expansion);
+                    NodeAst r = RewriteFrom(schema, from.rightAst!, expansion);
+                    NodeAst? on = RewriteChild(schema, from.extendedOne, expansion);
 
                     return ReferenceEquals(l, from.leftAst) && ReferenceEquals(r, from.rightAst) && ReferenceEquals(on, from.extendedOne)
                         ? from
@@ -193,8 +280,8 @@ internal static class ViewExpander
             case NodeType.CommaJoin:
             case NodeType.CommaJoinTableList:
                 {
-                    NodeAst l = RewriteFrom(schema, from.leftAst!, expansionStack, maxDepth, parseBody, authorize);
-                    NodeAst r = RewriteFrom(schema, from.rightAst!, expansionStack, maxDepth, parseBody, authorize);
+                    NodeAst l = RewriteFrom(schema, from.leftAst!, expansion);
+                    NodeAst r = RewriteFrom(schema, from.rightAst!, expansion);
 
                     return ReferenceEquals(l, from.leftAst) && ReferenceEquals(r, from.rightAst)
                         ? from
@@ -210,14 +297,7 @@ internal static class ViewExpander
     /// Builds the derived-table node that replaces a view reference, or null when the name is not a
     /// view (a table, a materialized view, or unknown — all of which resolve later, as they always did).
     /// </summary>
-    private static NodeAst? TrySubstitute(
-        Schema schema,
-        string? name,
-        string? alias,
-        List<string> expansionStack,
-        int maxDepth,
-        Func<string, NodeAst> parseBody,
-        Action<string, ViewSchema>? authorize)
+    private static NodeAst? TrySubstitute(Schema schema, string? name, string? alias, Expansion expansion)
     {
         if (name is null || !schema.Views.TryGetValue(name, out ViewSchema? view))
             return null;
@@ -231,8 +311,8 @@ internal static class ViewExpander
         // the enclosing view's owner, and only the binder knows that principal, because only it enters
         // the owner's scope. Checked before the body is read, so a caller with no grant learns nothing
         // about what the view selects from, not even through a differing error.
-        if (expansionStack.Count == 0)
-            authorize?.Invoke(name, view);
+        if (expansion.Stack.Count == 0)
+            expansion.Authorize?.Invoke(name, view);
 
         if (view.Definition?.Sql is not { Length: > 0 } sql || view.Id is null)
             throw new CamusDBException(
@@ -242,28 +322,34 @@ internal static class ViewExpander
         // The DDL-time acyclicity check is the real defense; this catches a cycle that reached the
         // stored schema anyway (a hand-edited checkpoint, a partially-applied log) rather than
         // recursing until the stack gives out.
-        if (expansionStack.Contains(view.Id, StringComparer.Ordinal))
+        if (expansion.Stack.Contains(view.Id, StringComparer.Ordinal))
             throw new CamusDBException(
                 CamusDBErrorCodes.ViewRecursionDetected,
                 $"Infinite recursion detected in the definition of view '{name}'");
 
-        if (expansionStack.Count >= maxDepth)
+        if (expansion.Stack.Count >= expansion.MaxDepth)
             throw new CamusDBException(
                 CamusDBErrorCodes.ViewRecursionDetected,
-                $"View expansion for '{name}' exceeded the maximum nesting depth of {maxDepth}");
+                $"View expansion for '{name}' exceeded the maximum nesting depth of {expansion.MaxDepth}");
 
-        NodeAst body = parseBody(sql);
+        // The parser cache returns the same instance for the same text, so a view referenced many
+        // times is parsed once; its node count is memoized on that instance.
+        NodeAst body = expansion.ParseBody(sql);
+
+        // Charged before anything is copied: the rewrite below is what allocates.
+        expansion.Charge(name, CountBodyNodes(body));
 
         // The stored body names its relations by immutable id, so the ids are resolved against the
         // current schema before anything binds against them. Skipped outright for a body that
-        // carries none, which is every body written before ids were stored.
+        // carries none, which is every body written before ids were stored. Memoized per body and
+        // schema version, so repeated references to one view do not resolve it again.
         if (DDL.StoredBodyBinder.MayContainReferences(sql))
-            body = DDL.StoredBodyBinder.ResolveStoredForm(schema, body, name);
+            body = ResolveBody(schema, body, name);
 
-        expansionStack.Add(view.Id);
+        expansion.Stack.Add(view.Id);
         try
         {
-            NodeAst expandedBody = Rewrite(schema, body, expansionStack, maxDepth, parseBody, authorize);
+            NodeAst expandedBody = Rewrite(schema, body, expansion);
 
             // The owner rides with the expansion. It has to: by the time anything opens a relation the
             // view's name is gone, so this derived table is the only remaining evidence that these
@@ -294,7 +380,7 @@ internal static class ViewExpander
         }
         finally
         {
-            expansionStack.Remove(view.Id);
+            expansion.Stack.RemoveAt(expansion.Stack.Count - 1);
         }
     }
 }
