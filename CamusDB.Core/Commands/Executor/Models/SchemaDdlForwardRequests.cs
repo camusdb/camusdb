@@ -259,6 +259,27 @@ public sealed class SchemaDdlForwardResponse
     public bool Applied { get; set; }
     public string? Code { get; set; }
     public string? Message { get; set; }
+
+    /// <summary>
+    /// For a forwarded schema change: the schema version it was committed at, which the follower
+    /// waits to apply before it answers. Null for every other forward.
+    /// </summary>
+    public long? Version { get; set; }
+}
+
+/// <summary>
+/// A schema change a follower built and checked itself, forwarded to the schema leader; see
+/// <see cref="ISchemaDdlForwarder.ForwardSchemaDeltaAsync"/>. The timestamp travels as its three parts.
+/// </summary>
+public sealed class ForwardSchemaDeltaRequest
+{
+    public string OperationId { get; set; } = "";
+    public string DatabaseName { get; set; } = "";
+    public int Op { get; set; }
+    public byte[] Payload { get; set; } = [];
+    public int TsNode { get; set; }
+    public long TsPhysical { get; set; }
+    public uint TsCounter { get; set; }
 }
 
 /// <summary>

@@ -352,7 +352,37 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
         }
     }
 
+    public async Task<long?> ForwardSchemaDeltaAsync(string leader, SchemaDeltaForward delta, string operationId, CancellationToken cancellationToken)
+    {
+        ForwardSchemaDeltaRequest request = new()
+        {
+            OperationId = operationId,
+            DatabaseName = delta.DatabaseName,
+            Op = (int)delta.Op,
+            Payload = delta.Payload,
+            TsNode = delta.Ts.N,
+            TsPhysical = delta.Ts.L,
+            TsCounter = delta.Ts.C,
+        };
+
+        SchemaDdlForwardResponse? response = await PostForResponseAsync(leader, "schema-delta", request, cancellationToken).ConfigureAwait(false);
+        if (response is null)
+            return null;
+
+        return response.Version ?? throw new CamusDBException(
+            CamusDBErrorCodes.InvalidInternalOperation,
+            $"The schema leader '{leader}' committed a forwarded '{delta.Op}' change but did not say at which version");
+    }
+
     private async Task<bool?> PostAsync<TRequest>(string leader, string operation, TRequest request, CancellationToken cancellationToken)
+        => (await PostForResponseAsync(leader, operation, request, cancellationToken).ConfigureAwait(false))?.Applied;
+
+    /// <summary>
+    /// Posts one forward and returns the leader's "ok" answer, or null when the target does not lead
+    /// or could not be reached, so the caller tries the leader again. A "failed" answer is raised with
+    /// the leader's error code.
+    /// </summary>
+    private async Task<SchemaDdlForwardResponse?> PostForResponseAsync<TRequest>(string leader, string operation, TRequest request, CancellationToken cancellationToken)
     {
         Uri baseUri = endpointResolver(leader);
         Uri endpoint = new(baseUri, $"/internal/schema-ddl/{operation}");
@@ -383,7 +413,7 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
 
             return body.Status switch
             {
-                "ok" => body.Applied,
+                "ok" => body,
                 "not-leader" => null,
                 "failed" => throw new CamusDBException(body.Code ?? CamusDBErrorCodes.InvalidInternalOperation, body.Message ?? "Unknown error from schema leader"),
                 _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"Unexpected status '{body.Status}' from {endpoint}"),

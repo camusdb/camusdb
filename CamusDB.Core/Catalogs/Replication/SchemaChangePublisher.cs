@@ -73,6 +73,20 @@ internal sealed class SchemaChangePublisher
             ? CamusDBErrorCodes.TransactionMustRetry
             : CamusDBErrorCodes.InvalidInternalOperation;
 
+    /// <summary>
+    /// Sends an entry to the database's schema leader when this node does not lead its schema log, and
+    /// waits until this node has applied it. Answers null when this node should propose the entry
+    /// itself: standalone, or this node leads. Set once at startup in cluster mode; null otherwise.
+    /// </summary>
+    /// <remarks>
+    /// Statements with a statement-level forward (table, index, constraint, rename, truncate and
+    /// comment DDL) are sent before they build an entry and never get here on a follower. What gets
+    /// here is a change built by code with no forward of its own: view DDL, a materialized view's
+    /// relations, a refresh's publish and table settings. Proposed from a follower, those used to fail
+    /// with NotLeader, reported as "the leader moved, retry", which never helped.
+    /// </remarks>
+    internal Func<DatabaseDescriptor, SchemaChangeLogEntry, Task<bool?>>? ForwardWhenNotLeader { get; set; }
+
     internal async Task ReplicateAndWaitLocalApplyAsync(DatabaseDescriptor database, SchemaChangeLogEntry entry)
     {
         // Replicating the schema-log delta (and the checkpoint persist below) re-enters the
@@ -91,6 +105,11 @@ internal sealed class SchemaChangePublisher
                 CamusDBErrorCodes.InvalidInternalOperation,
                 $"Schema subsystem for database '{database.Name}' is degraded; DDL proposals are rejected until the node recovers"
             );
+
+        // On a follower the leader proposes, persists the checkpoint and waits for the acks; this node
+        // only waits to apply the result.
+        if (ForwardWhenNotLeader is { } forward && await forward(database, entry).ConfigureAwait(false) is not null)
+            return;
 
         await WaitForPreviousVersionAcksAsync(database, entry).ConfigureAwait(false);
 

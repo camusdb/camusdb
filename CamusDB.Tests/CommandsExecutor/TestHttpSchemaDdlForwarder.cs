@@ -24,6 +24,7 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Storage.Kv;
+using Kommander.Time;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -346,6 +347,37 @@ public sealed class TestHttpSchemaDdlForwarder
         await forwarder.ForwardDropTableAsync("leader:7070", ticket, StableOperationId, CancellationToken.None);
 
         Assert.That(handler.LastRequest!.RequestUri!.ToString(), Does.EndWith("/internal/schema-ddl/drop-table"));
+    }
+
+    [Test]
+    public async Task ForwardSchemaDelta_PostsTheChangeAndReturnsTheCommittedVersion()
+    {
+        FakeMessageHandler handler = new(new StringContent(
+            JsonSerializer.Serialize(new SchemaDdlForwardResponse { Status = "ok", Applied = true, Version = 42 }, JsonOptions),
+            Encoding.UTF8, "application/json"));
+        HttpSchemaDdlForwarder forwarder = BuildForwarder(handler);
+
+        SchemaDeltaForward delta = new("mydb", SchemaOp.DropView, [1, 2, 3], new HLCTimestamp(1, 10, 2));
+        long? version = await forwarder.ForwardSchemaDeltaAsync("leader:7070", delta, StableOperationId, CancellationToken.None);
+
+        Assert.AreEqual(42, version);
+        Assert.That(handler.LastRequest!.RequestUri!.ToString(), Does.EndWith("/internal/schema-ddl/schema-delta"));
+
+        ForwardSchemaDeltaRequest sent = JsonSerializer.Deserialize<ForwardSchemaDeltaRequest>(handler.LastBody!, JsonOptions)!;
+        Assert.AreEqual("mydb", sent.DatabaseName);
+        Assert.AreEqual((int)SchemaOp.DropView, sent.Op);
+        CollectionAssert.AreEqual(new byte[] { 1, 2, 3 }, sent.Payload);
+        Assert.AreEqual((1, 10L, 2u), (sent.TsNode, sent.TsPhysical, sent.TsCounter));
+    }
+
+    [Test]
+    public async Task ForwardSchemaDelta_ReturnsNullWhenTheTargetDoesNotLead()
+    {
+        FakeMessageHandler handler = new(NotLeaderResponse());
+        HttpSchemaDdlForwarder forwarder = BuildForwarder(handler);
+
+        SchemaDeltaForward delta = new("mydb", SchemaOp.DropView, [1], new HLCTimestamp(1, 10, 2));
+        Assert.IsNull(await forwarder.ForwardSchemaDeltaAsync("leader:7070", delta, StableOperationId, CancellationToken.None));
     }
 
     [Test]

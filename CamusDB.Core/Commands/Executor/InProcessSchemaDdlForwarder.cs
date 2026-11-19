@@ -116,6 +116,12 @@ public sealed class InProcessSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAc
         return (await executor.Comment(ticket).ConfigureAwait(false)).Success;
     }
 
+    public async Task<long?> ForwardSchemaDeltaAsync(string leader, SchemaDeltaForward delta, string operationId, CancellationToken cancellationToken)
+    {
+        CommandExecutor executor = await LeaderAsync(leader, delta.DatabaseName, cancellationToken).ConfigureAwait(false);
+        return await executor.ApplyForwardedSchemaDeltaAsync(delta).ConfigureAwait(false);
+    }
+
     /// <summary>
     /// Hands the follower's applied version to the tracker of the node the caller named, then answers
     /// whether that node leads the schema partition, exactly as the HTTP endpoint does. The record

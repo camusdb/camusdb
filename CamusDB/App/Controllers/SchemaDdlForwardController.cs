@@ -16,6 +16,7 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Models.Results;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.App.Services;
+using Kommander.Time;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -397,6 +398,81 @@ public sealed class SchemaDdlForwardController : CommandsController
 
             bool result = await executor.RenameTable(ticket).ConfigureAwait(false);
             SchemaDdlForwardResponse response = new() { Status = "ok", Applied = result };
+            opCache?.SetAndComplete(req.OperationId, response);
+            return new JsonResult(response);
+        }
+        catch (CamusDBException e)
+        {
+            opCache?.FaultAndRelease(req.OperationId, e);
+            LogCommandFailure(e);
+            return FailedDdl(e.Code, e.Message);
+        }
+        catch (Exception e)
+        {
+            opCache?.FaultAndRelease(req.OperationId, e);
+            logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
+            return FailedDdl(CamusDBErrorCodes.InvalidInternalOperation, e.Message);
+        }
+    }
+
+    /// <summary>
+    /// Publishes a schema change a follower built and checked, as the schema leader, and answers with
+    /// the version it was committed at; see <see cref="ISchemaDdlForwarder.ForwardSchemaDeltaAsync"/>.
+    /// A retry with the same operation id gets the first answer, so the change is not published twice.
+    /// </summary>
+    [HttpPost]
+    [Route("/internal/schema-ddl/schema-delta")]
+    public async Task<JsonResult> ForwardSchemaDelta()
+    {
+        ForwardSchemaDeltaRequest? req;
+        try
+        {
+            req = await ReadJsonBodyAsync<ForwardSchemaDeltaRequest>().ConfigureAwait(false);
+            if (req is null)
+                return BadDdlRequest("ForwardSchemaDelta request is null");
+
+            if (!Enum.IsDefined(typeof(SchemaOp), req.Op))
+                return BadDdlRequest($"Unknown schema operation {req.Op}");
+
+            if (!await IsSchemaLeaderAsync(req.DatabaseName).ConfigureAwait(false))
+                return NotLeaderDdl();
+        }
+        catch (CamusDBException e)
+        {
+            LogCommandFailure(e);
+            return FailedDdl(e.Code, e.Message);
+        }
+        catch (Exception e)
+        {
+            logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
+            return FailedDdl(CamusDBErrorCodes.InvalidInternalOperation, e.Message);
+        }
+
+        DdlOperationIdCache? opCache = GetOperationIdCache();
+        Task<SchemaDdlForwardResponse?>? pending = opCache?.TryGetOrReserve(req.OperationId);
+        if (pending is not null)
+        {
+            try { return new JsonResult(await pending.ConfigureAwait(false)); }
+            catch (CamusDBException e) { return FailedDdl(e.Code, e.Message); }
+            catch (Exception e) { return FailedDdl(CamusDBErrorCodes.InvalidInternalOperation, e.Message); }
+        }
+
+        try
+        {
+            SchemaDeltaForward delta = new(
+                req.DatabaseName,
+                (SchemaOp)req.Op,
+                req.Payload,
+                new HLCTimestamp(req.TsNode, req.TsPhysical, req.TsCounter));
+
+            long? version = await executor.ApplyForwardedSchemaDeltaAsync(delta).ConfigureAwait(false);
+            if (version is null)
+            {
+                opCache?.FaultAndRelease(req.OperationId, new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "not the schema leader"));
+                return NotLeaderDdl();
+            }
+
+            SchemaDdlForwardResponse response = new() { Status = "ok", Applied = true, Version = version };
             opCache?.SetAndComplete(req.OperationId, response);
             return new JsonResult(response);
         }

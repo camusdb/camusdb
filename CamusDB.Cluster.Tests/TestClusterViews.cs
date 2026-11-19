@@ -28,10 +28,9 @@ namespace CamusDB.Tests.Cluster;
 /// <see cref="ViewCreator.BeforeProposeForTesting"/> — so the competing statement lands inside exactly
 /// the window a race occupies, with no sleeps.
 ///
-/// <para>View DDL, materialized-view creation and the refresh's publication are proposed by the node
-/// that runs them, and only the schema leader can propose. They run on the leader here; table and
-/// index DDL from a follower is forwarded to it. Reads, and the refusals that the refresh fence
-/// decides, run on every node.</para>
+/// <para>Only the schema leader proposes schema changes. View DDL, materialized-view creation, the
+/// refresh's publication and table settings issued on a follower are sent to it, as table and index DDL
+/// is. Reads, and the refusals that the refresh fence decides, run on every node.</para>
 /// </summary>
 [TestFixture]
 // Serial: boots a multi-node in-process cluster (port contention / Raft timing).
@@ -174,6 +173,78 @@ public sealed class TestClusterViews
             {
                 Assert.AreEqual(NewContents, await Ids(node, db, "SELECT id FROM open_v2"), $"node {node.Index}");
                 Assert.AreEqual(new List<long> { 1 }, await Ids(node, db, "SELECT id FROM open_v"), $"node {node.Index}");
+            }
+        }
+        finally
+        {
+            await cluster.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// Every view statement, materialized-view create and refresh, and table setting issued on a follower
+    /// is sent to the schema leader and visible on every node. A follower used to fail them with a
+    /// "the leader moved, retry" error, which never helped, or with an internal error that named the
+    /// leader's Raft address.
+    /// </summary>
+    [Test]
+    public async Task ViewDdlRefreshAndTableSettingsWorkFromAFollower()
+    {
+        (InProcessSchemaCluster cluster, string db, InProcessSchemaCluster.Node leader, InProcessSchemaCluster.Node follower) = await StartAsync();
+        try
+        {
+            await Ddl(follower, db, "CREATE VIEW open_v AS SELECT id FROM orders WHERE status = 'open'");
+            await Ddl(follower, db, "CREATE OR REPLACE VIEW open_v AS SELECT id FROM orders WHERE status = 'open' AND id > 1");
+            await Ddl(follower, db, "COMMENT ON VIEW open_v IS 'open orders but the first'");
+            await Ddl(follower, db, "ALTER VIEW open_v RENAME TO open_v2");
+            await Ddl(follower, db, "CREATE MATERIALIZED VIEW closed_m AS SELECT id FROM orders WHERE status = 'closed'");
+            await Ddl(follower, db, "CREATE MATERIALIZED VIEW later_m AS SELECT id FROM orders WITH NO DATA");
+            await Write(follower, db, "REFRESH MATERIALIZED VIEW open_orders");
+            await Write(follower, db, "REFRESH MATERIALIZED VIEW later_m");
+            await Converge(cluster, leader, db);
+
+            foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+            {
+                Assert.AreEqual(new List<long> { 2, 3, 6 }, await Ids(node, db, "SELECT id FROM open_v2"), $"node {node.Index}");
+                Assert.AreEqual("open orders but the first", node.Database!.Schema.Views["open_v2"].Comment, $"node {node.Index}");
+                Assert.AreEqual(new List<long> { 4 }, await Ids(node, db, "SELECT id FROM closed_m"), $"node {node.Index}");
+                Assert.AreEqual(new List<long> { 1, 2, 3, 4, 6 }, await Ids(node, db, "SELECT id FROM later_m"), $"node {node.Index}");
+                Assert.AreEqual(NewContents, await Ids(node, db, "SELECT id FROM open_orders"), $"node {node.Index}");
+            }
+
+            AssertNoStaging(cluster);
+
+            // Table settings, for the analyze opt-out and for a TTL setting.
+            await Ddl(follower, db, "CREATE TABLE sessions (id int64 PRIMARY KEY, expires_at TIMESTAMP NULL)");
+            await Ddl(follower, db, "ALTER TABLE orders SET (sql_stats_automatic_collection_enabled = false)");
+            await Ddl(follower, db, "ALTER TABLE sessions SET (ttl_expiration_expression = 'expires_at')");
+            await Converge(cluster, leader, db);
+
+            foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+            {
+                Assert.AreEqual("false", node.Database!.Schema.Tables["orders"].Settings?["sql_stats_automatic_collection_enabled"], $"node {node.Index}");
+                Assert.AreEqual("expires_at", node.Database.Schema.Tables["sessions"].Settings?["ttl_expiration_expression"], $"node {node.Index}");
+            }
+
+            await Ddl(follower, db, "ALTER TABLE orders RESET (sql_stats_automatic_collection_enabled)");
+            await Ddl(follower, db, "ALTER TABLE sessions RESET (ttl)");
+            await Converge(cluster, leader, db);
+
+            foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+            {
+                Assert.IsFalse(node.Database!.Schema.Tables["orders"].Settings?.ContainsKey("sql_stats_automatic_collection_enabled") ?? false, $"node {node.Index}");
+                Assert.IsFalse(node.Database.Schema.Tables["sessions"].Settings?.ContainsKey("ttl_expiration_expression") ?? false, $"node {node.Index}");
+            }
+
+            // And the drops, from the follower too.
+            await Ddl(follower, db, "DROP VIEW open_v2");
+            await Ddl(follower, db, "DROP MATERIALIZED VIEW closed_m");
+            await Converge(cluster, leader, db);
+
+            foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+            {
+                Assert.IsFalse(node.Database!.Schema.Views.ContainsKey("open_v2"), $"node {node.Index}");
+                Assert.IsFalse(node.Database.Schema.Tables.ContainsKey("closed_m"), $"node {node.Index}");
             }
         }
         finally
@@ -392,8 +463,9 @@ public sealed class TestClusterViews
     }
 
     /// <summary>
-    /// A rebuild interrupted on one node is restarted by the sweep on another, after schema leadership
-    /// moved there, and every node ends with the new contents and nothing left behind.
+    /// A rebuild interrupted on the leader is restarted by the sweep on a follower, which does not lead
+    /// the schema log, and every node ends with the new contents and nothing left behind. The restart's
+    /// publish is sent to the leader.
     /// </summary>
     [Test]
     public async Task AnInterruptedRebuildIsFinishedByAnotherNode()
@@ -412,9 +484,6 @@ public sealed class TestClusterViews
 
             Assert.ThrowsAsync<MaterializedViewRefresher.SimulatedCrashForTesting>(async () =>
                 await Write(leader, db, "REFRESH MATERIALIZED VIEW open_orders"));
-
-            // The node that ran the rebuild is still up, so leadership is handed over rather than lost.
-            await cluster.TransferSchemaLeadershipAsync(db, follower);
 
             Assert.AreEqual(1, await follower.Executor.ReclaimAbandonedRefreshesForTesting(db));
             await Converge(cluster, follower, db);
