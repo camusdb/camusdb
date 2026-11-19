@@ -554,10 +554,16 @@ public sealed class SchemaReplicator
 
     private static bool WasSchemaDeltaApplied(Schema schema, SchemaChangeLogEntry entry)
     {
+        // A refused entry was applied as a no-op, so the structure it would have produced is absent
+        // by design. Without this, a re-delivered refused entry would look unapplied and be reported
+        // as out of order.
+        if (schema.FindRefusal(entry) is not null)
+            return true;
+
         return entry.Op switch
         {
             SchemaOp.CreateTable => schema.Tables.ContainsKey(DecodePayload<SchemaCreateTablePayload>(entry).TableName),
-            SchemaOp.DropTable => !schema.Tables.ContainsKey(DecodePayload<SchemaDropTablePayload>(entry).TableName),
+            SchemaOp.DropTable => SchemaDeltaApplier.WasDropped(schema, DecodePayload<SchemaDropTablePayload>(entry)),
             SchemaOp.AddColumn => HasColumn(schema, DecodePayload<SchemaAlterColumnPayload>(entry)),
             SchemaOp.DropColumn => !HasColumn(schema, DecodePayload<SchemaAlterColumnPayload>(entry)),
             SchemaOp.SetElementState => HasElementState(schema, DecodePayload<SchemaElementStatePayload>(entry)),

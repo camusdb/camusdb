@@ -314,7 +314,7 @@ internal static class SchemaDeltaApplier
     /// True when no relation with the dropped id still has the name. A different relation that took
     /// the name since does not make the drop look unapplied.
     /// </summary>
-    private static bool WasDropped(Schema schema, SchemaDropTablePayload payload)
+    internal static bool WasDropped(Schema schema, SchemaDropTablePayload payload)
     {
         if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? current))
             return true;
