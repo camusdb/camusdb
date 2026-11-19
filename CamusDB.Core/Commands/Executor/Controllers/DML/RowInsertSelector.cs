@@ -26,7 +26,8 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
 /// re-read the rows it had just inserted and never finish. The buffer is bounded because rows-read
 /// equals rows-inserted here and a transaction may not insert more than
 /// <see cref="CamusDBOptions.MaxMutationsPerTransaction"/> rows — the drain enforces that ceiling as
-/// it reads rather than after materialising an unbounded set.</para>
+/// it reads rather than after materialising an unbounded set. An operator who disables the ceiling
+/// (zero or less) disables this bound with it.</para>
 /// </summary>
 internal sealed class RowInsertSelector
 {
@@ -178,7 +179,8 @@ internal sealed class RowInsertSelector
 
             await foreach (QueryResultRow sourceRow in cursor.ConfigureAwait(false))
             {
-                if (sourceRows.Count >= mutationLimit)
+                // Zero or less disables the ceiling, as it does for the transaction itself.
+                if (mutationLimit > 0 && sourceRows.Count >= mutationLimit)
                     throw new CamusDBException(
                         CamusDBErrorCodes.TransactionMutationLimitExceeded,
                         $"INSERT ... SELECT would insert more than {mutationLimit} rows, which exceeds the " +
