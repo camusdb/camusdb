@@ -216,7 +216,7 @@ public sealed class SchemaReplicator
             // Resolved before the apply: the answer depends on the state the delta replaces.
             WriteShapeTargets writeShapeTargets = WriteShapeDeltaRules.Resolve(database.Schema, entry);
 
-            TableSchema? appliedTableSchema = CatalogsManager.ApplySchemaDelta(database.Schema, database, entry);
+            TableSchema? appliedTableSchema = SchemaDeltaApplier.ApplyOrRefuse(database.Schema, database, entry);
             InvalidateAppliedTableDescriptor(database, entry, appliedTableSchema);
 
             // After the mutation, the published foreign-key graph and the descriptor eviction, never
@@ -516,7 +516,7 @@ public sealed class SchemaReplicator
             // intermediate generation needs its own record or its rows become unreachable.
             CatalogsManager.CaptureContentsRetirementIntent(database, entry);
 
-            CatalogsManager.ApplySchemaDelta(database.Schema, database, entry);
+            SchemaDeltaApplier.ApplyOrRefuse(database.Schema, database, entry);
 
             Log.LogSchemaChangeRestored(logger, entry.Op, database.Name, entry.FromVersion, entry.ToVersion);
 
@@ -699,7 +699,8 @@ public sealed class SchemaReplicator
         Id = view.Id,
         Name = view.Name,
         Definition = view.Definition,
-        Comment = view.Comment
+        Comment = view.Comment,
+        Generation = view.Generation,
     };
 
     /// <summary>

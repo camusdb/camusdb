@@ -93,19 +93,17 @@ internal static class ViewDependencyMaintainer
 
         List<string> dependents = [];
 
-        foreach ((string viewName, ViewSchema view) in schema.Views)
+        // From the reverse index, so the check costs the definitions that read this column rather than
+        // every definition in the database. Materialized views are in it too: a body that would break on
+        // its next refresh has the same claim on the column as one that would break on its next read.
+        foreach (string dependent in ViewDependencyGraph.DependentsOfColumn(schema, columnId))
         {
-            if (Objects(view.Definition))
-                dependents.Add(viewName);
-        }
+            ViewDefinition? definition = schema.Views.TryGetValue(dependent, out ViewSchema? view)
+                ? view.Definition
+                : schema.Tables.TryGetValue(dependent, out TableSchema? relation) ? relation.ViewDefinition : null;
 
-        // Materialized views keep their definition on the relation rather than in the view map, and
-        // a body that would break on its next refresh has the same claim on the column as one that
-        // would break on its next read.
-        foreach ((string relationName, TableSchema relation) in schema.Tables)
-        {
-            if (relation.IsMaterializedView && Objects(relation.ViewDefinition))
-                dependents.Add(relationName);
+            if (Objects(definition))
+                dependents.Add(dependent);
         }
 
         bool Objects(ViewDefinition? definition)

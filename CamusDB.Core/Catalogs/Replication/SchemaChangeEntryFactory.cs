@@ -103,7 +103,8 @@ internal static class SchemaChangeEntryFactory
                 IsPopulated = false,
                 Settings = ticket.Settings is null
                     ? null
-                    : new Dictionary<string, string>(ticket.Settings, StringComparer.Ordinal)
+                    : new Dictionary<string, string>(ticket.Settings, StringComparer.Ordinal),
+                ApplyPreconditions = true,
             })
         };
     }
@@ -908,7 +909,7 @@ internal static class SchemaChangeEntryFactory
     /// </summary>
     internal static SchemaChangeLogEntry CreateViewEntry(
         DatabaseDescriptor database, string viewId, string viewName,
-        ViewDefinition definition, string? comment, bool replace)
+        ViewDefinition definition, string? comment, bool replace, long? expectedGeneration = null)
     {
         return new()
         {
@@ -921,12 +922,14 @@ internal static class SchemaChangeEntryFactory
                 ViewId = viewId,
                 ViewName = viewName,
                 Definition = definition,
-                Comment = comment
+                Comment = comment,
+                ExpectedGeneration = replace ? expectedGeneration : null,
+                ValidateDependencies = true,
             })
         };
     }
 
-    internal static SchemaChangeLogEntry DropViewEntry(DatabaseDescriptor database, string viewName)
+    internal static SchemaChangeLogEntry DropViewEntry(DatabaseDescriptor database, string viewName, string? expectedViewId = null)
     {
         return new()
         {
@@ -934,7 +937,12 @@ internal static class SchemaChangeEntryFactory
             FromVersion = database.Schema.SchemaVersion,
             ToVersion = database.Schema.SchemaVersion + 1,
             Op = SchemaOp.DropView,
-            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaDropViewPayload { ViewName = viewName })
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaDropViewPayload
+            {
+                ViewName = viewName,
+                ExpectedViewId = expectedViewId,
+                RequireNoDependents = true,
+            })
         };
     }
 
@@ -1042,7 +1050,8 @@ internal static class SchemaChangeEntryFactory
     }
 
     internal static SchemaChangeLogEntry SetViewDefinitionEntry(
-        DatabaseDescriptor database, string viewName, ViewDefinition definition)
+        DatabaseDescriptor database, string viewName, ViewDefinition definition,
+        long? expectedGeneration, bool setComment, string? comment)
     {
         return new()
         {
@@ -1053,7 +1062,10 @@ internal static class SchemaChangeEntryFactory
             Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaSetViewDefinitionPayload
             {
                 ViewName = viewName,
-                Definition = definition
+                Definition = definition,
+                ExpectedGeneration = expectedGeneration,
+                SetComment = setComment,
+                Comment = comment,
             })
         };
     }

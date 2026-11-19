@@ -334,11 +334,16 @@ internal sealed class DdlStatementDispatcher
                             CamusDBErrorCodes.UserDoesNotExist,
                             $"User '{newOwnerName}' does not exist, or predates user ids and cannot own a view");
 
-                    ViewDefinition transferred = ownedView.Definition;
+                    // A copy, never the live definition: editing that in place showed the new owner
+                    // before the change committed, and kept showing it when the change failed.
+                    ViewDefinition transferred = ownedView.Definition.Copy();
                     transferred.Owner = newOwner?.Name ?? newOwnerName;
                     transferred.OwnerId = newOwner?.Id;
 
-                    await catalogs.SetViewDefinitionAsync(database, ownedViewName, transferred).ConfigureAwait(false);
+                    // Checked against the generation the copy was taken from, so a concurrent replace
+                    // is not overwritten with the body it replaced.
+                    await catalogs.SetViewDefinitionAsync(
+                        database, ownedViewName, transferred, expectedGeneration: ownedView.Generation).ConfigureAwait(false);
                     return new ExecuteDDLSQLResult(database, true);
                 }
 

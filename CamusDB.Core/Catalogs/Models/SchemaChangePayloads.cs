@@ -115,6 +115,16 @@ public sealed class SchemaCreateTablePayload
     /// does not have.
     /// </summary>
     public bool IsPopulated { get; set; }
+
+    /// <summary>
+    /// Re-check at apply what the proposer checked against its own snapshot: that no view holds the
+    /// name — views and relations share one namespace, and a view may be proposed from another node —
+    /// and, for a materialized view, that every relation its body reads still exists and that it
+    /// closes no cycle. False in entries written before these checks existed, which apply unchecked so
+    /// a replay reaches the answer the original apply did.
+    /// </summary>
+    public bool ApplyPreconditions { get; set; }
+
 }
 
 /// <summary>
@@ -132,6 +142,23 @@ public sealed class SchemaViewPayload
 
     /// <summary>The view's comment, carried so a replace does not silently drop it.</summary>
     public string? Comment { get; set; }
+
+    /// <summary>
+    /// For a replace, the <see cref="ViewSchema.Generation"/> the replacement was validated against
+    /// — its shape compatibility, its owner and its cycle check were all computed from that
+    /// definition. Apply refuses the replace when the live view has moved on, so two concurrent
+    /// replaces that are each compatible with the old shape, but not with each other, cannot both
+    /// land. Null in entries written before preconditions existed, which apply unchecked.
+    /// </summary>
+    public long? ExpectedGeneration { get; set; }
+
+    /// <summary>
+    /// Re-check, at apply, that every relation the body reads still exists and that the view does
+    /// not close a cycle. A drop committed after the statement checked its dependencies, and before
+    /// this entry, would otherwise leave the view reading something gone. False in entries written
+    /// before preconditions existed, which apply unchecked.
+    /// </summary>
+    public bool ValidateDependencies { get; set; }
 }
 
 /// <summary>
@@ -142,6 +169,20 @@ public sealed class SchemaViewPayload
 public sealed class SchemaDropViewPayload
 {
     public string ViewName { get; set; } = "";
+
+    /// <summary>
+    /// The id of the view the statement meant to drop. A name dropped and re-created by somebody else
+    /// since then names a different view, which apply refuses to drop. Null in older entries.
+    /// </summary>
+    public string? ExpectedViewId { get; set; }
+
+    /// <summary>
+    /// Refuse the drop, at apply, while any view or materialized view still reads this one. The
+    /// statement checked that already, but a dependent created between that check — or a
+    /// <c>CASCADE</c>'s scan of the dependents — and this entry would otherwise be left reading
+    /// nothing. False in older entries, which apply unchecked.
+    /// </summary>
+    public bool RequireNoDependents { get; set; }
 }
 
 /// <summary>
@@ -152,7 +193,25 @@ public sealed class SchemaSetViewDefinitionPayload
 {
     public string ViewName { get; set; } = "";
 
+    /// <summary>
+    /// The definition to store. Always present, also for a change that only sets the comment: a node
+    /// that predates <see cref="SetComment"/> applies this field alone, and must keep the definition it
+    /// has rather than lose it.
+    /// </summary>
     public ViewDefinition? Definition { get; set; }
+
+    /// <summary>
+    /// The <see cref="ViewSchema.Generation"/> the change was computed against. Apply refuses it when
+    /// the view has moved on, so an <c>ALTER VIEW … OWNER TO</c> or <c>COMMENT ON VIEW</c> cannot put
+    /// back a definition a concurrent <c>CREATE OR REPLACE</c> replaced. Null in older entries.
+    /// </summary>
+    public long? ExpectedGeneration { get; set; }
+
+    /// <summary>Whether <see cref="Comment"/> is to be stored (<c>COMMENT ON VIEW</c>).</summary>
+    public bool SetComment { get; set; }
+
+    /// <summary>The comment to store when <see cref="SetComment"/> is set; null removes it.</summary>
+    public string? Comment { get; set; }
 }
 
 /// <summary>

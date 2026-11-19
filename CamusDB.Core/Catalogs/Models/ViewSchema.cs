@@ -35,6 +35,19 @@ public sealed class ViewSchema
     /// <summary>The stored body, column list, dependencies, check option and owner.</summary>
     public ViewDefinition? Definition { get; set; }
 
+    /// <summary>
+    /// Advanced by every applied change to this view — its body, owner, comment or name — and never
+    /// by anything else. A statement that computes a change from the view as it stands carries the
+    /// generation it saw, and apply refuses the change if the view has moved on: the view's
+    /// counterpart of <see cref="TableSchema.MetadataGeneration"/>.
+    ///
+    /// <para>Persisted with the view, so every node — including one that restarted and reloaded the
+    /// checkpoint — agrees on it, so the apply-time comparison decides the same way on every
+    /// node. Zero on a view stored before the field existed, and from then on it moves with every
+    /// node's apply alike.</para>
+    /// </summary>
+    public long Generation { get; set; }
+
     /// <summary>Free-text description attached via <c>COMMENT ON VIEW</c>. Null means no comment; an
     /// empty string is a present-but-empty comment, and the two stay distinguishable so
     /// <c>SHOW CREATE VIEW</c> can omit the clause entirely for null — the same rule

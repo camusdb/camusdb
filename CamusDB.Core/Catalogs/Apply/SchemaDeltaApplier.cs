@@ -132,6 +132,32 @@ internal static class SchemaDeltaApplier
         return tableSchema;
     }
 
+    /// <summary>
+    /// Applies a committed delta on the live path — a replicated apply or a replay — turning a
+    /// <see cref="SchemaDeltaRefusedException"/> into a no-op that still consumes the entry's version.
+    /// </summary>
+    /// <remarks>
+    /// A refusal is deterministic: every node applies the same entry at the same log position against
+    /// the same schema, so every node refuses it. Advancing the version keeps the log moving; recording
+    /// the refusal lets the proposer tell its caller the change did not land
+    /// (<see cref="Replication.SchemaChangePublisher.ReplicateAndWaitLocalApplyAsync"/>). The dry-run
+    /// validator does not come through here, so there the refusal is the error the statement fails
+    /// with.
+    /// </remarks>
+    internal static TableSchema? ApplyOrRefuse(Schema schema, DatabaseDescriptor database, SchemaChangeLogEntry entry)
+    {
+        try
+        {
+            return ApplySchemaDelta(schema, database, entry);
+        }
+        catch (SchemaDeltaRefusedException refused)
+        {
+            schema.RecordRefusal(entry, refused.Code, refused.Message);
+            schema.SchemaVersion = entry.ToVersion;
+            return null;
+        }
+    }
+
     internal static T DecodePayload<T>(SchemaChangeLogEntry entry) where T : new()
         => entry.GetPayload<T>();
 
@@ -168,7 +194,12 @@ internal static class SchemaDeltaApplier
         foreach ((string viewName, ViewDefinition definition) in rewrites)
         {
             if (schema.Views.TryGetValue(viewName, out ViewSchema? view))
+            {
+                ViewDefinition? before = view.Definition;
                 view.Definition = definition;
+                view.Generation++;
+                schema.ReplaceViewDependencyEdges(view.Id, before, definition);
+            }
         }
     }
 
@@ -180,7 +211,16 @@ internal static class SchemaDeltaApplier
 
         // Dry-run: apply to a throwaway clone so validation has no side effects on the live schema.
         Schema clone = SchemaReplicator.CloneSchema(database.Schema);
-        ApplySchemaDelta(clone, database, entry);
+        try
+        {
+            ApplySchemaDelta(clone, database, entry);
+        }
+        catch (SchemaDeltaRefusedException refused)
+        {
+            // Here a refusal is simply the statement's error. The type only matters to the live apply,
+            // which turns it into a no-op, so it does not leave this method.
+            throw new CamusDBException(refused.Code, refused.Message);
+        }
 
         // Proposer only, under the schema lock: a stored call to an extension function must still
         // resolve, because a DROP EXTENSION can commit after the statement resolved it.
@@ -189,6 +229,11 @@ internal static class SchemaDeltaApplier
 
     internal static bool WasSchemaDeltaApplied(Schema schema, SchemaChangeLogEntry entry)
     {
+        // A refused entry was applied as a no-op, so the structure it would have produced is absent
+        // by design. The refusal record is the proof it landed.
+        if (schema.FindRefusal(entry) is not null)
+            return true;
+
         return entry.Op switch
         {
             SchemaOp.CreateTable => schema.Tables.ContainsKey(DecodePayload<SchemaCreateTablePayload>(entry).TableName),

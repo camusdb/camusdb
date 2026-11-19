@@ -57,8 +57,7 @@ internal static class ViewAuthorization
     /// <remarks>
     /// Called by the binder for every expanded view. Inside a view's body the principal in scope is
     /// that view's owner (the binder swapped to it), so this is the read-time check of a nested view's
-    /// grant: the owner of the outer view needs SELECT on the inner one on every read, not only when
-    /// the outer view was created. The message names the principal because, nested, it is not the
+    /// grant: the owner of the outer view needs SELECT on the inner one at every read. The message names the principal because, nested, it is not the
     /// caller, and "missing privilege" without saying whose would send the caller looking at their own
     /// grants.
     /// </remarks>

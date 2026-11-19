@@ -73,7 +73,7 @@ internal static class DependentRelationDropper
             // Already gone is fine: an earlier step of this same cascade, or a concurrent drop, got
             // there first, and the outcome the caller asked for holds either way.
             if (CatalogsManager.ViewExists(database, name))
-                await catalogs.DropViewAsync(database, name).ConfigureAwait(false);
+                await catalogs.DropViewAsync(database, name, expectedViewId: id).ConfigureAwait(false);
         }
     }
 }

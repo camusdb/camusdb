@@ -27,6 +27,14 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 internal sealed class ViewCreator
 {
     /// <summary>
+    /// Test-only seam: invoked with the view's name after a <c>CREATE [OR REPLACE] VIEW</c> or
+    /// <c>DROP VIEW</c> has done its checks and before it proposes, so a test can commit competing DDL
+    /// exactly inside the window a race between two statements occupies — deterministically, without
+    /// threads or sleeps. Null in production.
+    /// </summary>
+    internal static Func<string, Task>? BeforeProposeForTesting { get; set; }
+
+    /// <summary>
     /// Creates or replaces a view. Returns false only when a create lost a race it was allowed to
     /// lose; every other failure raises.
     /// </summary>
@@ -53,6 +61,15 @@ internal sealed class ViewCreator
                 CamusDBErrorCodes.TableAlreadyExists,
                 $"'{viewName}' is a table, not a view; CREATE OR REPLACE VIEW cannot replace it");
 
+        // The view a replace starts from, read once. Its owner, its shape and the cycle check below are
+        // all computed from this one snapshot, and its generation travels with the replace: if another
+        // statement changes the view before the replace lands, the replace is refused rather than
+        // published over a definition it was never checked against.
+        ViewSchema? existing = replace && database.Schema.Views.TryGetValue(viewName, out ViewSchema? current)
+            && current.Definition is not null
+                ? current
+                : null;
+
         // A stored body is evaluated once per reader, an unbounded number of times, so a sequence
         // call in one cannot be counted before it runs — and the count is what lets the engine
         // reserve values in bulk instead of one round trip per row. Refused at CREATE, where the
@@ -65,17 +82,14 @@ internal sealed class ViewCreator
         ViewDefinition definition = await BuildDefinitionAsync(
             executor, database, bodyAst, ticket, columnAliasList, checkOption).ConfigureAwait(false);
 
-        // A replace rewrites an existing view's body; it does not re-create the object, so it must not
-        // re-own it. Letting the replacing caller become owner would make CREATE OR REPLACE a way to
-        // seize a definer's-rights view and run its body with one's own privileges instead.
-        if (replace && database.Schema.Views.TryGetValue(viewName, out ViewSchema? owned) && owned.Definition is not null)
+        if (existing is not null)
         {
-            definition.Owner = owned.Definition.Owner;
-            definition.OwnerId = owned.Definition.OwnerId;
-        }
+            // A replace rewrites an existing view's body; it does not re-create the object, so it must
+            // not re-own it. Letting the replacing caller become owner would make CREATE OR REPLACE a
+            // way to seize a definer's-rights view and run its body with one's own privileges instead.
+            definition.Owner = existing.Definition!.Owner;
+            definition.OwnerId = existing.Definition.OwnerId;
 
-        if (replace && database.Schema.Views.TryGetValue(viewName, out ViewSchema? existing) && existing.Definition is not null)
-        {
             // Replacing an existing view rewrites what every reader of it sees, so it needs authority
             // over that view — the CreateTable privilege this statement mapped to is about creating a
             // new object, and by itself would let any creator overwrite anyone's view.
@@ -84,8 +98,12 @@ internal sealed class ViewCreator
             ViewShapeComparer.RequireCompatible(viewName, existing.Definition, definition);
             ViewDependencyGraph.RequireAcyclic(database.Schema, existing.Id!, viewName, definition);
 
+            if (BeforeProposeForTesting is { } beforeReplace)
+                await beforeReplace(viewName).ConfigureAwait(false);
+
             await catalogs.CreateViewAsync(
-                database, existing.Id!, viewName, definition, existing.Comment, replace: true).ConfigureAwait(false);
+                database, existing.Id!, viewName, definition, existing.Comment, replace: true,
+                expectedGeneration: existing.Generation).ConfigureAwait(false);
 
             return true;
         }
@@ -97,6 +115,9 @@ internal sealed class ViewCreator
         string viewId = await registry.AllocateTableIdAsync().ConfigureAwait(false);
 
         ViewDependencyGraph.RequireAcyclic(database.Schema, viewId, viewName, definition);
+
+        if (BeforeProposeForTesting is { } beforeCreate)
+            await beforeCreate(viewName).ConfigureAwait(false);
 
         await catalogs.CreateViewAsync(
             database, viewId, viewName, definition, comment: null, replace: false).ConfigureAwait(false);
@@ -156,6 +177,7 @@ internal sealed class ViewCreator
 
             string viewId = dropped.Id!;
             List<string> dependents = ViewDependencyGraph.DirectDependentsOfView(database.Schema, viewId);
+            dependents.Sort(StringComparer.OrdinalIgnoreCase);
 
             if (dependents.Count > 0 && !cascade)
                 throw new CamusDBException(
@@ -170,7 +192,13 @@ internal sealed class ViewCreator
                 await DependentRelationDropper.DropTransitiveDependentsAsync(
                     executor, catalogs, await registryTask.ConfigureAwait(false), database, viewId, logger).ConfigureAwait(false);
 
-            await catalogs.DropViewAsync(database, name).ConfigureAwait(false);
+            if (BeforeProposeForTesting is { } beforeDrop)
+                await beforeDrop(name).ConfigureAwait(false);
+
+            // Carries the id, and is refused at apply while anything still reads the view: a dependent
+            // created after the check above — or after the cascade listed what to drop first — must
+            // not be left reading a view that is gone.
+            await catalogs.DropViewAsync(database, name, expectedViewId: viewId).ConfigureAwait(false);
             droppedAny = true;
         }
 
