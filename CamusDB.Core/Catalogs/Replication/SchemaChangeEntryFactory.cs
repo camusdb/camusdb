@@ -60,7 +60,7 @@ internal static class SchemaChangeEntryFactory
         SchemaColumnPayload[] columns = [.. ticket.Columns.Select(column =>
         {
             SchemaColumnPayload payload = SchemaColumnPayload.FromColumnInfo(column);
-            payload.Id = ObjectIdGenerator.Generate().ToString();
+            payload.Id = string.IsNullOrEmpty(column.PreservedId) ? ObjectIdGenerator.Generate().ToString() : column.PreservedId;
             return payload;
         })];
 

@@ -1061,8 +1061,9 @@ internal sealed class MaterializedViewRefresher
     /// would let a column added to a base table silently widen the materialized view — the same drift
     /// a non-materialized view's frozen column list exists to prevent — and would leave every
     /// dependent object bound to a shape that changed without a statement being issued against it.
-    /// Copying the layout also copies the indexes, so the rebuilt relation is as queryable as the one
-    /// it replaces the instant it is swapped in.</para>
+    /// Copying the layout also copies the column ids, which a view that reads the materialized view
+    /// stores in its body, and the indexes, so the rebuilt relation is as queryable as the one it
+    /// replaces the instant it is swapped in.</para>
     ///
     /// <para>It is created as an ordinary table, not a materialized view: the rebuild writes rows into
     /// it, and writing into a materialized view is refused. It becomes one at the swap.</para>
@@ -1082,7 +1083,12 @@ internal sealed class MaterializedViewRefresher
             comment: column.Comment,
             storage: column.Storage,
             defaultSequenceId: column.DefaultSequenceId,
-            identityAlways: column.IdentityAlways))];
+            identityAlways: column.IdentityAlways)
+        {
+            // Kept, so the swap leaves the view's column ids as they were and a view that reads this
+            // materialized view still finds every column it stored.
+            PreservedId = column.Id,
+        })];
 
         Dictionary<string, string> nameByColumnId = new(StringComparer.Ordinal);
         foreach (TableColumnSchema column in view.Columns ?? [])

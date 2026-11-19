@@ -119,6 +119,41 @@ public sealed class TestViewBodiesBoundByRelationId : SharedNodeBaseTest
         }
     }
 
+    /// <summary>
+    /// A view stores the column ids of the materialized view it reads. A refresh built its new contents
+    /// in a staging relation whose columns got new ids, and the swap moved those onto the materialized
+    /// view, so every view that read it failed with "reads a column that no longer exists" after the
+    /// first refresh.
+    /// </summary>
+    [Test]
+    public async Task AViewOverAMaterializedViewStillReadsAfterARefresh()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await SeedOrders(database, executor, dbname);
+
+        await ExecDdl(database, executor, dbname,
+            "CREATE MATERIALIZED VIEW open_orders AS SELECT id, customer, total FROM orders WHERE status = 'open'");
+        await ExecDdl(database, executor, dbname,
+            "CREATE VIEW acme_open AS SELECT id, total FROM open_orders WHERE customer = 'acme'");
+
+        string[] columnIds = database.Schema.Tables["open_orders"].Columns!.Select(c => c.Id).ToArray();
+        CollectionAssert.AreEqual(new long[] { 1, 2 }, Ids(await ExecQuery(database, executor, dbname, "SELECT id FROM acme_open")));
+
+        await ExecNonQuery(database, executor, dbname,
+            "INSERT INTO orders (id, customer, total, status) VALUES (6, 'acme', 60, 'open')");
+        await ExecNonQuery(database, executor, dbname, "REFRESH MATERIALIZED VIEW open_orders");
+
+        CollectionAssert.AreEqual(columnIds, database.Schema.Tables["open_orders"].Columns!.Select(c => c.Id).ToArray(),
+            "a refresh keeps the materialized view's column ids");
+        CollectionAssert.AreEqual(new long[] { 1, 2, 6 }, Ids(await ExecQuery(database, executor, dbname, "SELECT id FROM acme_open")));
+
+        await ExecNonQuery(database, executor, dbname, "REFRESH MATERIALIZED VIEW open_orders");
+        database = await Reopen(executor, dbname);
+
+        CollectionAssert.AreEqual(new long[] { 1, 2, 6 }, Ids(await ExecQuery(database, executor, dbname, "SELECT id FROM acme_open")),
+            "and the view still reads after a second refresh and a reopen");
+    }
+
     [Test]
     public async Task AnIdBoundBodyReadsExactlyWhatTheInlinedQueryReads()
     {
