@@ -37,6 +37,15 @@ internal static class TableDeltaApplier
         if (schema.Tables.ContainsKey(payload.TableName))
             throw new CamusDBException(CamusDBErrorCodes.TableAlreadyExists, $"Table '{payload.TableName}' already exists");
 
+        // WITH DATA: the rows are already in a staging relation, which this create adopts. Resolved
+        // before anything changes, so a staging relation that is gone refuses the whole create.
+        TableSchema? staging = null;
+        if (payload.AdoptStagingTableId is { Length: > 0 } stagingId)
+            staging = SchemaDeltaApplier.FindRelationById(schema, stagingId)
+                ?? throw new SchemaDeltaRefusedException(
+                    CamusDBErrorCodes.ConcurrentSchemaChange,
+                    $"The rows loaded for '{payload.TableName}' are gone; nothing was created. Retry the statement.");
+
         if (payload.ApplyPreconditions)
         {
             // A view may be proposed from any node, so the proposer's own name check can lose to one
@@ -145,6 +154,24 @@ internal static class TableDeltaApplier
             tableSchema.ForeignKeys = [.. payload.ForeignKeys];
 
         ForeignKeyDefinitionRules.ValidateTable(schema, tableSchema);
+
+        if (staging is not null)
+        {
+            // The same transfer a refresh's swap makes: the storage the rows were written into, and the
+            // column and index definitions they were encoded against. The view keeps its own id; the
+            // staging relation has served its purpose and only the view answers for that storage now.
+            tableSchema.StorageId = staging.EffectiveStorageId;
+            tableSchema.Columns = staging.Columns;
+            tableSchema.Indexes = staging.Indexes;
+            tableSchema.CheckConstraints = staging.CheckConstraints;
+            tableSchema.Version = staging.Version;
+            tableSchema.SchemaHistory = staging.SchemaHistory;
+            tableSchema.SchemaHistoryLoader = staging.SchemaHistoryLoader;
+            tableSchema.IsPopulated = true;
+            tableSchema.RefreshedAt = payload.RefreshedAt;
+
+            schema.Tables.Remove(staging.Name!);
+        }
 
         schema.Tables.Add(payload.TableName, tableSchema);
 

@@ -26,10 +26,10 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// TTL and the result cache cover materialized views on the day they ship, with no separate
 /// integration for any of them.</para>
 ///
-/// <para>Creation and population are deliberately separate steps. The relation is created empty and
-/// unpopulated even for <c>WITH DATA</c>, and only then refreshed, so a load that fails leaves a
-/// materialized view that reports it holds nothing rather than one that claims data it never
-/// received.</para>
+/// <para><c>WITH DATA</c> publishes nothing until the rows are loaded: they go into a staging relation
+/// first, and the view is created on that storage, populated, in one replicated change — so no other
+/// session or node ever sees it half-created. <c>WITH NO DATA</c> publishes an unpopulated view at
+/// once, which is what it asks for.</para>
 /// </summary>
 internal sealed class MaterializedViewCreator
 {
@@ -79,44 +79,21 @@ internal sealed class MaterializedViewCreator
             kind: RelationKind.MaterializedView,
             viewDefinition: definition);
 
-        await executor.CreateRelationInDdlTransactionAsync(
-            database, createTicket, tableId, validate: true).ConfigureAwait(false);
-
+        // WITH NO DATA publishes the view at once, unpopulated: that is what the statement asked for,
+        // and a read of it says so rather than returning nothing.
         if (withNoData)
+        {
+            await executor.CreateRelationInDdlTransactionAsync(
+                database, createTicket, tableId, validate: true).ConfigureAwait(false);
+
             return (true, 0);
-
-        try
-        {
-            int rows = await refresher.RefreshAsync(
-                executor, catalogs, registryTask, database, viewName,
-                concurrently: false, withNoData: false, ticket, logger).ConfigureAwait(false);
-
-            return (true, rows);
         }
-        catch (Exception loadError)
-        {
-            // The materialized view exists but has never held data, and the statement that created it
-            // did not complete. Removing it is what makes the statement retryable — leaving it behind
-            // would make the retry fail on the name instead of on whatever actually went wrong.
-            try
-            {
-                await executor.DropStagingRelationAsync(database, viewName).ConfigureAwait(false);
-            }
-            catch (Exception dropError)
-            {
-                logger.LogWarning(
-                    dropError,
-                    "CREATE MATERIALIZED VIEW failed to populate '{ViewName}' and could not remove it again",
-                    viewName);
 
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInput,
-                    $"CREATE MATERIALIZED VIEW failed to populate '{viewName}' ({loadError.Message}), and the " +
-                    $"empty materialized view could not be removed ({dropError.Message}); drop it manually before retrying");
-            }
+        // WITH DATA publishes nothing until the rows are loaded; see CreatePopulatedAsync.
+        int rows = await refresher.CreatePopulatedAsync(
+            executor, catalogs, registryTask, database, viewName, tableId, createTicket, ticket, logger).ConfigureAwait(false);
 
-            throw;
-        }
+        return (true, rows);
     }
 
     /// <summary>
@@ -178,13 +155,13 @@ internal sealed class MaterializedViewCreator
     /// when it goes.
     /// </summary>
     /// <remarks>
-    /// <para><b>Why the drop takes the fence.</b> A rebuild that is still running when the view is
+    /// <para><b>The fence.</b> A rebuild that is still running when the view is
     /// dropped swaps onto an id that is no longer in the schema. The apply correctly treats that as a
     /// no-op — but that no-op is what would have removed the staging relation from the schema, and the
     /// rebuild then deletes its own ownership record, leaving registered storage nothing points at. The
     /// swap is right to do nothing; what was missing is that the drop excluded nothing.</para>
     ///
-    /// <para><b>It refuses, it does not wait.</b> A rebuild can run for as long as its source takes to
+    /// <para><b>Refusal.</b> The drop refuses while a rebuild runs. A rebuild can run for as long as its source takes to
     /// scan, and a <c>DROP</c> that stalled for that long would look hung. The fence is retried briefly,
     /// exactly as <c>REFRESH</c> retries it, so a background sweep holding it for a few milliseconds
     /// does not turn the drop away; a real rebuild does, with <c>RefreshAlreadyInProgress</c>.</para>

@@ -230,6 +230,13 @@ internal sealed class SchemaCheckpointWriter
                 if (database.Schema.Tables.TryGetValue(tableName, out TableSchema? tableSchema))
                     await SchemaMetaStore.PersistSchemaTableAsync(database, tableSchema, entry.ToVersion, tx).ConfigureAwait(false);
 
+                // A materialized view created WITH DATA adopted its staging relation in this entry. The
+                // staging relation is gone from the schema; its meta key goes in the same transaction, or a
+                // reopen would load a relation nothing can reach that owns the view's key-space.
+                if (entry.Op == SchemaOp.CreateTable
+                    && SchemaDeltaApplier.DecodePayload<SchemaCreateTablePayload>(entry).AdoptStagingTableId is { Length: > 0 } adopted)
+                    await MetaKeyWriter.DeleteMetaKey(database.Kahuna.Kahuna, tx, MetaKeys.TableKey(database.Id, adopted)).ConfigureAwait(false);
+
                 // A rename carries its dependents' rewritten bodies, so they are checkpointed in the
                 // very transaction that persists the rename. Splitting them would put back on disk the
                 // same half-applied state the single delta removes from memory.

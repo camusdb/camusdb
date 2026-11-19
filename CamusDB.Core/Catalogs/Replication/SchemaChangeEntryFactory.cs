@@ -97,10 +97,11 @@ internal static class SchemaChangeEntryFactory
                 Comment = ticket.Comment,
                 Kind = ticket.Kind,
                 ViewDefinition = ticket.ViewDefinition,
-                // Never true at creation: even WITH DATA creates the relation empty and then refreshes
-                // it, so a refresh that fails leaves a materialized view that admits it holds nothing
-                // rather than one that claims data it never received.
-                IsPopulated = false,
+                // True only when the creation adopts rows already loaded (WITH DATA): the view is then
+                // born holding them. Otherwise it is created holding nothing, and says so.
+                IsPopulated = ticket.AdoptStagingTableId is not null,
+                AdoptStagingTableId = ticket.AdoptStagingTableId,
+                RefreshedAt = ticket.RefreshedAt,
                 Settings = ticket.Settings is null
                     ? null
                     : new Dictionary<string, string>(ticket.Settings, StringComparer.Ordinal),

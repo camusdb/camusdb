@@ -274,6 +274,16 @@ public sealed class SchemaReplicator
             return;
         }
 
+        // A materialized view created WITH DATA adopted its staging relation: the name the rows were
+        // loaded under no longer answers, and its descriptor would otherwise be handed to a later
+        // relation of that name.
+        if (entry.Op == SchemaOp.CreateTable)
+        {
+            SchemaCreateTablePayload created = DecodePayload<SchemaCreateTablePayload>(entry);
+            if (created.AdoptStagingTableId is { Length: > 0 } adopted && created.TableId is { Length: > 0 } viewId)
+                database.TableDescriptors.TryRemove(MaterializedViewNaming.StagingRelationName(viewId, adopted), out _);
+        }
+
         // For index changes the table stays alive but its cached descriptor no longer
         // reflects the updated index list — evict it so the next open rebuilds from
         // the updated table.Schema.Indexes.

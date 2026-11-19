@@ -498,6 +498,14 @@ REFRESH MATERIALIZED VIEW customer_totals;   -- now it reads
 
 `REFRESH MATERIALIZED VIEW … WITH NO DATA` empties one again and returns it to that state.
 
+Without `WITH NO DATA`, the view does not exist for anyone until its rows are in place: the rows are
+loaded into a relation nobody can see, and the view is created on it, populated, in one atomic schema
+change. No other session or node can list, read, grant on, alter or drop it half-created. If the
+load fails, nothing is left behind; if the process dies during the load, the background sweep removes
+what it loaded, and running the statement again starts clean. The name is not held during the load,
+so a relation another statement creates under it in the meantime wins, and the `CREATE` then fails
+with the name taken.
+
 ### What a refresh does to concurrent readers
 
 A refresh does not affect concurrent readers. It builds an entirely new relation, populates it, and then moves the materialized

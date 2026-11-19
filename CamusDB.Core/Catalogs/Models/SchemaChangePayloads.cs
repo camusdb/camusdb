@@ -125,6 +125,16 @@ public sealed class SchemaCreateTablePayload
     /// </summary>
     public bool ApplyPreconditions { get; set; }
 
+    /// <summary>
+    /// For <c>CREATE MATERIALIZED VIEW … WITH DATA</c>: the id of the staging relation the rows were
+    /// loaded into. The apply creates the materialized view on that storage, already populated, and
+    /// removes the staging relation, in this one change — so the view never exists without its rows.
+    /// Null for every other create.
+    /// </summary>
+    public string? AdoptStagingTableId { get; set; }
+
+    /// <summary>With <see cref="AdoptStagingTableId"/>: the snapshot the adopted rows were read at.</summary>
+    public HLCTimestamp? RefreshedAt { get; set; }
 }
 
 /// <summary>

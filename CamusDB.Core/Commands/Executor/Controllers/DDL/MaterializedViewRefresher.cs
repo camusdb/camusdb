@@ -62,6 +62,42 @@ internal sealed class MaterializedViewRefresher
     /// </summary>
     internal static Func<Task>? AfterStagingForTesting { get; set; }
 
+    /// <summary>The points of a rebuild at which <see cref="FaultInjectionForTesting"/> runs.</summary>
+    internal enum FaultPoint
+    {
+        /// <summary>The staging relation exists and nothing is loaded.</summary>
+        AfterStaging,
+
+        /// <summary>A chunk of rows was committed into the staging relation.</summary>
+        AfterChunk,
+
+        /// <summary>Every chunk was committed; nothing is published.</summary>
+        AfterFinalChunk,
+
+        /// <summary>The swap is committed, applied and checkpointed; the ownership record is not yet deleted.</summary>
+        AfterPublish,
+
+        /// <summary>A failed rebuild removed its staging relation and has not finished cleaning up.</summary>
+        DuringCleanup,
+    }
+
+    /// <summary>
+    /// Test-only seam: invoked at each <see cref="FaultPoint"/> of a rebuild. Throwing
+    /// <see cref="SimulatedCrashForTesting"/> from it stands in for the process dying there: the
+    /// rebuild stops at once and runs none of the cleanup a failure would, exactly as a crash would
+    /// not. Null in production.
+    /// </summary>
+    internal static Func<FaultPoint, Task>? FaultInjectionForTesting { get; set; }
+
+    /// <summary>A process death at a <see cref="FaultPoint"/>; see <see cref="FaultInjectionForTesting"/>.</summary>
+    internal sealed class SimulatedCrashForTesting(FaultPoint point) : Exception($"simulated crash at {point}")
+    {
+        public FaultPoint Point { get; } = point;
+    }
+
+    private static Task InjectAsync(FaultPoint point)
+        => FaultInjectionForTesting is { } inject ? inject(point) : Task.CompletedTask;
+
     /// <summary>
     /// Runs a parsed <c>REFRESH MATERIALIZED VIEW</c> statement and returns the number of rows
     /// materialized.
@@ -208,11 +244,13 @@ internal sealed class MaterializedViewRefresher
         string stagingTableId = await registry.AllocateTableIdAsync().ConfigureAwait(false);
         string stagingName = MaterializedViewNaming.StagingRelationName(viewTableId, stagingTableId);
 
+        RefreshRun run = new(takeoverAttempts > 0 ? "takeover" : "refresh", ObjectIdGenerator.Generate().ToString(), takeoverAttempts);
+
         // Recorded before the relation exists. A record naming a relation that was never created is
         // inert; a relation created with no record naming it is storage nothing can find.
         await catalogs.PersistRefreshJobAsync(database, new MaterializedViewRefreshJob
         {
-            JobId = ObjectIdGenerator.Generate().ToString(),
+            JobId = run.JobId,
             DatabaseId = database.Id,
             ViewTableId = viewTableId,
             ViewName = viewName,
@@ -234,12 +272,20 @@ internal sealed class MaterializedViewRefresher
             if (AfterStagingForTesting is not null)
                 await AfterStagingForTesting().ConfigureAwait(false);
 
+            await InjectAsync(FaultPoint.AfterStaging).ConfigureAwait(false);
+
             HLCTimestamp snapshot = executor.ClusterNow();
+            run.Phase = "loading";
+            run.Source = snapshot;
+
             int rows = withNoData
                 ? 0
                 : await LoadAsync(
-                    executor, database, definition, stagingName, view, snapshot, ticket,
-                    cancellationToken).ConfigureAwait(false);
+                    executor, database, definition, stagingName, view.Name ?? viewName, view.Indexes?.Count ?? 0,
+                    snapshot, ticket, run, cancellationToken).ConfigureAwait(false);
+
+            run.Phase = "publishing";
+            run.Publish = executor.ClusterNow();
 
             // One replicated change publishes the rebuilt relation, records how stale it now is,
             // and detaches the relation it replaced. Everything up to here was invisible.
@@ -256,8 +302,11 @@ internal sealed class MaterializedViewRefresher
                 // preceded it, and — because the retired storage's orphan record takes its
                 // DroppedAt from here — would spend a long rebuild's entire duration out of that
                 // storage's retention window before it was even detached.
-                publishHlc: executor.ClusterNow(),
+                publishHlc: run.Publish.Value,
                 expectedMetadataGeneration: metadataGeneration).ConfigureAwait(false);
+
+            run.Phase = "published";
+            await InjectAsync(FaultPoint.AfterPublish).ConfigureAwait(false);
 
             // The staging relation has become the materialized view, so nothing is left to own.
             // Deleted after the swap, never before: a record removed while the relation it names
@@ -279,10 +328,13 @@ internal sealed class MaterializedViewRefresher
             // No cache invalidation here on purpose: the replicated apply does it on every node,
             // including this one. Doing it only at the proposer is what left followers answering
             // from the contents the swap retired.
+            Report(logger, database, viewName, run, error: null);
             return rows;
         }
-        catch (Exception)
+        catch (Exception error) when (error is not SimulatedCrashForTesting)
         {
+            Report(logger, database, viewName, run, error);
+
             // The swap never happened, so the materialized view still holds its previous contents
             // and the only thing worth removing is the half-built relation. A failure to remove it
             // must not replace the caller's real error: it costs storage, nothing more, and the
@@ -290,13 +342,18 @@ internal sealed class MaterializedViewRefresher
             try
             {
                 await executor.DropStagingRelationAsync(database, stagingName).ConfigureAwait(false);
+                await InjectAsync(FaultPoint.DuringCleanup).ConfigureAwait(false);
+            }
+            catch (SimulatedCrashForTesting)
+            {
+                throw;
             }
             catch (Exception cleanupError)
             {
+                // Logs the error code only: a message can quote a row value.
                 logger.LogWarning(
-                    cleanupError,
-                    "REFRESH of materialized view '{ViewName}' failed and its staging relation could not be removed; it will be swept by the next refresh",
-                    viewName);
+                    "REFRESH of materialized view '{ViewName}' failed and its staging relation could not be removed ({ErrorCode}); it will be swept by the next refresh",
+                    viewName, ErrorCode(cleanupError));
             }
 
             // The ownership record is deliberately left in place. It is what the sweep reads to find
@@ -305,6 +362,244 @@ internal sealed class MaterializedViewRefresher
             throw;
         }
     }
+
+    /// <summary>
+    /// Creates a materialized view <c>WITH DATA</c>: loads the body's rows into a staging relation
+    /// nobody can see, then creates the view on that storage, already populated, in one replicated
+    /// change. Returns the number of rows materialized.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>One publication.</b> Creating the view first and populating it in a second
+    /// step published an object the statement had not finished: other sessions and nodes could list it,
+    /// query it, grant on it or alter it while it was empty, and a failed population then dropped
+    /// something they might already have touched. Now nothing is published until the rows are in place,
+    /// so no statement anywhere can observe the view half-created.</para>
+    ///
+    /// <para><b>Recovery needs no help from this process.</b> The fence is taken on the view's id before
+    /// anything is staged, and the ownership record is written before the staging relation exists —
+    /// the same order a refresh uses. If the process dies before the view is published, the sweep finds
+    /// the record, finds no view with that id, and removes the staging relation: the view simply never
+    /// existed, and a retry of the statement starts clean. If it dies after, the sweep sees the view
+    /// already owns that storage and removes only the record.</para>
+    ///
+    /// <para>The name is not held while the rows load. A relation created under it meanwhile wins, and
+    /// this statement then fails with the name taken, leaving nothing behind.</para>
+    /// </remarks>
+    internal async Task<int> CreatePopulatedAsync(
+        CommandExecutor executor,
+        CatalogsManager catalogs,
+        Task<DatabaseRegistry> registryTask,
+        DatabaseDescriptor database,
+        string viewName,
+        string viewTableId,
+        CreateTableTicket viewTicket,
+        ExecuteSQLTicket ticket,
+        ILogger<ICamusDB> logger)
+    {
+        if (!database.Options.MaterializedViewRefreshEnabled)
+            throw new CamusDBException(
+                CamusDBErrorCodes.FeatureNotSupported,
+                "Materialized view refresh is disabled on this node (materialized_view_refresh_enabled); " +
+                "create the materialized view WITH NO DATA and refresh it from another node");
+
+        ViewDefinition definition = viewTicket.ViewDefinition
+            ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "A materialized view needs a definition");
+
+        DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
+        string fenceId = RegistryDropMarkers.TableFenceId(database.Id, viewTableId);
+
+        // A fresh id, so nobody else can hold this; taken anyway, so the sweep cannot mistake the
+        // record written below for an abandoned one while this statement is still running.
+        if (!await AcquireRefreshFenceAsync(registry, fenceId).ConfigureAwait(false))
+            throw new CamusDBException(
+                CamusDBErrorCodes.RefreshAlreadyInProgress,
+                $"Materialized view '{viewName}' is already being created; retry later");
+
+        try
+        {
+            string stagingTableId = await registry.AllocateTableIdAsync().ConfigureAwait(false);
+            string stagingName = MaterializedViewNaming.StagingRelationName(viewTableId, stagingTableId);
+
+            RefreshRun run = new("create", ObjectIdGenerator.Generate().ToString(), 0);
+
+            await catalogs.PersistRefreshJobAsync(database, new MaterializedViewRefreshJob
+            {
+                JobId = run.JobId,
+                DatabaseId = database.Id,
+                ViewTableId = viewTableId,
+                ViewName = viewName,
+                StagingTableId = stagingTableId,
+                StagingName = stagingName,
+                Owner = fenceId,
+                StartedAt = executor.ClusterNow(),
+            }).ConfigureAwait(false);
+
+            // An ordinary table with the view's own layout: the rows are written into it, and writing
+            // into a materialized view is refused. It becomes the view's storage when it is adopted.
+            await executor.CreateRelationInDdlTransactionAsync(
+                database,
+                new CreateTableTicket(
+                    databaseName: database.Name,
+                    tableName: stagingName,
+                    columns: viewTicket.Columns,
+                    constraints: viewTicket.Constraints,
+                    ifNotExists: false,
+                    checkConstraints: viewTicket.CheckConstraints,
+                    settings: viewTicket.Settings),
+                stagingTableId,
+                validate: false).ConfigureAwait(false);
+
+            try
+            {
+                if (AfterStagingForTesting is not null)
+                    await AfterStagingForTesting().ConfigureAwait(false);
+
+                await InjectAsync(FaultPoint.AfterStaging).ConfigureAwait(false);
+
+                HLCTimestamp snapshot = executor.ClusterNow();
+                int indexCount = database.Schema.Tables.TryGetValue(stagingName, out TableSchema? staging)
+                    ? staging.Indexes?.Count ?? 0
+                    : 0;
+
+                run.Phase = "loading";
+                run.Source = snapshot;
+
+                int rows = await LoadAsync(
+                    executor, database, definition, stagingName, viewName, indexCount, snapshot, ticket,
+                    run, CancellationToken.None).ConfigureAwait(false);
+
+                run.Phase = "publishing";
+                run.Publish = executor.ClusterNow();
+
+                // The one change that publishes the view: created on the staging storage, populated,
+                // with the staging relation gone.
+                await executor.CreateRelationInDdlTransactionAsync(
+                    database,
+                    new CreateTableTicket(
+                        databaseName: viewTicket.DatabaseName,
+                        tableName: viewTicket.TableName,
+                        columns: viewTicket.Columns,
+                        constraints: viewTicket.Constraints,
+                        ifNotExists: false,
+                        checkConstraints: viewTicket.CheckConstraints,
+                        comment: viewTicket.Comment,
+                        settings: viewTicket.Settings,
+                        kind: RelationKind.MaterializedView,
+                        viewDefinition: definition)
+                    {
+                        AdoptStagingTableId = stagingTableId,
+                        RefreshedAt = snapshot,
+                    },
+                    viewTableId,
+                    validate: true).ConfigureAwait(false);
+
+                run.Phase = "published";
+                await InjectAsync(FaultPoint.AfterPublish).ConfigureAwait(false);
+
+                await catalogs.DeleteRefreshJobAsync(database, viewTableId).ConfigureAwait(false);
+
+                await AdoptRefreshStatisticsAsync(executor, database, viewName, stagingTableId, rows, logger).ConfigureAwait(false);
+
+                Report(logger, database, viewName, run, error: null);
+                return rows;
+            }
+            catch (Exception error) when (error is not SimulatedCrashForTesting)
+            {
+                Report(logger, database, viewName, run, error);
+
+                // Nothing was published, so the staging relation is all there is to remove. The record
+                // goes only once that worked: while the storage exists, the record is what finds it.
+                try
+                {
+                    await executor.DropStagingRelationAsync(database, stagingName).ConfigureAwait(false);
+                    await catalogs.DeleteRefreshJobAsync(database, viewTableId).ConfigureAwait(false);
+                }
+                catch (Exception cleanupError)
+                {
+                    logger.LogWarning(
+                        "CREATE MATERIALIZED VIEW of '{ViewName}' failed and its staging relation could not be removed ({ErrorCode}); the background sweep will remove it",
+                        viewName, ErrorCode(cleanupError));
+                }
+
+                throw;
+            }
+        }
+        finally
+        {
+            await registry.DropMarkers.ReleaseDropIntentAsync(fenceId).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// What one rebuild did, for its telemetry: the phase it reached, the work it wrote, the snapshot
+    /// it read and when it published, and how its snapshot hold fared.
+    /// </summary>
+    internal sealed class RefreshRun(string kind, string jobId, int attempt)
+    {
+        public string Kind { get; } = kind;
+
+        public string JobId { get; } = jobId;
+
+        public int Attempt { get; } = attempt;
+
+        public string Phase { get; set; } = "staging";
+
+        public int Rows { get; set; }
+
+        public long Mutations { get; set; }
+
+        public long Bytes { get; set; }
+
+        public HLCTimestamp? Source { get; set; }
+
+        public HLCTimestamp? Publish { get; set; }
+
+        public int HoldRenewals { get; set; }
+
+        public bool HoldLost { get; set; }
+
+        public System.Diagnostics.Stopwatch Watch { get; } = System.Diagnostics.Stopwatch.StartNew();
+    }
+
+    /// <summary>
+    /// Exports how a rebuild ended: the totals of <see cref="Diagnostics.MaterializedViewRefreshMetrics"/>,
+    /// the server meter, and one log line. Never the view's SQL and never a row value — a view body and
+    /// its rows are user data — and for a failure the error code rather than its message, which can quote
+    /// a value.
+    /// </summary>
+    private static void Report(ILogger<ICamusDB> logger, DatabaseDescriptor database, string viewName, RefreshRun run, Exception? error)
+    {
+        string outcome = error switch
+        {
+            null => "published",
+            CamusDBException { Code: CamusDBErrorCodes.ConcurrentSchemaChange } => "conflict",
+            _ => "failed",
+        };
+
+        Diagnostics.MaterializedViewRefreshMetrics.RecordRebuild(outcome, run.Rows, run.Mutations, run.Bytes, run.HoldRenewals, run.HoldLost);
+        Diagnostics.ServerDiagnostics.RecordMatViewRefresh(run.Kind, outcome, run.Rows, run.Mutations, run.Bytes, run.Watch.Elapsed.TotalMilliseconds);
+
+        if (error is null)
+        {
+            if (logger.IsEnabled(LogLevel.Information))
+                logger.LogInformation(
+                    "Materialized view {Kind} published: database '{DatabaseName}', view '{ViewName}', job {JobId}, attempt {Attempt}, " +
+                    "rows {Rows}, mutations {Mutations}, bytes {Bytes}, source {SourceHlc}, publish {PublishHlc}, " +
+                    "hold renewals {HoldRenewals}, elapsed {ElapsedMs} ms",
+                    run.Kind, database.Name, viewName, run.JobId, run.Attempt, run.Rows, run.Mutations, run.Bytes,
+                    run.Source, run.Publish, run.HoldRenewals, (long)run.Watch.Elapsed.TotalMilliseconds);
+            return;
+        }
+
+        logger.LogWarning(
+            "Materialized view {Kind} {Outcome} with {ErrorCode} in phase {Phase}: database '{DatabaseName}', view '{ViewName}', " +
+            "job {JobId}, attempt {Attempt}, rows {Rows}, source {SourceHlc}, hold lost {HoldLost}, elapsed {ElapsedMs} ms",
+            run.Kind, outcome, ErrorCode(error), run.Phase, database.Name, viewName, run.JobId, run.Attempt, run.Rows,
+            run.Source, run.HoldLost, (long)run.Watch.Elapsed.TotalMilliseconds);
+    }
+
+    /// <summary>The code of a CamusDB error, or the type of any other; never the message.</summary>
+    private static string ErrorCode(Exception error) => error is CamusDBException camus ? camus.Code : error.GetType().Name;
 
     /// <summary>The stored body a rebuild reads, or a corruption error naming the view that lost it.</summary>
     private static ViewDefinition RequireDefinition(TableSchema view, string viewName)
@@ -327,9 +622,11 @@ internal sealed class MaterializedViewRefresher
         DatabaseDescriptor database,
         ViewDefinition definition,
         string stagingName,
-        TableSchema view,
+        string viewName,
+        int indexCount,
         HLCTimestamp snapshot,
         ExecuteSQLTicket ticket,
+        RefreshRun run,
         CancellationToken cancellationToken)
     {
         NodeAst bodyAst = SQLParserProcessor.Parse(definition.Sql);
@@ -338,7 +635,7 @@ internal sealed class MaterializedViewRefresher
         // immutable id, so a rebuild reads whatever those ids point at now rather than whatever they
         // were called when the view was created.
         if (StoredBodyBinder.MayContainReferences(definition.Sql))
-            bodyAst = StoredBodyBinder.ResolveStoredForm(database.Schema, bodyAst, view.Name ?? "");
+            bodyAst = StoredBodyBinder.ResolveStoredForm(database.Schema, bodyAst, viewName);
 
         await using SelectRowSource source = await executor
             .BuildMaterializedViewSourceAsync(database, bodyAst, ticket, snapshot).ConfigureAwait(false);
@@ -349,7 +646,7 @@ internal sealed class MaterializedViewRefresher
         // generated default, exactly as CREATE TABLE ... AS SELECT does.
         List<string> targetColumns = [.. (definition.Columns ?? []).Select(column => column.Name)];
 
-        int chunkRows = ResolveChunkRows(database.Options, view);
+        int chunkRows = ResolveChunkRows(database.Options, indexCount);
         List<QueryResultRow> buffer = new(Math.Min(chunkRows, 1024));
         int total = 0;
 
@@ -362,6 +659,7 @@ internal sealed class MaterializedViewRefresher
             source.ThrowIfSnapshotLost("this materialized view refresh");
 
             buffer.Add(row);
+            run.Bytes += Cache.QueryResultCache.EstimateRowBytes(row);
 
             if (buffer.Count < chunkRows)
                 continue;
@@ -369,11 +667,24 @@ internal sealed class MaterializedViewRefresher
             total += await executor.InsertRefreshChunkAsync(
                 database, stagingName, source.Columns, targetColumns, buffer).ConfigureAwait(false);
             buffer.Clear();
+
+            await InjectAsync(FaultPoint.AfterChunk).ConfigureAwait(false);
         }
 
         if (buffer.Count > 0)
+        {
             total += await executor.InsertRefreshChunkAsync(
                 database, stagingName, source.Columns, targetColumns, buffer).ConfigureAwait(false);
+
+            await InjectAsync(FaultPoint.AfterChunk).ConfigureAwait(false);
+        }
+
+        await InjectAsync(FaultPoint.AfterFinalChunk).ConfigureAwait(false);
+
+        run.Rows = total;
+        run.Mutations = (long)total * (1 + indexCount);
+        run.HoldRenewals = source.HoldRenewals;
+        run.HoldLost = source.HoldLost;
 
         // The last word before the caller publishes: a hold lost after the final chunk is just as
         // damaging as one lost mid-scan, and the drain finishing is not evidence it survived.
@@ -399,7 +710,7 @@ internal sealed class MaterializedViewRefresher
     /// update-shaped path can touch an entry twice — so aiming at the cap would leave nothing for the
     /// cases that cost more than the estimate.</para>
     /// </summary>
-    private static int ResolveChunkRows(CamusDBOptions options, TableSchema view)
+    private static int ResolveChunkRows(CamusDBOptions options, int indexCount)
     {
         int configured = Math.Max(1, options.MaterializedViewRefreshChunkRows);
         int mutationLimit = options.MaxMutationsPerTransaction;
@@ -412,7 +723,7 @@ internal sealed class MaterializedViewRefresher
         // The row itself, plus one entry per index. Indexes are null only on a relation that predates
         // replicated index definitions, which a materialized view never is; the +1 for the primary key
         // is already included because it is an ordinary entry in that list.
-        int mutationsPerRow = 1 + (view.Indexes?.Count ?? 0);
+        int mutationsPerRow = 1 + indexCount;
 
         int affordable = (int)Math.Max(1, (long)mutationLimit * MutationBudgetPercent / 100 / mutationsPerRow);
 
@@ -491,6 +802,8 @@ internal sealed class MaterializedViewRefresher
 
         await executor.DropStagingRelationAsync(database, abandoned.StagingName).ConfigureAwait(false);
         await catalogs.DeleteRefreshJobAsync(database, viewTableId).ConfigureAwait(false);
+
+        Diagnostics.MaterializedViewRefreshMetrics.RecordReclaim("staging_dropped");
     }
 
     /// <summary>
@@ -555,6 +868,7 @@ internal sealed class MaterializedViewRefresher
             && string.Equals(view.EffectiveStorageId, abandoned.StagingTableId, StringComparison.Ordinal))
         {
             await catalogs.DeleteRefreshJobAsync(database, viewTableId).ConfigureAwait(false);
+            Diagnostics.MaterializedViewRefreshMetrics.RecordReclaim("record_only");
             return true;
         }
 
@@ -600,6 +914,9 @@ internal sealed class MaterializedViewRefresher
         {
             await catalogs.DeleteRefreshJobAsync(database, viewTableId).ConfigureAwait(false);
 
+            Diagnostics.MaterializedViewRefreshMetrics.RecordReclaim(
+                foreign ? "foreign" : view is not null && spent >= allowed && allowed > 0 ? "gave_up" : "staging_dropped");
+
             if (view is not null && spent >= allowed && allowed > 0)
                 logger.LogError(
                     "Materialized view '{ViewName}' in database '{DatabaseName}' was left stale: its refresh was restarted {Attempts} times and never completed. Its previous contents are intact; issue REFRESH MATERIALIZED VIEW to try again.",
@@ -613,6 +930,8 @@ internal sealed class MaterializedViewRefresher
         // rather than relying on the background sweep never having had one.
         AuthorizationScope callerScope = AuthorizationContext.Current;
         AuthorizationContext.Current = default;
+
+        Diagnostics.MaterializedViewRefreshMetrics.RecordReclaim("restarted");
 
         try
         {
@@ -637,9 +956,8 @@ internal sealed class MaterializedViewRefresher
             // here must not stop the sweep from reaching the other databases. The attempt is already
             // counted, so a rebuild that fails every time still terminates.
             logger.LogWarning(
-                error,
-                "Restarting the interrupted refresh of materialized view '{ViewName}' in database '{DatabaseName}' failed (attempt {Attempt} of {Allowed})",
-                view!.Name, database.Name, spent + 1, allowed);
+                "Restarting the interrupted refresh of materialized view '{ViewName}' in database '{DatabaseName}' failed with {ErrorCode} (attempt {Attempt} of {Allowed})",
+                view!.Name, database.Name, ErrorCode(error), spent + 1, allowed);
         }
         finally
         {
