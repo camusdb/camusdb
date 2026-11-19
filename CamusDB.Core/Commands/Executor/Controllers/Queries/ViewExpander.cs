@@ -227,11 +227,10 @@ internal static class ViewExpander
         // here would make every nested view require a grant to the reader, which is precisely the
         // encapsulation a view exists to provide.
         //
-        // The nested reference is not unchecked: creating the enclosing view binds its body through
-        // this same path with an empty stack, so its author had to hold access to it then. What is not
-        // re-verified is a grant revoked after that point — the enclosing view keeps working until it
-        // is replaced. Checked before the body is read, so a caller with no grant learns nothing about
-        // what the view selects from, not even through a differing error.
+        // The nested reference is checked too, on every read, but by the binder: it is checked against
+        // the enclosing view's owner, and only the binder knows that principal, because only it enters
+        // the owner's scope. Checked before the body is read, so a caller with no grant learns nothing
+        // about what the view selects from, not even through a differing error.
         if (expansionStack.Count == 0)
             authorize?.Invoke(name, view);
 
@@ -269,12 +268,23 @@ internal static class ViewExpander
             // The owner rides with the expansion. It has to: by the time anything opens a relation the
             // view's name is gone, so this derived table is the only remaining evidence that these
             // sources are being read on somebody else's behalf rather than the caller's.
-            NodeAst? ownerNode = view.Definition?.OwnerId is { Length: > 0 } ownerId
-                ? new NodeAst(
-                    NodeType.Identifier,
-                    new NodeAst(NodeType.Identifier, null, null, null, null, null, null, null, view.Definition.Owner),
-                    null, null, null, null, null, null, ownerId)
-                : null;
+            //
+            // So does the view's own identity (rightAst: yytext = id, leftAst = name). The binder
+            // re-checks a view reached from inside another view's body against the principal that body
+            // runs as — the enclosing view's owner — on every read, as PostgreSQL does. Without it, a
+            // grant revoked from that owner after the enclosing view was created would never be seen.
+            NodeAst viewIdentity = new(
+                NodeType.Identifier,
+                new NodeAst(NodeType.Identifier, null, null, null, null, null, null, null, name),
+                null, null, null, null, null, null, view.Id);
+
+            NodeAst ownerNode = new(
+                NodeType.Identifier,
+                view.Definition?.OwnerId is { Length: > 0 }
+                    ? new NodeAst(NodeType.Identifier, null, null, null, null, null, null, null, view.Definition.Owner)
+                    : null,
+                viewIdentity, null, null, null, null, null,
+                view.Definition?.OwnerId is { Length: > 0 } ownerId ? ownerId : null);
 
             return new NodeAst(
                 NodeType.DerivedTableReference,

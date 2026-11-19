@@ -287,6 +287,8 @@ internal sealed class SelectQueryCreator
 
         return new DerivedTableSource(innerQuery, derivedAst.rightAst.yytext, cacheHint, ownerName, ownerId)
         {
+            ViewId = derivedAst.extendedTwo?.rightAst?.yytext,
+            ViewName = derivedAst.extendedTwo?.rightAst?.leftAst?.yytext,
             ColumnAliases = derivedAst.extendedThree is { } columns ? ColumnAliasNames(columns) : null,
             ComputedOnce = derivedAst.extendedFour,
             LateralBody = LateralAst.IsLateral(derivedAst) ? derivedAst.leftAst : null,

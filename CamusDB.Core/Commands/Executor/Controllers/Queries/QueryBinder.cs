@@ -461,6 +461,15 @@ internal sealed class QueryBinder
                         $"Duplicate alias '{derivedSource.Alias}'");
                 }
 
+                // An expanded view is checked against the principal in scope before its body binds.
+                // At the top of a statement that is the caller, already checked at expansion. Inside
+                // another view's body it is that view's owner — which is the check that matters: the
+                // inner view is read on the owner's behalf, so a grant revoked from the owner after the
+                // outer view was created must stop the read, as it does in PostgreSQL.
+                if (derivedSource.ViewId is { } viewId)
+                    ViewAuthorization.RequireReadOnBehalfOfScope(
+                        database, derivedSource.ViewName ?? derivedSource.Alias, viewId);
+
                 // A LATERAL derived table after other FROM items can read them. The items to its left are
                 // the sources bound so far, because a join binds its left side first.
                 if (derivedSource.LateralBody is { } lateralBody

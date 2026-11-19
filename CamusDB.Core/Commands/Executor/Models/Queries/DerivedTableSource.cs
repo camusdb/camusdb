@@ -37,6 +37,16 @@ public sealed record DerivedTableSource(
     string? OwnerId = null) : QuerySource
 {
     /// <summary>
+    /// The immutable id of the view this derived table was expanded from, or null for a derived table
+    /// the user wrote. The binder checks the principal in scope — the caller, or the owner of the view
+    /// whose body this one appears in — for SELECT on it, on every read.
+    /// </summary>
+    public string? ViewId { get; init; }
+
+    /// <summary>The name of the view this derived table was expanded from, for error messages.</summary>
+    public string? ViewName { get; init; }
+
+    /// <summary>
     /// The set-returning function this derived table stands for, or null for a subquery or an
     /// expanded view. When it is set, <see cref="Query"/> is the inner shell
     /// <c>SELECT column FROM function(...)</c>: it is never bound or executed as a query, and the

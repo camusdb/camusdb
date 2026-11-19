@@ -359,7 +359,10 @@ Specifics:
 - **The swap is scoped to the view.** A query naming the same table both through a view and directly
   gets the owner's rights only for the reference that came through the view; the direct one is still
   checked against the caller.
-- **Each view in a chain runs as its own owner.**
+- **Each view in a chain runs as its own owner.** When a view's body reads another view, the
+  outer view's owner needs `SELECT` on the inner view, and this is checked on every read, as in
+  PostgreSQL. Revoke that grant and reads of the outer view fail from then on; grant it again and
+  they work, with no need to replace the view. The reader needs no grant on the inner view.
 - **Views are grantable objects**: `GRANT SELECT ON db.my_view TO someone`. Dropping, renaming,
   replacing and describing one all require a grant on the view, and `SHOW VIEWS` lists only what the
   caller can reach.
@@ -579,10 +582,6 @@ These parse but are **rejected at execution**, so they fail with an error:
 - **Resuming an interrupted refresh mid-scan.** An interrupted refresh is restarted from the
   beginning (see above), so the work the dead run did is done again. The materialized view is untouched in the meantime, so nothing is left
   inconsistent.
-- **Re-checking a nested view's grant at read time.** A view whose body reads another view has that
-  inner reference checked when it is *created*, not on every read; a grant revoked afterwards does not
-  break the outer view until it is replaced. The inner view still runs as its own owner, so this
-  widens nothing beyond what its author could already reach.
 - **Absorbing a column rename into a definition written before columns were bound by id**, or into a
   reference in `ORDER BY` / `GROUP BY` / `HAVING` that matches one of the view's own output names.
   Both are refused instead (see *Columns a view reads*).

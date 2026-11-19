@@ -52,6 +52,30 @@ internal static class ViewAuthorization
     }
 
     /// <summary>
+    /// Throws unless the principal in scope may SELECT from the view, naming that principal.
+    /// </summary>
+    /// <remarks>
+    /// Called by the binder for every expanded view. Inside a view's body the principal in scope is
+    /// that view's owner (the binder swapped to it), so this is the read-time check of a nested view's
+    /// grant: the owner of the outer view needs SELECT on the inner one on every read, not only when
+    /// the outer view was created. The message names the principal because, nested, it is not the
+    /// caller, and "missing privilege" without saying whose would send the caller looking at their own
+    /// grants.
+    /// </remarks>
+    internal static void RequireReadOnBehalfOfScope(DatabaseDescriptor database, string viewName, string viewId)
+    {
+        if (!database.Options.AuthenticationEnabled)
+            return;
+
+        Principal? principal = AuthorizationContext.Current.Principal;
+
+        if (principal is not null && !principal.HasPrivilege(Privilege.Select, database.Id, viewId))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InsufficientPrivilege,
+                $"Missing Select privilege on view '{database.Name}.{viewName}' for user '{principal.UserName}'");
+    }
+
+    /// <summary>
     /// Checks the ambient requirement the statement was mapped to, for paths where that mapping is
     /// already the right answer (a read expands the view, a drop is mapped to Drop, and so on).
     /// </summary>
