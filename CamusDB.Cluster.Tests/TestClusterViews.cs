@@ -244,6 +244,57 @@ public sealed class TestClusterViews
     }
 
     /// <summary>
+    /// A rename forwarded from a follower while the leader rebuilds the view: the rebuild publishes onto
+    /// the view under its new name, or is refused and leaves the previous contents. Either way every
+    /// node has the view only under the new name, holding one whole version, and no staging relation.
+    /// </summary>
+    [Test]
+    public async Task ARenameFromAnotherNodeDuringARebuildLeavesOneWholeView()
+    {
+        (InProcessSchemaCluster cluster, string db, InProcessSchemaCluster.Node leader, InProcessSchemaCluster.Node follower) = await StartAsync();
+        try
+        {
+            MaterializedViewRefresher.AfterStagingForTesting = async () =>
+            {
+                MaterializedViewRefresher.AfterStagingForTesting = null;
+                await Ddl(follower, db, "ALTER MATERIALIZED VIEW open_orders RENAME TO open_orders_v2");
+            };
+
+            try
+            {
+                await Write(leader, db, "REFRESH MATERIALIZED VIEW open_orders");
+            }
+            catch (CamusDBException refused)
+            {
+                Assert.AreEqual(CamusDBErrorCodes.ConcurrentSchemaChange, refused.Code, refused.Message);
+            }
+
+            await Converge(cluster, leader, db);
+
+            foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+            {
+                Assert.IsFalse(node.Database!.Schema.Tables.ContainsKey("open_orders"), $"node {node.Index} kept the old name");
+
+                List<long> contents = await Ids(node, db, "SELECT id FROM open_orders_v2");
+                Assert.IsTrue(contents.SequenceEqual(OldContents) || contents.SequenceEqual(NewContents),
+                    $"node {node.Index} holds a mixture: {string.Join(",", contents)}");
+            }
+
+            AssertNoStaging(cluster);
+
+            await Write(leader, db, "REFRESH MATERIALIZED VIEW open_orders_v2");
+            await Converge(cluster, leader, db);
+
+            foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+                Assert.AreEqual(NewContents, await Ids(node, db, "SELECT id FROM open_orders_v2"), $"node {node.Index}");
+        }
+        finally
+        {
+            await cluster.DisposeAsync();
+        }
+    }
+
+    /// <summary>
     /// A transaction that read the materialized view before the swap never sees a mixture after it:
     /// it reads one whole version, or it is refused with a retryable error because the contents it
     /// pinned were replaced. A reader that starts after the swap sees the new contents whole.
