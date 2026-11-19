@@ -718,19 +718,13 @@ internal sealed class NonQueryStatementDispatcher
                     return new ExecuteNonSQLResult(database, ctasTable, ctasRows, ctasWarning);
                 }
 
-            // REFRESH is routed here rather than through the DDL path because it is a write: it
-            // replaces a relation's contents and reports how many rows it wrote, the same shape a
-            // caller already gets from INSERT … SELECT.
+            // REFRESH belongs here because it is a write: it replaces a relation's contents and
+            // reports how many rows it wrote, the same shape a caller already gets from
+            // INSERT … SELECT. The DDL path accepts it too, through the same implementation.
             case NodeType.RefreshMaterializedView:
                 {
-                    string refreshedName = ast.leftAst!.yytext!;
-                    string refreshOptions = ast.yytext ?? "";
-
-                    int refreshedRows = await matViewRefresher.RefreshAsync(
-                        executor, catalogs, context.Registry, database, refreshedName,
-                        concurrently: refreshOptions.StartsWith("concurrently", StringComparison.Ordinal),
-                        withNoData: refreshOptions.EndsWith("no data", StringComparison.Ordinal),
-                        ticket, context.Logger).ConfigureAwait(false);
+                    int refreshedRows = await matViewRefresher.RefreshStatementAsync(
+                        executor, catalogs, context.Registry, database, ast, ticket, context.Logger).ConfigureAwait(false);
 
                     return new ExecuteNonSQLResult(database, null!, refreshedRows);
                 }

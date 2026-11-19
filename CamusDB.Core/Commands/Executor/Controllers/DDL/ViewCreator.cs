@@ -12,6 +12,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.SQLParser;
+using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 
@@ -114,10 +115,13 @@ internal sealed class ViewCreator
     /// is why the order matters rather than being incidental.
     /// </remarks>
     internal async Task<bool> DropAsync(
+        CommandExecutor executor,
         CatalogsManager catalogs,
+        Task<DatabaseRegistry> registryTask,
         DatabaseDescriptor database,
         NodeAst ast,
-        bool ifExists)
+        bool ifExists,
+        ILogger<ICamusDB> logger)
     {
         List<string> names = [];
         FlattenNames(ast.leftAst!, names);
@@ -159,20 +163,12 @@ internal sealed class ViewCreator
                     $"Cannot drop view '{name}' because other objects depend on it: " +
                     $"{string.Join(", ", dependents)}. Use DROP VIEW ... CASCADE to drop them too.");
 
+            // CASCADE is not an escape from authorization: it drops objects the caller did not name,
+            // so each one is checked on its own, and all of them before any goes. A materialized view
+            // that reads this view is a dependent too, and is dropped by its own path.
             if (cascade)
-            {
-                foreach (string dependent in ViewDependencyGraph.TransitiveDependentsOfView(database.Schema, viewId))
-                {
-                    if (!CatalogsManager.ViewExists(database, dependent))
-                        continue;
-
-                    // CASCADE is not an escape from authorization: it drops objects the caller did not
-                    // name, so each one is checked on its own before it goes.
-                    ViewAuthorization.Require(database, dependent, database.Schema.Views[dependent], Privilege.Drop);
-
-                    await catalogs.DropViewAsync(database, dependent).ConfigureAwait(false);
-                }
-            }
+                await DependentRelationDropper.DropTransitiveDependentsAsync(
+                    executor, catalogs, await registryTask.ConfigureAwait(false), database, viewId, logger).ConfigureAwait(false);
 
             await catalogs.DropViewAsync(database, name).ConfigureAwait(false);
             droppedAny = true;

@@ -63,6 +63,35 @@ internal sealed class MaterializedViewRefresher
     internal static Func<Task>? AfterStagingForTesting { get; set; }
 
     /// <summary>
+    /// Runs a parsed <c>REFRESH MATERIALIZED VIEW</c> statement and returns the number of rows
+    /// materialized.
+    /// </summary>
+    /// <remarks>
+    /// Shared by the non-query path, where the statement belongs because it writes rows, and the DDL
+    /// path, which accepts it as well: clients classify statements by their first words, and one that
+    /// counts <c>REFRESH MATERIALIZED VIEW</c> as view DDL — camus-cli did — sends it to the DDL
+    /// endpoint. A statement that works through one entry point and is "unknown" through the other is,
+    /// to that client, a statement the server does not support.
+    /// </remarks>
+    internal Task<int> RefreshStatementAsync(
+        CommandExecutor executor,
+        CatalogsManager catalogs,
+        Task<DatabaseRegistry> registryTask,
+        DatabaseDescriptor database,
+        NodeAst ast,
+        ExecuteSQLTicket ticket,
+        ILogger<ICamusDB> logger)
+    {
+        string options = ast.yytext ?? "";
+
+        return RefreshAsync(
+            executor, catalogs, registryTask, database, ast.leftAst!.yytext!,
+            concurrently: options.StartsWith("concurrently", StringComparison.Ordinal),
+            withNoData: options.EndsWith("no data", StringComparison.Ordinal),
+            ticket, logger);
+    }
+
+    /// <summary>
     /// Rebuilds <paramref name="viewName"/> and returns the number of rows materialized.
     /// </summary>
     /// <param name="withNoData">
@@ -405,8 +434,12 @@ internal sealed class MaterializedViewRefresher
     /// about the <b>background reclaimer</b>, which takes the same fence for a few milliseconds while
     /// it checks whether a job is abandoned. Without this, a user's REFRESH could be refused because a
     /// janitor happened to be mid-sweep, which is an outcome no caller can act on or predict.
+    ///
+    /// <para><c>DROP MATERIALIZED VIEW</c> takes the fence through here too, for the same reason: it
+    /// must not be refused because a janitor is mid-sweep, and it must be refused while a real rebuild
+    /// is running.</para>
     /// </remarks>
-    private static async Task<bool> AcquireRefreshFenceAsync(DatabaseRegistry registry, string fenceId)
+    internal static async Task<bool> AcquireRefreshFenceAsync(DatabaseRegistry registry, string fenceId)
     {
         for (int attempt = 0; ; attempt++)
         {

@@ -1,0 +1,286 @@
+/**
+ * This file is part of CamusDB
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+
+using NUnit.Framework;
+
+using CamusDB.Core;
+using CamusDB.Core.Catalogs;
+using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.CommandsExecutor;
+using CamusDB.Core.CommandsExecutor.Controllers.DDL;
+using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Results;
+using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Transactions;
+
+namespace CamusDB.Tests.CommandsExecutor;
+
+/// <summary>
+/// How <c>DROP MATERIALIZED VIEW</c>, <c>DROP VIEW … CASCADE</c> and the table rename treat a
+/// materialized view: the drop is fenced against a running refresh, a cascade reaches every
+/// dependent of either kind, and each kind of object is changed by its own statement.
+/// </summary>
+[NonParallelizable]
+public sealed class TestMaterializedViewDropAndRename : SharedNodeBaseTest
+{
+    private static async Task ExecDdl(DatabaseDescriptor database, CommandExecutor executor, string dbname, string sql)
+    {
+        KvTransaction tx = await database.Transactions.BeginAsync();
+        ExecuteSQLTicket ticket = new(txnState: tx, database: dbname, sql: sql, parameters: null);
+        await executor.ExecuteDDLSQL(ticket);
+        await database.Transactions.CommitAsync(tx);
+    }
+
+    private static async Task<int> ExecNonQuery(DatabaseDescriptor database, CommandExecutor executor, string dbname, string sql)
+    {
+        KvTransaction tx = await database.Transactions.BeginAsync();
+        ExecuteSQLTicket ticket = new(txnState: tx, database: dbname, sql: sql, parameters: null);
+        ExecuteNonSQLResult result = await executor.ExecuteNonSQLQuery(ticket);
+        await database.Transactions.CommitAsync(tx);
+        return result.ModifiedRows;
+    }
+
+    private static async Task<List<QueryResultRow>> ExecQuery(
+        DatabaseDescriptor database, CommandExecutor executor, string dbname, string sql)
+    {
+        KvTransaction tx = await database.Transactions.BeginAsync();
+        ExecuteSQLTicket ticket = new(txnState: tx, database: dbname, sql: sql, parameters: null);
+        (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
+        List<QueryResultRow> rows = await cursor.ToListAsync();
+        await database.Transactions.CommitAsync(tx);
+        return rows;
+    }
+
+    private static async Task SeedOrders(DatabaseDescriptor database, CommandExecutor executor, string dbname)
+    {
+        await ExecDdl(database, executor, dbname,
+            "CREATE TABLE orders (id int64 PRIMARY KEY, customer string(64), total int64, status string(16))");
+
+        await ExecNonQuery(database, executor, dbname,
+            "INSERT INTO orders (id, customer, total, status) VALUES " +
+            "(1, 'acme', 10, 'open'), (2, 'acme', 2000, 'open'), (3, 'globex', 30, 'open')");
+    }
+
+    private static void AssertNoStagingLeft(DatabaseDescriptor database)
+        => CollectionAssert.IsEmpty(
+            database.Schema.Tables.Keys.Where(MaterializedViewNaming.IsStagingRelation).ToList(),
+            "no staging relation may outlive the statement");
+
+    /// <summary>
+    /// The refusal must name the object it refused and a statement that works. It once said "table"
+    /// and suggested <c>DROP TABLE … CASCADE</c>, which is refused for a materialized view and has no
+    /// <c>CASCADE</c> form at all, so a user who followed it failed twice.
+    /// </summary>
+    [Test]
+    public async Task ARefusedDropNamesAMaterializedViewAndSuggestsAStatementThatWorks()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await SeedOrders(database, executor, dbname);
+
+        await ExecDdl(database, executor, dbname,
+            "CREATE MATERIALIZED VIEW customer_totals AS SELECT customer, SUM(total) AS total_spent FROM orders GROUP BY customer");
+        await ExecDdl(database, executor, dbname,
+            "CREATE VIEW big_spenders AS SELECT customer FROM customer_totals WHERE total_spent > 1000");
+
+        CamusDBException? error = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await ExecDdl(database, executor, dbname, "DROP MATERIALIZED VIEW customer_totals"));
+
+        Assert.AreEqual(CamusDBErrorCodes.DependentObjectsExist, error!.Code);
+        Assert.AreEqual(
+            "Cannot drop materialized view 'customer_totals' because other objects depend on it: big_spenders. " +
+            "Use DROP MATERIALIZED VIEW ... CASCADE to drop them too.",
+            error.Message);
+
+        // The statement the message names does what it says.
+        await ExecDdl(database, executor, dbname, "DROP MATERIALIZED VIEW customer_totals CASCADE");
+
+        Assert.IsFalse(database.Schema.Tables.ContainsKey("customer_totals"));
+        Assert.IsFalse(database.Schema.Views.ContainsKey("big_spenders"));
+    }
+
+    /// <summary>
+    /// A cascade used to drop only the plain views that read the materialized view directly. A view
+    /// over such a view was left reading something gone, and a materialized view over it made the
+    /// final relation drop refuse after the plain views had already been removed.
+    /// </summary>
+    [Test]
+    public async Task ACascadeReachesTransitiveDependentsOfBothKinds()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await SeedOrders(database, executor, dbname);
+
+        await ExecDdl(database, executor, dbname,
+            "CREATE MATERIALIZED VIEW open_orders AS SELECT id, customer, total FROM orders WHERE status = 'open'");
+        await ExecDdl(database, executor, dbname,
+            "CREATE VIEW acme_open AS SELECT id, total FROM open_orders WHERE customer = 'acme'");
+        await ExecDdl(database, executor, dbname,
+            "CREATE VIEW acme_big AS SELECT id FROM acme_open WHERE total > 100");
+        await ExecDdl(database, executor, dbname,
+            "CREATE MATERIALIZED VIEW open_totals AS SELECT customer, SUM(total) AS spent FROM open_orders GROUP BY customer");
+        await ExecDdl(database, executor, dbname,
+            "CREATE VIEW top_open AS SELECT customer FROM open_totals WHERE spent > 100");
+
+        await ExecDdl(database, executor, dbname, "DROP MATERIALIZED VIEW open_orders CASCADE");
+
+        foreach (string gone in new[] { "acme_open", "acme_big", "top_open" })
+            Assert.IsFalse(database.Schema.Views.ContainsKey(gone), $"{gone} must go with the cascade");
+
+        foreach (string gone in new[] { "open_orders", "open_totals" })
+            Assert.IsFalse(database.Schema.Tables.ContainsKey(gone), $"{gone} must go with the cascade");
+
+        Assert.IsTrue(database.Schema.Tables.ContainsKey("orders"), "the base table is not a dependent");
+        AssertNoStagingLeft(database);
+    }
+
+    /// <summary>
+    /// <c>DROP VIEW … CASCADE</c> skipped a materialized view that read the view, so the view went
+    /// and left the materialized view with a body that names nothing — failing at its next refresh.
+    /// </summary>
+    [Test]
+    public async Task DropViewCascadeTakesAMaterializedViewThatReadsIt()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await SeedOrders(database, executor, dbname);
+
+        await ExecDdl(database, executor, dbname,
+            "CREATE VIEW open_orders AS SELECT id, customer, total FROM orders WHERE status = 'open'");
+        await ExecDdl(database, executor, dbname,
+            "CREATE MATERIALIZED VIEW open_totals AS SELECT customer, SUM(total) AS spent FROM open_orders GROUP BY customer");
+
+        CamusDBException? refused = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await ExecDdl(database, executor, dbname, "DROP VIEW open_orders"));
+        Assert.AreEqual(CamusDBErrorCodes.DependentObjectsExist, refused!.Code);
+
+        await ExecDdl(database, executor, dbname, "DROP VIEW open_orders CASCADE");
+
+        Assert.IsFalse(database.Schema.Views.ContainsKey("open_orders"));
+        Assert.IsFalse(database.Schema.Tables.ContainsKey("open_totals"),
+            "a materialized view that reads the view is a dependent like any other");
+        AssertNoStagingLeft(database);
+    }
+
+    /// <summary>
+    /// A drop while a rebuild is running is refused, not raced. Raced, the rebuild swapped onto an id
+    /// no longer in the schema — a correct no-op that therefore never removed the staging relation —
+    /// and then deleted its own ownership record, leaving storage nothing points at.
+    /// </summary>
+    [Test]
+    public async Task ADropWhileARefreshIsRunningIsRefusedAndLeavesNothingBehind()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await SeedOrders(database, executor, dbname);
+
+        await ExecDdl(database, executor, dbname,
+            "CREATE MATERIALIZED VIEW open_orders AS SELECT id, total FROM orders WHERE status = 'open'");
+
+        string viewTableId = database.Schema.Tables["open_orders"].Id!;
+        CamusDBException? duringRefresh = null;
+
+        MaterializedViewRefresher.AfterStagingForTesting = async () =>
+        {
+            MaterializedViewRefresher.AfterStagingForTesting = null;
+            duringRefresh = Assert.ThrowsAsync<CamusDBException>(async () =>
+                await ExecDdl(database, executor, dbname, "DROP MATERIALIZED VIEW open_orders"));
+            await Task.CompletedTask;
+        };
+
+        try
+        {
+            await ExecNonQuery(database, executor, dbname, "REFRESH MATERIALIZED VIEW open_orders");
+        }
+        finally
+        {
+            MaterializedViewRefresher.AfterStagingForTesting = null;
+        }
+
+        Assert.IsNotNull(duringRefresh, "the drop inside the rebuild window must have been attempted");
+        Assert.AreEqual(CamusDBErrorCodes.RefreshAlreadyInProgress, duringRefresh!.Code);
+        StringAssert.Contains("Cannot drop materialized view 'open_orders' while a REFRESH", duringRefresh.Message);
+
+        // The refused drop changed nothing: the refresh published, and the view still answers.
+        Assert.AreEqual(3, (await ExecQuery(database, executor, dbname, "SELECT id FROM open_orders")).Count);
+
+        // Once the rebuild is done the drop goes through, and nothing it built is left behind.
+        await ExecDdl(database, executor, dbname, "DROP MATERIALIZED VIEW open_orders");
+
+        Assert.IsFalse(database.Schema.Tables.ContainsKey("open_orders"));
+        AssertNoStagingLeft(database);
+
+        CatalogsManager catalogs = executor.GetCatalogsManagerForTesting();
+        Assert.IsNull(await catalogs.TryGetRefreshJobAsync(database, viewTableId));
+    }
+
+    /// <summary>
+    /// <c>REFRESH MATERIALIZED VIEW</c> belongs to the non-query path, but a client that classifies it
+    /// as view DDL by its first words — camus-cli did — sends it to the DDL path, which answered
+    /// "Unknown DDL AST stmt". Both paths now run it through one implementation.
+    /// </summary>
+    [Test]
+    public async Task RefreshWorksThroughTheDdlPathToo()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await SeedOrders(database, executor, dbname);
+
+        await ExecDdl(database, executor, dbname,
+            "CREATE MATERIALIZED VIEW open_orders AS SELECT id, total FROM orders WHERE status = 'open'");
+        await ExecNonQuery(database, executor, dbname,
+            "INSERT INTO orders (id, customer, total, status) VALUES (4, 'acme', 5, 'open')");
+
+        KvTransaction tx = await database.Transactions.BeginAsync();
+        ExecuteDDLSQLResult result = await executor.ExecuteDDLSQL(
+            new ExecuteSQLTicket(txnState: tx, database: dbname, sql: "REFRESH MATERIALIZED VIEW open_orders", parameters: null));
+        await database.Transactions.CommitAsync(tx);
+
+        Assert.IsTrue(result.Success);
+        Assert.AreEqual(4, result.ModifiedRows, "the DDL path reports the rows the refresh wrote, as the non-query path does");
+        Assert.AreEqual(4, (await ExecQuery(database, executor, dbname, "SELECT id FROM open_orders")).Count);
+
+        await ExecDdl(database, executor, dbname, "REFRESH MATERIALIZED VIEW open_orders WITH NO DATA");
+        CamusDBException? unpopulated = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await ExecQuery(database, executor, dbname, "SELECT id FROM open_orders"));
+        Assert.AreEqual(CamusDBErrorCodes.MaterializedViewNotPopulated, unpopulated!.Code);
+
+        CamusDBException? concurrently = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await ExecDdl(database, executor, dbname, "REFRESH MATERIALIZED VIEW CONCURRENTLY open_orders"));
+        Assert.AreEqual(CamusDBErrorCodes.FeatureNotSupported, concurrently!.Code);
+    }
+
+    /// <summary>
+    /// <c>DROP TABLE</c> refuses a materialized view and names the right statement; the rename did not,
+    /// so a materialized view could be renamed by the table statement. Both kinds of object are now
+    /// changed by their own statement — through the SQL path and the ticket API alike.
+    /// </summary>
+    [Test]
+    public async Task TheTableRenameRefusesAMaterializedView()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await SeedOrders(database, executor, dbname);
+
+        await ExecDdl(database, executor, dbname,
+            "CREATE MATERIALIZED VIEW open_orders AS SELECT id, total FROM orders WHERE status = 'open'");
+
+        CamusDBException? sql = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await ExecDdl(database, executor, dbname, "ALTER TABLE open_orders RENAME TO active_orders"));
+        Assert.AreEqual(CamusDBErrorCodes.TableDoesntExist, sql!.Code);
+        Assert.AreEqual("'open_orders' is a materialized view; use ALTER MATERIALIZED VIEW ... RENAME TO", sql.Message);
+
+        CamusDBException? ticket = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await executor.RenameTable(new RenameTableTicket(dbname, "open_orders", "active_orders")));
+        Assert.AreEqual(CamusDBErrorCodes.TableDoesntExist, ticket!.Code);
+
+        Assert.IsTrue(database.Schema.Tables.ContainsKey("open_orders"), "a refused rename changes nothing");
+
+        await ExecDdl(database, executor, dbname, "ALTER MATERIALIZED VIEW open_orders RENAME TO active_orders");
+
+        Assert.IsTrue(database.Schema.Tables.ContainsKey("active_orders"));
+        Assert.AreEqual(3, (await ExecQuery(database, executor, dbname, "SELECT id FROM active_orders")).Count);
+    }
+}

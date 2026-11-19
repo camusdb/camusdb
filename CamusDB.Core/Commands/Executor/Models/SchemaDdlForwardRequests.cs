@@ -225,6 +225,9 @@ public sealed class ForwardRenameTableRequest
     public string DatabaseName { get; set; } = "";
     public string TableName { get; set; } = "";
     public string NewName { get; set; } = "";
+
+    /// <summary>Carries <c>RenameTableTicket.AllowMaterializedView</c> to the leader.</summary>
+    public bool AllowMaterializedView { get; set; }
 }
 
 /// <summary>

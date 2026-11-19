@@ -278,8 +278,9 @@ internal sealed class DdlStatementDispatcher
             case NodeType.DropViewIfExists:
                 {
                     bool droppedView = await viewCreator.DropAsync(
-                        catalogs, database, ast,
-                        ifExists: ast.nodeType == NodeType.DropViewIfExists).ConfigureAwait(false);
+                        executor, catalogs, context.Registry, database, ast,
+                        ifExists: ast.nodeType == NodeType.DropViewIfExists,
+                        context.Logger).ConfigureAwait(false);
 
                     return new ExecuteDDLSQLResult(database, droppedView);
                 }
@@ -354,11 +355,21 @@ internal sealed class DdlStatementDispatcher
             case NodeType.DropMaterializedViewIfExists:
                 {
                     bool droppedMatView = await matViewCreator.DropAsync(
-                        executor, catalogs, database, ast,
+                        executor, catalogs, context.Registry, database, ast,
                         ifExists: ast.nodeType == NodeType.DropMaterializedViewIfExists,
                         context.Logger).ConfigureAwait(false);
 
                     return new ExecuteDDLSQLResult(database, droppedMatView);
+                }
+
+            // Normally a non-query statement (it writes rows), and accepted here too so a client that
+            // classifies it as view DDL by its first words still works; see RefreshStatementAsync.
+            case NodeType.RefreshMaterializedView:
+                {
+                    int refreshedRows = await matViewRefresher.RefreshStatementAsync(
+                        executor, catalogs, context.Registry, database, ast, ticket, context.Logger).ConfigureAwait(false);
+
+                    return new ExecuteDDLSQLResult(database, true, refreshedRows);
                 }
 
             case NodeType.AlterMaterializedViewRenameTo:
@@ -379,7 +390,7 @@ internal sealed class DdlStatementDispatcher
                             sql => SQLParserProcessor.Parse(sql, sqlParserCache));
 
                     await schemaDdl.RenameTable(new RenameTableTicket(
-                        ticket.DatabaseName, oldMatViewName, newMatViewName), matViewRewrites).ConfigureAwait(false);
+                        ticket.DatabaseName, oldMatViewName, newMatViewName, allowMaterializedView: true), matViewRewrites).ConfigureAwait(false);
 
                     return new ExecuteDDLSQLResult(database, true);
                 }
@@ -612,6 +623,7 @@ internal sealed class DdlStatementDispatcher
                         return new ExecuteDDLSQLResult(database, forwarded.Value);
 
                     TableDescriptor renameTableDesc = await context.TableOpener.Open(database, oldTableName).ConfigureAwait(false);
+                    SchemaDdlService.RequireRenamableAsTable(renameTableDesc, renameTableTicket);
 
                     // A body written before relation ids were stored names its sources in text, so a
                     // rename would leave it pointing at something that no longer exists. Such a body

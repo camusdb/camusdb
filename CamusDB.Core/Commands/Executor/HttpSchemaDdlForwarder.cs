@@ -216,6 +216,7 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
             DatabaseName = ticket.DatabaseName,
             TableName = ticket.TableName,
             NewName = ticket.NewName,
+            AllowMaterializedView = ticket.AllowMaterializedView,
         };
 
         return await PostAsync(leader, "rename-table", request, cancellationToken).ConfigureAwait(false);

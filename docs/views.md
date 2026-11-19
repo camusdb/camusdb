@@ -505,13 +505,30 @@ DROP MATERIALIZED VIEW customer_totals;
 DROP MATERIALIZED VIEW IF EXISTS customer_totals CASCADE;
 ```
 
-A plain view may read a materialized view. Dropping the materialized view out from under it is
-refused unless you say `CASCADE`, exactly as for a table. Renaming one rewrites the views that read
-it, so they keep working.
+A plain view may read a materialized view, and a materialized view may read a plain view.
+Dropping a materialized view that something reads is refused unless you say `CASCADE`:
+
+```sql
+DROP MATERIALIZED VIEW customer_totals;
+-- ERROR (CADB0530): Cannot drop materialized view 'customer_totals' because other objects depend
+--                   on it: big_spenders. Use DROP MATERIALIZED VIEW ... CASCADE to drop them too.
+```
+
+`CASCADE` — on `DROP MATERIALIZED VIEW` and on `DROP VIEW` alike — drops every view and materialized
+view that reads the object, directly or through other views, before the object itself. You need the
+privilege to drop each of them, and all of them are checked before any is dropped. Renaming a
+materialized view does not affect the views that read it.
+
+**A drop waits for no refresh.** `DROP MATERIALIZED VIEW` is refused with `CADB0532`
+(`RefreshAlreadyInProgress`) while a refresh of that view is running anywhere in the cluster. Retry
+it once the refresh has finished. Index and constraint DDL is different: it does not wait either, it
+commits, and the running refresh is the one that fails, with `CADB0534` (`ConcurrentSchemaChange`) —
+retry the refresh.
 
 Tables, views and materialized views share **one namespace**: you cannot have a table and a
-materialized view with the same name, and each kind is dropped by its own statement — `DROP TABLE`
-refuses a materialized view and tells you which statement to use.
+materialized view with the same name, and each kind is dropped and renamed by its own statement —
+`DROP TABLE` and `ALTER TABLE … RENAME TO` refuse a materialized view and tell you which statement
+to use.
 
 ### Introspection
 
