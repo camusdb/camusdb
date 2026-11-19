@@ -739,7 +739,7 @@ public static class CamusDBErrorCodes
     /// A recursive CTE (<c>WITH RECURSIVE</c>) went past one of its limits: more steps of its recursive
     /// term made rows than <see cref="CamusDBOptions.MaxRecursiveCteIterations"/> allows, or the CTE made
     /// more rows than <see cref="CamusDBOptions.MaxRecursiveCteRows"/> allows. Without the limits, a
-    /// recursion with no end runs until the disk is full, because a statement has no time limit. The
+    /// recursion with no end runs until the disk is full, because a statement has no time limit by default. The
     /// message names the setting. Add a condition that ends the recursion, use UNION in place of UNION
     /// ALL to drop the rows already returned (that ends a walk over a cycle), or raise the setting. Not
     /// retryable as is. Maps to HTTP 400 and gRPC <c>RESOURCE_EXHAUSTED</c>.
@@ -750,11 +750,23 @@ public static class CamusDBErrorCodes
     /// One read of a function in <c>FROM</c>, such as <c>generate_series</c>, made more rows than
     /// <see cref="CamusDBOptions.MaxTableFunctionRows"/> allows. The count includes the rows that a filter
     /// then dropped. Without the limit, one short statement over a huge series runs for hours, because a
-    /// statement has no time limit. The message names the function and the setting. Narrow the
+    /// statement has no time limit by default. The message names the function and the setting. Narrow the
     /// arguments, add a <c>LIMIT</c> that stops the read before the limit, or raise the setting. Not
     /// retryable as is. Maps to HTTP 400 and gRPC <c>RESOURCE_EXHAUSTED</c>.
     /// </summary>
     public const string TableFunctionRowLimitExceeded = "CADB0561";
+
+    /// <summary>
+    /// The statement ran longer than <see cref="CamusDBOptions.StatementTimeoutMs"/> allows and was
+    /// stopped. A read stops wherever it is (a scan, a join, a lock wait, a fragment on a peer); a write
+    /// stops at the start of the next row it reads or writes, or inside the inline function call or
+    /// trigger it runs. Either way the statement fails like any other failed statement: an explicit
+    /// transaction is marked rollback-only, and an autocommit statement is rolled back, so nothing it
+    /// wrote is kept. Rows a read returned before the deadline were real. Make the statement cheaper,
+    /// split it, or raise the setting. Not retryable as is. Maps to HTTP 400 and gRPC
+    /// <c>RESOURCE_EXHAUSTED</c>.
+    /// </summary>
+    public const string StatementTimeout = "CADB0562";
 
     public const string InvalidConfig = "CADB0600";
 
@@ -1291,6 +1303,7 @@ public static class CamusDBErrorCodes
         ResultSetTooLarge => 400,
         RecursiveQueryLimitExceeded => 400,
         TableFunctionRowLimitExceeded => 400,
+        StatementTimeout => 400,
         StatementTooLarge => 413,
         ConcurrencyLimitExceeded => 503,
         QueryNotFound => 404,

@@ -208,6 +208,10 @@ internal sealed class CreateTableAsSelectExecutor
         }
         catch (Exception loadError)
         {
+            // The drop below runs after the load failed, which can be because the statement ran out of
+            // time; it must not be stopped by the same deadline.
+            StatementDeadline.Suspend();
+
             // Compensate: the table was created by a statement that did not complete, so leaving it
             // behind would make a retry of the same statement load into a table it did not create.
             try

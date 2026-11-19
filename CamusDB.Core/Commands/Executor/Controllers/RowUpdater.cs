@@ -753,8 +753,13 @@ public sealed class RowUpdater
         int chunkSize = state.Database.Options.SpillEffectiveThreshold;
         List<ObjectIdValue> chunkRowIds = new(Math.Min(chunkSize, 64));
 
+        // A write checks its time limit itself, at each row (statement_timeout_ms).
+        StatementDeadline? statementDeadline = StatementDeadline.Current;
+
         await foreach (QueryResultRow queryRow in state.RowsToUpdate.EnumerateAsync().ConfigureAwait(false))
         {
+            statementDeadline?.ThrowIfExpired();
+
             // Drain-time retention check: the buffer holds row-id-only records, so a drained record
             // with columns means the locate phase retained scanned values it must not. Reading Count
             // on a lazy row is a layout lookup — it materializes nothing.

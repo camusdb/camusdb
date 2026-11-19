@@ -383,6 +383,7 @@ public static class ConfigResolver
         MaxRecursiveCteIterations = config.MaxRecursiveCteIterations,
         MaxRecursiveCteRows = config.MaxRecursiveCteRows,
         MaxTableFunctionRows = config.MaxTableFunctionRows,
+        StatementTimeoutMs = config.StatementTimeoutMs,
         MaxOpenExplicitTransactions = config.MaxOpenExplicitTransactions,
         MaxClientConnections = config.MaxClientConnections,
         MaxIndexColumns = config.MaxIndexColumns,

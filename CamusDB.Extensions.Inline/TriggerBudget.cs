@@ -34,12 +34,20 @@ namespace CamusDB.Extensions.Inline;
 /// statement takes inside the session is added to the deadline on <see cref="Resume"/>, so a slow
 /// statement is bounded by its own limits and not by the trigger's, and a body that runs SQL in a
 /// loop meets the transaction's mutation limit, not this one.</para>
+///
+/// <para><b>The statement's deadline is not extended.</b> The statement that fired the trigger can
+/// have a time limit of its own. The body never runs past it, whatever time its SQL took: the
+/// deadline of the body is capped by it when the fire starts and again on each
+/// <see cref="Resume"/>.</para>
 /// </summary>
 public sealed class TriggerBudget
 {
     private readonly long allocationLimit;
 
     private readonly int arrayLimit;
+
+    /// <summary>The deadline of the statement that fired the trigger; <see cref="long.MaxValue"/> for none.</summary>
+    private readonly long statementDeadline;
 
     private long deadline;
 
@@ -56,8 +64,23 @@ public sealed class TriggerBudget
     /// <param name="allocationLimitBytes">The managed bytes the body may allocate; 0 or less for no limit.</param>
     /// <param name="arrayLimit">The most elements of an array the body creates; 0 or less for no limit.</param>
     public TriggerBudget(int timeoutMilliseconds, long allocationLimitBytes, int arrayLimit)
+        : this(timeoutMilliseconds, allocationLimitBytes, arrayLimit, long.MaxValue)
     {
-        deadline = timeoutMilliseconds > 0 ? Environment.TickCount64 + timeoutMilliseconds : long.MaxValue;
+    }
+
+    /// <param name="timeoutMilliseconds">The time the body's own work may take; 0 or less for no limit.</param>
+    /// <param name="allocationLimitBytes">The managed bytes the body may allocate; 0 or less for no limit.</param>
+    /// <param name="arrayLimit">The most elements of an array the body creates; 0 or less for no limit.</param>
+    /// <param name="statementDeadline">
+    /// The <see cref="Environment.TickCount64"/> value the body never runs past: the deadline of the
+    /// statement that fired it. <see cref="long.MaxValue"/> for none.
+    /// </param>
+    public TriggerBudget(int timeoutMilliseconds, long allocationLimitBytes, int arrayLimit, long statementDeadline)
+    {
+        this.statementDeadline = statementDeadline;
+        deadline = Math.Min(
+            timeoutMilliseconds > 0 ? Environment.TickCount64 + timeoutMilliseconds : long.MaxValue,
+            statementDeadline);
         allocationLimit = allocationLimitBytes > 0 ? allocationLimitBytes : long.MaxValue;
         this.arrayLimit = arrayLimit > 0 ? arrayLimit : int.MaxValue;
         allocationBase = GC.GetAllocatedBytesForCurrentThread();
@@ -107,7 +130,7 @@ public sealed class TriggerBudget
         threadId = Environment.CurrentManagedThreadId;
 
         if (deadline != long.MaxValue && suspendedAt != 0)
-            deadline += Math.Max(0, Environment.TickCount64 - suspendedAt);
+            deadline = Math.Min(deadline + Math.Max(0, Environment.TickCount64 - suspendedAt), statementDeadline);
 
         suspendedAt = 0;
     }

@@ -326,6 +326,10 @@ internal sealed class DatabaseOpener
     {
         _ = Task.Run(async () =>
         {
+            // The open can run inside a statement, and this task inherits that statement's flow. The
+            // jobs it resumes are not part of the statement and must not stop at its time limit.
+            StatementDeadline.Suspend();
+
             try
             {
                 if (!await sharedNode.AmISchemaLeaderAsync(database.Id).ConfigureAwait(false))

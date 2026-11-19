@@ -710,7 +710,7 @@ Domain errors are surfaced two ways depending on the call shape:
 | `CANCELLED` | `CANCEL QUERY` stopped the statement | query cancelled (`CADB0554`) |
 | `UNAVAILABLE` | The node that may own a statement did not answer a cancel, or this node cannot run the statement | query owner unreachable (`CADB0553`); the cancel can be sent again. A statement uses an extension the database installed and this node does not load in that build (`CADB0834`), or a trigger's type that the installed version does not define (`CADB0817`); a node that deploys the right file can run it |
 | `ABORTED` | **Retryable** transaction family | transaction conflict (`CADB0502`), must-retry (`CADB0504`), lifetime exceeded (`CADB0505`), finalize unresolved (`CADB0509`); also `SELECT … FOR UPDATE NOWAIT` on a row another transaction holds (`CADB0555`), which ends the transaction but is **not** retried for you (§8.2) |
-| `RESOURCE_EXHAUSTED` | Permanent for this op | mutation limit exceeded, spill storage unavailable, AFTER-trigger rows over the byte budget (`CADB0826`) |
+| `RESOURCE_EXHAUSTED` | Permanent for this op | mutation limit exceeded, spill storage unavailable, AFTER-trigger rows over the byte budget (`CADB0826`), statement timeout (`CADB0562`) |
 | `INTERNAL` | Unexpected server error | `CADB0000` |
 
 ### 8.2 The retryable family — how to retry (read `camus-error-code`)

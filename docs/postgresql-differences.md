@@ -157,7 +157,7 @@ A derived table and a view compute every column of each of their rows before the
 | `WITH c AS (SELECT id FROM nowhere) SELECT v FROM d WHERE id = 1` | `10` | `relation "nowhere" does not exist` | The parser writes out each CTE where the statement reads it, so a CTE that nothing reads runs no check. A statement that reads it reports the unknown table. |
 | `SELECT same FROM (WITH r AS (SELECT random() AS x) SELECT a.x = b.x AS same FROM r a, r b) q` | `false` | `true` | A `WITH` in parentheses can read the columns of the query around it, so each reader runs its own copy. A `WITH` at the start of the statement computes a CTE that it reads two or more times one time, as PostgreSQL does. |
 | `WITH r AS NOT MATERIALIZED (SELECT random() AS x) SELECT a.x = b.x AS same FROM r a, r b` | `false` | `true` | `NOT MATERIALIZED` always inlines. PostgreSQL computes a CTE that calls a volatile function one time, whatever the hint says. |
-| `WITH RECURSIVE r (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 20000) SELECT COUNT(*) FROM r` | `CADB0560` | `20000` | A statement has no time limit, so a recursion with no end would run until the disk is full. The cluster settings `max_recursive_cte_iterations` (10,000 steps) and `max_recursive_cte_rows` (10,000,000 rows) stop it. Both can be raised, and `0` turns a limit off. |
+| `WITH RECURSIVE r (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 20000) SELECT COUNT(*) FROM r` | `CADB0560` | `20000` | A statement has no time limit by default, so a recursion with no end would run until the disk is full. The cluster settings `max_recursive_cte_iterations` (10,000 steps) and `max_recursive_cte_rows` (10,000,000 rows) stop it. Both can be raised, and `0` turns a limit off. |
 | `WITH RECURSIVE r (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r) SELECT a.n + b.n FROM (SELECT n FROM r LIMIT 1) a, (SELECT n FROM r LIMIT 1) b` | `CADB0560` | `2` | A CTE that the statement reads two times is computed one time, and that run makes every row before a reader gets one. PostgreSQL gives each reader rows when it asks for them. A recursive CTE that the statement reads one time streams, so a `LIMIT` over it stops it, as in PostgreSQL. |
 
 A view stores its body with each CTE written out as a derived table, so `SHOW CREATE VIEW` shows no
@@ -181,7 +181,7 @@ See [set-returning functions](set-returning-functions.md#how-it-runs).
 
 | Statement | CamusDB | PostgreSQL | Why |
 |---|---|---|---|
-| `SELECT COUNT(*) FROM generate_series(1, 5000001)` | `CADB0561` | `5000001` | A statement has no time limit, so one short statement over a series of a trillion rows would run for hours. The cluster setting `max_table_function_rows` (5,000,000 rows) stops one read of a function in `FROM`. A `LIMIT` that stops the read early keeps it under the limit. The setting can be raised, and `0` turns the limit off. |
+| `SELECT COUNT(*) FROM generate_series(1, 5000001)` | `CADB0561` | `5000001` | A statement has no time limit by default, so one short statement over a series of a trillion rows would run for hours. The cluster setting `max_table_function_rows` (5,000,000 rows) stops one read of a function in `FROM`. A `LIMIT` that stops the read early keeps it under the limit. The setting can be raised, and `0` turns the limit off. |
 
 ## NULL in ORDER BY
 

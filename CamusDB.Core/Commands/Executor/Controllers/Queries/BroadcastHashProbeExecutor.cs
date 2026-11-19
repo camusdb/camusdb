@@ -326,6 +326,7 @@ internal sealed class BroadcastHashProbeExecutor
                     RequiredColumns = broadcast.ProbeRequiredColumns?.ToArray(),
                     Join = broadcast.Spec,
                     WantStats = spanExecution is not null,
+                    StatementTimeoutRemainingMs = StatementDeadline.Current?.RemainingMs,
                 };
 
                 RowEncoder.RowDecodeState decodeState = new();

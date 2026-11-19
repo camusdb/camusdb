@@ -7,6 +7,7 @@
 
 using System.Globalization;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Controllers.Functions;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Extensions;
@@ -368,6 +369,14 @@ internal sealed class InlineFunctionRuntime : IDisposable
 
         return (calledName, arguments) =>
         {
+            // The call gets the smaller of its own budget and the time its statement has left
+            // (statement_timeout_ms), so a call that runs when the time is up stops at the statement's
+            // deadline. A statement calls a function once per row, so the budget of one call alone
+            // does not bound the statement. Checked before the culture is pinned: it can throw, and
+            // only the try below puts the culture back.
+            StatementDeadline? statement = StatementDeadline.Current;
+            int callTimeout = StatementBoundTimeout(timeout, statement);
+
             CultureInfo culture = CultureInfo.CurrentCulture;
             CultureInfo uiCulture = CultureInfo.CurrentUICulture;
 
@@ -383,8 +392,8 @@ internal sealed class InlineFunctionRuntime : IDisposable
 
             // The scalar evaluator carries no cancellation token, so the deadline is what ends a call
             // of a cancelled statement.
-            long deadline = timeout > 0 ? Environment.TickCount64 + timeout : long.MaxValue;
-            CallBudgetFrame frame = CallBudget.Enter(timeout, allocation, array, CancellationToken.None);
+            long deadline = callTimeout > 0 ? Environment.TickCount64 + callTimeout : long.MaxValue;
+            CallBudgetFrame frame = CallBudget.Enter(callTimeout, allocation, array, CancellationToken.None);
 
             try
             {
@@ -402,10 +411,16 @@ internal sealed class InlineFunctionRuntime : IDisposable
             catch (CamusDBException failed) when (failed.InnerException is { } cause and not OperationCanceledException && CallBudget.IsBudgetException(cause))
 
             {
+                if (cause is CallBudgetExceededException { Kind: CallBudgetKind.Time } && statement is { IsExpired: true })
+                    throw statement.Exceeded();
+
                 throw BudgetExceeded(calledName, cause, timeout, allocation);
             }
             catch (CamusDBException failed) when (failed.InnerException is System.Text.RegularExpressions.RegexMatchTimeoutException && Environment.TickCount64 >= deadline)
             {
+                if (statement is { IsExpired: true })
+                    throw statement.Exceeded();
+
                 // The match had the time the call had left as its timeout, and used all of it.
                 throw BudgetExceeded(calledName, new CallBudgetExceededException(CallBudgetKind.Time, failed.Message), timeout, allocation);
             }
@@ -421,6 +436,29 @@ internal sealed class InlineFunctionRuntime : IDisposable
                 }
             }
         };
+    }
+
+    /// <summary>
+    /// The time limit of one call or one trigger fire: the smaller of its own limit and the time its
+    /// statement has left. Fails the statement when no time is left, before the body runs.
+    /// </summary>
+    /// <param name="timeoutMs">The limit of one call; zero or less for none.</param>
+    /// <param name="statement">The deadline of the statement that makes the call, or null when it has none.</param>
+    /// <returns>The limit to give the call; zero or less for none.</returns>
+    internal static int StatementBoundTimeout(int timeoutMs, StatementDeadline? statement)
+    {
+        if (statement is null)
+            return timeoutMs;
+
+        long remaining = statement.RemainingMs;
+
+        if (remaining <= 0)
+            throw statement.Exceeded();
+
+        if (timeoutMs > 0 && timeoutMs <= remaining)
+            return timeoutMs;
+
+        return (int)Math.Min(remaining, int.MaxValue);
     }
 
     private static CamusDBException BudgetExceeded(string function, Exception cause, int timeoutMs, long allocationBytes) =>
@@ -557,6 +595,13 @@ internal sealed class InlineFunctionRuntime : IDisposable
 
         return async (context, session) =>
         {
+            // A fire never runs past the deadline of the statement that fired it (statement_timeout_ms),
+            // and does not start once that has passed: a statement fires a trigger once per row, so the
+            // budget of one fire alone does not bound the statement. Checked before the culture is
+            // pinned, which only the try below puts back.
+            StatementDeadline? statement = StatementDeadline.Current;
+            statement?.ThrowIfExpired();
+
             CultureInfo culture = CultureInfo.CurrentCulture;
             CultureInfo uiCulture = CultureInfo.CurrentUICulture;
             bool pinned = culture.Name.Length != 0 || uiCulture.Name.Length != 0;
@@ -567,8 +612,9 @@ internal sealed class InlineFunctionRuntime : IDisposable
                 CultureInfo.CurrentUICulture = CultureInfo.InvariantCulture;
             }
 
-            TriggerBudget frame = new(timeout, allocation, array);
-            long deadline = timeout > 0 ? Environment.TickCount64 + timeout : long.MaxValue;
+            long statementDeadline = statement?.DeadlineTicks ?? long.MaxValue;
+            TriggerBudget frame = new(timeout, allocation, array, statementDeadline);
+            long deadline = Math.Min(timeout > 0 ? Environment.TickCount64 + timeout : long.MaxValue, statementDeadline);
 
             try
             {
@@ -577,10 +623,16 @@ internal sealed class InlineFunctionRuntime : IDisposable
             }
             catch (Exception failed) when (failed is not OperationCanceledException and not CamusDBException && CallBudget.IsBudgetException(failed))
             {
+                if (failed is CallBudgetExceededException { Kind: CallBudgetKind.Time } && statement is { IsExpired: true })
+                    throw statement.Exceeded();
+
                 throw BudgetExceeded("Trigger", triggerName, failed, timeout, allocation);
             }
             catch (System.Text.RegularExpressions.RegexMatchTimeoutException timedOut) when (Environment.TickCount64 >= deadline)
             {
+                if (statement is { IsExpired: true })
+                    throw statement.Exceeded();
+
                 throw BudgetExceeded("Trigger", triggerName, new CallBudgetExceededException(CallBudgetKind.Time, timedOut.Message), timeout, allocation);
             }
             finally
