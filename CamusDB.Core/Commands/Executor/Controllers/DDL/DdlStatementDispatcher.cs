@@ -230,6 +230,9 @@ internal sealed class DdlStatementDispatcher
             ? null
             : DML.SQLExecutorBaseCreator.UnquoteStringLiteral(ast.rightAst.yytext!);
 
+        // This statement builds no CommentTicket, so it checks the bound every other comment has here.
+        CommandsValidator.Validators.ValidatorBase.ValidateCommentLength(comment, $"View '{viewName}'");
+
         return catalogs.SetViewCommentAsync(database, viewName, comment);
     }
 
@@ -240,9 +243,13 @@ internal sealed class DdlStatementDispatcher
     /// </summary>
     internal async Task CommentOnMaterializedViewAsync(DatabaseDescriptor database, NodeAst ast, ExecuteSQLTicket ticket)
     {
-        MaterializedViewRefresher.RequireMaterializedView(database, ast.leftAst!.yytext!);
+        string viewName = ast.leftAst!.yytext!;
+        MaterializedViewRefresher.RequireMaterializedView(database, viewName);
 
         CommentTicket commentTicket = sqlExecutor.CreateCommentTicket(ticket, ast);
+
+        // Checked first so the error names a materialized view; the ticket's target is the relation.
+        CommandsValidator.Validators.ValidatorBase.ValidateCommentLength(commentTicket.Comment, $"Materialized view '{viewName}'");
         context.Validator.Validate(commentTicket);
         await schemaDdl.Comment(database, commentTicket).ConfigureAwait(false);
     }
