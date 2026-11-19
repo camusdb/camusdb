@@ -24,9 +24,10 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// a view over the materialized view was left behind. Each dependent is now dropped by the path that
 /// owns its kind — a materialized view under its refresh fence.</para>
 ///
-/// <para><b>Authorized first, dropped after.</b> <c>CASCADE</c> removes objects the caller did not
-/// name, so each is checked on its own. All of them are checked before any is dropped, so a refusal
-/// half-way down the chain cannot leave the chain half-removed.</para>
+/// <para><b>Authorized and fenced first, dropped after.</b> <c>CASCADE</c> removes objects the caller
+/// did not name, so each is checked on its own. All of them are checked, and the refresh fence of every
+/// materialized view among them is taken, before any is dropped, so a refusal half-way down the chain
+/// cannot leave the chain half-removed.</para>
 ///
 /// <para><b>Dependents first.</b> The order comes from
 /// <see cref="ViewDependencyGraph.TransitiveDependentsOfView"/>, which lists every object after
@@ -35,45 +36,75 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// </summary>
 internal static class DependentRelationDropper
 {
-    internal static async Task DropTransitiveDependentsAsync(
-        CommandExecutor executor,
-        CatalogsManager catalogs,
-        DatabaseRegistry registry,
-        DatabaseDescriptor database,
-        string relationId,
-        ILogger<ICamusDB> logger)
+    /// <summary>One view or materialized view a cascade removes.</summary>
+    internal readonly record struct Dependent(string Name, string Id, bool Materialized);
+
+    /// <summary>
+    /// Lists every view and materialized view that reads <paramref name="relationId"/>, transitively,
+    /// each after everything that reads it, and checks that the caller may drop each one. Removes
+    /// nothing.
+    /// </summary>
+    internal static List<Dependent> PlanTransitiveDependents(DatabaseDescriptor database, string relationId)
     {
-        List<(string Name, string Id, bool Materialized)> ordered = [];
+        List<Dependent> ordered = [];
 
         foreach (string dependent in ViewDependencyGraph.TransitiveDependentsOfView(database.Schema, relationId))
         {
             if (database.Schema.Views.TryGetValue(dependent, out ViewSchema? view))
             {
                 ViewAuthorization.Require(database, dependent, view, Privilege.Drop);
-                ordered.Add((dependent, view.Id!, false));
+                ordered.Add(new Dependent(dependent, view.Id!, Materialized: false));
                 continue;
             }
 
             if (database.Schema.Tables.TryGetValue(dependent, out TableSchema? relation) && relation.IsMaterializedView)
             {
                 MaterializedViewRefresher.RequireTargetPrivilege(database, dependent, relation);
-                ordered.Add((dependent, relation.Id!, true));
+                ordered.Add(new Dependent(dependent, relation.Id!, Materialized: true));
             }
         }
 
-        foreach ((string name, string id, bool materialized) in ordered)
+        return ordered;
+    }
+
+    /// <summary>The materialized views in <paramref name="plan"/>, as the fence set takes them.</summary>
+    internal static IEnumerable<(string Name, string Id)> MaterializedViewsIn(List<Dependent> plan)
+    {
+        foreach (Dependent dependent in plan)
         {
-            if (materialized)
+            if (dependent.Materialized)
+                yield return (dependent.Name, dependent.Id);
+        }
+    }
+
+    /// <summary>
+    /// Drops the dependents of a plan in its order.
+    /// </summary>
+    /// <remarks>
+    /// The caller holds the refresh fence of every materialized view in the plan, taken through
+    /// <see cref="RefreshFenceSet"/> before this runs, so a running refresh refuses the statement before
+    /// any dependent is removed.
+    /// </remarks>
+    internal static async Task DropPlannedAsync(
+        CommandExecutor executor,
+        CatalogsManager catalogs,
+        DatabaseDescriptor database,
+        List<Dependent> plan,
+        ILogger<ICamusDB> logger)
+    {
+        foreach (Dependent dependent in plan)
+        {
+            if (dependent.Materialized)
             {
-                await MaterializedViewCreator.DropFencedAsync(
-                    executor, catalogs, registry, database, name, id, logger).ConfigureAwait(false);
+                await MaterializedViewCreator.DropUnderFenceAsync(
+                    executor, catalogs, database, dependent.Name, dependent.Id, logger).ConfigureAwait(false);
                 continue;
             }
 
             // Already gone is fine: an earlier step of this same cascade, or a concurrent drop, got
             // there first, and the outcome the caller asked for holds either way.
-            if (CatalogsManager.ViewExists(database, name))
-                await catalogs.DropViewAsync(database, name, expectedViewId: id).ConfigureAwait(false);
+            if (CatalogsManager.ViewExists(database, dependent.Name))
+                await catalogs.DropViewAsync(database, dependent.Name, expectedViewId: dependent.Id).ConfigureAwait(false);
         }
     }
 }

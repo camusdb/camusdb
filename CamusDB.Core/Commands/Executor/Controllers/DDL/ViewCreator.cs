@@ -207,8 +207,19 @@ internal sealed class ViewCreator
             // so each one is checked on its own, and all of them before any goes. A materialized view
             // that reads this view is a dependent too, and is dropped by its own path.
             if (cascade)
-                await DependentRelationDropper.DropTransitiveDependentsAsync(
-                    executor, catalogs, await registryTask.ConfigureAwait(false), database, viewId, logger).ConfigureAwait(false);
+            {
+                List<DependentRelationDropper.Dependent> plan = DependentRelationDropper.PlanTransitiveDependents(database, viewId);
+
+                // Every materialized view the cascade reaches is fenced before anything is dropped,
+                // so a running refresh of one of them refuses the statement while the cascade is whole.
+                RefreshFenceSet fences = await RefreshFenceSet.AcquireAsync(
+                    await registryTask.ConfigureAwait(false),
+                    database,
+                    DependentRelationDropper.MaterializedViewsIn(plan)).ConfigureAwait(false);
+
+                await using (fences.ConfigureAwait(false))
+                    await DependentRelationDropper.DropPlannedAsync(executor, catalogs, database, plan, logger).ConfigureAwait(false);
+            }
 
             if (BeforeProposeForTesting is { } beforeDrop)
                 await beforeDrop(name).ConfigureAwait(false);

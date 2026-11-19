@@ -219,6 +219,114 @@ public sealed class TestMaterializedViewDropAndRename : SharedNodeBaseTest
     }
 
     /// <summary>
+    /// Runs <paramref name="statement"/> while a refresh of <paramref name="refreshed"/> is between
+    /// staging and publish, and returns the error it raised.
+    /// </summary>
+    private static async Task<CamusDBException?> DuringRefreshOf(
+        DatabaseDescriptor database, CommandExecutor executor, string dbname, string refreshed, string statement)
+    {
+        CamusDBException? duringRefresh = null;
+
+        MaterializedViewRefresher.AfterStagingForTesting = async () =>
+        {
+            MaterializedViewRefresher.AfterStagingForTesting = null;
+            duringRefresh = Assert.ThrowsAsync<CamusDBException>(async () => await ExecDdl(database, executor, dbname, statement));
+            await Task.CompletedTask;
+        };
+
+        try
+        {
+            await ExecNonQuery(database, executor, dbname, $"REFRESH MATERIALIZED VIEW {refreshed}");
+        }
+        finally
+        {
+            MaterializedViewRefresher.AfterStagingForTesting = null;
+        }
+
+        Assert.IsNotNull(duringRefresh, "the statement inside the rebuild window must have been attempted");
+        return duringRefresh;
+    }
+
+    /// <summary>
+    /// A cascade used to drop the dependents first and take the refresh fence after, so a running
+    /// refresh refused the statement with the dependent views already gone.
+    /// </summary>
+    [Test]
+    public async Task ACascadeRefusedByARunningRefreshKeepsEveryDependent()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await SeedOrders(database, executor, dbname);
+
+        await ExecDdl(database, executor, dbname,
+            "CREATE MATERIALIZED VIEW open_orders AS SELECT id, customer, total FROM orders WHERE status = 'open'");
+        await ExecDdl(database, executor, dbname,
+            "CREATE VIEW acme_open AS SELECT id, total FROM open_orders WHERE customer = 'acme'");
+        await ExecDdl(database, executor, dbname,
+            "CREATE VIEW acme_big AS SELECT id FROM acme_open WHERE total > 100");
+
+        CamusDBException? refused = await DuringRefreshOf(
+            database, executor, dbname, "open_orders", "DROP MATERIALIZED VIEW open_orders CASCADE");
+
+        Assert.AreEqual(CamusDBErrorCodes.RefreshAlreadyInProgress, refused!.Code);
+        StringAssert.Contains("'open_orders'", refused.Message);
+
+        foreach (string kept in new[] { "acme_open", "acme_big" })
+            Assert.IsTrue(database.Schema.Views.ContainsKey(kept), $"{kept} must survive the refused drop");
+        Assert.IsTrue(database.Schema.Tables.ContainsKey("open_orders"));
+        Assert.AreEqual(1, (await ExecQuery(database, executor, dbname, "SELECT id FROM acme_big")).Count);
+
+        await ExecDdl(database, executor, dbname, "DROP MATERIALIZED VIEW open_orders CASCADE");
+        Assert.IsFalse(database.Schema.Views.ContainsKey("acme_open"));
+        AssertNoStagingLeft(database);
+    }
+
+    /// <summary>
+    /// The same refusal when the refresh runs on a materialized view further down the cascade, for
+    /// both <c>DROP MATERIALIZED VIEW … CASCADE</c> and <c>DROP VIEW … CASCADE</c>.
+    /// </summary>
+    [Test]
+    public async Task ACascadeThatReachesARefreshingMaterializedViewDropsNothing()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await SeedOrders(database, executor, dbname);
+
+        await ExecDdl(database, executor, dbname,
+            "CREATE VIEW open_orders AS SELECT id, customer, total FROM orders WHERE status = 'open'");
+        await ExecDdl(database, executor, dbname,
+            "CREATE MATERIALIZED VIEW open_snapshot AS SELECT id, customer, total FROM open_orders");
+        await ExecDdl(database, executor, dbname,
+            "CREATE VIEW acme_snapshot AS SELECT id FROM open_snapshot WHERE customer = 'acme'");
+        await ExecDdl(database, executor, dbname,
+            "CREATE MATERIALIZED VIEW open_totals AS SELECT customer, SUM(total) AS spent FROM open_snapshot GROUP BY customer");
+        await ExecDdl(database, executor, dbname,
+            "CREATE VIEW top_open AS SELECT customer FROM open_totals WHERE spent > 100");
+
+        string[] views = ["open_orders", "acme_snapshot", "top_open"];
+        string[] materialized = ["open_snapshot", "open_totals"];
+
+        foreach (string statement in new[] { "DROP MATERIALIZED VIEW open_snapshot CASCADE", "DROP VIEW open_orders CASCADE" })
+        {
+            CamusDBException? refused = await DuringRefreshOf(database, executor, dbname, "open_totals", statement);
+
+            Assert.AreEqual(CamusDBErrorCodes.RefreshAlreadyInProgress, refused!.Code, statement);
+            StringAssert.Contains("'open_totals'", refused.Message, "the refusal names the view being refreshed");
+
+            foreach (string kept in views)
+                Assert.IsTrue(database.Schema.Views.ContainsKey(kept), $"{kept} must survive {statement}");
+            foreach (string kept in materialized)
+                Assert.IsTrue(database.Schema.Tables.ContainsKey(kept), $"{kept} must survive {statement}");
+        }
+
+        await ExecDdl(database, executor, dbname, "DROP VIEW open_orders CASCADE");
+
+        foreach (string gone in views)
+            Assert.IsFalse(database.Schema.Views.ContainsKey(gone), $"{gone} goes once no refresh runs");
+        foreach (string gone in materialized)
+            Assert.IsFalse(database.Schema.Tables.ContainsKey(gone), $"{gone} goes once no refresh runs");
+        AssertNoStagingLeft(database);
+    }
+
+    /// <summary>
     /// <c>REFRESH MATERIALIZED VIEW</c> belongs to the non-query path, but a client that classifies it
     /// as view DDL by its first words — camus-cli did — sends it to the DDL path, which answered
     /// "Unknown DDL AST stmt". Both paths now run it through one implementation.
