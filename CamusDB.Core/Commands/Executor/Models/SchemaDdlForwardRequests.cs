@@ -171,6 +171,9 @@ public sealed class ForwardDropTableRequest
 
     /// <summary>Carries <c>DropTableTicket.AllowMaterializedView</c> to the leader.</summary>
     public bool AllowMaterializedView { get; set; }
+
+    /// <summary>Carries <c>DropTableTicket.ExpectedTableId</c> to the leader. Null when unset.</summary>
+    public string? ExpectedTableId { get; set; }
 }
 
 public sealed class ForwardTruncateTableRequest

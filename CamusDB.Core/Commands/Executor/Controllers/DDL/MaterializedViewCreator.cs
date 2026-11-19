@@ -207,9 +207,23 @@ internal sealed class MaterializedViewCreator
         await MaterializedViewRefresher.ReclaimAbandonedRefreshAsync(
             executor, catalogs, database, viewId, logger).ConfigureAwait(false);
 
+        if (BeforeRelationDropForTesting is { } beforeDrop)
+            await beforeDrop(name).ConfigureAwait(false);
+
+        // The rename that the refresh fence does not exclude can give the name to a different relation
+        // during the awaits above. The drop carries the id, and the table-drop path refuses a name that
+        // now resolves to anything else.
         return await executor.DropTable(
-            new DropTableTicket(database.Name, name, ifExists: true, force: false, allowMaterializedView: true)).ConfigureAwait(false);
+            new DropTableTicket(
+                database.Name, name, ifExists: true, force: false, allowMaterializedView: true, expectedTableId: viewId)).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// Test-only seam: invoked with the materialized view's name after a drop checked the name under
+    /// the refresh fence and reclaimed any abandoned staging relation, and before the relation drop
+    /// runs, so a test can commit a rename and a create inside that window. Null in production.
+    /// </summary>
+    internal static Func<string, Task>? BeforeRelationDropForTesting { get; set; }
 
     /// <summary>
     /// Checks, under the refresh fence, that <paramref name="name"/> still names the materialized view

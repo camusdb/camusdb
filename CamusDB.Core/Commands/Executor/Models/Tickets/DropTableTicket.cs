@@ -33,12 +33,29 @@ public readonly struct DropTableTicket
     /// </summary>
     public bool AllowMaterializedView { get; }
 
-    public DropTableTicket(string databaseName, string tableName, bool ifExists, bool force = false, bool allowMaterializedView = false)
+    /// <summary>
+    /// The id the caller resolved <see cref="TableName"/> to, or null to drop whatever relation has the
+    /// name. Set by an engine path that resolved the name earlier and then awaited, such as
+    /// <c>DROP MATERIALIZED VIEW</c>: a rename in that wait can give the name to a different relation,
+    /// and dropping by name alone would remove it. The drop is refused with
+    /// <c>ConcurrentSchemaChange</c> when the name resolves to another id. It rides the forwarded
+    /// request, so the schema leader checks it too.
+    /// </summary>
+    public string? ExpectedTableId { get; }
+
+    public DropTableTicket(
+        string databaseName,
+        string tableName,
+        bool ifExists,
+        bool force = false,
+        bool allowMaterializedView = false,
+        string? expectedTableId = null)
     {
         DatabaseName = databaseName;
         TableName = tableName;
         IfExists = ifExists;
         Force = force;
         AllowMaterializedView = allowMaterializedView;
+        ExpectedTableId = expectedTableId;
     }
 }

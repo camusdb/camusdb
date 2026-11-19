@@ -1469,6 +1469,27 @@ internal sealed partial class SchemaDdlService
     }
 
     /// <summary>
+    /// Refuses a drop whose ticket names an <see cref="DropTableTicket.ExpectedTableId"/> when the
+    /// opened relation, or the relation the name resolves to now, has a different id. Runs under the
+    /// DDL gate: the relation was opened by name before the gate was taken, and a rename in between
+    /// can give the name to a different relation.
+    /// </summary>
+    private static void RequireExpectedRelation(DatabaseDescriptor database, TableDescriptor table, DropTableTicket ticket)
+    {
+        if (ticket.ExpectedTableId is not { Length: > 0 } expected)
+            return;
+
+        if (string.Equals(table.Id, expected, StringComparison.Ordinal)
+            && database.Schema.Tables.TryGetValue(ticket.TableName, out TableSchema? current)
+            && string.Equals(current.Id, expected, StringComparison.Ordinal))
+            return;
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.ConcurrentSchemaChange,
+            $"'{ticket.TableName}' was renamed or replaced by another statement while it was being dropped; nothing was dropped");
+    }
+
+    /// <summary>
     /// Refuses <c>ALTER TABLE … RENAME TO</c> on a materialized view unless the ticket says the caller
     /// knows what it is renaming, naming the statement to use instead — the rename-side twin of
     /// <see cref="RequireDroppableAsTable"/>. Harmless either way today, since both statements go
@@ -1523,6 +1544,7 @@ internal sealed partial class SchemaDdlService
                 // refusal costs nothing to undo. The ticket API, the SQL path and a forwarded drop on
                 // the leader all reach this point.
                 RequireDroppableAsTable(table, ticket);
+                RequireExpectedRelation(database, table, ticket);
                 ViewDependencyRules.RequireNotReadByViews(database.Schema, table.Schema);
                 ForeignKeyDependencyRules.RequireNotReferencedByOtherTables(database.Schema, table.Schema, "drop table");
 

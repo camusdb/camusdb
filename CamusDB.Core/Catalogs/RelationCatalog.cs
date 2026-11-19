@@ -87,7 +87,7 @@ internal sealed class RelationCatalog
     /// without leaving a recovery record. The caller must have already retained the row/index data.
     /// </summary>
     internal Task<TableSchema?> DropTableSchema(DatabaseDescriptor database, string tableName, string tableId, KvTransaction tx, bool deferred = false)
-        => DropTableReplicatedAsync(database, tableName, tx, deferred);
+        => DropTableReplicatedAsync(database, tableName, tableId, tx, deferred);
 
     /// <summary>
     /// Allows querying the current schema of a table object.
@@ -154,14 +154,15 @@ internal sealed class RelationCatalog
         return GetTableSchema(database, ticket.TableName);
     }
 
-    private async Task<TableSchema?> DropTableReplicatedAsync(DatabaseDescriptor database, string tableName, KvTransaction tx, bool deferred)
+    private async Task<TableSchema?> DropTableReplicatedAsync(
+        DatabaseDescriptor database, string tableName, string tableId, KvTransaction tx, bool deferred)
     {
         SchemaChangeLogEntry entry;
 
         await database.Schema.AcquireLockAsync().ConfigureAwait(false);
         try
         {
-            entry = SchemaChangeEntryFactory.DropTableEntry(database, tableName, tx, deferred);
+            entry = SchemaChangeEntryFactory.DropTableEntry(database, tableName, tableId, tx, deferred);
             SchemaDeltaApplier.ValidateSchemaDelta(database, entry);
         }
         finally

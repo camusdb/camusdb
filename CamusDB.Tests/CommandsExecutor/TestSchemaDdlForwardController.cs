@@ -633,9 +633,17 @@ public sealed class TestSchemaDdlForwardController
             Assert.AreEqual(indexes, descriptor.Schema.Tables["cities"].Indexes!.Count, "A refused drop must not have dropped any index");
             Assert.IsTrue(descriptor.Schema.Tables.ContainsKey("city_names"));
 
-            // The request DROP MATERIALIZED VIEW forwards carries the flag, and goes through.
+            // A forwarded drop whose expected id the name no longer has is refused on the leader.
+            SchemaDdlForwardResponse? staleId = ExtractResponse(await BuildController(
+                DropBody(db, "city_names", force: false, allowMaterializedView: true, expectedTableId: "not-its-id"), clusterNode: node).ForwardDropTable());
+            Assert.AreEqual("failed", staleId!.Status);
+            Assert.AreEqual(CamusDBErrorCodes.ConcurrentSchemaChange, staleId.Code);
+            Assert.IsTrue(descriptor.Schema.Tables.ContainsKey("city_names"));
+
+            // The request DROP MATERIALIZED VIEW forwards carries the flag and the id, and goes through.
             SchemaDdlForwardResponse? dropAsMatView = ExtractResponse(await BuildController(
-                DropBody(db, "city_names", force: false, allowMaterializedView: true), clusterNode: node).ForwardDropTable());
+                DropBody(db, "city_names", force: false, allowMaterializedView: true,
+                    expectedTableId: descriptor.Schema.Tables["city_names"].Id), clusterNode: node).ForwardDropTable());
             Assert.AreEqual("ok", dropAsMatView!.Status);
             Assert.IsTrue(dropAsMatView.Applied);
             Assert.IsFalse(descriptor.Schema.Tables.ContainsKey("city_names"));
@@ -645,7 +653,7 @@ public sealed class TestSchemaDdlForwardController
             await DropTestDatabaseAsync(db);
         }
 
-        static string DropBody(string db, string table, bool force, bool allowMaterializedView = false) =>
+        static string DropBody(string db, string table, bool force, bool allowMaterializedView = false, string? expectedTableId = null) =>
             JsonSerializer.Serialize(new ForwardDropTableRequest
             {
                 OperationId = Guid.NewGuid().ToString("N"),
@@ -653,6 +661,7 @@ public sealed class TestSchemaDdlForwardController
                 TableName = table,
                 Force = force,
                 AllowMaterializedView = allowMaterializedView,
+                ExpectedTableId = expectedTableId,
             }, JsonOpts);
     }
 

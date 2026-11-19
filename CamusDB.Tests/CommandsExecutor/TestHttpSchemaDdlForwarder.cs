@@ -348,6 +348,18 @@ public sealed class TestHttpSchemaDdlForwarder
         Assert.That(handler.LastRequest!.RequestUri!.ToString(), Does.EndWith("/internal/schema-ddl/drop-table"));
     }
 
+    [Test]
+    public async Task ForwardDropTable_CarriesTheExpectedTableId()
+    {
+        FakeMessageHandler handler = new(OkResponse(true));
+        HttpSchemaDdlForwarder forwarder = BuildForwarder(handler);
+
+        DropTableTicket ticket = new("mydb", "robots", ifExists: true, allowMaterializedView: true, expectedTableId: "A7");
+        await forwarder.ForwardDropTableAsync("leader:7070", ticket, StableOperationId, CancellationToken.None);
+
+        Assert.That(handler.LastBody, Does.Contain("xpectedTableId\":\"A7\""));
+    }
+
     // ── Transport-failure → null ─────────────────────────────────────────
 
     [Test]
@@ -425,16 +437,19 @@ public sealed class TestHttpSchemaDdlForwarder
 
         public HttpRequestMessage? LastRequest { get; private set; }
 
+        public string? LastBody { get; private set; }
+
         public FakeMessageHandler(HttpContent content, HttpStatusCode statusCode = HttpStatusCode.OK)
         {
             this.responseContent = content;
             this.statusCode = statusCode;
         }
 
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             LastRequest = request;
-            return Task.FromResult(new HttpResponseMessage(statusCode) { Content = responseContent });
+            LastBody = request.Content is null ? null : await request.Content.ReadAsStringAsync(cancellationToken);
+            return new HttpResponseMessage(statusCode) { Content = responseContent };
         }
     }
 

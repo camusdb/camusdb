@@ -157,7 +157,8 @@ internal static class SchemaChangeEntryFactory
         };
     }
 
-    internal static SchemaChangeLogEntry DropTableEntry(DatabaseDescriptor database, string tableName, KvTransaction tx, bool deferred)
+    internal static SchemaChangeLogEntry DropTableEntry(
+        DatabaseDescriptor database, string tableName, string tableId, KvTransaction tx, bool deferred)
     {
         return new()
         {
@@ -166,7 +167,12 @@ internal static class SchemaChangeEntryFactory
             FromVersion = database.Schema.SchemaVersion,
             ToVersion = database.Schema.SchemaVersion + 1,
             Op = SchemaOp.DropTable,
-            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaDropTablePayload { TableName = tableName, Deferred = deferred })
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaDropTablePayload
+            {
+                TableName = tableName,
+                Deferred = deferred,
+                ExpectedTableId = tableId,
+            })
         };
     }
 

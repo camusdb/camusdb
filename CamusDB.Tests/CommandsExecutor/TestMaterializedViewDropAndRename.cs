@@ -13,7 +13,9 @@ using NUnit.Framework;
 
 using CamusDB.Core;
 using CamusDB.Core.Catalogs;
+using CamusDB.Core.Catalogs.Apply;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.Catalogs.Replication;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Controllers.DDL;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -324,6 +326,80 @@ public sealed class TestMaterializedViewDropAndRename : SharedNodeBaseTest
         foreach (string gone in materialized)
             Assert.IsFalse(database.Schema.Tables.ContainsKey(gone), $"{gone} goes once no refresh runs");
         AssertNoStagingLeft(database);
+    }
+
+    /// <summary>
+    /// The drop checked the view's id under the refresh fence, awaited, and then dropped by name. A
+    /// rename and a create in that wait made it drop the new relation, which can be an ordinary table.
+    /// </summary>
+    [Test]
+    public async Task ADropDoesNotRemoveARelationThatTookTheNameMeanwhile()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await SeedOrders(database, executor, dbname);
+
+        await ExecDdl(database, executor, dbname,
+            "CREATE MATERIALIZED VIEW open_orders AS SELECT id, total FROM orders WHERE status = 'open'");
+
+        MaterializedViewCreator.BeforeRelationDropForTesting = async _ =>
+        {
+            MaterializedViewCreator.BeforeRelationDropForTesting = null;
+            await ExecDdl(database, executor, dbname, "ALTER MATERIALIZED VIEW open_orders RENAME TO open_orders_old");
+            await ExecDdl(database, executor, dbname, "CREATE TABLE open_orders (id int64 PRIMARY KEY, note string(16))");
+        };
+
+        CamusDBException? refused;
+        try
+        {
+            refused = Assert.ThrowsAsync<CamusDBException>(async () =>
+                await ExecDdl(database, executor, dbname, "DROP MATERIALIZED VIEW open_orders"));
+        }
+        finally
+        {
+            MaterializedViewCreator.BeforeRelationDropForTesting = null;
+        }
+
+        Assert.AreEqual(CamusDBErrorCodes.ConcurrentSchemaChange, refused!.Code);
+
+        Assert.IsTrue(database.Schema.Tables.TryGetValue("open_orders", out TableSchema? newcomer), "the new table survives");
+        Assert.IsFalse(newcomer!.IsMaterializedView);
+        Assert.IsTrue(database.Schema.Tables["open_orders_old"].IsMaterializedView, "and so does the renamed view");
+        AssertNoStagingLeft(database);
+    }
+
+    /// <summary>
+    /// The apply-time half, for a rename that commits on another node after the proposer's checks: a
+    /// drop entry whose name now resolves to a different id is refused, and drops nothing.
+    /// </summary>
+    [Test]
+    public async Task ADropEntryForAnIdTheNameNoLongerHasIsRefused()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await SeedOrders(database, executor, dbname);
+
+        Schema schema = SchemaReplicator.CloneSchema(database.Schema);
+        long version = schema.SchemaVersion;
+
+        SchemaChangeLogEntry entry = new()
+        {
+            Database = database.Id,
+            FromVersion = version,
+            ToVersion = version + 1,
+            Op = SchemaOp.DropTable,
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaDropTablePayload
+            {
+                TableName = "orders",
+                ExpectedTableId = "not-the-orders-id",
+            }),
+        };
+
+        SchemaDeltaRefusedException? refused = Assert.Throws<SchemaDeltaRefusedException>(
+            () => SchemaDeltaApplier.ApplySchemaDelta(schema, database, entry));
+        Assert.AreEqual(CamusDBErrorCodes.ConcurrentSchemaChange, refused!.Code);
+
+        Assert.DoesNotThrow(() => SchemaDeltaApplier.ApplyOrRefuse(schema, database, entry));
+        Assert.IsTrue(schema.Tables.ContainsKey("orders"), "a refused drop leaves the relation that has the name");
+        Assert.IsTrue(SchemaDeltaApplier.WasSchemaDeltaApplied(schema, entry), "the refusal is how the entry landed");
     }
 
     /// <summary>

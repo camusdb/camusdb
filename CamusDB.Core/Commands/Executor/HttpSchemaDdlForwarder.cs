@@ -142,6 +142,7 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
             IfExists = ticket.IfExists,
             Force = ticket.Force,
             AllowMaterializedView = ticket.AllowMaterializedView,
+            ExpectedTableId = ticket.ExpectedTableId,
         };
 
         return await PostAsync(leader, "drop-table", request, cancellationToken).ConfigureAwait(false);
