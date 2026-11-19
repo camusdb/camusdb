@@ -29,6 +29,9 @@ internal static class CheckEnforcer
     /// </summary>
     public static void EnforceOnRow(TableDescriptor table, IReadOnlyDictionary<string, ColumnValue> row)
     {
+        // A row written through a view with WITH CHECK OPTION must also be visible through that view.
+        DML.ViewWriteContext.Current?.EnforceCheckOptions(table, row);
+
         List<CheckConstraintSchema>? checks = table.Schema.CheckConstraints;
 
         if (checks is null || checks.Count == 0)

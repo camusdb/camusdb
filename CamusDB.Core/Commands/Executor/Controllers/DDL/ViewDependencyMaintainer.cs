@@ -32,13 +32,15 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 internal static class ViewDependencyMaintainer
 {
     /// <summary>
-    /// Refuses a drop that would leave a view reading a relation that no longer exists.
+    /// Refuses a <c>DROP MATERIALIZED VIEW</c> that would leave a view or materialized view reading a
+    /// relation that no longer exists.
     /// </summary>
     /// <remarks>
-    /// This makes <c>DROP TABLE</c> stricter than it was before views existed, which is deliberate
-    /// and matches PostgreSQL: the alternative is a table drop that silently converts every dependent
-    /// view into a delayed error for whoever reads it next. <c>CASCADE</c> is the escape hatch, and it
-    /// is spelled out in the message.
+    /// <para><c>CASCADE</c> is the escape hatch, and the message names the statement that has it.
+    /// <c>DROP TABLE</c> has no <c>CASCADE</c> form and refuses a materialized view outright, so a
+    /// message that pointed there — as this one once did — sent the user to a statement that fails
+    /// twice. A plain table's form of this rule is
+    /// <see cref="Catalogs.Apply.ViewDependencyRules.RequireNotReadByViews"/>.</para>
     /// </remarks>
     public static void RequireNoDependentViews(Schema schema, string relationName, string relationId, bool cascade)
     {
@@ -50,10 +52,12 @@ internal static class ViewDependencyMaintainer
         if (dependents.Count == 0)
             return;
 
+        dependents.Sort(StringComparer.OrdinalIgnoreCase);
+
         throw new CamusDBException(
             CamusDBErrorCodes.DependentObjectsExist,
-            $"Cannot drop table '{relationName}' because other objects depend on it: " +
-            $"{string.Join(", ", dependents)}. Use DROP TABLE ... CASCADE to drop them too.");
+            $"Cannot drop materialized view '{relationName}' because other objects depend on it: " +
+            $"{string.Join(", ", dependents)}. Use DROP MATERIALIZED VIEW ... CASCADE to drop them too.");
     }
 
     /// <summary>
@@ -89,19 +93,17 @@ internal static class ViewDependencyMaintainer
 
         List<string> dependents = [];
 
-        foreach ((string viewName, ViewSchema view) in schema.Views)
+        // From the reverse index, so the check costs the definitions that read this column rather than
+        // every definition in the database. Materialized views are in it too: a body that would break on
+        // its next refresh has the same claim on the column as one that would break on its next read.
+        foreach (string dependent in ViewDependencyGraph.DependentsOfColumn(schema, columnId))
         {
-            if (Objects(view.Definition))
-                dependents.Add(viewName);
-        }
+            ViewDefinition? definition = schema.Views.TryGetValue(dependent, out ViewSchema? view)
+                ? view.Definition
+                : schema.Tables.TryGetValue(dependent, out TableSchema? relation) ? relation.ViewDefinition : null;
 
-        // Materialized views keep their definition on the relation rather than in the view map, and
-        // a body that would break on its next refresh has the same claim on the column as one that
-        // would break on its next read.
-        foreach ((string relationName, TableSchema relation) in schema.Tables)
-        {
-            if (relation.IsMaterializedView && Objects(relation.ViewDefinition))
-                dependents.Add(relationName);
+            if (Objects(definition))
+                dependents.Add(dependent);
         }
 
         bool Objects(ViewDefinition? definition)

@@ -1423,6 +1423,69 @@ public sealed record CamusDBOptions
     public int MaxViewExpansionDepth { get; init; } = 32;
 
     /// <summary>
+    /// Most bytes the normalized SQL of one view or materialized-view body may have. Checked at
+    /// <c>CREATE</c> and <c>CREATE OR REPLACE</c>, where the author can fix it, and refused with
+    /// <see cref="CamusDBErrorCodes.ViewComplexityLimitExceeded"/>. Read per statement.
+    /// <para><c>&lt;= 0</c> — limit is disabled.</para>
+    /// Default: <c>1048576</c> (1 MiB).
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
+    public long MaxViewDefinitionBytes { get; init; } = 1024 * 1024;
+
+    /// <summary>
+    /// Most syntax-tree nodes one view or materialized-view body may have, checked at <c>CREATE</c>.
+    /// Bytes alone do not bound the work of a body: a short text can be a deep or wide tree.
+    /// <para><c>&lt;= 0</c> — limit is disabled.</para>
+    /// Default: <c>200000</c>.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
+    public long MaxViewDefinitionNodes { get; init; } = 200_000;
+
+    /// <summary>
+    /// Most output columns one view or materialized view may have, checked at <c>CREATE</c>. Matches
+    /// PostgreSQL's per-relation column limit.
+    /// <para><c>&lt;= 0</c> — limit is disabled.</para>
+    /// Default: <c>1600</c>.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
+    public int MaxViewOutputColumns { get; init; } = 1_600;
+
+    /// <summary>
+    /// Most relations — tables, views and materialized views — one view body may read directly,
+    /// checked at <c>CREATE</c>. Every dependency is an edge that drop, rename and cycle checks walk.
+    /// <para><c>&lt;= 0</c> — limit is disabled.</para>
+    /// Default: <c>1000</c>.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
+    public int MaxViewDirectDependencies { get; init; } = 1_000;
+
+    /// <summary>
+    /// Most syntax-tree nodes the expansion of the views one statement reads may produce, counting
+    /// every body as often as it is expanded.
+    ///
+    /// <para>This and <see cref="MaxViewExpandedRelations"/> are what bound a view graph that is
+    /// shallow but wide: when each level reads the level below twice, ten levels expand 1024 copies
+    /// of the bottom view, and <see cref="MaxViewExpansionDepth"/> — which bounds nesting only — never
+    /// trips. Each view is charged before its body is copied, so the statement fails with
+    /// <see cref="CamusDBErrorCodes.ViewComplexityLimitExceeded"/> before the memory is spent. The
+    /// same budget applies when <c>CREATE VIEW</c> binds a body that reads other views, so an
+    /// adversarial definition is refused when it is created.</para>
+    /// <para><c>&lt;= 0</c> — limit is disabled.</para>
+    /// Default: <c>2000000</c>.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
+    public long MaxViewExpandedNodes { get; init; } = 2_000_000;
+
+    /// <summary>
+    /// Most view references the expansion of one statement may substitute, counting a view as often
+    /// as it is expanded. See <see cref="MaxViewExpandedNodes"/>.
+    /// <para><c>&lt;= 0</c> — limit is disabled.</para>
+    /// Default: <c>10000</c>.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
+    public int MaxViewExpandedRelations { get; init; } = 10_000;
+
+    /// <summary>
     /// Rows written per transaction while a materialized-view <c>REFRESH</c> populates its new
     /// contents.
     ///
@@ -1466,6 +1529,27 @@ public sealed record CamusDBOptions
     /// </summary>
     [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int MaterializedViewRefreshTakeoverAttempts { get; init; } = 3;
+
+    /// <summary>
+    /// Lease, in milliseconds, on the snapshot-floor hold a materialized-view <c>REFRESH</c> takes on
+    /// the MVCC history it reads.
+    ///
+    /// <para>A rebuild reads its source at one pinned snapshot for its whole duration, and the hold is
+    /// what keeps revision GC from reclaiming that history under it. The hold is renewed every
+    /// lease/3 while the rebuild runs and fails closed — the refresh aborts and the view keeps its
+    /// previous contents — once renewal stops being confirmed inside the lease. A longer lease rides
+    /// out a longer stall of the renewing node; a shorter one releases history sooner after a node
+    /// dies mid-rebuild.</para>
+    ///
+    /// <para>Separate from <see cref="BranchSnapshotHoldLeaseMs"/>, which the refresh used to borrow:
+    /// a branch's hold lives as long as the branch, a refresh's only as long as one rebuild, and an
+    /// operator tuning one should not be tuning the other by accident. Read when each refresh acquires
+    /// its hold, so a change applies from the next refresh. Must be &gt;= 5000.</para>
+    ///
+    /// Default: <c>300_000</c> (5 min).
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
+    public int MaterializedViewRefreshHoldLeaseMs { get; init; } = 300_000;
 
     /// <summary>
     /// How long, in milliseconds, a row read of an optimistic read-write transaction waits for a write

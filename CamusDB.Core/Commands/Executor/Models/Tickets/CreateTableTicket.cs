@@ -88,5 +88,15 @@ public readonly struct CreateTableTicket
     /// differently-configured table.
     /// </summary>
     public IReadOnlyDictionary<string, string>? Settings { get; }
+
+    /// <summary>
+    /// For a materialized view created <c>WITH DATA</c>: the staging relation its rows were loaded
+    /// into, which the creation adopts in the same replicated change. See
+    /// <c>SchemaCreateTablePayload.AdoptStagingTableId</c>.
+    /// </summary>
+    public string? AdoptStagingTableId { get; init; }
+
+    /// <summary>With <see cref="AdoptStagingTableId"/>: the snapshot the rows were read at.</summary>
+    public Kommander.Time.HLCTimestamp? RefreshedAt { get; init; }
 }
 

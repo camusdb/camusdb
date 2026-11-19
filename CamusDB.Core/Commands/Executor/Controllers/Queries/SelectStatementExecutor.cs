@@ -1207,7 +1207,9 @@ internal sealed class SelectStatementExecutor
             // requirement: reading through a view is a read of the view, whatever the outer statement
             // goes on to do with the rows.
             (viewName, view) => ViewAuthorization.Require(
-                database, viewName, view, Privilege.Select));
+                database, viewName, view, Privilege.Select),
+            options.MaxViewExpandedNodes,
+            options.MaxViewExpandedRelations);
 
     /// <summary>
     /// Plans and starts one SELECT statement whose AST has been expanded: a FROM-less projection, a join
@@ -1794,8 +1796,13 @@ internal sealed class SelectStatementExecutor
         // The hold is leased, and the lease is shorter than a large copy. Renewing it — and failing
         // closed when renewal stops being confirmed — is what makes "one pinned snapshot" true for the
         // whole read rather than only for its first few minutes.
+        // A refresh has its own lease knob; an AS OF SYSTEM TIME copy still shares the branch one.
+        int leaseMs = explicitSnapshot is null
+            ? options.BranchSnapshotHoldLeaseMs
+            : options.MaterializedViewRefreshHoldLeaseMs;
+
         SnapshotHoldLease lease = await SnapshotHoldLease.AcquireAsync(
-            kahuna, context.Logger, holderId, snapshotT, options.BranchSnapshotHoldLeaseMs,
+            kahuna, context.Logger, holderId, snapshotT, leaseMs,
             options.SnapshotHoldRetryBudgetMs, statementName)
             .ConfigureAwait(false);
 

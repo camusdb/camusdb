@@ -199,6 +199,55 @@ internal sealed class DdlStatementDispatcher
     }
 
     /// <summary>
+    /// Runs <c>COMMENT ON VIEW</c> for both entry points, for the same reason
+    /// <see cref="CommentOnSequenceAsync"/> serves both: a client routes a non-SELECT statement to
+    /// whichever endpoint it uses, and the statement must behave the same through either.
+    /// </summary>
+    /// <remarks>
+    /// The view is authorized here because nothing else will: setting its comment opens no relation, so
+    /// the per-table check that guards <c>COMMENT ON TABLE</c> never runs for a view.
+    /// </remarks>
+    internal Task CommentOnViewAsync(DatabaseDescriptor database, NodeAst ast)
+    {
+        string viewName = ast.leftAst!.yytext!;
+
+        if (!database.Schema.Views.TryGetValue(viewName, out ViewSchema? view))
+        {
+            // Named by the statement for the other kinds, as DROP VIEW does.
+            if (database.Schema.Tables.TryGetValue(viewName, out TableSchema? relation))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.ViewDoesntExist,
+                    relation.IsMaterializedView
+                        ? $"'{viewName}' is a materialized view; use COMMENT ON MATERIALIZED VIEW"
+                        : $"'{viewName}' is a table, not a view; use COMMENT ON TABLE");
+
+            throw new CamusDBException(CamusDBErrorCodes.ViewDoesntExist, $"View '{viewName}' does not exist");
+        }
+
+        ViewAuthorization.Require(database, viewName, view, Privilege.Alter);
+
+        string? comment = ast.rightAst is null
+            ? null
+            : DML.SQLExecutorBaseCreator.UnquoteStringLiteral(ast.rightAst.yytext!);
+
+        return catalogs.SetViewCommentAsync(database, viewName, comment);
+    }
+
+    /// <summary>
+    /// Runs <c>COMMENT ON MATERIALIZED VIEW</c> for both entry points. The name must be a materialized
+    /// view; the comment then goes through the relation comment path <c>COMMENT ON TABLE</c> uses,
+    /// which forwards to the schema leader and checks the caller against the relation.
+    /// </summary>
+    internal async Task CommentOnMaterializedViewAsync(DatabaseDescriptor database, NodeAst ast, ExecuteSQLTicket ticket)
+    {
+        MaterializedViewRefresher.RequireMaterializedView(database, ast.leftAst!.yytext!);
+
+        CommentTicket commentTicket = sqlExecutor.CreateCommentTicket(ticket, ast);
+        context.Validator.Validate(commentTicket);
+        await schemaDdl.Comment(database, commentTicket).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Executes a schema statement, and guards the statement boundary as the DML dispatcher does,
     /// under PostgreSQL's rule: a statement on an aborted transaction is refused, and a statement that
     /// fails aborts the caller's transaction (a single-node schema change persists its metadata inside
@@ -275,6 +324,14 @@ internal sealed class DdlStatementDispatcher
                     return await schemaDdl.Comment(database, commentTicket).ConfigureAwait(false);
                 }
 
+            case NodeType.CommentOnView:
+                await CommentOnViewAsync(database, ast).ConfigureAwait(false);
+                return new ExecuteDDLSQLResult(database, true);
+
+            case NodeType.CommentOnMaterializedView:
+                await CommentOnMaterializedViewAsync(database, ast, ticket).ConfigureAwait(false);
+                return new ExecuteDDLSQLResult(database, true);
+
             case NodeType.CreateView:
             case NodeType.CreateOrReplaceView:
                 {
@@ -289,8 +346,9 @@ internal sealed class DdlStatementDispatcher
             case NodeType.DropViewIfExists:
                 {
                     bool droppedView = await viewCreator.DropAsync(
-                        catalogs, database, ast,
-                        ifExists: ast.nodeType == NodeType.DropViewIfExists).ConfigureAwait(false);
+                        executor, catalogs, context.Registry, database, ast,
+                        ifExists: ast.nodeType == NodeType.DropViewIfExists,
+                        context.Logger).ConfigureAwait(false);
 
                     return new ExecuteDDLSQLResult(database, droppedView);
                 }
@@ -344,11 +402,16 @@ internal sealed class DdlStatementDispatcher
                             CamusDBErrorCodes.UserDoesNotExist,
                             $"User '{newOwnerName}' does not exist, or predates user ids and cannot own a view");
 
-                    ViewDefinition transferred = ownedView.Definition;
+                    // A copy, never the live definition: editing that in place showed the new owner
+                    // before the change committed, and kept showing it when the change failed.
+                    ViewDefinition transferred = ownedView.Definition.Copy();
                     transferred.Owner = newOwner?.Name ?? newOwnerName;
                     transferred.OwnerId = newOwner?.Id;
 
-                    await catalogs.SetViewDefinitionAsync(database, ownedViewName, transferred).ConfigureAwait(false);
+                    // Checked against the generation the copy was taken from, so a concurrent replace
+                    // is not overwritten with the body it replaced.
+                    await catalogs.SetViewDefinitionAsync(
+                        database, ownedViewName, transferred, expectedGeneration: ownedView.Generation).ConfigureAwait(false);
                     return new ExecuteDDLSQLResult(database, true);
                 }
 
@@ -365,11 +428,21 @@ internal sealed class DdlStatementDispatcher
             case NodeType.DropMaterializedViewIfExists:
                 {
                     bool droppedMatView = await matViewCreator.DropAsync(
-                        executor, catalogs, database, ast,
+                        executor, catalogs, context.Registry, database, ast,
                         ifExists: ast.nodeType == NodeType.DropMaterializedViewIfExists,
                         context.Logger).ConfigureAwait(false);
 
                     return new ExecuteDDLSQLResult(database, droppedMatView);
+                }
+
+            // Normally a non-query statement (it writes rows), and accepted here too so a client that
+            // classifies it as view DDL by its first words still works; see RefreshStatementAsync.
+            case NodeType.RefreshMaterializedView:
+                {
+                    int refreshedRows = await matViewRefresher.RefreshStatementAsync(
+                        executor, catalogs, context.Registry, database, ast, ticket, context.Logger).ConfigureAwait(false);
+
+                    return new ExecuteDDLSQLResult(database, true, refreshedRows);
                 }
 
             case NodeType.AlterMaterializedViewRenameTo:
@@ -390,7 +463,7 @@ internal sealed class DdlStatementDispatcher
                             sql => SQLParserProcessor.Parse(sql, sqlParserCache));
 
                     await schemaDdl.RenameTable(new RenameTableTicket(
-                        ticket.DatabaseName, oldMatViewName, newMatViewName), matViewRewrites).ConfigureAwait(false);
+                        ticket.DatabaseName, oldMatViewName, newMatViewName, allowMaterializedView: true), matViewRewrites).ConfigureAwait(false);
 
                     return new ExecuteDDLSQLResult(database, true);
                 }
@@ -623,6 +696,7 @@ internal sealed class DdlStatementDispatcher
                         return new ExecuteDDLSQLResult(database, forwarded.Value);
 
                     TableDescriptor renameTableDesc = await context.TableOpener.Open(database, oldTableName).ConfigureAwait(false);
+                    SchemaDdlService.RequireRenamableAsTable(renameTableDesc, renameTableTicket);
 
                     // A body written before relation ids were stored names its sources in text, so a
                     // rename would leave it pointing at something that no longer exists. Such a body

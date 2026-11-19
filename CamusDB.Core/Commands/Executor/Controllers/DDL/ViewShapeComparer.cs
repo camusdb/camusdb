@@ -59,74 +59,63 @@ internal static class ViewShapeComparer
 /// <para>Both walk <see cref="ViewDefinition.DependsOnTableIds"/> / <c>DependsOnViewIds</c>, which
 /// hold immutable ids. Resolving through names instead would give wrong answers the moment anything
 /// was renamed — which is precisely when a dependency check matters most.</para>
+///
+/// <para><b>Answered from <see cref="Schema.ViewDependencies"/>.</b> Every question
+/// here used to walk every definition in the database, and a cascade or a cycle check asked it once per
+/// vertex, so dropping, renaming and validating grew with the square of the catalog. The reverse index
+/// makes each answer cost what it contains, and a transitive walk cost the subgraph it visits.</para>
+///
+/// <para>A materialized view is a dependency <b>consumer</b> as much as a plain view is — it stores a
+/// query and reads whatever that query names — but its definition lives on a <see cref="TableSchema"/>
+/// in <see cref="Schema.Tables"/> rather than in <see cref="Schema.Views"/>. The index holds both, so
+/// every question here sees both.</para>
 /// </summary>
 internal static class ViewDependencyGraph
 {
-    /// <summary>
-    /// Every stored definition in the database, plain views and materialized views alike, as
-    /// (name, definition) pairs.
-    /// </summary>
-    /// <remarks>
-    /// A materialized view is a dependency <b>consumer</b> as much as a plain view is — it stores a
-    /// query and reads whatever that query names — but its definition lives on a
-    /// <see cref="TableSchema"/> in <see cref="Schema.Tables"/> rather than in
-    /// <see cref="Schema.Views"/>. Walking only the view map made every one of those edges invisible:
-    /// a base table could be dropped out from under a materialized view, a rename would leave its
-    /// stored body naming a relation that no longer exists (failing at the next refresh, not at the
-    /// rename), and a cascade would stop at the first materialized view in the chain. Both maps, one
-    /// walk.
-    /// </remarks>
-    private static IEnumerable<(string Name, ViewDefinition Definition)> AllDefinitions(Schema schema)
-    {
-        foreach ((string name, ViewSchema view) in schema.Views)
-        {
-            if (view.Definition is { } definition)
-                yield return (name, definition);
-        }
+    /// <summary>The name an id answers to now, or null for one that is gone.</summary>
+    private static string? NameOf(Schema schema, string id)
+        => schema.TryGetRelationNameById(id, out string? name) ? name : null;
 
-        foreach ((string name, TableSchema relation) in schema.Tables)
-        {
-            if (relation.IsMaterializedView && relation.ViewDefinition is { } definition)
-                yield return (name, definition);
-        }
+    /// <summary>The stored definition of the view or materialized view <paramref name="id"/>, or null.</summary>
+    private static ViewDefinition? DefinitionOf(Schema schema, string id)
+    {
+        if (NameOf(schema, id) is not { } name)
+            return null;
+
+        if (schema.Views.TryGetValue(name, out ViewSchema? view) && string.Equals(view.Id, id, StringComparison.Ordinal))
+            return view.Definition;
+
+        return schema.Tables.TryGetValue(name, out TableSchema? relation)
+            && relation.IsMaterializedView
+            && string.Equals(relation.Id, id, StringComparison.Ordinal)
+                ? relation.ViewDefinition
+                : null;
     }
 
-    /// <summary>Resolves a relation or view name to the id its definition is keyed by.</summary>
-    private static string? IdOf(Schema schema, string name)
+    private static List<string> Names(Schema schema, IEnumerable<string> ids)
     {
-        if (schema.Views.TryGetValue(name, out ViewSchema? view))
-            return view.Id;
+        List<string> names = [];
 
-        return schema.Tables.TryGetValue(name, out TableSchema? relation) ? relation.Id : null;
+        foreach (string id in ids)
+        {
+            if (NameOf(schema, id) is { } name)
+                names.Add(name);
+        }
+
+        return names;
     }
 
     /// <summary>Names of the views and materialized views that read <paramref name="relationId"/>, directly only.</summary>
     public static List<string> DirectDependentsOfTable(Schema schema, string relationId)
-    {
-        List<string> dependents = [];
-
-        foreach ((string name, ViewDefinition definition) in AllDefinitions(schema))
-        {
-            if (definition.DependsOnTableIds?.Contains(relationId, StringComparer.Ordinal) == true)
-                dependents.Add(name);
-        }
-
-        return dependents;
-    }
+        => Names(schema, schema.ViewDependencies.DependentsOfRelation(relationId));
 
     /// <summary>Names of the views and materialized views that read view <paramref name="viewId"/>, directly only.</summary>
     public static List<string> DirectDependentsOfView(Schema schema, string viewId)
-    {
-        List<string> dependents = [];
+        => Names(schema, schema.ViewDependencies.DependentsOfView(viewId));
 
-        foreach ((string name, ViewDefinition definition) in AllDefinitions(schema))
-        {
-            if (definition.DependsOnViewIds?.Contains(viewId, StringComparer.Ordinal) == true)
-                dependents.Add(name);
-        }
-
-        return dependents;
-    }
+    /// <summary>Names of the views and materialized views whose definition reads column <paramref name="columnId"/>.</summary>
+    public static List<string> DependentsOfColumn(Schema schema, string columnId)
+        => Names(schema, schema.ViewDependencies.DependentsOfColumn(columnId));
 
     /// <summary>
     /// Every view that depends on <paramref name="viewId"/>, transitively, ordered dependents-first
@@ -134,8 +123,9 @@ internal static class ViewDependencyGraph
     /// </summary>
     public static List<string> TransitiveDependentsOfView(Schema schema, string viewId)
     {
+        ViewDependencyIndex index = schema.ViewDependencies;
         List<string> ordered = [];
-        HashSet<string> seen = new(StringComparer.OrdinalIgnoreCase);
+        HashSet<string> seen = new(StringComparer.Ordinal);
 
         Visit(viewId);
         return ordered;
@@ -145,17 +135,17 @@ internal static class ViewDependencyGraph
             // Both edge kinds: a materialized view is reached through the table edge (it is a
             // relation), and whatever reads *it* is reached through the table edge again, so a chain
             // that alternates between the two kinds only stays connected if both are followed.
-            foreach (string dependentName in DirectDependentsOfView(schema, id).Concat(DirectDependentsOfTable(schema, id)))
+            foreach (string dependentId in index.DependentsOfView(id).Concat(index.DependentsOfRelation(id)))
             {
-                if (!seen.Add(dependentName))
+                if (!seen.Add(dependentId))
                     continue;
 
-                if (IdOf(schema, dependentName) is { } dependentId)
-                    Visit(dependentId);
+                Visit(dependentId);
 
                 // Appended after recursing, so a view is always listed after everything that depends
                 // on it — which is the order a cascading drop has to use.
-                ordered.Add(dependentName);
+                if (NameOf(schema, dependentId) is { } name)
+                    ordered.Add(name);
             }
         }
     }
@@ -168,6 +158,7 @@ internal static class ViewDependencyGraph
     /// defense. <paramref name="viewId"/> is the id the view will have — on a replace that is the
     /// existing id, which is exactly why a replace preserves it: minting a new one would make a
     /// self-referencing replacement look acyclic here and then recurse forever at read time.
+    /// Walks the forward edges reachable from the definition only.
     /// </remarks>
     public static void RequireAcyclic(Schema schema, string viewId, string viewName, ViewDefinition definition)
     {
@@ -186,13 +177,10 @@ internal static class ViewDependencyGraph
             if (!visited.Add(id))
                 continue;
 
-            foreach ((string candidateName, ViewDefinition candidate) in AllDefinitions(schema))
+            if (DefinitionOf(schema, id) is { } next)
             {
-                if (!string.Equals(IdOf(schema, candidateName), id, StringComparison.Ordinal))
-                    continue;
-
-                foreach (string next in candidate.DependsOnViewIds ?? [])
-                    pending.Push(next);
+                foreach (string dependency in next.DependsOnViewIds ?? [])
+                    pending.Push(dependency);
             }
         }
     }

@@ -323,6 +323,14 @@ internal sealed class SubqueryScopeAnalyzer
                     PushLevels(levels, lateral.Query, level);
                     break;
 
+                // An expanded view's body is never entered. It was bound on its own when the view was
+                // created, so it cannot name the query around it, and there is nothing to find. Entering
+                // it was also wrong for authorization: each level's sources are bound to resolve names,
+                // and this walk runs outside the owner's scope the binder enters for a view body, so a
+                // caller allowed to read the view but not its tables was refused here.
+                case DerivedTableSource { ViewId: not null }:
+                    break;
+
                 // A table function, such as a series or the one row of a SELECT with no FROM, is a
                 // derived table with no FROM of its own and no name to read.
                 case DerivedTableSource { Function: null } derived:

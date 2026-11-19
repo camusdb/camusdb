@@ -685,7 +685,8 @@ internal sealed class StatementAuthorizer
         NodeType.DropView or NodeType.DropViewIfExists
             or NodeType.DropMaterializedView or NodeType.DropMaterializedViewIfExists => Privilege.Drop,
         NodeType.AlterViewRenameTo or NodeType.AlterViewOwnerTo
-            or NodeType.AlterMaterializedViewRenameTo => Privilege.Alter,
+            or NodeType.AlterMaterializedViewRenameTo
+            or NodeType.CommentOnView or NodeType.CommentOnMaterializedView => Privilege.Alter,
         // REFRESH replaces the relation's contents, so it is a write, not a read.
         NodeType.RefreshMaterializedView => Privilege.Insert,
         NodeType.ShowViews or NodeType.ShowMaterializedViews

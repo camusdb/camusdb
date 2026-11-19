@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.CommandsExecutor.Controllers.DDL;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Util.ObjectIds;
@@ -53,9 +54,16 @@ internal static class ViewDeltaApplier
         {
             // A name held by a table (or a materialized view) is not ours to take, on either op.
             if (schema.Tables.ContainsKey(payload.ViewName))
-                throw new CamusDBException(
+                throw new SchemaDeltaRefusedException(
                     CamusDBErrorCodes.TableAlreadyExists,
                     $"Relation '{payload.ViewName}' already exists");
+
+            // A replace validated against a view that a delta committed ahead of it dropped. Creating
+            // the view afresh would bring back a name its dropper meant to remove, under the old id.
+            if (replacing && payload.ExpectedGeneration is not null)
+                throw new SchemaDeltaRefusedException(
+                    CamusDBErrorCodes.ConcurrentSchemaChange,
+                    $"View '{payload.ViewName}' was dropped while it was being replaced; nothing was changed");
         }
         else if (!replacing)
         {
@@ -64,18 +72,37 @@ internal static class ViewDeltaApplier
             if (string.Equals(existing.Id, payload.ViewId, StringComparison.Ordinal))
                 return null;
 
-            throw new CamusDBException(
+            throw new SchemaDeltaRefusedException(
                 CamusDBErrorCodes.ViewAlreadyExists,
                 $"Relation '{payload.ViewName}' already exists");
         }
+        else if (payload.ExpectedGeneration is { } expected
+            && (!string.Equals(existing.Id, payload.ViewId, StringComparison.Ordinal) || existing.Generation != expected))
+        {
+            // The replacement's shape check, its owner and its cycle check were all computed from the
+            // definition at that generation. Two replaces that are each compatible with the old shape
+            // need not be compatible with each other, so the later one is refused.
+            throw new SchemaDeltaRefusedException(
+                CamusDBErrorCodes.ConcurrentSchemaChange,
+                $"View '{payload.ViewName}' was changed by another statement while this one was replacing it; " +
+                "nothing was changed. Retry the statement.");
+        }
+
+        string viewId = existing?.Id ?? payload.ViewId!;
+
+        if (payload.ValidateDependencies && payload.Definition is { } definition)
+            RequireDependenciesHold(schema, viewId, payload.ViewName, definition);
 
         schema.Views[payload.ViewName] = new ViewSchema
         {
-            Id = existing?.Id ?? payload.ViewId,
+            Id = viewId,
             Name = payload.ViewName,
             Definition = payload.Definition,
             Comment = payload.Comment ?? existing?.Comment,
+            Generation = existing is null ? 0 : existing.Generation + 1,
         };
+
+        schema.ReplaceViewDependencyEdges(viewId, existing?.Definition, payload.Definition);
 
         return null;
     }
@@ -85,9 +112,40 @@ internal static class ViewDeltaApplier
     /// failure, so a re-delivered entry — or one that arrives after the view was dropped by a later,
     /// already-applied entry — cannot wedge the apply pipeline.
     /// </summary>
+    /// <remarks>
+    /// Entries written with preconditions also refuse a name that now belongs to a different view,
+    /// and refuse while anything still reads the view — a dependent created after the statement's own
+    /// check, or after a <c>CASCADE</c> listed what to drop first, would otherwise be left reading
+    /// nothing. The table-drop rule <see cref="ViewDependencyRules"/> is the same check one level
+    /// down.
+    /// </remarks>
     internal static TableSchema? ApplyDropView(Schema schema, SchemaDropViewPayload payload)
     {
+        if (!schema.Views.TryGetValue(payload.ViewName, out ViewSchema? view))
+            return null;
+
+        if (payload.ExpectedViewId is { } expectedId && !string.Equals(view.Id, expectedId, StringComparison.Ordinal))
+            throw new SchemaDeltaRefusedException(
+                CamusDBErrorCodes.ConcurrentSchemaChange,
+                $"View '{payload.ViewName}' was dropped and created again by another statement; the new view was not dropped");
+
+        if (payload.RequireNoDependents && view.Id is not null)
+        {
+            List<string> dependents = ViewDependencyGraph.DirectDependentsOfView(schema, view.Id);
+
+            if (dependents.Count > 0)
+            {
+                dependents.Sort(StringComparer.OrdinalIgnoreCase);
+
+                throw new SchemaDeltaRefusedException(
+                    CamusDBErrorCodes.DependentObjectsExist,
+                    $"Cannot drop view '{payload.ViewName}' because other objects depend on it: " +
+                    $"{string.Join(", ", dependents)}. Use DROP VIEW ... CASCADE to drop them too.");
+            }
+        }
+
         schema.Views.Remove(payload.ViewName);
+        schema.ReplaceViewDependencyEdges(view.Id, view.Definition, null);
         return null;
     }
 
@@ -99,18 +157,20 @@ internal static class ViewDeltaApplier
             if (schema.Views.ContainsKey(payload.NewName))
                 return null;
 
-            throw new CamusDBException(
+            throw new SchemaDeltaRefusedException(
                 CamusDBErrorCodes.ViewDoesntExist,
                 $"View '{payload.TableName}' does not exist");
         }
 
-        if (schema.Tables.ContainsKey(payload.NewName) || schema.Views.ContainsKey(payload.NewName))
-            throw new CamusDBException(
+        if (schema.Tables.ContainsKey(payload.NewName) || schema.Views.ContainsKey(payload.NewName)
+            || schema.Sequences.ContainsKey(payload.NewName))
+            throw new SchemaDeltaRefusedException(
                 CamusDBErrorCodes.ViewAlreadyExists,
                 $"Relation '{payload.NewName}' already exists");
 
         schema.Views.Remove(payload.TableName);
         view.Name = payload.NewName;
+        view.Generation++;
         schema.Views[payload.NewName] = view;
 
         SchemaDeltaApplier.ApplyDependentViewRewrites(schema, payload);
@@ -119,17 +179,91 @@ internal static class ViewDeltaApplier
     }
 
     /// <summary>
-    /// Applies a SetViewDefinition delta — the dependent-view rewrite that rides along with a base
-    /// table or column rename. Idempotent: replaying it simply writes the same body again, and a
-    /// view that no longer exists is a no-op rather than a failure, so a rename entry re-delivered
-    /// after a later DROP VIEW cannot wedge apply.
+    /// Applies a SetViewDefinition delta: <c>ALTER VIEW … OWNER TO</c>, <c>COMMENT ON VIEW</c>, or a
+    /// rewrite of a view's stored body. Idempotent: replaying it simply writes the same body again,
+    /// and, for an entry without preconditions, a view that no longer exists is a no-op rather than a
+    /// failure.
     /// </summary>
+    /// <remarks>
+    /// An entry that carries <see cref="SchemaSetViewDefinitionPayload.ExpectedGeneration"/> is a
+    /// change computed from the view as it stood; it is refused if the view has moved on since, so it
+    /// cannot put back a body a concurrent <c>CREATE OR REPLACE</c> replaced.
+    /// </remarks>
     internal static TableSchema? ApplySetViewDefinition(Schema schema, SchemaSetViewDefinitionPayload payload)
     {
-        if (schema.Views.TryGetValue(payload.ViewName, out ViewSchema? view))
+        if (!schema.Views.TryGetValue(payload.ViewName, out ViewSchema? view))
+        {
+            if (payload.ExpectedGeneration is not null)
+                throw new SchemaDeltaRefusedException(
+                    CamusDBErrorCodes.ConcurrentSchemaChange,
+                    $"View '{payload.ViewName}' was dropped or renamed by another statement; nothing was changed");
+
+            return null;
+        }
+
+        if (payload.ExpectedGeneration is { } expected && view.Generation != expected)
+            throw new SchemaDeltaRefusedException(
+                CamusDBErrorCodes.ConcurrentSchemaChange,
+                $"View '{payload.ViewName}' was changed by another statement while this one was altering it; " +
+                "nothing was changed. Retry the statement.");
+
+        if (payload.Definition is not null)
+        {
+            ViewDefinition? before = view.Definition;
             view.Definition = payload.Definition;
+            schema.ReplaceViewDependencyEdges(view.Id, before, payload.Definition);
+        }
+
+        if (payload.SetComment)
+            view.Comment = payload.Comment;
+
+        view.Generation++;
 
         return null;
+    }
+
+    /// <summary>
+    /// Refuses a view definition that reads a relation which no longer exists, or that would make the
+    /// view reachable from itself, against the schema the entry is applied to.
+    /// </summary>
+    /// <remarks>
+    /// The statement checked both before it proposed, but against the schema as it stood then. A drop
+    /// committed in between — on another node, or by a <c>CASCADE</c> — would otherwise leave this
+    /// view reading something gone, and a concurrent replace of a view it reads could close a cycle
+    /// neither statement saw.
+    /// </remarks>
+    internal static void RequireDependenciesHold(Schema schema, string viewId, string viewName, ViewDefinition definition)
+    {
+        // Resolved through the id index, so the check costs one lookup per dependency the
+        // definition lists.
+        foreach (string tableId in definition.DependsOnTableIds ?? [])
+        {
+            if (!schema.TryGetRelationNameById(tableId, out string? tableName)
+                || !schema.Tables.TryGetValue(tableName, out TableSchema? relation)
+                || !string.Equals(relation.Id, tableId, StringComparison.Ordinal))
+                throw new SchemaDeltaRefusedException(
+                    CamusDBErrorCodes.ConcurrentSchemaChange,
+                    $"A relation that '{viewName}' reads was dropped by another statement; nothing was changed");
+        }
+
+        foreach (string dependencyId in definition.DependsOnViewIds ?? [])
+        {
+            if (!schema.TryGetRelationNameById(dependencyId, out string? dependencyName)
+                || !schema.Views.TryGetValue(dependencyName, out ViewSchema? dependency)
+                || !string.Equals(dependency.Id, dependencyId, StringComparison.Ordinal))
+                throw new SchemaDeltaRefusedException(
+                    CamusDBErrorCodes.ConcurrentSchemaChange,
+                    $"A view that '{viewName}' reads was dropped by another statement; nothing was changed");
+        }
+
+        try
+        {
+            ViewDependencyGraph.RequireAcyclic(schema, viewId, viewName, definition);
+        }
+        catch (CamusDBException cycle) when (cycle is not SchemaDeltaRefusedException)
+        {
+            throw new SchemaDeltaRefusedException(cycle.Code, cycle.Message);
+        }
     }
 
     /// <summary>
@@ -167,7 +301,7 @@ internal static class ViewDeltaApplier
         // Refused rather than merged: a heuristic merge would have to guess which side of a conflict
         // the user meant, and guessing wrong here loses data rather than an operation.
         if (payload.ExpectedMetadataGeneration is { } expected && live.MetadataGeneration != expected)
-            throw new CamusDBException(
+            throw new SchemaDeltaRefusedException(
                 CamusDBErrorCodes.ConcurrentSchemaChange,
                 $"The definition of materialized view '{live.Name}' changed while it was being refreshed, so the " +
                 "rebuild was discarded rather than published over it. Retry the refresh.");
@@ -178,7 +312,7 @@ internal static class ViewDeltaApplier
         // makes the outcome depend on the data rather than on scheduling.
         if (payload.RefreshedAt is { } incoming && live.RefreshedAt is { } published
             && incoming < published)
-            throw new CamusDBException(
+            throw new SchemaDeltaRefusedException(
                 CamusDBErrorCodes.ConcurrentSchemaChange,
                 $"A newer refresh of materialized view '{live.Name}' has already been published, so this " +
                 "older rebuild was discarded rather than overwriting it.");
@@ -186,7 +320,7 @@ internal static class ViewDeltaApplier
         TableSchema? built = SchemaDeltaApplier.FindRelationById(schema, payload.SwapToTableId);
 
         if (built is null)
-            throw new CamusDBException(
+            throw new SchemaDeltaRefusedException(
                 CamusDBErrorCodes.InvalidInternalOperation,
                 $"Cannot swap materialized view '{live.Name}': the rebuilt relation '{payload.SwapToTableId}' is not in the schema");
 

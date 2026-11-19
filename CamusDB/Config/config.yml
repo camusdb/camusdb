@@ -326,6 +326,12 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 # max_recursive_cte_rows: 10000000        # rows one run of a WITH RECURSIVE query makes (CADB0560)
 # max_table_function_rows: 5000000        # rows one read of a function in FROM makes (CADB0561)
 # statement_timeout_ms: 0                 # longest one SQL statement may run, in ms (CADB0562); 0 = no limit
+# max_view_definition_bytes: 1048576      # bytes of one normalized view body, checked at CREATE (CADB0563)
+# max_view_definition_nodes: 200000       # syntax-tree nodes of one view body, checked at CREATE (CADB0563)
+# max_view_output_columns: 1600           # output columns of one view, checked at CREATE (CADB0563)
+# max_view_direct_dependencies: 1000      # relations one view body reads directly, checked at CREATE (CADB0563)
+# max_view_expanded_nodes: 2000000        # syntax-tree nodes the view expansion of one statement makes (CADB0563)
+# max_view_expanded_relations: 10000      # view references the expansion of one statement substitutes (CADB0563)
 # max_open_explicit_transactions: 10000   # explicit transactions open at one time on this node (CADB0558)
 # max_client_connections: 10000           # client connections on the HTTP, HTTPS and gRPC listeners
 # cluster_activity_max_concurrent_fan_outs: 8   # concurrent SHOW CLUSTER QUERIES/CONNECTIONS (CADB0558)
@@ -356,11 +362,14 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 #   of max_mutations_per_transaction, because each row also costs one mutation per index.
 # materialized_view_refresh_takeover_attempts: restarts of an interrupted refresh before the sweep
 #   gives up; 0 only reclaims the abandoned staging storage.
+# materialized_view_refresh_hold_lease_ms: lease on the snapshot-floor hold a refresh takes on the
+#   history it reads; renewed every lease/3 while the rebuild runs. Must be >= 5000.
 # branch_snapshot_hold_lease_ms: lease on a branch's snapshot-floor hold on its parent's MVCC history;
 #   the leader renews it well inside the lease. Must be >= 5000.
 # materialized_view_refresh_enabled: true
 # materialized_view_refresh_chunk_rows: 10000
 # materialized_view_refresh_takeover_attempts: 3
+# materialized_view_refresh_hold_lease_ms: 300000
 # branch_snapshot_hold_lease_ms: 300000
 
 # ── Database lifecycle ────────────────────────────────────────────────────────

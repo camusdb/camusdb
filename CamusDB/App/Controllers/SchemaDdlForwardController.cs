@@ -391,7 +391,8 @@ public sealed class SchemaDdlForwardController : CommandsController
             RenameTableTicket ticket = new(
                 databaseName: req.DatabaseName,
                 tableName: req.TableName,
-                newName: req.NewName
+                newName: req.NewName,
+                allowMaterializedView: req.AllowMaterializedView
             );
 
             bool result = await executor.RenameTable(ticket).ConfigureAwait(false);

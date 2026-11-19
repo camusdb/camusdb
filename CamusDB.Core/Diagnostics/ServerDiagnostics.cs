@@ -53,6 +53,48 @@ public static class ServerDiagnostics
     private static readonly Histogram<long> BatchRequestFrameItems =
         Meter.CreateHistogram<long>("camus.batch.request_frame_items", unit: "{op}", description: "Ops carried by one request frame.");
 
+    // ── Materialized-view refresh ──────────────────────────────────────────────
+    // One count per rebuild that ends, tagged by what started it and how it ended, plus the work it
+    // did. Never tagged with a view's SQL or a row value: a view body and its rows are user data.
+    private static readonly Counter<long> MatViewRefreshes =
+        Meter.CreateCounter<long>("camus.matview.refreshes", unit: "{refresh}", description: "Materialized-view rebuilds that ended, by kind and outcome.");
+
+    private static readonly Counter<long> MatViewRefreshRows =
+        Meter.CreateCounter<long>("camus.matview.refresh.rows", unit: "{row}", description: "Rows materialized-view rebuilds wrote.");
+
+    private static readonly Counter<long> MatViewRefreshMutations =
+        Meter.CreateCounter<long>("camus.matview.refresh.mutations", unit: "{mutation}", description: "Row and index writes materialized-view rebuilds made.");
+
+    private static readonly Counter<long> MatViewRefreshBytes =
+        Meter.CreateCounter<long>("camus.matview.refresh.bytes", unit: "By", description: "Estimated bytes materialized-view rebuilds wrote.");
+
+    private static readonly Histogram<double> MatViewRefreshDuration =
+        Meter.CreateHistogram<double>("camus.matview.refresh.duration", unit: "ms", description: "Materialized-view rebuild duration, by kind and outcome.");
+
+    private static readonly Counter<long> MatViewReclaims =
+        Meter.CreateCounter<long>("camus.matview.reclaims", unit: "{reclaim}", description: "Abandoned rebuilds the sweep dealt with, by outcome.");
+
+    public static void RecordMatViewRefresh(string kind, string outcome, long rows, long mutations, long bytes, double milliseconds)
+    {
+        if (!Enabled)
+            return;
+
+        TagList tags = new() { { "kind", kind }, { "outcome", outcome } };
+        MatViewRefreshes.Add(1, tags);
+        MatViewRefreshDuration.Record(milliseconds, tags);
+        MatViewRefreshRows.Add(rows);
+        MatViewRefreshMutations.Add(mutations);
+        MatViewRefreshBytes.Add(bytes);
+    }
+
+    public static void RecordMatViewReclaim(string outcome)
+    {
+        if (!Enabled)
+            return;
+
+        MatViewReclaims.Add(1, new TagList { { "outcome", outcome } });
+    }
+
     // ── KV retry waits ─────────────────────────────────────────────────────────
     // One count per backoff sleep inside a KvTableStore retry loop, tagged by call site. Localizes
     // which retry loop a latency tail is spending its time in — added while chasing the back-to-back

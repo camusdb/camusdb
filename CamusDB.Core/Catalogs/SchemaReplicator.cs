@@ -216,7 +216,7 @@ public sealed class SchemaReplicator
             // Resolved before the apply: the answer depends on the state the delta replaces.
             WriteShapeTargets writeShapeTargets = WriteShapeDeltaRules.Resolve(database.Schema, entry);
 
-            TableSchema? appliedTableSchema = CatalogsManager.ApplySchemaDelta(database.Schema, database, entry);
+            TableSchema? appliedTableSchema = SchemaDeltaApplier.ApplyOrRefuse(database.Schema, database, entry);
             InvalidateAppliedTableDescriptor(database, entry, appliedTableSchema);
 
             // After the mutation, the published foreign-key graph and the descriptor eviction, never
@@ -272,6 +272,16 @@ public sealed class SchemaReplicator
         {
             database.TableDescriptors.TryRemove(tableSchema.Name, out _);
             return;
+        }
+
+        // A materialized view created WITH DATA adopted its staging relation: the name the rows were
+        // loaded under no longer answers, and its descriptor would otherwise be handed to a later
+        // relation of that name.
+        if (entry.Op == SchemaOp.CreateTable)
+        {
+            SchemaCreateTablePayload created = DecodePayload<SchemaCreateTablePayload>(entry);
+            if (created.AdoptStagingTableId is { Length: > 0 } adopted && created.TableId is { Length: > 0 } viewId)
+                database.TableDescriptors.TryRemove(MaterializedViewNaming.StagingRelationName(viewId, adopted), out _);
         }
 
         // For index changes the table stays alive but its cached descriptor no longer
@@ -516,7 +526,7 @@ public sealed class SchemaReplicator
             // intermediate generation needs its own record or its rows become unreachable.
             CatalogsManager.CaptureContentsRetirementIntent(database, entry);
 
-            CatalogsManager.ApplySchemaDelta(database.Schema, database, entry);
+            SchemaDeltaApplier.ApplyOrRefuse(database.Schema, database, entry);
 
             Log.LogSchemaChangeRestored(logger, entry.Op, database.Name, entry.FromVersion, entry.ToVersion);
 
@@ -699,7 +709,8 @@ public sealed class SchemaReplicator
         Id = view.Id,
         Name = view.Name,
         Definition = view.Definition,
-        Comment = view.Comment
+        Comment = view.Comment,
+        Generation = view.Generation,
     };
 
     /// <summary>

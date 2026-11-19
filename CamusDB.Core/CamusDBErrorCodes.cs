@@ -768,6 +768,16 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string StatementTimeout = "CADB0562";
 
+    /// <summary>
+    /// A view definition, or the expansion of the views one statement reads, is larger than the
+    /// <c>max_view_*</c> settings allow. A view references other views by name, and expanding a shallow
+    /// graph whose every level reads the one below twice doubles the work at each level, so a user who
+    /// may create views could otherwise make a later query cost unbounded CPU and memory. The message
+    /// names the setting. Simplify the view, or raise the setting. Not retryable as is. Maps to HTTP 400
+    /// and gRPC <c>RESOURCE_EXHAUSTED</c>.
+    /// </summary>
+    public const string ViewComplexityLimitExceeded = "CADB0563";
+
     public const string InvalidConfig = "CADB0600";
 
     /// <summary>
@@ -1315,6 +1325,7 @@ public static class CamusDBErrorCodes
         RecursiveQueryLimitExceeded => 400,
         TableFunctionRowLimitExceeded => 400,
         StatementTimeout => 400,
+        ViewComplexityLimitExceeded => 400,
         StatementTooLarge => 413,
         ConcurrencyLimitExceeded => 503,
         QueryNotFound => 404,

@@ -67,6 +67,12 @@ internal sealed class SelectRowSource : IAsyncDisposable
     /// </summary>
     public void ThrowIfSnapshotLost(string what) => lease?.ThrowIfLost(what);
 
+    /// <summary>Confirmed renewals of the snapshot hold so far, or 0 for a source that holds none. Telemetry only.</summary>
+    public int HoldRenewals => lease?.Renewals ?? 0;
+
+    /// <summary>Whether the snapshot hold was lost. Telemetry only; callers that publish use <see cref="ThrowIfSnapshotLost"/>.</summary>
+    public bool HoldLost => lease?.IsLost ?? false;
+
     /// <summary>Fires if the pinned snapshot is lost, so a long drain can stop instead of finishing wrong.</summary>
     public CancellationToken SnapshotLost => lease?.Lost ?? CancellationToken.None;
 

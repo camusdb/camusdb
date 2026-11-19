@@ -65,6 +65,39 @@ internal static class NodeAstWalk
     }
 
     /// <summary>
+    /// The number of nodes in the tree under <paramref name="ast"/>, itself included, counting every
+    /// child slot. A node reached through two slots counts twice, which is what a copy of the tree
+    /// costs. Iterative, so a deep tree does not grow the call stack.
+    /// </summary>
+    public static long Count(NodeAst? ast)
+    {
+        if (ast is null)
+            return 0;
+
+        long count = 0;
+        Stack<NodeAst> pending = new();
+        pending.Push(ast);
+
+        while (pending.Count > 0)
+        {
+            NodeAst node = pending.Pop();
+            count++;
+
+            Push(pending, node.leftAst);
+            Push(pending, node.rightAst);
+            Push(pending, node.extendedOne);
+            Push(pending, node.extendedTwo);
+            Push(pending, node.extendedThree);
+            Push(pending, node.extendedFour);
+            Push(pending, node.extendedFive);
+            Push(pending, node.extendedSix);
+            Push(pending, node.extendedSeven);
+        }
+
+        return count;
+    }
+
+    /// <summary>
     /// Returns a copy of <paramref name="root"/> in which each node that is a key of
     /// <paramref name="replacements"/> (by reference) is replaced by its value. A subtree that holds no
     /// such node is shared with <paramref name="root"/>, not copied, and <paramref name="root"/> is not

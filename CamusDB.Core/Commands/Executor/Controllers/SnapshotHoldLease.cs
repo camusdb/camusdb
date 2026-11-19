@@ -76,6 +76,11 @@ internal sealed class SnapshotHoldLease : IAsyncDisposable
     /// <summary>True once the hold has been lost; latches, and never returns to false.</summary>
     internal bool IsLost => lost.IsCancellationRequested;
 
+    private int renewals;
+
+    /// <summary>How many renewals Kahuna has confirmed since the hold was acquired. Telemetry only.</summary>
+    internal int Renewals => Volatile.Read(ref renewals);
+
     /// <summary>
     /// When false, <see cref="DisposeAsync"/> only stops the renew loop and leaves the hold alive —
     /// the keep-alive mode used by branch creation, where the hold must outlive this object (the
@@ -225,6 +230,7 @@ internal sealed class SnapshotHoldLease : IAsyncDisposable
                     {
                         sinceConfirmed.Restart();
                         unanswered = 0;
+                        Interlocked.Increment(ref renewals);
                         continue;
                     }
 

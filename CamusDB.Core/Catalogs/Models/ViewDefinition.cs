@@ -139,4 +139,13 @@ public sealed class ViewDefinition
     /// turn a definer's-rights view into an invoker's-rights one.</para>
     /// </summary>
     public string? OwnerId { get; set; }
+
+    /// <summary>
+    /// A copy to change. A stored definition is shared — by the live schema, by the clone a delta is
+    /// dry-run against, and by readers expanding the view — so a change builds a new instance rather
+    /// than editing the one in place; editing it would show the change before the delta that makes it
+    /// has committed, and keep showing it if that delta is refused. The lists are shared, and are
+    /// never mutated in place either.
+    /// </summary>
+    public ViewDefinition Copy() => (ViewDefinition)MemberwiseClone();
 }

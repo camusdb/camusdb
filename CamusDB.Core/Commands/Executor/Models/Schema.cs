@@ -23,12 +23,63 @@ public sealed class Schema : IDisposable
     public long SchemaVersion { get; set; }
 
     /// <summary>
+    /// The committed deltas this node applied as refusals (see
+    /// <see cref="Catalogs.Apply.SchemaDeltaRefusedException"/>), keyed by the version each consumed.
+    /// In memory only and bounded: the one reader is the proposer of the refused entry, right after its
+    /// own apply ran, and a replay after a restart records the same refusals again.
+    /// </summary>
+    private readonly SortedList<long, SchemaDeltaRefusal> refusals = new();
+
+    /// <summary>How many refusals are remembered. Old ones are only ever asked about by a re-delivery.</summary>
+    private const int MaxRememberedRefusals = 256;
+
+    /// <summary>Records that <paramref name="entry"/> was applied as a refusal.</summary>
+    internal void RecordRefusal(SchemaChangeLogEntry entry, string code, string message)
+    {
+        lock (refusals)
+        {
+            refusals[entry.ToVersion] = new SchemaDeltaRefusal(entry.Op, entry.Payload, code, message);
+
+            while (refusals.Count > MaxRememberedRefusals)
+                refusals.RemoveAt(0);
+        }
+    }
+
+    /// <summary>
+    /// The refusal recorded for <paramref name="entry"/>, or null when it was not refused. Matched on
+    /// the op and the payload as well as the version, so a different delta that claims the same version
+    /// — two nodes proposing against one base — is not mistaken for the refused one.
+    /// </summary>
+    internal SchemaDeltaRefusal? FindRefusal(SchemaChangeLogEntry entry)
+    {
+        lock (refusals)
+        {
+            return refusals.TryGetValue(entry.ToVersion, out SchemaDeltaRefusal? refusal)
+                && refusal.Op == entry.Op
+                && refusal.Payload.AsSpan().SequenceEqual(entry.Payload)
+                    ? refusal
+                    : null;
+        }
+    }
+
+    /// <summary>
     /// Live tables keyed by name. Renaming swaps the key; the table's immutable Id is unchanged.
     /// The comparer is <see cref="StringComparer.OrdinalIgnoreCase"/> so table names match
     /// case-insensitively regardless of the case the user wrote in SQL, while the stored
     /// <see cref="TableSchema.Name"/> preserves the original case the table was created with.
     /// </summary>
-    public Dictionary<string, TableSchema> Tables { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, TableSchema> Tables
+    {
+        get => tables;
+        set
+        {
+            tables = value;
+            // Replaced wholesale — a load or a reload — so nothing kept the reverse edges current.
+            ResetViewDependencyIndex();
+        }
+    }
+
+    private Dictionary<string, TableSchema> tables = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Live non-materialized views keyed by name, with the same case-insensitive comparer and the
@@ -40,7 +91,17 @@ public sealed class Schema : IDisposable
     /// <see cref="RequireRelationNameAvailable"/> or <see cref="TryResolveRelation"/>, which consult
     /// both.</para>
     /// </summary>
-    public Dictionary<string, ViewSchema> Views { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, ViewSchema> Views
+    {
+        get => views;
+        set
+        {
+            views = value;
+            ResetViewDependencyIndex();
+        }
+    }
+
+    private Dictionary<string, ViewSchema> views = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Live sequences keyed by name, with the same case-insensitive comparer and the same
@@ -305,6 +366,86 @@ public sealed class Schema : IDisposable
                 $"Relation '{name}' already exists");
     }
 
+    // Published as one immutable index and replaced, never edited, for the same reason as
+    // relationNamesById. Null until first needed after a load; see ViewDependencies.
+    private ViewDependencyIndex? viewDependencies;
+
+    /// <summary>
+    /// The reverse edges of every stored view and materialized-view definition. See
+    /// <see cref="ViewDependencyIndex"/>.
+    /// </summary>
+    /// <remarks>
+    /// Built from the forward lists the first time it is needed after the maps were loaded or replaced,
+    /// and from then on changed by each apply that changes a definition
+    /// (<see cref="ReplaceViewDependencyEdges"/>), so a question about dependents costs what its answer
+    /// contains instead of a walk of every definition.
+    /// </remarks>
+    public ViewDependencyIndex ViewDependencies
+    {
+        get
+        {
+            ViewDependencyIndex? index = Volatile.Read(ref viewDependencies);
+            if (index is not null)
+                return index;
+
+            // Published only if no writer got there first: a writer's index is never older than one
+            // built here, and a writer applies its change to whichever it finds.
+            ViewDependencyIndex built = BuildViewDependencyIndexDefensively();
+            return Interlocked.CompareExchange(ref viewDependencies, built, null) ?? built;
+        }
+    }
+
+    /// <summary>
+    /// Moves the reverse edges of the definition <paramref name="dependentId"/> from
+    /// <paramref name="before"/> to <paramref name="after"/>. Called by an apply arm, under the schema
+    /// lock, after it changed the maps — so an index built here from the maps already holds the change,
+    /// and applying it again is a no-op.
+    /// </summary>
+    internal void ReplaceViewDependencyEdges(string? dependentId, ViewDefinition? before, ViewDefinition? after)
+    {
+        if (string.IsNullOrEmpty(dependentId))
+            return;
+
+        Volatile.Write(ref viewDependencies, ViewDependencies.Replace(dependentId, before, after));
+    }
+
+    /// <summary>
+    /// Drops the index so it is rebuilt from the forward lists on next use. Called whenever the maps are
+    /// replaced wholesale — a load, a reload — where nothing applied a delta to keep it current.
+    /// </summary>
+    public void ResetViewDependencyIndex() => Volatile.Write(ref viewDependencies, null);
+
+    /// <summary>Every stored definition, keyed by the id of the view or materialized view it belongs to.</summary>
+    internal IEnumerable<(string Id, ViewDefinition Definition)> StoredDefinitions()
+    {
+        foreach (ViewSchema view in Views.Values)
+        {
+            if (view.Id is { Length: > 0 } id && view.Definition is { } definition)
+                yield return (id, definition);
+        }
+
+        foreach (TableSchema relation in Tables.Values)
+        {
+            if (relation.IsMaterializedView && relation.Id is { Length: > 0 } id && relation.ViewDefinition is { } definition)
+                yield return (id, definition);
+        }
+    }
+
+    private ViewDependencyIndex BuildViewDependencyIndexDefensively()
+    {
+        for (int attempt = 0; ; attempt++)
+        {
+            try
+            {
+                return ViewDependencyIndex.Build(StoredDefinitions());
+            }
+            catch (InvalidOperationException) when (attempt < 2)
+            {
+                // A delta mutated a map mid-walk; the writer holds the lock for one apply only.
+            }
+        }
+    }
+
     // Published as one finished dictionary that is never mutated after publication, so a reader
     // holding no lock always sees a complete index rather than one being filled in.
     private volatile Dictionary<string, string>? relationNamesById;
@@ -453,3 +594,9 @@ public sealed class Schema : IDisposable
     }
 
 }
+
+/// <summary>
+/// A committed delta this node applied as a no-op because its preconditions no longer held, and the
+/// error its proposer reports. See <see cref="Catalogs.Apply.SchemaDeltaRefusedException"/>.
+/// </summary>
+internal sealed record SchemaDeltaRefusal(SchemaOp Op, byte[] Payload, string Code, string Message);

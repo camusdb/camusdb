@@ -267,19 +267,47 @@ public sealed class CatalogsManager
         string viewName,
         ViewDefinition definition,
         string? comment,
-        bool replace)
-        => await views.CreateViewAsync(database, viewId, viewName, definition, comment, replace).ConfigureAwait(false);
+        bool replace,
+        long? expectedGeneration = null)
+        => await views.CreateViewAsync(database, viewId, viewName, definition, comment, replace, expectedGeneration).ConfigureAwait(false);
 
-    public async Task DropViewAsync(DatabaseDescriptor database, string viewName)
-        => await views.DropViewAsync(database, viewName).ConfigureAwait(false);
+    /// <summary>
+    /// Test-only. Commits a view creation through the schema log without taking this node's DDL gate,
+    /// the way a delta proposed on another node arrives while a DDL here holds the gate. Production
+    /// code creates views through <see cref="CreateViewAsync"/>, which takes the gate.
+    /// </summary>
+    internal async Task CreateViewAsAnotherNodeForTesting(
+        DatabaseDescriptor database, string viewId, string viewName, ViewDefinition definition)
+    {
+        SchemaChangeLogEntry entry;
+
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+        try
+        {
+            entry = SchemaChangeEntryFactory.CreateViewEntry(database, viewId, viewName, definition, comment: null, replace: false);
+        }
+        finally
+        {
+            database.Schema.ReleaseLock();
+        }
+
+        await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+    }
+
+    public async Task DropViewAsync(DatabaseDescriptor database, string viewName, string? expectedViewId = null)
+        => await views.DropViewAsync(database, viewName, expectedViewId).ConfigureAwait(false);
 
     public async Task RenameViewAsync(
         DatabaseDescriptor database, string viewName, string newName,
         Dictionary<string, ViewDefinition>? dependentViews = null)
         => await views.RenameViewAsync(database, viewName, newName, dependentViews).ConfigureAwait(false);
 
-    public async Task SetViewDefinitionAsync(DatabaseDescriptor database, string viewName, ViewDefinition definition)
-        => await views.SetViewDefinitionAsync(database, viewName, definition).ConfigureAwait(false);
+    public async Task SetViewDefinitionAsync(
+        DatabaseDescriptor database, string viewName, ViewDefinition definition, long? expectedGeneration = null)
+        => await views.SetViewDefinitionAsync(database, viewName, definition, expectedGeneration).ConfigureAwait(false);
+
+    public async Task SetViewCommentAsync(DatabaseDescriptor database, string viewName, string? comment)
+        => await views.SetViewCommentAsync(database, viewName, comment).ConfigureAwait(false);
 
     public async Task SetMaterializedViewStateAsync(
         DatabaseDescriptor database,

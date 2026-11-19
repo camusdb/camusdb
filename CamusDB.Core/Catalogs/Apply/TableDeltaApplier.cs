@@ -37,6 +37,31 @@ internal static class TableDeltaApplier
         if (schema.Tables.ContainsKey(payload.TableName))
             throw new CamusDBException(CamusDBErrorCodes.TableAlreadyExists, $"Table '{payload.TableName}' already exists");
 
+        // WITH DATA: the rows are already in a staging relation, which this create adopts. Resolved
+        // before anything changes, so a staging relation that is gone refuses the whole create.
+        TableSchema? staging = null;
+        if (payload.AdoptStagingTableId is { Length: > 0 } stagingId)
+            staging = SchemaDeltaApplier.FindRelationById(schema, stagingId)
+                ?? throw new SchemaDeltaRefusedException(
+                    CamusDBErrorCodes.ConcurrentSchemaChange,
+                    $"The rows loaded for '{payload.TableName}' are gone; nothing was created. Retry the statement.");
+
+        if (payload.ApplyPreconditions)
+        {
+            // A view may be proposed from any node, so the proposer's own name check can lose to one
+            // committed just ahead of this entry. One name, one object, on every node.
+            if (schema.Views.ContainsKey(payload.TableName))
+                throw new SchemaDeltaRefusedException(
+                    CamusDBErrorCodes.ViewAlreadyExists, $"Relation '{payload.TableName}' already exists");
+
+            // A materialized view's body was checked against the proposer's snapshot; a drop committed
+            // since would leave it reading something gone, failing at its first refresh.
+            if (payload.Kind == RelationKind.MaterializedView
+                && payload.ViewDefinition is { } definition
+                && !string.IsNullOrWhiteSpace(payload.TableId))
+                ViewDeltaApplier.RequireDependenciesHold(schema, payload.TableId, payload.TableName, definition);
+        }
+
         // Sequences share one namespace with relations, as they do in PostgreSQL, so a name a
         // sequence holds is not this table's to take. Checked in apply rather than only at the
         // proposer because apply is the one place every node runs — a check the proposer made
@@ -130,7 +155,28 @@ internal static class TableDeltaApplier
 
         ForeignKeyDefinitionRules.ValidateTable(schema, tableSchema);
 
+        if (staging is not null)
+        {
+            // The same transfer a refresh's swap makes: the storage the rows were written into, and the
+            // column and index definitions they were encoded against. The view keeps its own id; the
+            // staging relation has served its purpose and only the view answers for that storage now.
+            tableSchema.StorageId = staging.EffectiveStorageId;
+            tableSchema.Columns = staging.Columns;
+            tableSchema.Indexes = staging.Indexes;
+            tableSchema.CheckConstraints = staging.CheckConstraints;
+            tableSchema.Version = staging.Version;
+            tableSchema.SchemaHistory = staging.SchemaHistory;
+            tableSchema.SchemaHistoryLoader = staging.SchemaHistoryLoader;
+            tableSchema.IsPopulated = true;
+            tableSchema.RefreshedAt = payload.RefreshedAt;
+
+            schema.Tables.Remove(staging.Name!);
+        }
+
         schema.Tables.Add(payload.TableName, tableSchema);
+
+        // A materialized view reads what its body names, like a view does.
+        schema.ReplaceViewDependencyEdges(tableSchema.Id, null, tableSchema.ViewDefinition);
 
         return tableSchema;
     }
@@ -213,6 +259,9 @@ internal static class TableDeltaApplier
 
         schema.Tables.Add(payload.TableName, tableSchema);
 
+        // A relinked materialized view reads its sources again.
+        schema.ReplaceViewDependencyEdges(tableSchema.Id, null, tableSchema.ViewDefinition);
+
         return tableSchema;
     }
 
@@ -224,9 +273,20 @@ internal static class TableDeltaApplier
         // In log order on every node: a child or a view created by another node since this drop was
         // validated still stops it.
         ForeignKeyDependencyRules.RequireNotReferencedByOtherTables(schema, tableSchema, "drop table");
-        ViewDependencyRules.RequireNotReadByViews(schema, tableSchema);
+
+        try
+        {
+            ViewDependencyRules.RequireNotReadByViews(schema, tableSchema);
+        }
+        catch (CamusDBException dependents) when (dependents is not SchemaDeltaRefusedException)
+        {
+            // In log order this is a committed entry every node refuses alike, which must not stop the
+            // schema pipeline; see SchemaDeltaRefusedException.
+            throw new SchemaDeltaRefusedException(dependents.Code, dependents.Message);
+        }
 
         schema.Tables.Remove(payload.TableName);
+        schema.ReplaceViewDependencyEdges(tableSchema.Id, tableSchema.ViewDefinition, null);
 
         // The compiled code of the table's inline triggers goes back to the engine with the table.
         CamusDB.Core.Extensions.TriggerRuntime.RetireAll(tableSchema);

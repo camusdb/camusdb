@@ -46,15 +46,6 @@ internal sealed class ViewCatalog
         this.publisher = publisher;
     }
 
-    /// <summary>
-    /// Proposes a <see cref="SchemaOp.SetComment"/> delta and replicates it, so every node's
-    /// in-memory schema carries the new comment and the KV checkpoint is rewritten. Advances the
-    /// database schema version but not <see cref="TableSchema.Version"/>. Cluster mode only —
-    /// standalone goes through <see cref="SetTableCommentAsync"/>.
-    ///
-    /// <para><paramref name="comment"/> is null to remove the comment; the empty string stores a
-    /// present-but-empty one.</para>
-    /// </summary>
     /// <summary>Whether a non-materialized view with this name currently exists.</summary>
     internal static bool ViewExists(DatabaseDescriptor database, string viewName)
         => database.Schema.Views.ContainsKey(viewName);
@@ -69,18 +60,20 @@ internal sealed class ViewCatalog
     /// section that builds the delta — not in the caller. Checking outside the lock would be a
     /// check-then-act that two concurrent creations both pass.
     /// </remarks>
-    internal async Task CreateViewAsync(
+    /// <param name="expectedGeneration">
+    /// For a replace, the <see cref="ViewSchema.Generation"/> of the view the replacement was
+    /// validated against. The replace is refused if the view has moved on — at the proposer here,
+    /// and again at apply on every node.
+    /// </param>
+    internal Task CreateViewAsync(
         DatabaseDescriptor database,
         string viewId,
         string viewName,
         ViewDefinition definition,
         string? comment,
-        bool replace)
-    {
-        SchemaChangeLogEntry entry;
-
-        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
-        try
+        bool replace,
+        long? expectedGeneration = null)
+        => ProposeAsync(database, () =>
         {
             if (replace)
             {
@@ -94,87 +87,76 @@ internal sealed class ViewCatalog
                 database.Schema.RequireRelationNameAvailable(viewName);
             }
 
-            entry = SchemaChangeEntryFactory.CreateViewEntry(database, viewId, viewName, definition, comment, replace);
-            SchemaDeltaApplier.ValidateSchemaDelta(database, entry);
-        }
-        finally
-        {
-            database.Schema.ReleaseLock();
-        }
-
-        await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
-    }
+            return SchemaChangeEntryFactory.CreateViewEntry(
+                database, viewId, viewName, definition, comment, replace, expectedGeneration);
+        });
 
     /// <summary>Proposes a <see cref="SchemaOp.DropView"/> delta and waits for it to apply locally.</summary>
-    internal async Task DropViewAsync(DatabaseDescriptor database, string viewName)
-    {
-        SchemaChangeLogEntry entry;
-
-        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
-        try
+    /// <param name="expectedViewId">
+    /// The id of the view the statement resolved. A name dropped and re-created since names a different
+    /// view, which is refused rather than dropped.
+    /// </param>
+    /// <remarks>
+    /// The drop is refused, here and at apply, while anything still reads the view — including a
+    /// dependent created after the statement's own check or after a <c>CASCADE</c> listed what to drop
+    /// first. Nothing is left reading a view that is gone.
+    /// </remarks>
+    internal Task DropViewAsync(DatabaseDescriptor database, string viewName, string? expectedViewId = null)
+        => ProposeAsync(database, () =>
         {
             if (!database.Schema.Views.ContainsKey(viewName))
                 throw new CamusDBException(CamusDBErrorCodes.ViewDoesntExist, $"View '{viewName}' does not exist");
 
-            entry = SchemaChangeEntryFactory.DropViewEntry(database, viewName);
-            SchemaDeltaApplier.ValidateSchemaDelta(database, entry);
-        }
-        finally
-        {
-            database.Schema.ReleaseLock();
-        }
-
-        await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
-    }
+            return SchemaChangeEntryFactory.DropViewEntry(database, viewName, expectedViewId);
+        });
 
     /// <summary>Proposes a <see cref="SchemaOp.RenameView"/> delta and waits for it to apply locally.</summary>
-    internal async Task RenameViewAsync(
+    internal Task RenameViewAsync(
         DatabaseDescriptor database, string viewName, string newName,
         Dictionary<string, ViewDefinition>? dependentViews = null)
-    {
-        SchemaChangeLogEntry entry;
-
-        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
-        try
+        => ProposeAsync(database, () =>
         {
             if (!database.Schema.Views.ContainsKey(viewName))
                 throw new CamusDBException(CamusDBErrorCodes.ViewDoesntExist, $"View '{viewName}' does not exist");
 
             database.Schema.RequireRelationNameAvailable(newName);
 
-            entry = SchemaChangeEntryFactory.RenameViewEntry(database, viewName, newName, dependentViews);
-            SchemaDeltaApplier.ValidateSchemaDelta(database, entry);
-        }
-        finally
-        {
-            database.Schema.ReleaseLock();
-        }
-
-        await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
-    }
+            return SchemaChangeEntryFactory.RenameViewEntry(database, viewName, newName, dependentViews);
+        });
 
     /// <summary>
     /// Proposes a <see cref="SchemaOp.SetViewDefinition"/> delta: overwrites one view's stored body
-    /// without the user having issued a <c>CREATE OR REPLACE</c>. Used by the dependent-view rewrite
-    /// that follows a base table or column rename.
+    /// without the user having issued a <c>CREATE OR REPLACE</c>. Used by <c>ALTER VIEW … OWNER
+    /// TO</c>.
     /// </summary>
-    internal async Task SetViewDefinitionAsync(DatabaseDescriptor database, string viewName, ViewDefinition definition)
-    {
-        SchemaChangeLogEntry entry;
+    /// <param name="expectedGeneration">
+    /// The generation <paramref name="definition"/> was derived from. The change is refused if the
+    /// view has moved on since, so it cannot put back a body a concurrent replace replaced.
+    /// </param>
+    internal Task SetViewDefinitionAsync(
+        DatabaseDescriptor database, string viewName, ViewDefinition definition, long? expectedGeneration = null)
+        => ProposeAsync(database, () => SchemaChangeEntryFactory.SetViewDefinitionEntry(
+            database, viewName, definition, expectedGeneration, setComment: false, comment: null));
 
-        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
-        try
+    /// <summary>
+    /// Proposes <c>COMMENT ON VIEW</c>: a <see cref="SchemaOp.SetViewDefinition"/> delta that keeps the
+    /// definition and sets the comment. <paramref name="comment"/> is null to remove the comment; the
+    /// empty string stores a present-but-empty one.
+    /// </summary>
+    /// <remarks>
+    /// The current definition rides along, read under the schema lock together with the generation the
+    /// change is checked against: a node that predates comments applies the definition alone and keeps
+    /// the one it has, and every other node refuses the change if the view moved in between.
+    /// </remarks>
+    internal Task SetViewCommentAsync(DatabaseDescriptor database, string viewName, string? comment)
+        => ProposeAsync(database, () =>
         {
-            entry = SchemaChangeEntryFactory.SetViewDefinitionEntry(database, viewName, definition);
-            SchemaDeltaApplier.ValidateSchemaDelta(database, entry);
-        }
-        finally
-        {
-            database.Schema.ReleaseLock();
-        }
+            if (!database.Schema.Views.TryGetValue(viewName, out ViewSchema? view) || view.Definition is null)
+                throw new CamusDBException(CamusDBErrorCodes.ViewDoesntExist, $"View '{viewName}' does not exist");
 
-        await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
-    }
+            return SchemaChangeEntryFactory.SetViewDefinitionEntry(
+                database, viewName, view.Definition, view.Generation, setComment: true, comment: comment);
+        });
 
     /// <summary>
     /// Proposes a <see cref="SchemaOp.SetMaterializedViewState"/> delta recording a refresh outcome.
@@ -190,7 +172,7 @@ internal sealed class ViewCatalog
     /// source. It becomes the entry timestamp, and with it the <c>DroppedAt</c> of the storage the
     /// swap retires, so that storage gets its full retention window starting from the moment it
     /// actually stopped being read.</param>
-    internal async Task SetMaterializedViewStateAsync(
+    internal Task SetMaterializedViewStateAsync(
         DatabaseDescriptor database,
         string tableId,
         bool isPopulated,
@@ -198,20 +180,48 @@ internal sealed class ViewCatalog
         string? swapToTableId = null,
         HLCTimestamp publishHlc = default,
         long? expectedMetadataGeneration = null)
-    {
-        SchemaChangeLogEntry entry;
+        => ProposeAsync(database, () => SchemaChangeEntryFactory.SetMaterializedViewStateEntry(
+            database, tableId, isPopulated, refreshedAt, swapToTableId, publishHlc, expectedMetadataGeneration));
 
-        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+    /// <summary>
+    /// Builds one delta under the schema lock, dry-runs it there, and replicates it — the whole of it
+    /// under the database's DDL gate.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>The gate.</b> View DDL used to propose without it, so two view statements on one node
+    /// could each build a delta against the same schema version, or each pass a check the other was
+    /// about to invalidate. The gate makes "validate, then propose" atomic against every other DDL of
+    /// the database on this node, as it already is for table, function and extension DDL.</para>
+    ///
+    /// <para><b>The dry-run is the revalidation.</b> Each delta carries its preconditions — the
+    /// generation it was computed against, that nothing reads what it drops, that what it reads still
+    /// exists — and the apply arms check them. Dry-running the delta under the lock, immediately before
+    /// it is proposed, is therefore the last check against the live schema; applying it in log order on
+    /// every node covers what a proposer on another node committed in between.</para>
+    /// </remarks>
+    private async Task ProposeAsync(DatabaseDescriptor database, Func<SchemaChangeLogEntry> build)
+    {
+        await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
         try
         {
-            entry = SchemaChangeEntryFactory.SetMaterializedViewStateEntry(database, tableId, isPopulated, refreshedAt, swapToTableId, publishHlc, expectedMetadataGeneration);
-            SchemaDeltaApplier.ValidateSchemaDelta(database, entry);
+            SchemaChangeLogEntry entry;
+
+            await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+            try
+            {
+                entry = build();
+                SchemaDeltaApplier.ValidateSchemaDelta(database, entry);
+            }
+            finally
+            {
+                database.Schema.ReleaseLock();
+            }
+
+            await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
         }
         finally
         {
-            database.Schema.ReleaseLock();
+            database.SchemaDdlSemaphore.Release();
         }
-
-        await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
     }
 }

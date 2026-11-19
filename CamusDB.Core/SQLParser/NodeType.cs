@@ -126,7 +126,9 @@ public enum NodeType
     /// <summary>
     /// A query in <c>FROM</c>: <c>(SELECT …) [AS] alias [(c1, …)]</c>. <c>leftAst</c> = the query,
     /// <c>rightAst</c> = the alias identifier, <c>extendedOne</c> = the cache hint of an expanded view,
-    /// <c>extendedTwo</c> = the owner of an expanded view, <c>extendedThree</c> = the column-alias list
+    /// <c>extendedTwo</c> = an expanded view's identity (an <see cref="Identifier"/>: <c>yytext</c> = the
+    /// owner's id or null, <c>leftAst</c> = the owner's name or null, <c>rightAst</c> = the view, with
+    /// <c>yytext</c> = its id and <c>leftAst</c> = its name), <c>extendedThree</c> = the column-alias list
     /// (an <see cref="IdentifierList"/> or one <see cref="Identifier"/>) or null, <c>extendedFour</c> =
     /// the <see cref="CteMaterialization"/> marker of a CTE that the statement computes once, or null.
     /// A rewrite that builds a new node must carry every slot.
@@ -1314,4 +1316,14 @@ public enum NodeType
     /// operation again must carry this slot.
     /// </summary>
     RecursiveCte,
+
+    /// <summary><c>COMMENT ON VIEW &lt;name&gt; IS &lt;value&gt;</c>. A null <c>rightAst</c> removes the comment.</summary>
+    CommentOnView,
+
+    /// <summary>
+    /// <c>COMMENT ON MATERIALIZED VIEW &lt;name&gt; IS &lt;value&gt;</c>. A null <c>rightAst</c> removes the
+    /// comment. A materialized view is a relation, so the comment is the relation's own, the one
+    /// <c>COMMENT ON TABLE</c> also sets.
+    /// </summary>
+    CommentOnMaterializedView,
 }

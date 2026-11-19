@@ -986,6 +986,24 @@ public class ConfigDefinition
     /// </summary>
     public int MaxViewExpansionDepth { get; set; } = 32;
 
+    /// <summary>Most bytes of one normalized view body, checked at CREATE. &lt;= 0 disables. Default 1 MiB.</summary>
+    public long MaxViewDefinitionBytes { get; set; } = 1024 * 1024;
+
+    /// <summary>Most syntax-tree nodes of one view body, checked at CREATE. &lt;= 0 disables. Default 200 000.</summary>
+    public long MaxViewDefinitionNodes { get; set; } = 200_000;
+
+    /// <summary>Most output columns of one view, checked at CREATE. &lt;= 0 disables. Default 1600.</summary>
+    public int MaxViewOutputColumns { get; set; } = 1_600;
+
+    /// <summary>Most relations one view body reads directly, checked at CREATE. &lt;= 0 disables. Default 1000.</summary>
+    public int MaxViewDirectDependencies { get; set; } = 1_000;
+
+    /// <summary>Most syntax-tree nodes the view expansion of one statement produces. &lt;= 0 disables. Default 2 000 000.</summary>
+    public long MaxViewExpandedNodes { get; set; } = 2_000_000;
+
+    /// <summary>Most view references the expansion of one statement substitutes. &lt;= 0 disables. Default 10 000.</summary>
+    public int MaxViewExpandedRelations { get; set; } = 10_000;
+
     /// <summary>
     /// Free-space watermark (bytes) on the data directory's volume below which new user DML is
     /// refused with CADB0536; reads, DDL, and internal transactions stay admitted. &lt;= 0 disables.
@@ -1012,6 +1030,13 @@ public class ConfigDefinition
     /// Default 3. Maps to <c>CamusDBOptions.MaterializedViewRefreshTakeoverAttempts</c>.
     /// </summary>
     public int MaterializedViewRefreshTakeoverAttempts { get; set; } = 3;
+
+    /// <summary>
+    /// Lease, in milliseconds, on the snapshot-floor hold a materialized-view refresh takes on the
+    /// history it reads; renewed every lease/3 while the rebuild runs. Must be &gt;= 5000. Default
+    /// 300 000 (5 min). Maps to <c>CamusDBOptions.MaterializedViewRefreshHoldLeaseMs</c>.
+    /// </summary>
+    public int MaterializedViewRefreshHoldLeaseMs { get; set; } = 300_000;
 
     /// <summary>
     /// Lease window, in milliseconds, for a branch's snapshot-floor hold on its parent's MVCC history;
@@ -1537,6 +1562,12 @@ public class ConfigDefinition
         // lapsed hold permanently fails the branch closed — refuse the configuration instead.
         if (BranchSnapshotHoldLeaseMs < 5000)
             throw Invalid($"'branch_snapshot_hold_lease_ms' must be >= 5000 (the renewer ticks at most once a second and needs a wide margin inside the lease), got {BranchSnapshotHoldLeaseMs}");
+
+        // Same floor as the branch hold, for the same reason: the refresh renews every lease/3 and
+        // fails closed once renewal stops being confirmed, so a lease near the renewal tick would
+        // abort rebuilds that were never actually stalled.
+        if (MaterializedViewRefreshHoldLeaseMs < 5000)
+            throw Invalid($"'materialized_view_refresh_hold_lease_ms' must be >= 5000 (the hold is renewed every lease/3 and needs a wide margin inside the lease), got {MaterializedViewRefreshHoldLeaseMs}");
 
         if (SqlParserCacheTtlSeconds < 0)
             throw Invalid(

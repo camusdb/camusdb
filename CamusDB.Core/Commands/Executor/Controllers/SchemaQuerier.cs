@@ -118,7 +118,9 @@ internal sealed class SchemaQuerier
 
             yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
             {
-                { "views", new ColumnValue(ColumnType.String, view.Key) }
+                { "views", new ColumnValue(ColumnType.String, view.Key) },
+                // NULL for no comment and '' for an empty one, as SHOW SEQUENCES reports them.
+                { "comment", view.Value.Comment is null ? ColumnValue.Null : new ColumnValue(ColumnType.String, view.Value.Comment) },
             });
         }
     }
@@ -346,7 +348,8 @@ internal sealed class SchemaQuerier
                 {
                     "refreshed_at",
                     new ColumnValue(ColumnType.String, relation.Value.RefreshedAt?.ToString() ?? "")
-                }
+                },
+                { "comment", relation.Value.Comment is null ? ColumnValue.Null : new ColumnValue(ColumnType.String, relation.Value.Comment) },
             });
         }
     }

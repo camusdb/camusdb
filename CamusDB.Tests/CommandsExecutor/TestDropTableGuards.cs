@@ -114,22 +114,31 @@ internal static class DropTableGuardScenarios
     /// validation refuses the drop in log order, the transaction rolls back, and the table keeps every
     /// index in memory — the drop used to remove them index by index before the delta, and a refusal
     /// then left the table with no primary key and no unique enforcement until the schema reloaded.
+    ///
+    /// <para>View DDL on this node waits for the DDL gate the drop holds, so the view is committed the
+    /// way one proposed on another node arrives: through the schema log, without this node's gate.</para>
     /// </summary>
     public static async Task ADropRefusedAfterItsIndexPurgeKeepsTheIndexes(CommandExecutor executor, DatabaseDescriptor database, string dbname)
     {
         await Setup(executor, database, dbname);
         int indexes = database.Schema.Tables["cities"].Indexes!.Count;
 
+        // A real definition of the view, bound by CREATE VIEW, then dropped so the hook can commit it again.
+        await Ddl(executor, database, dbname, "CREATE VIEW big_cities AS SELECT id, name FROM cities WHERE population > 5");
+        ViewSchema bound = database.Schema.Views["big_cities"];
+        string viewId = bound.Id!;
+        ViewDefinition definition = bound.Definition!.Copy();
+        await Ddl(executor, database, dbname, "DROP VIEW big_cities");
+
         RowDeleter deleter = executor.RowDeleterForTests;
         bool hookRan = false;
 
-        // Fires inside the drop, between the index purge and the row deletes. CREATE VIEW does not
-        // take the DDL semaphore the drop holds, so it can land in that window.
+        // Fires inside the drop, between the index purge and the row deletes.
         deleter.TestBeforeWriteHook = async () =>
         {
             deleter.TestBeforeWriteHook = null;
             hookRan = true;
-            await Ddl(executor, database, dbname, "CREATE VIEW big_cities AS SELECT id, name FROM cities WHERE population > 5");
+            await executor.Catalogs.CreateViewAsAnotherNodeForTesting(database, viewId, "big_cities", definition);
         };
 
         try

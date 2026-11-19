@@ -17,6 +17,12 @@ For every limit, a value of `0` or less disables it. All of them are runtime set
 | `max_table_function_rows` | `5000000` | Rows that one read of a function in `FROM` makes | CADB0561, HTTP 400 |
 | `statement_timeout_ms` | `0` (no limit) | Time that one SQL statement runs | CADB0562, HTTP 400 |
 | `max_inline_definitions_per_user_per_minute` | `60` | Statements that compile inline C# that one user runs per minute | CADB0848, HTTP 429 |
+| `max_view_definition_bytes` | `1048576` (1 MiB) | Bytes of one normalized view body, at `CREATE` | CADB0563, HTTP 400 |
+| `max_view_definition_nodes` | `200000` | Syntax-tree nodes of one view body, at `CREATE` | CADB0563, HTTP 400 |
+| `max_view_output_columns` | `1600` | Output columns of one view, at `CREATE` | CADB0563, HTTP 400 |
+| `max_view_direct_dependencies` | `1000` | Relations one view body reads directly, at `CREATE` | CADB0563, HTTP 400 |
+| `max_view_expanded_nodes` | `2000000` | Syntax-tree nodes that expanding the views of one statement makes | CADB0563, HTTP 400 |
+| `max_view_expanded_relations` | `10000` | View references that expanding one statement substitutes | CADB0563, HTTP 400 |
 | `max_open_explicit_transactions` | `10000` | Explicit transactions open at one time on this node | CADB0558, HTTP 503 |
 | `max_client_connections` | `10000` | Client connections open at one time on this node | The connection is closed |
 | `max_databases` | `10000` | Databases in the registry | CADB0408, HTTP 500 |
@@ -29,6 +35,22 @@ statement has no time limit by default. Its work table spills to disk, so memory
 limits stop it with **CADB0560** (`RecursiveQueryLimitExceeded`), and the message names the setting.
 These two settings are cluster settings: every node must give the same answer to the same statement.
 See [recursive queries](common-table-expressions.md#recursive-queries).
+
+## Views
+
+A view names other views, and each reference is expanded into the view's body before the
+statement is planned. A view graph can be shallow and still very wide: when each of ten views
+reads the one below it twice, a read of the top view expands 1024 copies of the bottom one.
+`max_view_expansion_depth` bounds nesting only, so it does not stop that. Any user who may create
+views could otherwise make every later query of them cost unbounded CPU and memory.
+
+`max_view_expanded_relations` and `max_view_expanded_nodes` bound the expansion of one statement.
+Each view is charged before its body is copied, so the statement stops with **CADB0563**
+(`ViewComplexityLimitExceeded`) before the memory is spent. `CREATE VIEW` expands the views its body
+reads under the same budget, so such a definition is refused when it is created. The four
+`max_view_definition_*`, `max_view_output_columns` and `max_view_direct_dependencies` settings bound
+one definition, and are checked at `CREATE` and `CREATE OR REPLACE`. The message names the setting.
+See [views](views.md#configuration).
 
 ## Functions in FROM
 

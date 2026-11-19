@@ -1469,6 +1469,21 @@ internal sealed partial class SchemaDdlService
     }
 
     /// <summary>
+    /// Refuses <c>ALTER TABLE … RENAME TO</c> on a materialized view unless the ticket says the caller
+    /// knows what it is renaming, naming the statement to use instead — the rename-side twin of
+    /// <see cref="RequireDroppableAsTable"/>. Harmless either way today, since both statements go
+    /// through the same replicated rename; refused so each kind of object is changed by its own
+    /// statement, as PostgreSQL does.
+    /// </summary>
+    internal static void RequireRenamableAsTable(TableDescriptor table, RenameTableTicket ticket)
+    {
+        if (table.Schema.IsMaterializedView && !ticket.AllowMaterializedView)
+            throw new CamusDBException(
+                CamusDBErrorCodes.TableDoesntExist,
+                $"'{ticket.TableName}' is a materialized view; use ALTER MATERIALIZED VIEW ... RENAME TO");
+    }
+
+    /// <summary>
     /// Drops one table and, when the drop is not deferred, the sequences its identity columns own.
     /// Every entry point into <c>DROP TABLE</c> — the ticket API, the SQL dispatcher, and a statement
     /// forwarded from a follower, which the leader runs through the ticket API — goes through here,
@@ -2009,6 +2024,7 @@ internal sealed partial class SchemaDdlService
             return forwarded.Value;
 
         TableDescriptor renameTable = await context.TableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+        RequireRenamableAsTable(renameTable, ticket);
 
         dependentViews ??= ViewDependencyMaintainer.BuildRenameConversions(
             database.Schema, renameTable.Id, sql => SQLParserProcessor.Parse(sql, sqlParserCache));

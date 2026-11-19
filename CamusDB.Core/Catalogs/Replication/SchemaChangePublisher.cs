@@ -141,6 +141,12 @@ internal sealed class SchemaChangePublisher
                 $"Timed out waiting for local schema apply for database '{database.Name}' version {entry.ToVersion}"
             );
 
+        // Committed, but applied as a refusal: a delta committed ahead of this one moved the schema
+        // this one was validated against. Every node refused it, so nothing changed anywhere and there
+        // is no checkpoint to persist; the caller is told why. See SchemaDeltaRefusedException.
+        if (database.Schema.FindRefusal(entry) is { } refusal)
+            throw new CamusDBException(refusal.Code, refusal.Message);
+
         // Persist the durable KV checkpoint from this proposer context — NOT from the schema
         // apply callback, which runs inside the schema partition's commit pipeline and would
         // deadlock when its KV writes re-enter the same partition. The committed schema log is

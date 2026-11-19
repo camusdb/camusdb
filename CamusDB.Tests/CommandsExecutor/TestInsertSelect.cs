@@ -692,6 +692,43 @@ public sealed class TestInsertSelect : SharedNodeBaseTest
     }
 
     /// <summary>
+    /// A ceiling of zero disables it, as it does for the transaction itself: the copy and a
+    /// materialized view's population, which loads through the same path, both succeed.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task TestZeroMutationLimitDisablesTheCeiling()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) =
+            await CreateDatabase(Options with { MaxMutationsPerTransaction = 0 });
+
+        async Task Ddl(string sql)
+        {
+            KvTransaction tx = await database.Transactions.BeginAsync();
+            await executor.ExecuteDDLSQL(new ExecuteSQLTicket(txnState: tx, database: dbname, sql: sql, parameters: null));
+            await database.Transactions.CommitAsync(tx);
+        }
+
+        await Ddl("CREATE TABLE src (id int64 PRIMARY KEY, name string(16))");
+        await Ddl("CREATE TABLE dest (id int64 PRIMARY KEY, name string(16))");
+
+        KvTransaction seed = await database.Transactions.BeginAsync();
+        await ExecuteNonQuery(executor, dbname, seed, "INSERT INTO src (id, name) VALUES (1, 'a'), (2, 'b'), (3, 'c')");
+        await database.Transactions.CommitAsync(seed);
+
+        KvTransaction txn = await database.Transactions.BeginAsync();
+        Assert.AreEqual(3, await ExecuteNonQuery(executor, dbname, txn, "INSERT INTO dest (id, name) SELECT id, name FROM src"));
+        await database.Transactions.CommitAsync(txn);
+
+        await Ddl("CREATE MATERIALIZED VIEW names AS SELECT id, name FROM src");
+
+        KvTransaction read = await database.Transactions.BeginAsync();
+        Assert.AreEqual(3, (await Query(executor, dbname, read, "SELECT id FROM dest")).Count);
+        Assert.AreEqual(3, (await Query(executor, dbname, read, "SELECT id FROM names")).Count);
+        await database.Transactions.CommitAsync(read);
+    }
+
+    /// <summary>
     /// A time-travel source reads at the requested snapshot while the writes stay live. Behavior in
     /// depth is covered by <see cref="TestInsertSelectAsOfSystemTime"/>; this only pins that the
     /// clause is accepted on this path and does not resolve to "now".
