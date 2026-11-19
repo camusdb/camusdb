@@ -77,8 +77,8 @@ internal sealed class TableOpener
         if (database.Schema.Views.ContainsKey(tableName))
             throw new CamusDBException(
                 CamusDBErrorCodes.ViewNotUpdatable,
-                $"'{tableName}' is a view and cannot be written to: CamusDB has no updatable views yet, " +
-                "so writes must target the underlying table");
+                $"'{tableName}' is a view and this statement cannot target one: only INSERT, UPDATE and DELETE " +
+                "can be written through a view, so this statement must target the underlying table");
 
         TableSchema tableSchema = await GetTableSchemaWithFreshnessRetry(database, tableName).ConfigureAwait(false);
 
@@ -96,7 +96,10 @@ internal sealed class TableOpener
         if (database.Options.AuthenticationEnabled)
         {
             AuthorizationScope scope = AuthorizationContext.Current;
-            if (scope.Principal is not null && !scope.TableCheckSuspended)
+            // A write through a view reaches its base table on the view owner's authority, already
+            // checked; see ViewWriteContext.AuthorizesOpen for why this is that open and no other.
+            if (scope.Principal is not null && !scope.TableCheckSuspended
+                && !DML.ViewWriteContext.AuthorizesOpen(tableSchema.Id, scope.Principal))
             {
                 if (scope.RequiredPrivilege is not { } required)
                     throw new CamusDBException(

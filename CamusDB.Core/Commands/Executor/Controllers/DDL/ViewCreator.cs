@@ -84,6 +84,23 @@ internal sealed class ViewCreator
 
         ViewDefinitionLimits.Require(database.Options, viewName, definition);
 
+        // A check option is a promise about writes through the view, so, as in PostgreSQL, only a view
+        // that can be written through may make it. Refused here rather than at the first write.
+        if (checkOption != CheckOptionKind.None)
+        {
+            try
+            {
+                DML.ViewUpdatability.Analyze(
+                    database.Schema, viewName, new ViewSchema { Name = viewName, Definition = definition }, SQLParserProcessor.Parse);
+            }
+            catch (CamusDBException notUpdatable) when (notUpdatable.Code == CamusDBErrorCodes.ViewNotUpdatable)
+            {
+                throw new CamusDBException(
+                    CamusDBErrorCodes.ViewNotUpdatable,
+                    $"WITH CHECK OPTION is supported only on views that can be written through. {notUpdatable.Message}");
+            }
+        }
+
         if (existing is not null)
         {
             // A replace rewrites an existing view's body; it does not re-create the object, so it must

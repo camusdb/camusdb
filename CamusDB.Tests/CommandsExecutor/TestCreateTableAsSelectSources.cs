@@ -161,18 +161,15 @@ internal sealed class TestCreateTableAsSelectSources : BaseTest
     }
 
     /// <summary>
-    /// A write to a view is still refused: CamusDB has no updatable views. This differs from PostgreSQL, where a
-    /// simple view is updatable. The view and its table keep their rows.
+    /// A view over one table can be written through, as in PostgreSQL: the row lands in the table.
     /// </summary>
     [Test]
-    public async Task InsertIntoAView_IsStillRefused()
+    public async Task InsertIntoAView_LandsInItsTable()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateTables();
 
-        string result = await TryCommit(database, executor, dbname, "INSERT INTO c (id, v) VALUES (9, 9)");
-
-        StringAssert.StartsWith(CamusDBErrorCodes.ViewNotUpdatable + ": 'c' is a view and cannot be written to", result);
-        Assert.AreEqual("1|0 ; 2|2", await Query(database, executor, dbname, "SELECT id, v FROM t"));
+        Assert.AreEqual("ok", await TryCommit(database, executor, dbname, "INSERT INTO c (id, v) VALUES (9, 9)"));
+        Assert.AreEqual("1|0 ; 2|2 ; 9|9", await Query(database, executor, dbname, "SELECT id, v FROM t ORDER BY id"));
     }
 
     /// <summary>

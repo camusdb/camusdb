@@ -258,12 +258,11 @@ runs.
 A view is also a source for a statement that writes rows somewhere else: `CREATE TABLE … AS SELECT`
 (also `WITH NO DATA`), `INSERT … SELECT` and a materialized view body read it in the same way. Each
 column of the new table has the type that a `SELECT` of the view reports, also for a subquery column.
-A write *to* the view is still refused with `CADB0525` (see [Updatable views](#divergences-from-postgresql)).
+A write *to* a view is covered in [Writing through a view](#writing-through-a-view).
 
 ```sql
 CREATE TABLE open_copy AS SELECT id, customer FROM open_orders;           -- OK
 INSERT INTO archive (id, customer) SELECT id, customer FROM open_orders; -- OK
-INSERT INTO open_orders (id, customer) VALUES (9, 'acme');               -- ERROR (CADB0525)
 ```
 
 A subquery in the body's `WHERE` — `IN (SELECT …)`, `NOT IN`, a scalar subquery, `EXISTS` and
@@ -343,6 +342,79 @@ Views are stored re-rendered so that renames can rewrite them as targeted AST ed
 `CREATE OR REPLACE` has a canonical form to compare against. PostgreSQL's `pg_get_viewdef` also never
 returns the original text. The printed DDL is guaranteed to re-parse to the same query, so it can be
 fed straight back to the server.
+
+---
+
+## Writing through a view
+
+`INSERT`, `UPDATE` and `DELETE` can target a view whose body reads one table, as in PostgreSQL. The
+statement is rewritten into the same statement on the table, so it runs in your transaction, under
+the same locks, limits and constraints as a write to the table:
+
+```sql
+CREATE VIEW acme_orders AS
+  SELECT id, customer, total FROM orders WHERE customer = 'acme';
+
+INSERT INTO acme_orders (id, customer, total) VALUES (10, 'acme', 5);
+UPDATE acme_orders SET total = total + 1 WHERE TRUE;   -- only acme's rows
+DELETE FROM acme_orders WHERE total < 20;              -- only acme's rows
+```
+
+An `UPDATE` or `DELETE` reaches only rows the view shows: the body's `WHERE` is added to the
+statement's. A column the view does not expose takes its default on `INSERT`, and cannot be named at
+all — `DELETE FROM acme_orders WHERE status = 'closed'` is refused (`CADB0404`), because naming a
+hidden column would let a write's row count disclose what it holds. `RETURNING` works, and names the
+view's columns.
+
+### Which views can be written through
+
+A view can be written through when its body reads **exactly one** table, or one view that can itself
+be written through, and has none of: an aggregate, a window function, `DISTINCT`, `GROUP BY`,
+`HAVING`, `LIMIT`, `OFFSET`, a set operation (`UNION`, `INTERSECT`, `EXCEPT`), or a subquery in its
+`WHERE`. Any other view refuses writes with `CADB0525`, and the message says which rule it breaks.
+CamusDB has no rules and no `INSTEAD OF` triggers, so such a view stays read-only.
+
+An output column that is a plain column of the table can be written. Any other column is computed:
+it can be read, also in a `WHERE` (where it means the expression it stands for), but writing it is
+refused with `CADB0526`:
+
+```sql
+CREATE VIEW doubled AS SELECT id, total, total * 2 AS twice FROM orders;
+UPDATE doubled SET total = 1 WHERE twice = 60;   -- OK
+UPDATE doubled SET twice = 1 WHERE id = 1;       -- ERROR (CADB0526)
+```
+
+A materialized view takes no writes, whatever its shape, and neither does a view over one.
+`INSERT … ON CONFLICT`, `UPSERT`, `UPDATE … FROM` and `DELETE … USING` cannot target a view
+(`CADB0533`); write to the table.
+
+### `WITH CHECK OPTION`
+
+With a check option, a row written through the view must be one the view shows; otherwise the
+statement fails with `CADB0527` before anything is written:
+
+```sql
+CREATE VIEW acme_only AS
+  SELECT id, customer, total FROM orders WHERE customer = 'acme'
+  WITH CHECK OPTION;
+
+INSERT INTO acme_only (id, customer, total) VALUES (11, 'globex', 1);
+-- ERROR (CADB0527): new row violates check option for view "acme_only"
+```
+
+A row whose condition is NULL is not shown by the view, so it fails too — unlike a `CHECK`
+constraint, where NULL passes. `WITH CASCADED CHECK OPTION` (the meaning of a bare `WITH CHECK
+OPTION`) checks this view's condition and the condition of every view beneath it.
+`WITH LOCAL CHECK OPTION` checks this view's condition, and beneath it only views that have a check
+option of their own. Only a view that can be written through may have a check option; `CREATE VIEW`
+refuses it on any other.
+
+### Privileges
+
+You need `INSERT`, `UPDATE` or `DELETE` on the **view**, as the statement requires. The view's
+**owner** needs that privilege on what the view reads (and `SELECT` too, for `UPDATE` and `DELETE`),
+as for a read through a view: you need no grant on the table. A subquery you write in the statement
+still reads its tables as you.
 
 ---
 
@@ -598,7 +670,8 @@ unpopulated object.
 | --- | --- | --- |
 | Unnamed expression columns | **Refused** | PostgreSQL names them `?column?`, which nothing can reference. Requiring an alias costs one `AS` and produces a usable view. |
 | Rules / `INSTEAD OF` triggers | **Not supported** | CamusDB has neither, so there is no escape hatch that makes a non-auto-updatable view writable. |
-| Updatable views | **Not implemented yet** | See below. All views are currently read-only. |
+| Subquery in the `WHERE` of a view you write through | **Refused** (`CADB0525`) | The `WHERE` is added to the write, which runs as you, so a subquery there would read its tables as you rather than as the view's owner. |
+| `ON CONFLICT`, `UPSERT`, `UPDATE … FROM`, `DELETE … USING` on a view | **Refused** (`CADB0533`) | Write to the table. |
 | `REFRESH … CONCURRENTLY` | **Refused** | The ordinary refresh already leaves readers unblocked, which is what it buys in PostgreSQL; writing only the changed rows is not implemented. |
 | Writing to a materialized view | **Refused** | PostgreSQL refuses too; the row would be discarded by the next refresh either way. |
 | `DROP TABLE … CASCADE` | **No `CASCADE` form** | Drop the dependent views explicitly. |
@@ -616,9 +689,6 @@ unpopulated object.
 
 These parse but are **rejected at execution**, so they fail with an error:
 
-- **Updatable views.** `INSERT`/`UPDATE`/`DELETE` through a view, the auto-updatability rules, and
-  `WITH CHECK OPTION` enforcement. The `WITH [LOCAL|CASCADED] CHECK OPTION` clause parses and is
-  stored, but nothing enforces it yet. **All views are read-only.**
 - **Incremental refresh** (`REFRESH MATERIALIZED VIEW … CONCURRENTLY`), which would write only the
   rows that changed instead of rebuilding. The plain form works and does not block readers.
 - **Resuming an interrupted refresh mid-scan.** An interrupted refresh is restarted from the

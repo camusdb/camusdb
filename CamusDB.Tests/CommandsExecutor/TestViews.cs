@@ -533,10 +533,10 @@ public sealed class TestViews : SharedNodeBaseTest
     }
 
     /// <summary>
-    /// Views are read-only until updatable views land. The point of this test is that each write
-    /// fails <i>loudly and specifically</i> — a user who tries must be told the object is a view and
-    /// that writes go to the base table, not handed "table does not exist" about something they can
-    /// see in SHOW VIEWS, and certainly not have the write silently go nowhere.
+    /// A view that cannot be written through refuses every write <i>loudly and specifically</i> — a user
+    /// who tries must be told the object is a view and why it takes no writes, not handed "table does not
+    /// exist" about something they can see in SHOW VIEWS, and certainly not have the write silently go
+    /// nowhere. (A view over one table can be written through; see TestUpdatableViews.)
     /// </summary>
     [Test]
     public async Task WritesThroughAViewAreRefusedWithASpecificError()
@@ -545,7 +545,7 @@ public sealed class TestViews : SharedNodeBaseTest
         await SeedOrders(database, executor, dbname);
 
         await ExecDdl(database, executor, dbname,
-            "CREATE VIEW open_orders AS SELECT id, customer, total FROM orders WHERE status = 'open'");
+            "CREATE VIEW open_orders AS SELECT DISTINCT id, customer, total FROM orders WHERE status = 'open'");
 
         foreach (string write in new[]
                  {

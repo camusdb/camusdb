@@ -369,6 +369,14 @@ internal sealed class NonQueryStatementDispatcher
         //     fresh BeginAsync each time. Explicit multi-statement transactions surface these codes
         //     to the caller, which owns the retry loop.
 
+        // A write whose target is a view becomes the same write on the table beneath it, before
+        // anything below builds a ticket from the statement. The context it leaves in this flow
+        // authorizes that one table to the caller's own principal and carries the view's check
+        // options to the row validation; see UpdatableViewRewriter and ViewWriteContext.
+        if (UpdatableViewRewriter.TargetsView(database.Schema, ast))
+            (ast, ViewWriteContext.Current) = await UpdatableViewRewriter.RewriteAsync(
+                database, ast, sql => SQLParserProcessor.Parse(sql, sqlParserCache), executor.OwnerPrincipalResolver).ConfigureAwait(false);
+
         switch (ast.nodeType)
         {
             case NodeType.Insert:
