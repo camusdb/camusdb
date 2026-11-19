@@ -100,14 +100,16 @@ internal sealed class JoinLeafScanner
 
     /// <summary>
     /// Reads a <c>LATERAL</c> right side for one left row of a nested-loop join, see
-    /// <see cref="DerivedTableExecutor.StreamLateral"/>.
+    /// <see cref="DerivedTableExecutor.StreamLateral"/>. Under EXPLAIN (ANALYZE), <paramref name="joinStats"/>
+    /// is the join's counters, which count the run or the read of kept rows.
     /// </summary>
     internal IAsyncEnumerable<QueryResultRow> ScanLateralRightSource(
         BoundDerivedTableSource source,
         NodeAst? executionFilter,
         QueryPlan plan,
-        IReadOnlyDictionary<string, ColumnValue> leftRow) =>
-        derivedTableExecutor.StreamLateral(plan.Database, source, plan.Ticket, executionFilter, leftRow);
+        IReadOnlyDictionary<string, ColumnValue> leftRow,
+        PlanNodeStats? joinStats = null) =>
+        derivedTableExecutor.StreamLateral(plan.Database, source, plan.Ticket, executionFilter, leftRow, joinStats);
 
     /// <summary>
     /// Adds the rows of a <c>LATERAL</c> body of expressions only for one left row to <paramref name="output"/>,

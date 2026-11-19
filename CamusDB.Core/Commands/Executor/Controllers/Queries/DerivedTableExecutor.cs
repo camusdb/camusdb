@@ -11,6 +11,7 @@ using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Plans;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.SQLParser;
@@ -136,13 +137,18 @@ internal sealed class DerivedTableExecutor
     /// can keep its results, a run whose rows all fit in <see cref="MaxKeptLateralRows"/> is kept under those
     /// values for the rest of the statement, and a later left row with the same values reads the kept rows.
     /// A run that a reader stops early (a <c>LIMIT</c>) keeps nothing.</para>
+    ///
+    /// <para>Under EXPLAIN (ANALYZE), <paramref name="joinStats"/> is the join's counters: a run of the body
+    /// adds one to <see cref="PlanNodeStats.LateralRuns"/>, and a read of kept rows adds one to
+    /// <see cref="PlanNodeStats.LateralKeptReads"/>.</para>
     /// </summary>
     public async IAsyncEnumerable<QueryResultRow> StreamLateral(
         DatabaseDescriptor database,
         BoundDerivedTableSource source,
         QueryTicket outerTicket,
         NodeAst? executionFilter,
-        IReadOnlyDictionary<string, ColumnValue> leftRow)
+        IReadOnlyDictionary<string, ColumnValue> leftRow,
+        PlanNodeStats? joinStats = null)
     {
         CorrelatedSubqueryBody body = source.Lateral
             ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"Derived table '{source.Alias}' is not LATERAL");
@@ -150,6 +156,9 @@ internal sealed class DerivedTableExecutor
         // A body of expressions only: one row for each branch, keyed by the column row keys, with no run of the body.
         if (source.LateralExpressions is not null)
         {
+            if (joinStats is not null)
+                joinStats.LateralRuns++;
+
             List<QueryResultRow> evaluated = [];
             await EvaluateLateralExpressionsAsync(database, source, outerTicket, executionFilter, leftRow, evaluated).ConfigureAwait(false);
 
@@ -172,9 +181,15 @@ internal sealed class DerivedTableExecutor
         {
             CorrelatedRunProbe.CountHit();
             cursor = KeptRows(keptRows);
+
+            if (joinStats is not null)
+                joinStats.LateralKeptReads++;
         }
         else
         {
+            if (joinStats is not null)
+                joinStats.LateralRuns++;
+
             cursor = body.RunAsync(database, outerValues, outerTicket.TxnState, outerTicket.Parameters, outerTicket.CancellationToken);
 
             if (results is not null)
@@ -431,7 +446,8 @@ internal sealed class DerivedTableExecutor
     /// <summary>
     /// Runs the plan EXPLAIN built for a derived table's query (<see cref="ExplainedDerivedTable"/>). With
     /// counters on, it adds the rows and the time of the run to the plan's root and to the line of the
-    /// derived table, because only the root of a plan gets a time of its own.
+    /// derived table. The time is that of the requests for rows, as on every other line
+    /// (<see cref="PlanNodeCursor"/>): the work of the reader on each row is the reader's, so it is left out.
     /// </summary>
     private async IAsyncEnumerable<QueryResultRow> RunExplained(ExplainedDerivedTable explained)
     {
@@ -441,29 +457,28 @@ internal sealed class DerivedTableExecutor
             ? queryJoinExecutor.ExecuteJoinPlan(plan)
             : queryExecutor.ExecuteQueryPlan(plan);
 
-        System.Diagnostics.Stopwatch watch = System.Diagnostics.Stopwatch.StartNew();
-        long rows = 0;
+        if (!explained.Analyze)
+        {
+            await foreach (QueryResultRow row in cursor.ConfigureAwait(false))
+                yield return row;
+
+            yield break;
+        }
+
+        PlanNodeStats run = new();
 
         try
         {
-            await foreach (QueryResultRow row in cursor.ConfigureAwait(false))
-            {
-                rows++;
+            await foreach (QueryResultRow row in PlanNodeCursor.CountAndTime(cursor, run).ConfigureAwait(false))
                 yield return row;
-            }
         }
         finally
         {
-            watch.Stop();
-
-            if (explained.Analyze)
-            {
-                double ms = watch.Elapsed.TotalMilliseconds;
-                plan.Root.Stats ??= new();
-                plan.Root.Stats.ElapsedMs = (plan.Root.Stats.ElapsedMs ?? 0) + ms;
-                explained.ScanStats.RowsEmitted += rows;
-                explained.ScanStats.ElapsedMs = (explained.ScanStats.ElapsedMs ?? 0) + ms;
-            }
+            double ms = PlanNodeStats.TicksToMs(run.CursorTicks);
+            plan.Root.Stats ??= new();
+            plan.Root.Stats.ElapsedMs = (plan.Root.Stats.ElapsedMs ?? 0) + ms;
+            explained.ScanStats.RowsEmitted += run.RowsEmitted;
+            explained.ScanStats.ElapsedMs = (explained.ScanStats.ElapsedMs ?? 0) + ms;
         }
     }
 

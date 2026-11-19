@@ -306,33 +306,27 @@ public class TestExplainAnalyzeExecutor : SharedNodeBaseTest
     }
 
     [Test]
-    public async Task TestExplainAnalyze_NonRootNodes_ActualTimeMsIsNull()
+    public async Task TestExplainAnalyze_NonRootNodes_ActualTimeMsIsWithinTheParent()
     {
-        // Per-node timing is not measured below the root. Non-root rows must emit NULL rather
-        // than 0.0 (which would falsely imply zero cost). Only the root gets the total elapsed.
+        // Each node below the root has the inclusive time of its cursor, and a parent asks for the rows of
+        // its input inside its own requests, so no node takes more time than the node above it.
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable(5);
 
         List<QueryResultRow> rows = await ExplainAnalyzeAsync(executor, database, dbname,
-            "EXPLAIN (ANALYZE) SELECT * FROM robots LIMIT 3");
+            "EXPLAIN (ANALYZE) SELECT * FROM robots ORDER BY year LIMIT 3");
 
-        // There must be at least 2 nodes (limit + table-scan) for this assertion to be useful.
-        Assert.That(rows.Count, Is.GreaterThan(1),
-            "Need at least two plan nodes for this test");
+        List<QueryResultRow> nodes = rows.Where(r => r.Row["node"].StrValue != "plan-info").ToList();
+        Assert.That(nodes.Count, Is.GreaterThan(2), "Need at least three plan nodes for this test");
 
-        // Root (rows[0]) has the time; every other node must have NULL.
-        for (int i = 1; i < rows.Count; i++)
-        {
-            Assert.That(rows[i].Row["actual_time_ms"].Type, Is.EqualTo(ColumnType.Null),
-                $"Non-root node '{rows[i].Row["node"].StrValue}' at index {i} must have NULL actual_time_ms");
-        }
+        AssertEachTimeIsWithinItsParent(nodes);
     }
 
     [Test]
-    public async Task TestExplainAnalyze_FilterNode_ActualTimeMsIsNull()
+    public async Task TestExplainAnalyze_FilterNode_HasTheTimeOfTheScanItRunsIn()
     {
-        // FilterNode is folded into the scan — timing not captured; must be NULL not 0.0. The sort
-        // keeps the filter off the root: the root row carries the statement time, whatever its node
-        // (see TestExplainAnalyze_FilterRoot_KeepsTheStatementTime).
+        // A filter is folded into the scan below it, so it shows the scan's time. The sort keeps the filter
+        // off the root: the root row carries the statement time, whatever its node (see
+        // TestExplainAnalyze_FilterRoot_KeepsTheStatementTime).
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable(5);
 
         List<QueryResultRow> rows = await ExplainAnalyzeAsync(executor, database, dbname,
@@ -341,12 +335,44 @@ public class TestExplainAnalyzeExecutor : SharedNodeBaseTest
         if (rows[0].Row["node"].StrValue!.StartsWith("filter"))
             Assert.Ignore("The filter is the plan root; test does not apply.");
 
-        QueryResultRow? filterRow = rows.FirstOrDefault(r => r.Row["node"].StrValue!.StartsWith("filter"));
-        if (filterRow is null || filterRow.Value.Row.Count == 0)
+        int filter = rows.FindIndex(r => r.Row["node"].StrValue!.StartsWith("filter"));
+        if (filter < 0)
             Assert.Ignore("No filter node in plan — predicate was index-resolved; test does not apply.");
 
-        Assert.That(filterRow.Value.Row["actual_time_ms"].Type, Is.EqualTo(ColumnType.Null),
-            "filter node actual_time_ms must be NULL (timing not separately measured)");
+        QueryResultRow filterRow = rows[filter];
+        QueryResultRow scanRow = rows[filter + 1];
+
+        Assert.That(filterRow.Row["actual_time_ms"].Type, Is.EqualTo(ColumnType.Float64));
+        Assert.That(filterRow.Row["actual_time_ms"].FloatValue, Is.EqualTo(scanRow.Row["actual_time_ms"].FloatValue),
+            "the filter runs inside the scan, so it has the scan's time");
+    }
+
+    /// <summary>
+    /// Asserts that each row of <paramref name="nodes"/> (plan rows in walk order, with their depth) has a
+    /// time, and that no time is above the time of the row it hangs under.
+    /// </summary>
+    internal static void AssertEachTimeIsWithinItsParent(IReadOnlyList<QueryResultRow> nodes)
+    {
+        Stack<(long Depth, double Ms, string Node)> parents = new();
+
+        foreach (QueryResultRow row in nodes)
+        {
+            string node = row.Row["node"].StrValue!;
+            long depth = row.Row["depth"].LongValue;
+
+            Assert.That(row.Row["actual_time_ms"].Type, Is.EqualTo(ColumnType.Float64), $"'{node}' has a time");
+            double ms = row.Row["actual_time_ms"].FloatValue;
+            Assert.That(ms, Is.GreaterThanOrEqualTo(0), $"'{node}' has a time of zero or more");
+
+            while (parents.Count > 0 && parents.Peek().Depth >= depth)
+                parents.Pop();
+
+            if (parents.Count > 0)
+                Assert.That(ms, Is.LessThanOrEqualTo(parents.Peek().Ms),
+                    $"'{node}' takes {ms} ms, more than its parent '{parents.Peek().Node}' ({parents.Peek().Ms} ms)");
+
+            parents.Push((depth, ms, node));
+        }
     }
 
     // ── grammar / parse tests ─────────────────────────────────────────────────

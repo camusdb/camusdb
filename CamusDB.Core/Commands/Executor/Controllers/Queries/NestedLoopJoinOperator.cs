@@ -5,6 +5,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Diagnostics;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Plans;
@@ -107,9 +108,17 @@ internal sealed class NestedLoopJoinOperator
                 lateralRows ??= [];
                 lateralRows.Clear();
 
+                long evaluationStarted = joinNode.Stats is null ? 0 : Stopwatch.GetTimestamp();
+
                 await scanner
                     .EvaluateLateralExpressionsAsync(expressionBody, joinNode.RightExecutionFilter, plan, leftQualified, lateralRows, lateralParameters ??= new())
                     .ConfigureAwait(false);
+
+                if (joinNode.Stats is { } lateralStats)
+                {
+                    lateralStats.LateralRuns++;
+                    lateralStats.LateralTicks += Stopwatch.GetTimestamp() - evaluationStarted;
+                }
 
                 // An index loop: the list is reused for the next left row, after these rows are paired.
                 for (int r = 0; r < lateralRows.Count; r++)
@@ -137,7 +146,7 @@ internal sealed class NestedLoopJoinOperator
                 : spool is not null
                     ? spool.RowsAsync(plan.Ticket.CancellationToken)
                     : joinNode.RightSource.Derived is { Lateral: not null } lateral
-                        ? scanner.ScanLateralRightSource(lateral, joinNode.RightExecutionFilter, plan, leftQualified)
+                        ? LateralRightSide(joinNode, lateral, plan, leftQualified)
                         : ReadRightSide(joinNode, plan);
 
             await foreach (QueryResultRow rightRow in rightRows.ConfigureAwait(false))
@@ -159,6 +168,21 @@ internal sealed class NestedLoopJoinOperator
 
         if (spool is { Abandoned: true } && joinNode.Stats is { } stats)
             stats.RanAs ??= "nested-loop-rescan";
+    }
+
+    /// <summary>
+    /// The rows of the <c>LATERAL</c> right side for one left row. Under EXPLAIN (ANALYZE) the join's counters
+    /// count the run and take its time, which <c>lateral-runs=</c> and <c>lateral-ms=</c> show on the join line.
+    /// </summary>
+    private IAsyncEnumerable<QueryResultRow> LateralRightSide(
+        NestedLoopJoinNode joinNode,
+        BoundDerivedTableSource lateral,
+        QueryPlan plan,
+        IReadOnlyDictionary<string, ColumnValue> leftQualified)
+    {
+        IAsyncEnumerable<QueryResultRow> rows = scanner.ScanLateralRightSource(lateral, joinNode.RightExecutionFilter, plan, leftQualified, joinNode.Stats);
+
+        return joinNode.Stats is { } stats ? PlanNodeCursor.TimeLateralBody(rows, stats) : rows;
     }
 
     /// <summary>

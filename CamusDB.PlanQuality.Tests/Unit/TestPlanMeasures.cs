@@ -124,6 +124,22 @@ public sealed class TestPlanMeasures
     }
 
     [Test]
+    public void Fingerprint_DropsTheTimeOfALateralBodyAndKeepsItsRuns()
+    {
+        List<PlanNodeMeasure> nodes =
+        [
+            new("nested-loop-join", "on=true, right=v, lateral=expressions(z), lateral-runs=40, lateral-ms=1.234, join-order-est-rows=40", 40, 40, 0, 0, 0),
+            new("nested-loop-join", "on=true, right=w, lateral, lateral-runs=6, lateral-kept-reads=34, lateral-ms=0.5", 40, 40, 0, 0, 0),
+        ];
+
+        Assert.That(PlanMeasures.Fingerprint(nodes), Is.EqualTo(new[]
+        {
+            "nested-loop-join(on=true, right=v, lateral=expressions(z), lateral-runs=40)",
+            "nested-loop-join(on=true, right=w, lateral, lateral-runs=6, lateral-kept-reads=34)",
+        }));
+    }
+
+    [Test]
     public void ResultHash_DoesNotDependOnRowOrColumnOrder()
     {
         QueryResultRow a1 = Row(("x", L(1)), ("y", S("a")));

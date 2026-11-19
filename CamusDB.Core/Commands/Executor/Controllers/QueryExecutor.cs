@@ -684,7 +684,7 @@ internal sealed class QueryExecutor
         // Stats are initialized only for nodes present in StepNodes, so nodes without a step
         // (filter) are never wrapped — same coverage as the retired step-list walk.
         if (collectStats && node.Stats is not null)
-            cursor = CountRowsEmitted(cursor, node.Stats);
+            cursor = PlanNodeCursor.CountAndTime(cursor, node.Stats);
 
         return cursor;
 
@@ -1202,17 +1202,6 @@ internal sealed class QueryExecutor
                 $"{operation} integer overflow: the total {whole.ToString(System.Globalization.CultureInfo.InvariantCulture)} is outside the int64 range");
 
         return (long)whole;
-    }
-
-    private static async IAsyncEnumerable<QueryResultRow> CountRowsEmitted(
-        IAsyncEnumerable<QueryResultRow> source,
-        PlanNodeStats stats)
-    {
-        await foreach (QueryResultRow row in source.ConfigureAwait(false))
-        {
-            stats.RowsEmitted++;
-            yield return row;
-        }
     }
 
     private IAsyncEnumerable<QueryResultRow> QueryUsingIndex(

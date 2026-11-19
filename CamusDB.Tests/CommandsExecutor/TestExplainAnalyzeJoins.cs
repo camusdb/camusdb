@@ -425,26 +425,23 @@ public sealed class TestExplainAnalyzeJoins : SharedNodeBaseTest
     }
 
     /// <summary>
-    /// The root row carries the time of the whole statement and every other row has none, as on a
-    /// single-table plan.
+    /// The root row carries the time of the whole statement, and every other row the inclusive time of its
+    /// own cursor, which is never above the time of the row it hangs under.
     /// </summary>
     [Test]
-    public async Task JoinPlan_TimeIsOnTheRootRowOnly()
+    public async Task JoinPlan_EveryRowHasATimeWithinItsParent()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupCustomersOrders();
 
         List<QueryResultRow> rows = await RunAsync(executor, database, dbname, "EXPLAIN (ANALYZE) " + InnerJoinSql);
-        List<QueryResultRow> nodes = rows.Where(r => Node(r) != "plan-info").ToList();
+        List<QueryResultRow> nodes = rows.Where(r => Node(r) is not ("plan-info" or "broadcast-span" or "gather-span")).ToList();
 
         Assert.That(nodes, Has.Count.GreaterThanOrEqualTo(2), Dump(rows));
-        Assert.IsFalse(IsNull(nodes[0], "actual_time_ms"), "the root row carries the statement time");
-        Assert.GreaterOrEqual(nodes[0].Row["actual_time_ms"].FloatValue, 0.0);
 
-        foreach (QueryResultRow row in nodes.Skip(1))
-        {
-            Assert.IsTrue(IsNull(row, "actual_time_ms"), $"{Node(row)} must not carry a time");
+        foreach (QueryResultRow row in nodes)
             Assert.IsFalse(IsNull(row, "actual_rows"), $"{Node(row)} ran, so it has actual rows");
-        }
+
+        TestExplainAnalyzeExecutor.AssertEachTimeIsWithinItsParent(nodes);
     }
 
     /// <summary>

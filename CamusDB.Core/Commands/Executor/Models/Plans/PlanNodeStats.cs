@@ -44,12 +44,49 @@ public sealed class PlanNodeStats
     public long RowsEmitted;
 
     /// <summary>
-    /// Wall-clock milliseconds spent executing this operator and all operators below it.
-    /// Populated only on the plan root after the cursor is fully drained; null on all other
-    /// nodes (not measured — emitted as NULL in EXPLAIN ANALYZE output rather than 0.0 which
-    /// would imply zero cost).
+    /// Wall-clock milliseconds of a whole run, set from outside the operator's cursor: on the plan
+    /// root, the time to drain the plan; on the root of a derived table's plan and on its derived-table
+    /// line, the time of the derived query's runs. When it is set, EXPLAIN (ANALYZE) prints it in place
+    /// of <see cref="CursorMs"/>.
     /// </summary>
     public double? ElapsedMs;
+
+    /// <summary>
+    /// <see cref="System.Diagnostics.Stopwatch"/> ticks spent inside the operator's row cursor: from each
+    /// request for a row until the row (or the end) arrives. A request runs the inputs of the operator, so
+    /// the time includes theirs, and the time a parent spends on a row it got is left out. Written by
+    /// <see cref="Controllers.Queries.PlanNodeCursor.CountAndTime"/>, which only EXPLAIN (ANALYZE) puts on a
+    /// cursor; a plain query keeps no timer.
+    /// </summary>
+    public long CursorTicks;
+
+    /// <summary>True when the cursor of the node ran under a timer, so <see cref="CursorTicks"/> is a measurement.</summary>
+    public bool CursorTimed;
+
+    /// <summary>The inclusive time of the operator's cursor in milliseconds, or null when it ran without a timer.</summary>
+    public double? CursorMs => CursorTimed ? TicksToMs(CursorTicks) : null;
+
+    /// <summary>The time EXPLAIN (ANALYZE) prints for the node: <see cref="ElapsedMs"/> when set, else <see cref="CursorMs"/>.</summary>
+    public double? ReportedMs => ElapsedMs ?? CursorMs;
+
+    /// <summary>
+    /// Left rows for which a nested-loop join ran its <c>LATERAL</c> body. A left row that read the rows
+    /// that an earlier run with the same left values kept counts in <see cref="LateralKeptReads"/> instead.
+    /// </summary>
+    public long LateralRuns;
+
+    /// <summary>Left rows for which a nested-loop join read the kept rows of an earlier run of its <c>LATERAL</c> body.</summary>
+    public long LateralKeptReads;
+
+    /// <summary>
+    /// <see cref="System.Diagnostics.Stopwatch"/> ticks the <c>LATERAL</c> body of a nested-loop join took over all
+    /// left rows: the runs, the reads of kept rows and the right filter. Part of the join's
+    /// <see cref="CursorTicks"/>.
+    /// </summary>
+    public long LateralTicks;
+
+    /// <summary>Converts <see cref="System.Diagnostics.Stopwatch"/> ticks to milliseconds.</summary>
+    public static double TicksToMs(long ticks) => ticks * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
 
     /// <summary>KV point-lookups issued (unique-index lookups).</summary>
     public long KvPointLookups;

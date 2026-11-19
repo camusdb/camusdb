@@ -756,15 +756,18 @@ contains a subquery does read storage for the inner query. The outer query is ne
 
 `EXPLAIN (ANALYZE) SELECT …` executes the query, drains the cursor, and adds **actual** runtime
 counters per node. Counters live in `PlanNodeStats` (`Models/Plans/PlanNodeStats.cs`):
-`RowsRead`, `RowsEmitted`, `KvPointLookups`, `KvScanEntries`, `ElapsedMs` (root-only), `RanAs` (the
+`RowsRead`, `RowsEmitted`, `KvPointLookups`, `KvScanEntries`, `CursorTicks` (the inclusive time of the
+node's row cursor), `ElapsedMs` (the root, and the run of a derived table's query), the `Lateral*`
+counters of a nested-loop join over a `LATERAL` body, `RanAs` (the
 strategy a hash join actually ran, when it differs from the plan) and `BroadcastSpans` (per-span actuals
 of a broadcast probe).
-Extra result columns: `actual_rows`, `rows_read`, `actual_time_ms` (NULL on non-root nodes),
+Extra result columns: `actual_rows`, `rows_read`, `actual_time_ms` (on every node, see
+[`explain.md`](./explain.md#operator-times)),
 `kv_lookups`, `kv_scan_entries`.
 
 Design points:
 
-- **Gated and zero-cost when off.** Counters are only allocated/updated when `QueryPlan.CollectRuntimeStats`
+- **Gated and zero-cost when off.** Counters and timers are only allocated/updated when `QueryPlan.CollectRuntimeStats`
   is set (only EXPLAIN ANALYZE sets it). Normal `SELECT` pays nothing.
 - **Filter rows are folded into the scan.** A `filter` row reports `actual_rows` from the child scan's
   post-filter emit count; its KV counters are 0 (storage cost is charged to the scan).
@@ -1573,7 +1576,7 @@ These are the meaningful missing pieces and where new work fits.
 | **DISTINCT streaming** | **Done** | `SELECT DISTINCT` over a NOT-NULL index set-prefix streams (adjacent-row dedup, O(1) memory); otherwise hash dedup. |
 | **EXPLAIN ANALYZE for joins** | **Done** | Every join operator records `PlanNodeStats`; a join row counts the reads of its right side, shows `ran=` when a hash join changed strategy at run time, and shows the join-order search estimate next to the plan annotation's ([`explain.md`](./explain.md#join-plans)). |
 | **Logical EXPLAIN** | **Cosmetic** | `(LOGICAL)` renders the physical tree relabeled; there is no distinct logical-plan rendering. |
-| **Per-node timing** | **Root-only** | `actual_time_ms` is only measured for the whole plan, not per operator. |
+| **Per-node timing** | **Done** | `actual_time_ms` is the inclusive time of each operator's row cursor, also inside the plan of a derived table; a `LATERAL` join shows the runs and the time of its body ([`explain.md`](./explain.md#operator-times)). |
 | **Error/semantics matrix** | **Done** | `TestErrorMatrix.cs` — 14 negative cases (ambiguous column, bad HAVING refs, multi-column/multi-row subqueries, `COUNT(DISTINCT)`, etc.) asserting precise codes + messages. |
 | **Query microbenchmarks** | **Missing** | No benchmarks for grouped aggregation, join algorithms, or subquery materialization. |
 

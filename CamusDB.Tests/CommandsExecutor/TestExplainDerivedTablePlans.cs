@@ -192,7 +192,8 @@ public sealed class TestExplainDerivedTablePlans : SharedNodeBaseTest
         List<Line> readers = plan.Where(l => l.Node == "derived-table-scan" && l.Detail.Contains("computed_once=s")).ToList();
         Assert.That(readers, Has.Count.EqualTo(2), string.Join("\n", plan));
         Assert.That(plan.Count(l => l.Node == "table-scan" && l.Detail.StartsWith("table=items", System.StringComparison.Ordinal)), Is.EqualTo(1));
-        Assert.That(readers.Count(l => l.TimeMs is not null), Is.EqualTo(1), "only the reader that shows the plan has its time");
+        // The reader that shows the plan has the time of the run; the other reads the kept rows in its own time.
+        Assert.That(readers.All(l => l.TimeMs is not null), Is.True, "each reader has a time");
         Assert.That(readers.All(l => l.ActualRows == 7), Is.True);
 
         List<QueryResultRow> rows = await Query(executor, database, db, sql);
