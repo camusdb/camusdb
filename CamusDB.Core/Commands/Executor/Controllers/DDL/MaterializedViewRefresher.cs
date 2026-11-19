@@ -297,6 +297,8 @@ internal sealed class MaterializedViewRefresher
             database, BuildStagingTicket(database.Name, stagingName, view), stagingTableId,
             validate: false).ConfigureAwait(false);
 
+        int rows;
+
         try
         {
             if (AfterStagingForTesting is not null)
@@ -308,7 +310,7 @@ internal sealed class MaterializedViewRefresher
             run.Phase = "loading";
             run.Source = snapshot;
 
-            int rows = withNoData
+            rows = withNoData
                 ? 0
                 : await LoadAsync(
                     executor, database, definition, stagingName, view.Name ?? viewName, view.Indexes?.Count ?? 0,
@@ -344,30 +346,6 @@ internal sealed class MaterializedViewRefresher
                     $"Materialized view '{viewName}' was dropped while it was being refreshed; nothing was published");
 
             run.Phase = "published";
-            await InjectAsync(FaultPoint.AfterPublish).ConfigureAwait(false);
-
-            // The staging relation has become the materialized view, so nothing is left to own.
-            // Deleted after the swap, never before: a record removed while the relation it names
-            // is still separate storage would strand exactly what it exists to make findable.
-            await catalogs.DeleteRefreshJobAsync(database, viewTableId).ConfigureAwait(false);
-
-            // The rows were counted while they were written, but under the staging relation's id —
-            // which the swap has just retired. Move those counts onto the view, whose own were
-            // evicted by the same apply because they described the contents this replaced. Skipping
-            // this leaves the view costed by fallback constants, and unable to look stale to the
-            // background collector, so it would stay uncosted until someone ran ANALYZE by hand.
-            //
-            // After the swap and after the job record is gone: the refresh is already published and
-            // durable at this point, so a failure here must not undo any of it. Statistics are
-            // advisory, so the worst case is the behavior that existed before this ran at all.
-            await AdoptRefreshStatisticsAsync(
-                executor, database, viewName, stagingTableId, rows, logger).ConfigureAwait(false);
-
-            // No cache invalidation here on purpose: the replicated apply does it on every node,
-            // including this one. Doing it only at the proposer is what left followers answering
-            // from the contents the swap retired.
-            Report(logger, database, viewName, run, error: null);
-            return rows;
         }
         catch (Exception error) when (error is not SimulatedCrashForTesting)
         {
@@ -407,6 +385,57 @@ internal sealed class MaterializedViewRefresher
             // what the sweep reads to find this run's storage if the drop above did not happen, and
             // what tells it a rebuild was interrupted rather than never started.
             throw;
+        }
+
+        // Published. Nothing below may report the refresh as failed: the new contents are durable
+        // and visible, and a retry would only rebuild them again.
+        await RemoveJobRecordAfterPublishAsync(catalogs, database, viewTableId, viewName, "REFRESH", logger).ConfigureAwait(false);
+
+        // The rows were counted while they were written, but under the staging relation's id — which
+        // the swap has just retired. Move those counts onto the view, whose own were evicted by the
+        // same apply because they described the contents this replaced. Skipping this leaves the view
+        // costed by fallback constants, and unable to look stale to the background collector, so it
+        // would stay uncosted until someone ran ANALYZE by hand. Statistics are advisory, so a failure
+        // here is logged and the worst case is the behavior that existed before this ran at all.
+        await AdoptRefreshStatisticsAsync(
+            executor, database, viewName, stagingTableId, rows, logger).ConfigureAwait(false);
+
+        // No cache invalidation here on purpose: the replicated apply does it on every node,
+        // including this one. Doing it only at the proposer is what left followers answering
+        // from the contents the swap retired.
+        Report(logger, database, viewName, run, error: null);
+        return rows;
+    }
+
+    /// <summary>
+    /// Deletes a published run's ownership record. A failure is logged and leaves the record for the
+    /// background sweep, which sees that the view already owns the run's storage and removes only the
+    /// record. It does not fail the statement, whose result is already published.
+    /// </summary>
+    /// <remarks>
+    /// Deleted after the publish, never before: a record removed while the relation it names is still
+    /// separate storage would strand exactly what it exists to make findable. A simulated crash still
+    /// propagates, as a real one would stop the process here.
+    /// </remarks>
+    private static async Task RemoveJobRecordAfterPublishAsync(
+        CatalogsManager catalogs,
+        DatabaseDescriptor database,
+        string viewTableId,
+        string viewName,
+        string statement,
+        ILogger<ICamusDB> logger)
+    {
+        try
+        {
+            await InjectAsync(FaultPoint.AfterPublish).ConfigureAwait(false);
+            await catalogs.DeleteRefreshJobAsync(database, viewTableId).ConfigureAwait(false);
+        }
+        catch (Exception error) when (error is not SimulatedCrashForTesting)
+        {
+            // Logs the error code only: a message can quote a row value.
+            logger.LogWarning(
+                "{Statement} of materialized view '{ViewName}' was published, but its job record could not be removed ({ErrorCode}); the background sweep will remove it",
+                statement, viewName, ErrorCode(error));
         }
     }
 
@@ -496,6 +525,8 @@ internal sealed class MaterializedViewRefresher
                 stagingTableId,
                 validate: false).ConfigureAwait(false);
 
+            int rows;
+
             try
             {
                 if (AfterStagingForTesting is not null)
@@ -511,7 +542,7 @@ internal sealed class MaterializedViewRefresher
                 run.Phase = "loading";
                 run.Source = snapshot;
 
-                int rows = await LoadAsync(
+                rows = await LoadAsync(
                     executor, database, definition, stagingName, viewName, indexCount, snapshot, ticket,
                     run, CancellationToken.None).ConfigureAwait(false);
 
@@ -541,14 +572,6 @@ internal sealed class MaterializedViewRefresher
                     validate: true).ConfigureAwait(false);
 
                 run.Phase = "published";
-                await InjectAsync(FaultPoint.AfterPublish).ConfigureAwait(false);
-
-                await catalogs.DeleteRefreshJobAsync(database, viewTableId).ConfigureAwait(false);
-
-                await AdoptRefreshStatisticsAsync(executor, database, viewName, stagingTableId, rows, logger).ConfigureAwait(false);
-
-                Report(logger, database, viewName, run, error: null);
-                return rows;
             }
             catch (Exception error) when (error is not SimulatedCrashForTesting)
             {
@@ -570,6 +593,16 @@ internal sealed class MaterializedViewRefresher
 
                 throw;
             }
+
+            // Published: the view exists and holds its rows. A failure below must not report the
+            // create as failed, or a retry would fail on the name the view now holds.
+            await RemoveJobRecordAfterPublishAsync(
+                catalogs, database, viewTableId, viewName, "CREATE MATERIALIZED VIEW", logger).ConfigureAwait(false);
+
+            await AdoptRefreshStatisticsAsync(executor, database, viewName, stagingTableId, rows, logger).ConfigureAwait(false);
+
+            Report(logger, database, viewName, run, error: null);
+            return rows;
         }
         finally
         {
