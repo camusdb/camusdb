@@ -72,7 +72,12 @@ public sealed class TestSchemaChangeLogEntryCodec
     private static IEnumerable<(SchemaOp, object)> Payloads()
     {
         yield return (SchemaOp.CreateTable, CreateTablePayload());
-        yield return (SchemaOp.DropTable, new SchemaDropTablePayload { TableName = "robots", Deferred = true });
+
+        SchemaCreateTablePayload adopting = CreateTablePayload();
+        adopting.AdoptStagingTableId = "B7";
+        yield return (SchemaOp.CreatePopulatedMaterializedView, adopting);
+
+        yield return (SchemaOp.DropTable, new SchemaDropTablePayload { TableName = "robots", Deferred = true, ExpectedTableId = "A0" });
         yield return (SchemaOp.AddColumn, AlterColumnPayload());
         yield return (SchemaOp.DropColumn, AlterColumnPayload());
         yield return (SchemaOp.AddIndex, IndexPayload());

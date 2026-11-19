@@ -277,7 +277,7 @@ public sealed class SchemaReplicator
         // A materialized view created WITH DATA adopted its staging relation: the name the rows were
         // loaded under no longer answers, and its descriptor would otherwise be handed to a later
         // relation of that name.
-        if (entry.Op == SchemaOp.CreateTable)
+        if (entry.Op is SchemaOp.CreateTable or SchemaOp.CreatePopulatedMaterializedView)
         {
             SchemaCreateTablePayload created = DecodePayload<SchemaCreateTablePayload>(entry);
             if (created.AdoptStagingTableId is { Length: > 0 } adopted && created.TableId is { Length: > 0 } viewId)
@@ -562,7 +562,8 @@ public sealed class SchemaReplicator
 
         return entry.Op switch
         {
-            SchemaOp.CreateTable => schema.Tables.ContainsKey(DecodePayload<SchemaCreateTablePayload>(entry).TableName),
+            SchemaOp.CreateTable or SchemaOp.CreatePopulatedMaterializedView
+                => schema.Tables.ContainsKey(DecodePayload<SchemaCreateTablePayload>(entry).TableName),
             SchemaOp.DropTable => SchemaDeltaApplier.WasDropped(schema, DecodePayload<SchemaDropTablePayload>(entry)),
             SchemaOp.AddColumn => HasColumn(schema, DecodePayload<SchemaAlterColumnPayload>(entry)),
             SchemaOp.DropColumn => !HasColumn(schema, DecodePayload<SchemaAlterColumnPayload>(entry)),

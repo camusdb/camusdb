@@ -133,6 +133,7 @@ internal static class WriteShapeDeltaRules
             }
 
             case SchemaOp.CreateTable:
+            case SchemaOp.CreatePopulatedMaterializedView:
             {
                 // The new table has no earlier writer. Its parents do: each foreign key declared
                 // with the table is enforced on the parent from this delta on, and a parent DELETE

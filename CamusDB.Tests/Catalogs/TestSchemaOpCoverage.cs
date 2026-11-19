@@ -212,7 +212,7 @@ public sealed class TestSchemaOpCoverage
     {
         HashSet<SchemaOp> expected =
         [
-            SchemaOp.CreateTable, SchemaOp.RelinkTable, SchemaOp.DropTable,
+            SchemaOp.CreateTable, SchemaOp.CreatePopulatedMaterializedView, SchemaOp.RelinkTable, SchemaOp.DropTable,
             SchemaOp.AddColumn, SchemaOp.DropColumn, SchemaOp.SetElementState,
             SchemaOp.AddIndex, SchemaOp.DropIndex,
             SchemaOp.RenameTable, SchemaOp.RenameColumn, SchemaOp.RenameIndex,

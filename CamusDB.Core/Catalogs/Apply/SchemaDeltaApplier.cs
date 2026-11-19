@@ -64,7 +64,8 @@ internal static class SchemaDeltaApplier
     {
         TableSchema? tableSchema = entry.Op switch
         {
-            SchemaOp.CreateTable => TableDeltaApplier.ApplyCreateTable(schema, SchemaDeltaApplier.DecodePayload<SchemaCreateTablePayload>(entry)),
+            SchemaOp.CreateTable or SchemaOp.CreatePopulatedMaterializedView
+                => TableDeltaApplier.ApplyCreateTable(schema, SchemaDeltaApplier.DecodePayload<SchemaCreateTablePayload>(entry)),
             SchemaOp.RelinkTable => TableDeltaApplier.ApplyRelinkTable(schema, database, SchemaDeltaApplier.DecodePayload<SchemaRelinkTablePayload>(entry)),
             SchemaOp.DropTable => TableDeltaApplier.ApplyDropTable(schema, SchemaDeltaApplier.DecodePayload<SchemaDropTablePayload>(entry)),
             SchemaOp.AddColumn => ColumnDeltaApplier.ApplyAlterColumn(schema, SchemaDeltaApplier.DecodePayload<SchemaAlterColumnPayload>(entry), entry.Op),
@@ -236,7 +237,8 @@ internal static class SchemaDeltaApplier
 
         return entry.Op switch
         {
-            SchemaOp.CreateTable => schema.Tables.ContainsKey(DecodePayload<SchemaCreateTablePayload>(entry).TableName),
+            SchemaOp.CreateTable or SchemaOp.CreatePopulatedMaterializedView
+                => schema.Tables.ContainsKey(DecodePayload<SchemaCreateTablePayload>(entry).TableName),
             SchemaOp.RelinkTable => schema.Tables.ContainsKey(DecodePayload<SchemaRelinkTablePayload>(entry).TableName),
             SchemaOp.DropTable => WasDropped(schema, DecodePayload<SchemaDropTablePayload>(entry)),
             SchemaOp.AddColumn => HasColumn(schema, DecodePayload<SchemaAlterColumnPayload>(entry)),

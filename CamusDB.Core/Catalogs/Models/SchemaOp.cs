@@ -298,6 +298,21 @@ public enum SchemaOp
     /// <c>ALTER FUNCTION ... OWNER TO</c>. Changes who may replace and drop the function, and nothing
     /// about what it computes.
     /// </summary>
-    SetFunctionOwner = 37
+    SetFunctionOwner = 37,
+
+    /// <summary>
+    /// Create a materialized view <c>WITH DATA</c> on the storage of the staging relation its rows were
+    /// loaded into (payload: <c>SchemaCreateTablePayload</c> with <c>AdoptStagingTableId</c> set). The
+    /// apply is the <see cref="CreateTable"/> apply: it creates the view populated, moves the staging
+    /// relation's storage, columns and indexes onto it, and removes the staging relation.
+    ///
+    /// <para>A separate op so a node on an older build stops at this entry with "Unknown schema
+    /// operation" instead of applying it as a plain <see cref="CreateTable"/>. An older build ignores
+    /// <c>AdoptStagingTableId</c>, so it would create a populated view over an empty key-space and keep
+    /// the staging relation, and reach the same schema version as the other nodes with different
+    /// contents. An entry written by a build that sent this as <see cref="CreateTable"/> still applies
+    /// the same way.</para>
+    /// </summary>
+    CreatePopulatedMaterializedView = 38
 }
 

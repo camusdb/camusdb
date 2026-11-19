@@ -68,6 +68,7 @@ internal static class ExtensionReferenceGuard
         switch (entry.Op)
         {
             case SchemaOp.CreateTable:
+            case SchemaOp.CreatePopulatedMaterializedView:
             {
                 SchemaCreateTablePayload payload = SchemaDeltaApplier.DecodePayload<SchemaCreateTablePayload>(entry);
 

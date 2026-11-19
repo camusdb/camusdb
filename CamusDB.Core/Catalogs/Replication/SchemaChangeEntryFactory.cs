@@ -85,7 +85,9 @@ internal static class SchemaChangeEntryFactory
             Database = database.Id,
             FromVersion = database.Schema.SchemaVersion,
             ToVersion = database.Schema.SchemaVersion + 1,
-            Op = SchemaOp.CreateTable,
+            // An adopting create has its own op, so an older node that cannot apply it stops at the
+            // entry instead of creating the view empty; see SchemaOp.CreatePopulatedMaterializedView.
+            Op = string.IsNullOrEmpty(ticket.AdoptStagingTableId) ? SchemaOp.CreateTable : SchemaOp.CreatePopulatedMaterializedView,
             Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaCreateTablePayload
             {
                 TableId = tableId,
