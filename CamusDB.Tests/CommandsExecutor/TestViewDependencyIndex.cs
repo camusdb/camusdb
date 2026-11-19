@@ -62,6 +62,7 @@ public sealed class TestViewDependencyIndex : SharedNodeBaseTest
             "ALTER TABLE t RENAME COLUMN b TO bb",
             "ALTER MATERIALIZED VIEW m1 RENAME TO m1b",
             "REFRESH MATERIALIZED VIEW m1b",
+            "COMMENT ON VIEW v3 IS 'x'",
             "DROP VIEW v3",
             "DROP VIEW v1 CASCADE",
             "CREATE VIEW v4 AS SELECT id FROM u2",

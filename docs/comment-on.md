@@ -141,10 +141,13 @@ COMMENT ON INDEX email_idx       IS '…';                       -- rejected
 `PRIMARY KEY (...)` line, which has no inline `COMMENT` form to round-trip through, so a comment
 stored there could never be shown. Comment the table instead.
 
-**Only these object kinds are supported:** the four above, and sequences
-(`COMMENT ON SEQUENCE s IS '…'`, see [sequences](sequences.md#inspecting-sequences)). Constraints,
-branches, and functions have no `COMMENT ON` form, and there is no `pg_description` /
-`information_schema` catalog to query.
+**Only these object kinds are supported:** the four above, sequences
+(`COMMENT ON SEQUENCE s IS '…'`, see [sequences](sequences.md#inspecting-sequences)), views
+(`COMMENT ON VIEW v IS '…'`) and materialized views (`COMMENT ON MATERIALIZED VIEW m IS '…'`); `SHOW
+VIEWS` and `SHOW MATERIALIZED VIEWS` report the comment, see [views](views.md#introspection). A
+materialized view is a relation, so `COMMENT ON TABLE` sets the same comment. Constraints, branches,
+and functions have no `COMMENT ON` form, and there is no `pg_description` / `information_schema`
+catalog to query.
 
 ## `comment` is a reserved word
 

@@ -700,6 +700,15 @@ internal sealed class NonQueryStatementDispatcher
                 await ddlDispatcher.CommentOnSequenceAsync(database, ast).ConfigureAwait(false);
                 return new(database, null!, 0);
 
+            // The same reasoning for views: one implementation behind both entry points.
+            case NodeType.CommentOnView:
+                await ddlDispatcher.CommentOnViewAsync(database, ast).ConfigureAwait(false);
+                return new(database, null!, 0);
+
+            case NodeType.CommentOnMaterializedView:
+                await ddlDispatcher.CommentOnMaterializedViewAsync(database, ast, ticket).ConfigureAwait(false);
+                return new(database, null!, 0);
+
             case NodeType.SetTransaction:
             case NodeType.SetTransactionLocking:
             case NodeType.SetTransactionPriority:

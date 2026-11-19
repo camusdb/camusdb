@@ -195,6 +195,55 @@ internal sealed class DdlStatementDispatcher
     }
 
     /// <summary>
+    /// Runs <c>COMMENT ON VIEW</c> for both entry points, for the same reason
+    /// <see cref="CommentOnSequenceAsync"/> serves both: a client routes a non-SELECT statement to
+    /// whichever endpoint it uses, and the statement must behave the same through either.
+    /// </summary>
+    /// <remarks>
+    /// The view is authorized here because nothing else will: setting its comment opens no relation, so
+    /// the per-table check that guards <c>COMMENT ON TABLE</c> never runs for a view.
+    /// </remarks>
+    internal Task CommentOnViewAsync(DatabaseDescriptor database, NodeAst ast)
+    {
+        string viewName = ast.leftAst!.yytext!;
+
+        if (!database.Schema.Views.TryGetValue(viewName, out ViewSchema? view))
+        {
+            // Named by the statement for the other kinds, as DROP VIEW does.
+            if (database.Schema.Tables.TryGetValue(viewName, out TableSchema? relation))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.ViewDoesntExist,
+                    relation.IsMaterializedView
+                        ? $"'{viewName}' is a materialized view; use COMMENT ON MATERIALIZED VIEW"
+                        : $"'{viewName}' is a table, not a view; use COMMENT ON TABLE");
+
+            throw new CamusDBException(CamusDBErrorCodes.ViewDoesntExist, $"View '{viewName}' does not exist");
+        }
+
+        ViewAuthorization.Require(database, viewName, view, Privilege.Alter);
+
+        string? comment = ast.rightAst is null
+            ? null
+            : DML.SQLExecutorBaseCreator.UnquoteStringLiteral(ast.rightAst.yytext!);
+
+        return catalogs.SetViewCommentAsync(database, viewName, comment);
+    }
+
+    /// <summary>
+    /// Runs <c>COMMENT ON MATERIALIZED VIEW</c> for both entry points. The name must be a materialized
+    /// view; the comment then goes through the relation comment path <c>COMMENT ON TABLE</c> uses,
+    /// which forwards to the schema leader and checks the caller against the relation.
+    /// </summary>
+    internal async Task CommentOnMaterializedViewAsync(DatabaseDescriptor database, NodeAst ast, ExecuteSQLTicket ticket)
+    {
+        MaterializedViewRefresher.RequireMaterializedView(database, ast.leftAst!.yytext!);
+
+        CommentTicket commentTicket = sqlExecutor.CreateCommentTicket(ticket, ast);
+        context.Validator.Validate(commentTicket);
+        await schemaDdl.Comment(database, commentTicket).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Executes a schema statement, and guards the statement boundary as the DML dispatcher does,
     /// under PostgreSQL's rule: a statement on an aborted transaction is refused, and a statement that
     /// fails aborts the caller's transaction (a single-node schema change persists its metadata inside
@@ -263,6 +312,14 @@ internal sealed class DdlStatementDispatcher
                     context.Validator.Validate(commentTicket);
                     return await schemaDdl.Comment(database, commentTicket).ConfigureAwait(false);
                 }
+
+            case NodeType.CommentOnView:
+                await CommentOnViewAsync(database, ast).ConfigureAwait(false);
+                return new ExecuteDDLSQLResult(database, true);
+
+            case NodeType.CommentOnMaterializedView:
+                await CommentOnMaterializedViewAsync(database, ast, ticket).ConfigureAwait(false);
+                return new ExecuteDDLSQLResult(database, true);
 
             case NodeType.CreateView:
             case NodeType.CreateOrReplaceView:

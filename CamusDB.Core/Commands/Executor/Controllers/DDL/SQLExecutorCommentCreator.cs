@@ -34,6 +34,8 @@ internal sealed class SQLExecutorCommentCreator : SQLExecutorBaseCreator
         switch (ast.nodeType)
         {
             case NodeType.CommentOnTable:
+            // A materialized view is a relation, and its comment is the relation's own.
+            case NodeType.CommentOnMaterializedView:
                 return new CommentTicket(CommentTarget.Table, sqlTicket.DatabaseName, name, null, comment);
 
             case NodeType.CommentOnDatabase:

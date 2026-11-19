@@ -980,6 +980,8 @@ comment_stmt : TCOMMENT TON TTABLE any_identifier TIS comment_value { $$.n = new
              | TCOMMENT TON TINDEX any_identifier TIS comment_value { $$.n = new(NodeType.CommentOnIndex, $4.n, $6.n, null, null, null, null, null, null); }
              | TCOMMENT TON TDATABASE any_identifier TIS comment_value { $$.n = new(NodeType.CommentOnDatabase, $4.n, $6.n, null, null, null, null, null, null); }
              | TCOMMENT TON TSEQUENCE any_identifier TIS comment_value { $$.n = new(NodeType.CommentOnSequence, $4.n, $6.n, null, null, null, null, null, null); }
+             | TCOMMENT TON TVIEW any_identifier TIS comment_value { $$.n = new(NodeType.CommentOnView, $4.n, $6.n, null, null, null, null, null, null); }
+             | TCOMMENT TON TMATERIALIZED TVIEW any_identifier TIS comment_value { $$.n = new(NodeType.CommentOnMaterializedView, $5.n, $7.n, null, null, null, null, null, null); }
              ;
 
 /* A null node distinguishes "IS NULL" (remove the comment) from "IS ''" (store an empty string). */

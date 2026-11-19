@@ -294,11 +294,22 @@ exactly as it treats a table.
 ## Introspection
 
 ```sql
-SHOW VIEWS;                     -- names only
+SHOW VIEWS;                     -- name and comment
 SHOW VIEWS LIKE 'open%';
 SHOW CREATE VIEW open_orders;
 SHOW COLUMNS FROM open_orders;
 ```
+
+A view can carry a comment, which `SHOW VIEWS` reports in its `comment` column:
+
+```sql
+COMMENT ON VIEW open_orders IS 'orders not yet shipped';
+COMMENT ON VIEW open_orders IS NULL;   -- removes it; IS '' stores an empty one
+```
+
+The comment belongs to the view itself: `CREATE OR REPLACE VIEW` and
+`ALTER VIEW … RENAME TO` keep it. Setting it needs the `ALTER` privilege on the view. `SHOW CREATE
+VIEW` does not print it, so its output stays one statement.
 
 `SHOW TABLES` lists **tables only** — it does not list views. (PostgreSQL's `\dt` behaves the same
 way, and changing `SHOW TABLES` output would break existing clients.)
@@ -413,7 +424,7 @@ works on it:
 ```sql
 CREATE INDEX customer_totals_customer ON customer_totals (customer);
 ANALYZE TABLE customer_totals;
-COMMENT ON TABLE customer_totals IS 'nightly rollup';
+COMMENT ON MATERIALIZED VIEW customer_totals IS 'nightly rollup';
 SHOW COLUMNS FROM customer_totals;
 ```
 
@@ -537,7 +548,7 @@ to use.
 ### Introspection
 
 ```sql
-SHOW MATERIALIZED VIEWS;             -- name, whether it holds data, and the snapshot it holds
+SHOW MATERIALIZED VIEWS;             -- name, whether it holds data, the snapshot it holds, and its comment
 SHOW MATERIALIZED VIEWS LIKE 'cust%';
 SHOW CREATE MATERIALIZED VIEW customer_totals;
 SHOW COLUMNS FROM customer_totals;

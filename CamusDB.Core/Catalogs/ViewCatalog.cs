@@ -139,6 +139,26 @@ internal sealed class ViewCatalog
             database, viewName, definition, expectedGeneration, setComment: false, comment: null));
 
     /// <summary>
+    /// Proposes <c>COMMENT ON VIEW</c>: a <see cref="SchemaOp.SetViewDefinition"/> delta that keeps the
+    /// definition and sets the comment. <paramref name="comment"/> is null to remove the comment; the
+    /// empty string stores a present-but-empty one.
+    /// </summary>
+    /// <remarks>
+    /// The current definition rides along, read under the schema lock together with the generation the
+    /// change is checked against: a node that predates comments applies the definition alone and keeps
+    /// the one it has, and every other node refuses the change if the view moved in between.
+    /// </remarks>
+    internal Task SetViewCommentAsync(DatabaseDescriptor database, string viewName, string? comment)
+        => ProposeAsync(database, () =>
+        {
+            if (!database.Schema.Views.TryGetValue(viewName, out ViewSchema? view) || view.Definition is null)
+                throw new CamusDBException(CamusDBErrorCodes.ViewDoesntExist, $"View '{viewName}' does not exist");
+
+            return SchemaChangeEntryFactory.SetViewDefinitionEntry(
+                database, viewName, view.Definition, view.Generation, setComment: true, comment: comment);
+        });
+
+    /// <summary>
     /// Proposes a <see cref="SchemaOp.SetMaterializedViewState"/> delta recording a refresh outcome.
     ///
     /// <para>When <paramref name="swapToTableId"/> is given this is the <b>swap</b> half of a

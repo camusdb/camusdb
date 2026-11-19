@@ -34,6 +34,7 @@ internal static class DerivedTableSchemaBuilder
     internal static readonly IReadOnlyList<DerivedColumnSchema> ShowViewsSchema =
     [
         new("views", ColumnType.String),
+        new("comment", ColumnType.String),
     ];
 
     /// <summary>
@@ -46,6 +47,7 @@ internal static class DerivedTableSchemaBuilder
         new("materialized_views", ColumnType.String),
         new("populated", ColumnType.Bool),
         new("refreshed_at", ColumnType.String),
+        new("comment", ColumnType.String),
     ];
 
     /// <summary>

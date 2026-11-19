@@ -1316,4 +1316,14 @@ public enum NodeType
     /// operation again must carry this slot.
     /// </summary>
     RecursiveCte,
+
+    /// <summary><c>COMMENT ON VIEW &lt;name&gt; IS &lt;value&gt;</c>. A null <c>rightAst</c> removes the comment.</summary>
+    CommentOnView,
+
+    /// <summary>
+    /// <c>COMMENT ON MATERIALIZED VIEW &lt;name&gt; IS &lt;value&gt;</c>. A null <c>rightAst</c> removes the
+    /// comment. A materialized view is a relation, so the comment is the relation's own, the one
+    /// <c>COMMENT ON TABLE</c> also sets.
+    /// </summary>
+    CommentOnMaterializedView,
 }

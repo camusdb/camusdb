@@ -306,6 +306,9 @@ public sealed class CatalogsManager
         DatabaseDescriptor database, string viewName, ViewDefinition definition, long? expectedGeneration = null)
         => await views.SetViewDefinitionAsync(database, viewName, definition, expectedGeneration).ConfigureAwait(false);
 
+    public async Task SetViewCommentAsync(DatabaseDescriptor database, string viewName, string? comment)
+        => await views.SetViewCommentAsync(database, viewName, comment).ConfigureAwait(false);
+
     public async Task SetMaterializedViewStateAsync(
         DatabaseDescriptor database,
         string tableId,
