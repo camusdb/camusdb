@@ -140,6 +140,7 @@ public class ConfigReader
         "max_recursive_cte_iterations",
         "max_recursive_cte_rows",
         "max_table_function_rows",
+        "max_tables_per_statement",
         "statement_timeout_ms",
         "max_open_explicit_transactions",
         "max_client_connections",

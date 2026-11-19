@@ -920,6 +920,9 @@ public class ConfigDefinition
     /// <summary>Most rows one read of a function in FROM may make. &lt;= 0 disables. Default 5 000 000.</summary>
     public long MaxTableFunctionRows { get; set; } = 5_000_000;
 
+    /// <summary>Most relations one SQL statement may read. &lt;= 0 disables. Default 64.</summary>
+    public int MaxTablesPerStatement { get; set; } = 64;
+
     /// <summary>Most milliseconds one SQL statement may run. &lt;= 0 disables. Default 0 (no limit).</summary>
     public int StatementTimeoutMs { get; set; }
 

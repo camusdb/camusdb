@@ -778,6 +778,15 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string ViewComplexityLimitExceeded = "CADB0563";
 
+    /// <summary>
+    /// The statement reads more relations than <see cref="CamusDBOptions.MaxTablesPerStatement"/>
+    /// allows. The count covers every join, subquery, derived table, CTE and view body of the
+    /// statement, after view expansion. Refused before the statement is bound or planned, so nothing
+    /// ran. Split the statement or raise the setting. Not retryable as is. Maps to HTTP 400 and gRPC
+    /// <c>INVALID_ARGUMENT</c>.
+    /// </summary>
+    public const string TooManyTablesInStatement = "CADB0564";
+
     public const string InvalidConfig = "CADB0600";
 
     /// <summary>
@@ -1326,6 +1335,7 @@ public static class CamusDBErrorCodes
         TableFunctionRowLimitExceeded => 400,
         StatementTimeout => 400,
         ViewComplexityLimitExceeded => 400,
+        TooManyTablesInStatement => 400,
         StatementTooLarge => 413,
         ConcurrencyLimitExceeded => 503,
         QueryNotFound => 404,

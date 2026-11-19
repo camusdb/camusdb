@@ -124,6 +124,7 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 | `max_recursive_cte_iterations` | — | `10000` (see [common-table-expressions.md](common-table-expressions.md#recursive-queries)) |
 | `max_recursive_cte_rows` | — | `10000000` |
 | `max_table_function_rows` | — | `5000000` (see [request-resource-limits.md](request-resource-limits.md#functions-in-from)) |
+| `max_tables_per_statement` | — | `64` (see [request-resource-limits.md](request-resource-limits.md#tables-per-statement)) |
 | `statement_timeout_ms` | — | `0`, no limit (see [request-resource-limits.md](request-resource-limits.md#statement-timeout)) |
 | `max_open_explicit_transactions` | — | `10000` |
 | `max_client_connections` | — | `10000` |

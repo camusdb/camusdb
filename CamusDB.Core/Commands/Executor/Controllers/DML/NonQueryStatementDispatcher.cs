@@ -329,6 +329,11 @@ internal sealed class NonQueryStatementDispatcher
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
         activity?.Describe(ast.nodeType);
 
+        // The subqueries of a plain INSERT, UPDATE or DELETE are planned without view expansion, so
+        // the parsed tree is the whole count for them. A source query that reads a view is counted
+        // again after expansion, where it is built (SelectStatementExecutor.BuildSelectSourceAsync).
+        selectExecutor.EnforceTableLimit(ast);
+
         // A write with a CTE that it computes once keeps that CTE's rows until the write ends.
         await using Queries.ComputedOnceScope? computedOnce = Queries.ComputedOnceRows.Begin(ticket.TxnState, ast);
 
@@ -374,8 +379,15 @@ internal sealed class NonQueryStatementDispatcher
         // authorizes that one table to the caller's own principal and carries the view's check
         // options to the row validation; see UpdatableViewRewriter and ViewWriteContext.
         if (UpdatableViewRewriter.TargetsView(database.Schema, ast))
+        {
             (ast, ViewWriteContext.Current) = await UpdatableViewRewriter.RewriteAsync(
                 database, ast, sql => SQLParserProcessor.Parse(sql, sqlParserCache), executor.OwnerPrincipalResolver).ConfigureAwait(false);
+
+            // The rewrite puts a computed view column's expression wherever the statement names the
+            // column, and that expression can hold a subquery, so the rewritten write can read more
+            // relations than the parsed one. Count it again.
+            selectExecutor.EnforceTableLimit(ast);
+        }
 
         switch (ast.nodeType)
         {

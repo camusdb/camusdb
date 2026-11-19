@@ -182,6 +182,7 @@ public static class GrpcErrorMapper
         CamusDBErrorCodes.InlineDefinitionRateExceeded      => StatusCode.ResourceExhausted,
 
         CamusDBErrorCodes.StatementTooLarge                 => StatusCode.InvalidArgument,
+        CamusDBErrorCodes.TooManyTablesInStatement          => StatusCode.InvalidArgument,
 
         // The node's store is damaged. Not retryable, and not an ordinary internal error: a client must
         // not read it as an empty result or as a transient failure.
