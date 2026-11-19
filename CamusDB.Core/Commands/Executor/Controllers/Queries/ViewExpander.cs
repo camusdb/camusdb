@@ -152,10 +152,25 @@ internal static class ViewExpander
             && ReferenceEquals(cachedSchema, schema))
             return cached.Resolved;
 
+        // Runs without the schema lock, so a rename can apply while the ids are turned into names. The
+        // version is read first and the result is cached only if it did not move: a body that holds
+        // the old names must not be stored under the new version, where every later read would use it.
+        long version = schema.SchemaVersion;
         NodeAst resolved = DDL.StoredBodyBinder.ResolveStoredForm(schema, body, viewName);
-        resolvedBodies.AddOrUpdate(body, new ResolvedBody(new WeakReference<Schema>(schema), schema.SchemaVersion, viewName, resolved));
+
+        AfterResolveForTesting?.Invoke(viewName);
+
+        if (schema.SchemaVersion == version)
+            resolvedBodies.AddOrUpdate(body, new ResolvedBody(new WeakReference<Schema>(schema), version, viewName, resolved));
+
         return resolved;
     }
+
+    /// <summary>
+    /// Test-only seam: invoked with the view's name after its body is resolved and before the result
+    /// is cached, so a test can apply a rename inside that window. Null in production.
+    /// </summary>
+    internal static Action<string>? AfterResolveForTesting { get; set; }
 
     private static NodeAst Rewrite(Schema schema, NodeAst node, Expansion expansion)
     {

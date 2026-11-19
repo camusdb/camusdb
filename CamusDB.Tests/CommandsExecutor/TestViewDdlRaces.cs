@@ -17,6 +17,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Catalogs.Replication;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Controllers.DDL;
+using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Serializer;
@@ -44,6 +45,14 @@ public sealed class TestViewDdlRaces : SharedNodeBaseTest
         KvTransaction tx = await database.Transactions.BeginAsync();
         ExecuteSQLTicket ticket = new(txnState: tx, database: dbname, sql: sql, parameters: null);
         await executor.ExecuteDDLSQL(ticket);
+        await database.Transactions.CommitAsync(tx);
+    }
+
+    private static async Task ExecNonQuery(DatabaseDescriptor database, CommandExecutor executor, string dbname, string sql)
+    {
+        KvTransaction tx = await database.Transactions.BeginAsync();
+        ExecuteSQLTicket ticket = new(txnState: tx, database: dbname, sql: sql, parameters: null);
+        _ = await executor.ExecuteNonSQLQuery(ticket);
         await database.Transactions.CommitAsync(tx);
     }
 
@@ -76,7 +85,11 @@ public sealed class TestViewDdlRaces : SharedNodeBaseTest
     }
 
     [TearDown]
-    public void ClearSeam() => ViewCreator.BeforeProposeForTesting = null;
+    public void ClearSeam()
+    {
+        ViewCreator.BeforeProposeForTesting = null;
+        ViewExpander.AfterResolveForTesting = null;
+    }
 
     /// <summary>
     /// Two replaces that are each compatible with the old shape but not with each other. Both used to
@@ -219,6 +232,39 @@ public sealed class TestViewDdlRaces : SharedNodeBaseTest
         Assert.AreEqual("new_owner", stored.Owner, "the owner change stands");
         Assert.AreEqual("new-owner-id", stored.OwnerId);
         CollectionAssert.AreEqual(new[] { "id" }, stored.Columns!.Select(c => c.Name).ToArray(), "and the replace changed nothing");
+    }
+
+    /// <summary>
+    /// A table rename that applies while a read resolves a view body. The body resolved with the old
+    /// table name used to be cached under the new schema version, so every later read failed with a
+    /// missing relation until some other change moved the version.
+    /// </summary>
+    [Test]
+    public async Task ARenameDuringResolutionDoesNotCacheTheOldNames()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await Seed(database, executor, dbname);
+        await ExecNonQuery(database, executor, dbname, "INSERT INTO t (id, a, b) VALUES (1, 10, 'x')");
+
+        ViewExpander.AfterResolveForTesting = _ =>
+        {
+            ViewExpander.AfterResolveForTesting = null;
+            ExecDdl(database, executor, dbname, "ALTER TABLE t RENAME TO t2").GetAwaiter().GetResult();
+        };
+
+        // The read inside the window may fail, since its body names a table that was just renamed.
+        try
+        {
+            await ExecQuery(database, executor, dbname, "SELECT id, a FROM base");
+        }
+        catch (CamusDBException)
+        {
+        }
+
+        Assert.IsTrue(database.Schema.Tables.ContainsKey("t2"), "the rename applied inside the window");
+
+        List<QueryResultRow> rows = await ExecQuery(database, executor, dbname, "SELECT id, a FROM base");
+        Assert.AreEqual(1, rows.Count, "the next read resolves the new name");
     }
 
     /// <summary>
