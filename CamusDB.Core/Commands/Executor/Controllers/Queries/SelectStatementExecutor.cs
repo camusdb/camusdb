@@ -760,6 +760,10 @@ internal sealed class SelectStatementExecutor
         {
             case NodeType.Select:
                 {
+                    // Checked after the views are expanded, so a view body stored with the clause
+                    // before CREATE VIEW refused it is refused at read rather than read at the wrong time.
+                    NestedAsOfSystemTime.RequireOnlyOnTheOuterQuery(ast);
+
                     // A Read Committed SELECT of a transaction reads at one statement timestamp; see
                     // KvTransaction.QueryReadView. Taken from the statement's own transaction, before an
                     // AS OF SYSTEM TIME clause rebinds the ticket to a snapshot.

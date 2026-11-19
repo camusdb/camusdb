@@ -163,4 +163,80 @@ public sealed class TestAsOfSystemTime : SharedNodeBaseTest
         Assert.AreEqual(CamusDBErrorCodes.InvalidAsOfSystemTime, ex.Code);
         await db.Transactions.RollbackAsync(tx);
     }
+
+    /// <summary>
+    /// The clause on a CTE body, a derived table, or a scalar, IN, EXISTS or LATERAL subquery was parsed
+    /// and never read, so the query returned current data with no error, and an invalid value was not
+    /// checked. Each form is refused with CADB0409; the clause on the outer query still reads the past.
+    /// </summary>
+    [Test]
+    public async Task AsOfOnANestedQueryIsRefused()
+    {
+        (string dbName, DatabaseDescriptor db, CommandExecutor executor) = await SetupLeaderboard();
+
+        await RunNonQuery(dbName, db, executor,
+            "INSERT INTO leaderboard (id, name, score) VALUES (gen_id(), \"player1\", 7)");
+        await Task.Delay(60);
+        long t = NowMillis();
+        await Task.Delay(60);
+        await RunNonQuery(dbName, db, executor, "UPDATE leaderboard SET score = 14 WHERE name = \"player1\"");
+
+        List<QueryResultRow> outer = await RunSelect(dbName, executor, $"SELECT score FROM leaderboard AS OF SYSTEM TIME {t}");
+        Assert.AreEqual(7, outer[0].Row["score"].LongValue, "the clause on the outer query still works");
+
+        string[] nested =
+        [
+            $"WITH x AS (SELECT score FROM leaderboard AS OF SYSTEM TIME {t}) SELECT * FROM x",
+            $"SELECT * FROM (SELECT score FROM leaderboard AS OF SYSTEM TIME {t}) u",
+            $"SELECT (SELECT score FROM leaderboard AS OF SYSTEM TIME {t}) AS b",
+            $"SELECT name FROM leaderboard WHERE score IN (SELECT score FROM leaderboard AS OF SYSTEM TIME {t})",
+            $"SELECT name FROM leaderboard WHERE EXISTS (SELECT score FROM leaderboard AS OF SYSTEM TIME {t})",
+            $"SELECT l.name, v.score FROM leaderboard l, LATERAL (SELECT score FROM leaderboard AS OF SYSTEM TIME {t}) v",
+            "WITH x AS (SELECT score FROM leaderboard AS OF SYSTEM TIME '+1h') SELECT * FROM x",
+        ];
+
+        foreach (string sql in nested)
+        {
+            CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () => await RunSelect(dbName, executor, sql))!;
+            Assert.AreEqual(CamusDBErrorCodes.InvalidAsOfSystemTime, ex.Code, sql);
+            StringAssert.Contains("only on the outer query", ex.Message, sql);
+        }
+
+        // A set operation's operand keeps its own message, which names the operator.
+        CamusDBException union = Assert.ThrowsAsync<CamusDBException>(async () => await RunSelect(dbName, executor,
+            $"SELECT score FROM leaderboard UNION SELECT score FROM leaderboard AS OF SYSTEM TIME {t}"))!;
+        Assert.AreEqual(CamusDBErrorCodes.InvalidAsOfSystemTime, union.Code);
+        StringAssert.Contains("UNION", union.Message);
+    }
+
+    /// <summary>
+    /// A view body is expanded below the query that reads it, and a refresh reads a materialized view's
+    /// body at its own snapshot, so in neither is the clause read. Both are refused at CREATE, at any
+    /// depth of the body.
+    /// </summary>
+    [Test]
+    public async Task AsOfInAViewBodyIsRefusedAtCreate()
+    {
+        (string dbName, DatabaseDescriptor db, CommandExecutor executor) = await SetupLeaderboard();
+        long t = NowMillis();
+
+        foreach (string sql in new[]
+        {
+            $"CREATE VIEW past_scores AS SELECT score FROM leaderboard AS OF SYSTEM TIME {t}",
+            $"CREATE VIEW past_scores AS SELECT * FROM (SELECT score FROM leaderboard AS OF SYSTEM TIME {t}) u",
+            $"CREATE MATERIALIZED VIEW past_scores AS SELECT score FROM leaderboard AS OF SYSTEM TIME {t}",
+        })
+        {
+            KvTransaction tx = await db.Transactions.BeginAsync();
+            CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+                await executor.ExecuteDDLSQL(new ExecuteSQLTicket(tx, dbName, sql, null)))!;
+            await db.Transactions.RollbackIfNotCompletedAsync(tx);
+
+            Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex.Code, sql);
+            StringAssert.Contains("AS OF SYSTEM TIME", ex.Message, sql);
+        }
+
+        Assert.IsFalse(db.Schema.Views.ContainsKey("past_scores"));
+        Assert.IsFalse(db.Schema.Tables.ContainsKey("past_scores"));
+    }
 }
