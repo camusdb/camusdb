@@ -694,6 +694,9 @@ public sealed class SchemaReplicator
         // catalog saw removed, which the proposer-side reference check reads from the clone.
         clone.FunctionCatalog.CopyFrom(schema.FunctionCatalog);
 
+        // The clone holds the same view and materialized-view definitions, so it shares the immutable
+        // reverse dependency index instead of rebuilding it from every definition.
+        clone.ShareViewDependencyIndexFrom(schema);
 
         return clone;
     }

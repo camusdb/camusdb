@@ -410,6 +410,16 @@ public sealed class Schema : IDisposable
     }
 
     /// <summary>
+    /// Gives this schema the reverse dependency index of <paramref name="source"/>, building it there
+    /// first if needed. Used by a clone that holds the same definitions as its source: the index is
+    /// immutable and replaced on change, so a dry-run apply on the clone replaces the clone's reference
+    /// and leaves the source's alone. Sharing it saves a walk of every definition under the schema lock
+    /// on each dry-run.
+    /// </summary>
+    internal void ShareViewDependencyIndexFrom(Schema source)
+        => Volatile.Write(ref viewDependencies, source.ViewDependencies);
+
+    /// <summary>
     /// Drops the index so it is rebuilt from the forward lists on next use. Called whenever the maps are
     /// replaced wholesale — a load, a reload — where nothing applied a delta to keep it current.
     /// </summary>
