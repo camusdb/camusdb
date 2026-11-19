@@ -159,6 +159,13 @@ internal sealed class SelectBindPipeline
         existsSubqueryPreparer.PrepareLateralBodyAsync(database, select, bodyQuery, outerReferences, outerTables, outerDerived, ticket);
 
     /// <summary>
+    /// Prepares a scalar subquery inside a <c>LATERAL</c> body of expressions, see
+    /// <see cref="NestedSelectBinder.PrepareParameterSubqueryAsync"/>.
+    /// </summary>
+    internal Task<CorrelatedSubqueryBody> PrepareParameterSubqueryAsync(DatabaseDescriptor database, NodeAst select, ExecuteSQLTicket ticket) =>
+        existsSubqueryPreparer.PrepareParameterSubqueryAsync(database, select, ticket);
+
+    /// <summary>
     /// Prepares the WHERE and the SET values of an UPDATE, or the WHERE of a DELETE, on
     /// <paramref name="tableName"/>, whose rows are the outer query of each subquery. Every uncorrelated
     /// subquery folds to its value, as for any other clause. Each correlated one is prepared against the target
@@ -279,6 +286,14 @@ internal readonly struct NestedSelectBinder
         IReadOnlyList<BoundTableSource> outerTables,
         IReadOnlyList<BoundDerivedTableSource> outerDerived) =>
         pipeline.PrepareLateralAsync(database, select, bodyQuery, outerReferences, outerTables, outerDerived, ticket);
+
+    /// <summary>
+    /// Prepares a scalar subquery inside a <c>LATERAL</c> body of expressions, under the statement's ticket. The
+    /// subquery reads the left row only through the hidden placeholders of that body, so it binds one time
+    /// (see <see cref="LateralExpressionBody"/>).
+    /// </summary>
+    public Task<CorrelatedSubqueryBody> PrepareParameterSubqueryAsync(DatabaseDescriptor database, NodeAst select) =>
+        pipeline.PrepareParameterSubqueryAsync(database, select, ticket);
 }
 
 /// <summary>

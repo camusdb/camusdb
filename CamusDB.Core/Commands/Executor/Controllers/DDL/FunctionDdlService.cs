@@ -53,6 +53,10 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 ///
 /// <para><b>Runs on the schema leader</b>, under the database's DDL semaphore, like extension, view
 /// and sequence DDL.</para>
+///
+/// <para><b>Rate.</b> <c>CREATE [OR REPLACE] FUNCTION</c> counts against the caller's limit of
+/// statements that compile inline C# (<see cref="InlineDefinitionRateLimiter"/>), right before the
+/// compile.</para>
 /// </summary>
 internal sealed class FunctionDdlService
 {
@@ -66,14 +70,18 @@ internal sealed class FunctionDdlService
 
     private readonly CamusDB.Core.Auth.AuthService? authService;
 
+    private readonly InlineDefinitionRateLimiter definitionLimiter;
+
     public FunctionDdlService(
-        ExecutorContext context, CatalogsManager catalogs, SqlParserCache sqlParserCache, Auth.StatementAuthorizer authorizer, CamusDB.Core.Auth.AuthService? authService)
+        ExecutorContext context, CatalogsManager catalogs, SqlParserCache sqlParserCache, Auth.StatementAuthorizer authorizer, CamusDB.Core.Auth.AuthService? authService,
+        InlineDefinitionRateLimiter definitionLimiter)
     {
         this.context = context;
         this.catalogs = catalogs;
         this.sqlParserCache = sqlParserCache;
         this.authorizer = authorizer;
         this.authService = authService;
+        this.definitionLimiter = definitionLimiter;
     }
 
     public async Task CreateAsync(DatabaseDescriptor database, NodeAst ast, ExecuteSQLTicket ticket)
@@ -91,6 +99,11 @@ internal sealed class FunctionDdlService
         RequireNameFreeOfBuiltIns(function.Name);
 
         await RequireSchemaLeaderAsync(database, "CREATE FUNCTION").ConfigureAwait(false);
+
+        // After the checks that refuse without a compile, before the compile: the compile here and the
+        // one on every node at the next call are the cost the limit bounds, and a body that fails to
+        // compile costs the same.
+        definitionLimiter.Admit(database.Options, ticket.Principal, replace ? "CREATE OR REPLACE FUNCTION" : "CREATE FUNCTION");
 
         // Before any lock: the compile takes milliseconds to seconds, and a refused body must not
         // have held the schema of the database for that time.

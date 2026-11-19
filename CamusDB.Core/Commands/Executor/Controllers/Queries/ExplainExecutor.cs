@@ -237,8 +237,11 @@ internal sealed class ExplainExecutor
     ///
     /// The result row schema extends the plain EXPLAIN schema with five actual columns:
     /// <c>actual_rows INT64</c>, <c>rows_read INT64</c>, <c>actual_time_ms FLOAT64</c>,
-    /// <c>kv_lookups INT64</c>, <c>kv_scan_entries INT64</c>. <c>actual_time_ms</c> is the total
-    /// wall-clock milliseconds for the whole plan, reported on the root node only (NULL elsewhere).
+    /// <c>kv_lookups INT64</c>, <c>kv_scan_entries INT64</c>. <c>actual_time_ms</c> is the inclusive time
+    /// of the node: on the root, the time to drain the whole plan; on another node, the time spent in
+    /// its row cursor, inputs included (see <see cref="PlanNodeCursor"/>). A nested-loop join with a
+    /// <c>LATERAL</c> right side adds <c>lateral-runs=</c>, <c>lateral-kept-reads=</c> and
+    /// <c>lateral-ms=</c> to its detail.
     ///
     /// <para><b>Join plans</b> run through <see cref="QueryJoinExecutor.ExecuteJoinPlan"/>. A join
     /// node's storage columns count the reads of its right side, which has no row of its own (see
@@ -340,20 +343,24 @@ internal sealed class ExplainExecutor
             PlanNodeStats? stats;
             if (physNode is FilterNode)
                 stats = physNode.Input?.Stats is { } childStats
-                    ? new PlanNodeStats { RowsEmitted = childStats.RowsEmitted, ElapsedMs = physNode.Stats?.ElapsedMs }
+                    ? new PlanNodeStats { RowsEmitted = childStats.RowsEmitted, ElapsedMs = physNode.Stats?.ElapsedMs ?? childStats.ReportedMs }
                     : null;
             else if (physNode is not null && RightInputOf(physNode) is { } rightInput)
                 stats = WithRightInputReads(physNode.Stats, rightInput);
             else
                 stats = physNode?.Stats;
 
-            // Only the root of a plan gets a time of its own. A derived table whose query EXPLAIN planned
-            // gets the time of that query's run, as the root of the plan under it does. Another reader of a
-            // CTE computed once reads the kept rows, so the run's time is not its own.
+            // A derived table whose query EXPLAIN planned gets the time of that query's run, as the root of
+            // the plan under it does, so the line and its child agree. Another reader of a CTE computed once
+            // reads the kept rows, so it keeps the time of its own cursor.
             if (physNode is DerivedTableScanNode { Explained: { } explained } derivedScan
                 && ReferenceEquals(explained.RenderedAt, derivedScan.BoundSource)
                 && stats is { ElapsedMs: null })
                 stats.ElapsedMs = explained.ScanStats.ElapsedMs;
+
+            // An operand of a set operation counts its rows on its own line; its time is that of its plan.
+            if (physNode is SetOperationOperandNode operand && stats is { ElapsedMs: null })
+                stats.ElapsedMs = TimeOf(operand.Plan.Root);
 
             if (physNode is not null)
                 detail = AppendRuntimeDetail(detail, physNode, stats);
@@ -371,7 +378,7 @@ internal sealed class ExplainExecutor
                     : ColumnValue.Null },
                 { "actual_rows",       stats is not null ? new ColumnValue(ColumnType.Integer64, stats.RowsEmitted) : ColumnValue.Null },
                 { "rows_read",         stats is not null ? new ColumnValue(ColumnType.Integer64, stats.RowsRead) : ColumnValue.Null },
-                { "actual_time_ms",    stats?.ElapsedMs is { } ms ? new ColumnValue(ColumnType.Float64, ms) : ColumnValue.Null },
+                { "actual_time_ms",    stats?.ReportedMs is { } ms ? new ColumnValue(ColumnType.Float64, ms) : ColumnValue.Null },
                 { "kv_lookups",        stats is not null ? new ColumnValue(ColumnType.Integer64, stats.KvPointLookups) : ColumnValue.Null },
                 { "kv_scan_entries",   stats is not null ? new ColumnValue(ColumnType.Integer64, stats.KvScanEntries) : ColumnValue.Null },
                 { "estimate_trace",    physNode?.EstimateTrace is { } estimateTrace
@@ -459,6 +466,24 @@ internal sealed class ExplainExecutor
     }
 
     /// <summary>
+    /// The time printed for <paramref name="node"/>: its own, or for a filter, which runs inside the scan
+    /// below it, the time of that scan. Null when the node ran without a timer.
+    /// </summary>
+    private static double? TimeOf(PhysicalPlanNode? node)
+    {
+        for (; node is not null; node = node.Input)
+        {
+            if (node.Stats?.ReportedMs is { } ms)
+                return ms;
+
+            if (node is not FilterNode)
+                return null;
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// Attaches a fresh <see cref="PlanNodeStats"/> to every node of a join plan that can run: the
     /// left chain through <see cref="PhysicalPlanNode.Input"/>, and each right input that is a plan
     /// node of its own (<see cref="RightInputOf"/>), a subtree off that chain. The plan tree is
@@ -511,6 +536,11 @@ internal sealed class ExplainExecutor
             ProbeMemoHits = joinStats.ProbeMemoHits,
             ProbeBatches = joinStats.ProbeBatches,
             ElapsedMs = joinStats.ElapsedMs,
+            CursorTicks = joinStats.CursorTicks,
+            CursorTimed = joinStats.CursorTimed,
+            LateralRuns = joinStats.LateralRuns,
+            LateralKeptReads = joinStats.LateralKeptReads,
+            LateralTicks = joinStats.LateralTicks,
             RanAs = joinStats.RanAs,
             BroadcastSpans = joinStats.BroadcastSpans,
         };
@@ -537,6 +567,12 @@ internal sealed class ExplainExecutor
     /// <c>join-order-est-rows=</c>, the search's estimate of the join's output. The last is a plan
     /// fact, but it is shown only here: it is useful only beside <c>actual_rows</c>, and plain
     /// EXPLAIN output stays unchanged.
+    ///
+    /// <para>A nested-loop join with a <c>LATERAL</c> right side also shows its body:
+    /// <c>lateral-runs=</c>, the left rows that ran the body; <c>lateral-kept-reads=</c>, when above zero,
+    /// the left rows that read the kept rows of an earlier run with the same left values; and
+    /// <c>lateral-ms=</c>, the time of all runs and reads, the right filter included. That time is part of
+    /// the join's <c>actual_time_ms</c>.</para>
     /// </summary>
     private static string AppendRuntimeDetail(string detail, PhysicalPlanNode node, PlanNodeStats? stats)
     {
@@ -548,6 +584,16 @@ internal sealed class ExplainExecutor
 
         if (stats is { ProbeBatches: > 0 } batches)
             detail += ", probe-batches=" + batches.ProbeBatches.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+        if (node is NestedLoopJoinNode { RightSource.Derived.Lateral: not null } && stats is not null)
+        {
+            detail += ", lateral-runs=" + stats.LateralRuns.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+            if (stats.LateralKeptReads > 0)
+                detail += ", lateral-kept-reads=" + stats.LateralKeptReads.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+            detail += ", lateral-ms=" + PlanNodeStats.TicksToMs(stats.LateralTicks).ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+        }
 
         if (node.JoinOrderEstimatedRows is { } searchRows)
             detail += ", join-order-est-rows=" + searchRows.ToString("0", System.Globalization.CultureInfo.InvariantCulture);
@@ -739,12 +785,23 @@ internal sealed class ExplainExecutor
             {
                 ExplainedDerivedTable explained = await ExplainDerivedAsync(plan, right, ticket, traceEstimates, analyze, registry).ConfigureAwait(false);
 
+                // The line shows the estimate that the join read for its right side.
+                long rows = DerivedTableRowEstimator.RowsOf(right) ?? CostEstimator.DefaultTableRowCount;
+
                 node.ExplainedRightScan = new DerivedTableScanNode
                 {
                     BoundSource = right,
                     Explained = explained,
                     Stats = analyze ? explained.ScanStats : null,
+                    EstimatedCardinality = rows,
                 };
+
+                if (traceEstimates)
+                {
+                    EstimateTrace trace = new() { Rule = DerivedTableRowEstimator.RuleOf(right) };
+                    trace.Complete(EstimateFormula.Fixed, rows, rows);
+                    node.ExplainedRightScan.EstimateTrace = trace;
+                }
             }
         }
     }

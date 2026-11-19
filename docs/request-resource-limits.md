@@ -15,12 +15,14 @@ For every limit, a value of `0` or less disables it. All of them are runtime set
 | `max_recursive_cte_iterations` | `10000` | Steps of one `WITH RECURSIVE` query that make rows | CADB0560, HTTP 400 |
 | `max_recursive_cte_rows` | `10000000` | Rows that one run of a `WITH RECURSIVE` query makes | CADB0560, HTTP 400 |
 | `max_table_function_rows` | `5000000` | Rows that one read of a function in `FROM` makes | CADB0561, HTTP 400 |
-| `max_view_definition_bytes` | `1048576` (1 MiB) | Bytes of one normalized view body, at `CREATE` | CADB0562, HTTP 400 |
-| `max_view_definition_nodes` | `200000` | Syntax-tree nodes of one view body, at `CREATE` | CADB0562, HTTP 400 |
-| `max_view_output_columns` | `1600` | Output columns of one view, at `CREATE` | CADB0562, HTTP 400 |
-| `max_view_direct_dependencies` | `1000` | Relations one view body reads directly, at `CREATE` | CADB0562, HTTP 400 |
-| `max_view_expanded_nodes` | `2000000` | Syntax-tree nodes that expanding the views of one statement makes | CADB0562, HTTP 400 |
-| `max_view_expanded_relations` | `10000` | View references that expanding one statement substitutes | CADB0562, HTTP 400 |
+| `statement_timeout_ms` | `0` (no limit) | Time that one SQL statement runs | CADB0562, HTTP 400 |
+| `max_inline_definitions_per_user_per_minute` | `60` | Statements that compile inline C# that one user runs per minute | CADB0848, HTTP 429 |
+| `max_view_definition_bytes` | `1048576` (1 MiB) | Bytes of one normalized view body, at `CREATE` | CADB0563, HTTP 400 |
+| `max_view_definition_nodes` | `200000` | Syntax-tree nodes of one view body, at `CREATE` | CADB0563, HTTP 400 |
+| `max_view_output_columns` | `1600` | Output columns of one view, at `CREATE` | CADB0563, HTTP 400 |
+| `max_view_direct_dependencies` | `1000` | Relations one view body reads directly, at `CREATE` | CADB0563, HTTP 400 |
+| `max_view_expanded_nodes` | `2000000` | Syntax-tree nodes that expanding the views of one statement makes | CADB0563, HTTP 400 |
+| `max_view_expanded_relations` | `10000` | View references that expanding one statement substitutes | CADB0563, HTTP 400 |
 | `max_open_explicit_transactions` | `10000` | Explicit transactions open at one time on this node | CADB0558, HTTP 503 |
 | `max_client_connections` | `10000` | Client connections open at one time on this node | The connection is closed |
 | `max_databases` | `10000` | Databases in the registry | CADB0408, HTTP 500 |
@@ -29,7 +31,7 @@ For every limit, a value of `0` or less disables it. All of them are runtime set
 ## Recursive queries
 
 A `WITH RECURSIVE` query whose recursion does not end runs until the disk is full, because a
-statement has no time limit. Its work table spills to disk, so memory does not stop it. The two
+statement has no time limit by default. Its work table spills to disk, so memory does not stop it. The two
 limits stop it with **CADB0560** (`RecursiveQueryLimitExceeded`), and the message names the setting.
 These two settings are cluster settings: every node must give the same answer to the same statement.
 See [recursive queries](common-table-expressions.md#recursive-queries).
@@ -43,7 +45,7 @@ reads the one below it twice, a read of the top view expands 1024 copies of the 
 views could otherwise make every later query of them cost unbounded CPU and memory.
 
 `max_view_expanded_relations` and `max_view_expanded_nodes` bound the expansion of one statement.
-Each view is charged before its body is copied, so the statement stops with **CADB0562**
+Each view is charged before its body is copied, so the statement stops with **CADB0563**
 (`ViewComplexityLimitExceeded`) before the memory is spent. `CREATE VIEW` expands the views its body
 reads under the same budget, so such a definition is refused when it is created. The four
 `max_view_definition_*`, `max_view_output_columns` and `max_view_direct_dependencies` settings bound
@@ -54,7 +56,7 @@ See [views](views.md#configuration).
 
 A function in `FROM`, such as `generate_series`, makes its rows without a table, so one short
 statement can ask for a trillion rows. Memory does not stop it, because the rows stream and the
-blocking operators spill to disk. A statement has no time limit, so
+blocking operators spill to disk. A statement has no time limit by default, so
 `SELECT count(*) FROM generate_series(1, 1000000000000)` would run for hours.
 
 `max_table_function_rows` stops it. The row past the limit fails the statement with **CADB0561**
@@ -71,6 +73,73 @@ blocking operators spill to disk. A statement has no time limit, so
 
 This setting is a cluster setting: every node must give the same answer to the same statement. See
 [set-returning functions](set-returning-functions.md#how-it-runs).
+
+## Statement timeout
+
+`statement_timeout_ms` is the longest time, in milliseconds, that one SQL statement may run. A
+statement still running at the limit fails with **CADB0562** (`StatementTimeout`; HTTP 400, gRPC
+`RESOURCE_EXHAUSTED`), and the message names the setting.
+
+```sql
+SET CLUSTER SETTING statement_timeout_ms = 30000;
+```
+
+The default is `0`, no limit, as in PostgreSQL: a limit fails long statements that work today, such
+as a large `INSERT … SELECT` or a report. Choose a value above your longest legitimate statement. It
+is a cluster setting, and a change applies to the next statement. Unlike PostgreSQL's
+`statement_timeout`, it is one value for the whole cluster: no session or user can set its own, so a
+client cannot raise it for itself.
+
+The other limits bound one kind of input each. This one bounds what they do not: a statement that
+reads many rows and returns few, such as `SELECT count(*) FROM a, b` over two tables of 100,000 rows,
+and a statement that calls an inline C# function once for each row of a large table. The budgets of
+an inline function apply to one call, so only a limit per statement bounds that statement (see
+[C# extensions](csharp-extensions.md#budgets)).
+
+### How a statement stops
+
+- **A read** (`SELECT`, `SHOW`, `EXPLAIN`) stops where it is: in a scan, a join, a sort, a lock wait,
+  or a fragment that a peer node runs for it. It is the mechanism `CANCEL QUERY` uses. Rows the
+  client read before the limit were real.
+- **A write** (`INSERT`, `UPDATE` and `DELETE` with or without `RETURNING`, `INSERT … SELECT`,
+  `INSERT … ON CONFLICT`, `REFRESH MATERIALIZED VIEW`) does not stop for a cancel once it has
+  written, so it checks the time itself: at each row its scans read, at each row an `UPDATE` or a
+  `DELETE` writes, at each row the source of an `INSERT … SELECT` returns, and in each inline
+  function call and trigger it runs. Work between two of these points finishes first, such as a sort
+  or a join that the source query of the write holds in memory, or the batch write of the rows of an
+  `INSERT`.
+- **Inline code**: an inline function call or an inline trigger fire that runs when the time is up
+  stops at the deadline, not at the end of its own budget.
+
+Either way the statement fails like any other failed statement. An autocommit statement is rolled
+back. An explicit transaction is marked rollback-only: later statements in it are refused, and it
+can only be rolled back. Nothing the statement wrote is kept.
+
+### What the limit covers
+
+- The SQL that a trigger or a procedure runs is part of the statement that fired it. It has the same
+  deadline, and a statement that it starts after the deadline fails at once.
+- Each automatic retry of a Serializable autocommit statement starts its own clock.
+- The commit of an autocommit statement is not part of the time. A commit that has started is never
+  stopped.
+- In cluster mode, the node that coordinates the statement keeps the time. At the deadline it cancels
+  the fragments that peers run for it. Each fragment also carries the time the statement had left,
+  and the peer stops the fragment after that time when the cancel does not reach it.
+- Schema DDL (`CREATE INDEX`, `ALTER TABLE` and the other schema changes) is not bounded: its
+  backfills and replicated changes run as jobs that a statement error cannot stop honestly.
+  `CREATE TABLE … AS` is the exception. It loads its rows in the statement and drops the new table
+  when the load fails, so it is bounded like `INSERT … SELECT`.
+- Requests that are not SQL statements, such as the typed row endpoints and backups, are not bounded.
+
+## Inline C# compile rate
+
+`CREATE [OR REPLACE] FUNCTION ... LANGUAGE csharp` and `CREATE TRIGGER ... LANGUAGE csharp` compile
+C# on the node that runs them, and every node compiles the new code again at its next call. The
+compile limits bound one compile; `max_inline_definitions_per_user_per_minute` bounds how many such
+statements one user runs per minute on a node. The statement past it fails with **CADB0848**
+(`InlineDefinitionRateExceeded`, HTTP 429, gRPC `RESOURCE_EXHAUSTED`) before it compiles, and the
+message says when the next one can run. Superusers are not limited, and with authentication off
+nobody is. See [Compile rate](csharp-extensions.md#compile-rate).
 
 ## Buffered results
 
@@ -141,10 +210,11 @@ The result is the same as the scan, including the rules for `NULL` items and mix
 
 ## What these limits do not cover
 
-- There is no per-client rate limit. Put a rate-limiting proxy in front of a node that faces an
-  untrusted network.
-- There is no statement timeout. A statement that reads many rows and returns few, such as
-  `SELECT count(*) FROM a, b` over two tables of 100,000 rows, uses CPU until it ends or until the
-  client disconnects.
+- There is no per-client rate limit, except for the statements that compile inline C#
+  ([Compile rate](csharp-extensions.md#compile-rate)). Put a rate-limiting proxy in front of a node
+  that faces an untrusted network.
+- The statement timeout is off by default. Until you set `statement_timeout_ms`, a statement that
+  reads many rows and returns few, such as `SELECT count(*) FROM a, b` over two tables of 100,000
+  rows, uses CPU until it ends or until the client disconnects. See [Statement timeout](#statement-timeout).
 - Backup and restore write outside the disk-space admission gate. With authentication off, the
   node accepts these requests from loopback only.

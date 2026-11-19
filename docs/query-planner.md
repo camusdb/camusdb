@@ -561,6 +561,14 @@ holds the check.
 
 **File:** `Controllers/Queries/JoinQueryPlanner.cs`. Runs when `IsMultiSource`:
 
+0. **Derived-table estimates** — `DerivedTableRowEstimator` plans the query of each derived table with a
+   query of its own, with no plan cache and no trace, and keeps the estimate of the plan root. The join-order
+   search, the build-side choice and `CostEstimator` read it in place of the fixed 10,000 rows. The plan of
+   an inner query runs the same step for its own derived tables, so a CTE chain gets its estimates from the
+   bottom up. The step runs on every plan, a plan-cache hit included, because the annotation of a cached
+   plan reads the estimates too. The derived-table executor plans each query again when it runs, so a chain
+   of `n` levels costs about `n²/2` extra plans. A set operation, a work table and a recursive CTE reader
+   keep the default.
 1. **Join order** — `JoinEnumerator` (cost-based, the default) or `JoinOrderOptimizer.Choose`
    (heuristic, with the cross-product repair) may reorder sources first and move a conjunct to the join
    where its last table enters (§Part V). A tree that contains an outer join keeps its declared order.
@@ -756,15 +764,18 @@ contains a subquery does read storage for the inner query. The outer query is ne
 
 `EXPLAIN (ANALYZE) SELECT …` executes the query, drains the cursor, and adds **actual** runtime
 counters per node. Counters live in `PlanNodeStats` (`Models/Plans/PlanNodeStats.cs`):
-`RowsRead`, `RowsEmitted`, `KvPointLookups`, `KvScanEntries`, `ElapsedMs` (root-only), `RanAs` (the
+`RowsRead`, `RowsEmitted`, `KvPointLookups`, `KvScanEntries`, `CursorTicks` (the inclusive time of the
+node's row cursor), `ElapsedMs` (the root, and the run of a derived table's query), the `Lateral*`
+counters of a nested-loop join over a `LATERAL` body, `RanAs` (the
 strategy a hash join actually ran, when it differs from the plan) and `BroadcastSpans` (per-span actuals
 of a broadcast probe).
-Extra result columns: `actual_rows`, `rows_read`, `actual_time_ms` (NULL on non-root nodes),
+Extra result columns: `actual_rows`, `rows_read`, `actual_time_ms` (on every node, see
+[`explain.md`](./explain.md#operator-times)),
 `kv_lookups`, `kv_scan_entries`.
 
 Design points:
 
-- **Gated and zero-cost when off.** Counters are only allocated/updated when `QueryPlan.CollectRuntimeStats`
+- **Gated and zero-cost when off.** Counters and timers are only allocated/updated when `QueryPlan.CollectRuntimeStats`
   is set (only EXPLAIN ANALYZE sets it). Normal `SELECT` pays nothing.
 - **Filter rows are folded into the scan.** A `filter` row reports `actual_rows` from the child scan's
   post-filter emit count; its KV counters are 0 (storage cost is charged to the scan).
@@ -1409,6 +1420,12 @@ rows[S] = Π leafRows[t ∈ S] × Π selectivity(g ⊆ S) × Π classFactor(C, S
 - The distinct count of a column is its **table row count** when it covers a unique index, else its column
   or composite-key NDV. The conjunct's own alias gives the table of each column, so a unique key is
   recognized wherever its table sits in the tree.
+- The non-equi edges of one set of tables that bound a column of one of those tables from both ends
+  (`n.n >= s.lo AND n.n <= s.hi`, or `n.n BETWEEN s.lo AND s.hi`) make one range group with
+  `RangeJoinSelectivity` (0.005, PostgreSQL's default for a range), whatever the number of bounds
+  (`CardinalityEstimator.CountJoinRanges`). A fallback for each bound would multiply shares that are not
+  independent: four bounds at 0.1 each give 0.0001. The plan annotation of a nested-loop join with no
+  equality uses the same rule, with one `FallbackSelectivity` for the conjuncts that are in no range.
 - Every other edge (non-equi, an expression, three or more tables) is its own group with
   `FallbackSelectivity`. Single-table conjuncts and constants are not counted.
 - The values are doubles with no floor or clamp; a caller that needs a row count floors and clamps it.
@@ -1573,7 +1590,7 @@ These are the meaningful missing pieces and where new work fits.
 | **DISTINCT streaming** | **Done** | `SELECT DISTINCT` over a NOT-NULL index set-prefix streams (adjacent-row dedup, O(1) memory); otherwise hash dedup. |
 | **EXPLAIN ANALYZE for joins** | **Done** | Every join operator records `PlanNodeStats`; a join row counts the reads of its right side, shows `ran=` when a hash join changed strategy at run time, and shows the join-order search estimate next to the plan annotation's ([`explain.md`](./explain.md#join-plans)). |
 | **Logical EXPLAIN** | **Cosmetic** | `(LOGICAL)` renders the physical tree relabeled; there is no distinct logical-plan rendering. |
-| **Per-node timing** | **Root-only** | `actual_time_ms` is only measured for the whole plan, not per operator. |
+| **Per-node timing** | **Done** | `actual_time_ms` is the inclusive time of each operator's row cursor, also inside the plan of a derived table; a `LATERAL` join shows the runs and the time of its body ([`explain.md`](./explain.md#operator-times)). |
 | **Error/semantics matrix** | **Done** | `TestErrorMatrix.cs` — 14 negative cases (ambiguous column, bad HAVING refs, multi-column/multi-row subqueries, `COUNT(DISTINCT)`, etc.) asserting precise codes + messages. |
 | **Query microbenchmarks** | **Missing** | No benchmarks for grouped aggregation, join algorithms, or subquery materialization. |
 

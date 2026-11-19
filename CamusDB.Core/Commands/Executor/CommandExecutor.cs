@@ -1149,20 +1149,32 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         EnterExtensionScope(ticket.DatabaseName);
 
-        // Listed for SHOW QUERIES, but not cancellable: schema DDL ignores the read token, so the
-        // ticket keeps the transport's own.
-        Diagnostics.QueryActivityEntry? activity = queryActivity.Begin(ticket, cancellable: false, executing: true);
-
-        if (activity is null)
-            return await ExecuteDDLSQLTimed(ticket, activity: null).ConfigureAwait(false);
+        // The time limit of the statement, which the DDL dispatcher takes off again for every schema
+        // statement except CREATE TABLE … AS (see StatementDeadline.Suspend).
+        StatementDeadline? deadline = StatementDeadline.Begin(options.StatementTimeoutMs, out bool ownsDeadline);
 
         try
         {
-            return await ExecuteDDLSQLTimed(ticket, activity).ConfigureAwait(false);
+            // Listed for SHOW QUERIES, but not cancellable: schema DDL ignores the read token, so the
+            // ticket keeps the transport's own.
+            Diagnostics.QueryActivityEntry? activity = queryActivity.Begin(ticket, cancellable: false, executing: true);
+
+            if (activity is null)
+                return await ExecuteDDLSQLTimed(ticket, activity: null).ConfigureAwait(false);
+
+            try
+            {
+                return await ExecuteDDLSQLTimed(ticket, activity).ConfigureAwait(false);
+            }
+            finally
+            {
+                activity.End();
+            }
         }
         finally
         {
-            activity.End();
+            if (ownsDeadline)
+                deadline!.End();
         }
     }
 
@@ -1226,20 +1238,33 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         EnterExtensionScope(ticket.DatabaseName);
 
-        // Listed for SHOW QUERIES, but not cancellable: a write ignores the read token once its first
-        // mutation lands, so the ticket keeps the transport's own.
-        Diagnostics.QueryActivityEntry? activity = queryActivity.Begin(ticket, cancellable: false, executing: true);
-
-        if (activity is null)
-            return await ExecuteNonSQLQueryTimed(ticket, activity: null).ConfigureAwait(false);
+        // The time limit of the statement. A write ignores the read token, so the deadline never fires
+        // it: the write checks the deadline at each row and in each inline call it makes, and fails
+        // like any other failed write. The SQL of a trigger or a procedure inherits the outer deadline.
+        StatementDeadline? deadline = StatementDeadline.Begin(options.StatementTimeoutMs, out bool ownsDeadline);
 
         try
         {
-            return await ExecuteNonSQLQueryTimed(ticket, activity).ConfigureAwait(false);
+            // Listed for SHOW QUERIES, but not cancellable: a write ignores the read token once its first
+            // mutation lands, so the ticket keeps the transport's own.
+            Diagnostics.QueryActivityEntry? activity = queryActivity.Begin(ticket, cancellable: false, executing: true);
+
+            if (activity is null)
+                return await ExecuteNonSQLQueryTimed(ticket, activity: null).ConfigureAwait(false);
+
+            try
+            {
+                return await ExecuteNonSQLQueryTimed(ticket, activity).ConfigureAwait(false);
+            }
+            finally
+            {
+                activity.End();
+            }
         }
         finally
         {
-            activity.End();
+            if (ownsDeadline)
+                deadline!.End();
         }
     }
 
@@ -1930,7 +1955,14 @@ public sealed class CommandExecutor : IAsyncDisposable
         QueryFragmentRequest request, CancellationToken cancellationToken = default)
     {
         CamusDB.Core.Extensions.ExtensionScopeFrame frame = EnterExtensionScope(request.DatabaseName);
-        return CamusDB.Core.Extensions.ExtensionScopedCursor.Bind(selectExecutor.ExecuteQueryFragment(request, cancellationToken), frame);
+
+        // The time the coordinator's statement had left when it sent the fragment. The coordinator
+        // cancels the fragment at its own deadline; this bounds the fragment when that cancel is lost.
+        IAsyncEnumerable<QueryFragmentRow> rows = request.StatementTimeoutRemainingMs is > 0 and long remaining
+            ? StatementDeadline.BoundFragment(remaining, cancellationToken, token => selectExecutor.ExecuteQueryFragment(request, token))
+            : selectExecutor.ExecuteQueryFragment(request, cancellationToken);
+
+        return CamusDB.Core.Extensions.ExtensionScopedCursor.Bind(rows, frame);
     }
 
     /// <summary>

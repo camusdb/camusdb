@@ -231,7 +231,7 @@ its body reads under the same budget, so a definition like that is refused when 
 
 ```sql
 CREATE VIEW v10 AS SELECT a.id FROM v9 a JOIN v9 b ON a.id = b.id;
--- ERROR (CADB0562): Expanding the views of this statement substitutes more than 10000 view
+-- ERROR (CADB0563): Expanding the views of this statement substitutes more than 10000 view
 --                   references (max_view_expanded_relations) ...
 ```
 

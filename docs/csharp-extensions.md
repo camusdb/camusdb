@@ -581,7 +581,9 @@ again as a user who may run its SQL. `SHOW TRIGGERS` shows an empty owner for th
 that uses something not allowed with `CADB0839`; the record never reaches the schema. A `throw` in the
 body fails the statement with `CADB0818` and the exception's message. A body that catches the error
 of its own SQL and returns still fails the statement (`CADB0823`). With `inline_triggers_enabled` off,
-`CREATE TRIGGER ... LANGUAGE csharp` is refused with `CADB0841`; triggers that exist still fire.
+`CREATE TRIGGER ... LANGUAGE csharp` is refused with `CADB0841`; triggers that exist still fire. A
+`CREATE TRIGGER ... LANGUAGE csharp` counts against the same rate as `CREATE FUNCTION` (see
+[Compile rate](#compile-rate)).
 
 **Listing.** `SHOW TRIGGERS [ON table]` lists the triggers of both forms, and `SHOW CREATE TRIGGER name
 ON table` gives the statement that creates one again: `EXTERNAL NAME '...'` for the DLL form, and
@@ -968,12 +970,24 @@ A call that goes over a budget fails its statement with `CADB0840`. The node goe
 | Managed memory one call allocates | `inline_function_allocation_limit_bytes` | 16777216 (16 MiB) |
 | Elements of one array made with `new T[n]` | `inline_function_array_limit` | 1048576 |
 | Depth of the body's own calls | none: the free stack of the thread | |
+| Time of the whole statement | `statement_timeout_ms` | 0 (no limit) |
 
-**A budget covers one call. No budget covers a whole statement.** `SELECT f(x) FROM big_table` calls `f`
-once for each row, and each call gets the full budget. A user who may create a function can
-therefore write a statement that runs for a very long time, with each call inside its budget. There
-is no statement timeout in this version. Watch for long statements, and give `CREATE` on a database
-only to users who may use that much of the node.
+**A budget covers one call. `statement_timeout_ms` covers the statement.** `SELECT f(x) FROM big_table`
+calls `f` once for each row, and each call gets the full budget, so the call budgets alone do not
+bound the statement: with each call inside its budget, it runs for as long as the table is large.
+`statement_timeout_ms` does (see [request-resource-limits.md](request-resource-limits.md#statement-timeout)).
+A statement still running at that limit fails with `CADB0562`, a read or a write, and a write keeps
+nothing.
+
+- A call that runs when the statement's time is up gets only the time that is left. It stops at the
+  statement's deadline with `CADB0562`, not at the end of its own budget. A trigger fire does the
+  same, and the time its SQL takes does not move the deadline.
+- The SQL that a trigger runs is part of the statement that fired it and has the same deadline.
+- Schema DDL is not bounded by the setting, except `CREATE TABLE … AS`.
+
+The setting is off by default, as in PostgreSQL, because a limit would fail long statements that
+work today. On a node where the users who may create a function are not trusted with its CPU, set
+it, and give `CREATE` on a database only to users who may use that much of the node for that long.
 
 The server compiles a check into the start of every loop body, lambda and local function. An
 endless loop ends at the time limit, and a recursion with no end fails with `CADB0840` before the
@@ -1001,6 +1015,32 @@ statement stops waiting at the time limit and fails with `CADB0838`. A compile t
 even then keeps its compile slot until it ends, is counted, and is logged with the function's name
 and source hash, so a body that finds a new way to be slow can hold at most
 `inline_function_compile_concurrency` cores, never the node.
+
+### Compile rate
+
+These limits bound one compile. `max_inline_definitions_per_user_per_minute` (60) bounds how often one
+user starts them. It counts the statements that compile C# on the node that runs them:
+`CREATE FUNCTION`, `CREATE OR REPLACE FUNCTION` and `CREATE TRIGGER ... LANGUAGE csharp`. Each of
+them compiles the body there, and every node compiles a new or replaced function or trigger again
+at its next call or fire. A loop of `CREATE OR REPLACE FUNCTION`, or of `DROP FUNCTION` and
+`CREATE FUNCTION`, would otherwise keep the compile slots of every node busy and change the schema
+for as long as it runs.
+
+- A user can run that many such statements at once, and then one every `60 / value` seconds. The
+  statement past the limit fails with `CADB0848` before it compiles, and the message says when the
+  next one can run.
+- A statement counts when it reaches the compile, whether or not the body compiles: a body that
+  fails with `CADB0838` used the same compile. A statement refused before the compile, for a missing
+  privilege, a name that is taken or a type that is not accepted, does not count.
+- Functions and triggers share one count, so alternating them does not double the rate.
+- Superusers are not limited, and with authentication off nobody is: a superuser, and with
+  authentication off every client, can already drop the database. Load a dump with many functions as
+  a superuser, or raise the setting while it loads.
+- The count is kept on each node, by user id. `CREATE FUNCTION` runs on the schema leader of its
+  database, so a user who creates functions in databases with different schema leaders has a count
+  on each of those nodes, and a change of schema leader starts a new count.
+- It is a runtime cluster setting: `SET CLUSTER SETTING max_inline_definitions_per_user_per_minute = 120`
+  applies to the next statement. `0` or less disables it.
 
 
 ### Deterministic by construction
@@ -1176,3 +1216,4 @@ and its members at startup.
 | `CADB0844` | A view, a materialized view, a CHECK constraint or an inline trigger body calls the function, or a CHECK constraint calls a function whose body a replace changes; the message lists them (HTTP 409) |
 | `CADB0845` | This node could not compile an inline function that a statement called, or an inline trigger that a statement fired (HTTP 503) |
 | `CADB0846` | An inline trigger runs its SQL as its owner, and the owner no longer exists, or the trigger has no owner because it was created while authentication was off (HTTP 403) |
+| `CADB0848` | A user ran more `CREATE [OR REPLACE] FUNCTION` and `CREATE TRIGGER ... LANGUAGE csharp` statements than `max_inline_definitions_per_user_per_minute` allows; the message says when the next one can run (HTTP 429) |

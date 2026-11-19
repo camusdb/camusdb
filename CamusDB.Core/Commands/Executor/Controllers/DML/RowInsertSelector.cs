@@ -177,8 +177,13 @@ internal sealed class RowInsertSelector
             if (TestBeforeSourceReadHook is { } beforeSourceReadHook)
                 await beforeSourceReadHook().ConfigureAwait(false);
 
+            // A write checks its time limit itself, at each row (statement_timeout_ms).
+            StatementDeadline? statementDeadline = StatementDeadline.Current;
+
             await foreach (QueryResultRow sourceRow in cursor.ConfigureAwait(false))
             {
+                statementDeadline?.ThrowIfExpired();
+
                 // Zero or less disables the ceiling, as it does for the transaction itself.
                 if (mutationLimit > 0 && sourceRows.Count >= mutationLimit)
                     throw new CamusDBException(

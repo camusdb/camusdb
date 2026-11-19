@@ -28,8 +28,8 @@ namespace CamusDB.PlanQuality.Tests.Metrics;
 /// runs to fold it into a literal are not on any node, so they are not in the work.</para>
 ///
 /// <para><b>The fingerprint</b> is one line for each plan node: its name and its detail without the
-/// join-order estimate. It has no costs, estimates, timings or ids, so it changes only when the plan
-/// changes. The trailing <c>plan-info</c>, <c>cache</c> and span rows are not plan nodes and are left
+/// join-order estimate and without the time of a <c>LATERAL</c> body (<c>lateral-ms=</c>). It has no
+/// costs, estimates, timings or ids, so it changes only when the plan changes. The trailing <c>plan-info</c>, <c>cache</c> and span rows are not plan nodes and are left
 /// out.</para>
 /// </summary>
 internal static partial class PlanMeasures
@@ -44,6 +44,9 @@ internal static partial class PlanMeasures
 
     [GeneratedRegex(@"join-order-est-rows=(\d+)")]
     private static partial Regex JoinOrderEstimateValue();
+
+    [GeneratedRegex(@", lateral-ms=[0-9.]+")]
+    private static partial Regex LateralBodyTime();
 
     [GeneratedRegex(@"planning-ms=([0-9.]+)")]
     private static partial Regex PlanningMs();
@@ -144,7 +147,7 @@ internal static partial class PlanMeasures
         List<string> lines = new(nodes.Count);
         foreach (PlanNodeMeasure node in nodes)
         {
-            string detail = JoinOrderEstimate().Replace(node.Detail, "");
+            string detail = LateralBodyTime().Replace(JoinOrderEstimate().Replace(node.Detail, ""), "");
             if (detail.StartsWith("join-order-est-rows=", StringComparison.Ordinal))
                 detail = "";
 

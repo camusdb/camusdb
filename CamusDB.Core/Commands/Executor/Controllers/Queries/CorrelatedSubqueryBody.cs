@@ -64,6 +64,12 @@ internal sealed class CorrelatedSubqueryBody
     /// <summary>The body, with a hidden placeholder for each outer name.</summary>
     public NodeAst Select { get; }
 
+    /// <summary>
+    /// The hidden placeholder name of each outer value, in the order of <see cref="Outer"/>: value <c>i</c> of
+    /// <see cref="CorrelatedOuterValues.For(IReadOnlyDictionary{string, ColumnValue}, bool)"/> is the value of name <c>i</c>.
+    /// </summary>
+    internal IReadOnlyList<string> ParameterNames => parameterNames;
+
     /// <summary>Reads the outer values of the body from an outer row; see <see cref="CorrelatedResultCache{T}"/>.</summary>
     public CorrelatedOuterValues Outer { get; }
 
@@ -357,7 +363,7 @@ internal sealed class CorrelatedSubqueryBody
     /// True when a hidden placeholder is inside a nested subquery of <paramref name="select"/>. Then a
     /// bind runs a subquery that reads an outer value, and the body cannot bind once for all rows.
     /// </summary>
-    private static bool NestedSubqueryReadsOuterValue(NodeAst select)
+    internal static bool NestedSubqueryReadsOuterValue(NodeAst select)
     {
         Stack<NodeAst> pending = new();
         pending.Push(select);
@@ -387,7 +393,8 @@ internal sealed class CorrelatedSubqueryBody
         return false;
     }
 
-    private static bool IsHiddenPlaceholder(NodeAst node) =>
+    /// <summary>True when <paramref name="node"/> is a hidden placeholder of an outer value (<see cref="ParameterPrefix"/>).</summary>
+    internal static bool IsHiddenPlaceholder(NodeAst node) =>
         node.nodeType == NodeType.Placeholder
         && node.yytext is { } name
         && name.StartsWith(ParameterPrefix, StringComparison.Ordinal);

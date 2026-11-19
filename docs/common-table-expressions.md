@@ -163,7 +163,7 @@ also keeps one copy of each row that it returned, in memory, to drop a row that 
 
 ### Limits of a recursion
 
-A statement has no time limit, so a recursion with no end would run until the disk is full. Two
+A statement has no time limit by default, so a recursion with no end would run until the disk is full. Two
 cluster settings stop it with `CADB0560` (`RecursiveQueryLimitExceeded`). The message names the
 setting.
 

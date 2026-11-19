@@ -102,6 +102,8 @@ internal sealed class QueryScanner
         // enumerator, because the intermediate stages between here and the transport do not all
         // forward an enumerator token.
         CancellationToken cancellationToken = plan.Ticket.CancellationToken;
+        // A write never observes the token at its deadline; it stops here instead (statement_timeout_ms).
+        StatementDeadline? statementDeadline = StatementDeadline.Current;
 
         // Acquire a phantom-protection range lock on the row key space before the scan.
         // Shared for SELECT; Exclusive for UPDATE/DELETE (blocks concurrent readers from
@@ -162,6 +164,7 @@ internal sealed class QueryScanner
                     largeValues: LargeValueFetch.Columns(table.Schema, survivalColumns)))
                 {
                     cancellationToken.ThrowIfCancellationRequested();
+                    statementDeadline?.ThrowIfExpired();
 
                     if (data.Length == 0)
                         continue;
@@ -240,6 +243,7 @@ internal sealed class QueryScanner
                     // A KV read served from an already-fetched batch never observes the token, so
                     // the loop checks for itself. Without this the scan stops per batch, not per row.
                     cancellationToken.ThrowIfCancellationRequested();
+                    statementDeadline?.ThrowIfExpired();
 
                     rowsScanned++;
                     probe?.AddRowRead();
@@ -272,6 +276,7 @@ internal sealed class QueryScanner
                 largeValues: LargeValueFetch.Columns(table.Schema, plan.ScanRequiredColumns)))
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                statementDeadline?.ThrowIfExpired();
 
                 if (data.Length == 0)
                     continue;
@@ -703,6 +708,8 @@ internal sealed class QueryScanner
         CamusDB.Core.Diagnostics.StatementProbe? probe = plan.Ticket.Probe;
         QueryDependencyCollector? deps = plan.DepCollector;
         CancellationToken cancellationToken = plan.Ticket.CancellationToken;
+        // A write never observes the token at its deadline; it stops here instead (statement_timeout_ms).
+        StatementDeadline? statementDeadline = StatementDeadline.Current;
 
         await table.Store.AcquireRowRangeLockAsync(plan.Ticket.TxnState,
             exclusive: plan.Ticket.ExclusivePredicateLocks, cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -725,6 +732,7 @@ internal sealed class QueryScanner
                 // Rows arrive from worker channels, so a cancel that stops the workers still
                 // leaves buffered rows here. Check per row, not per channel read.
                 cancellationToken.ThrowIfCancellationRequested();
+                statementDeadline?.ThrowIfExpired();
 
                 rowsScanned++;
                 probe?.AddRowRead();
@@ -925,6 +933,7 @@ internal sealed class QueryScanner
                     FilterJson = filterJson,
                     RequiredColumns = requiredColumns?.ToArray(),
                     WantStats = spanExecution is not null,
+                    StatementTimeoutRemainingMs = StatementDeadline.Current?.RemainingMs,
                 };
 
                 RowEncoder.RowDecodeState decodeState = new()
@@ -1089,6 +1098,8 @@ internal sealed class QueryScanner
         CamusDB.Core.Diagnostics.StatementProbe? probe = plan.Ticket.Probe;
         QueryDependencyCollector? deps = plan.DepCollector;
         CancellationToken cancellationToken = ticket.CancellationToken;
+        // A write never observes the token at its deadline; it stops here instead (statement_timeout_ms).
+        StatementDeadline? statementDeadline = StatementDeadline.Current;
 
         // Phantom-protection range lock on the index key space (mirrors ScanUsingTableIndex).
         // Interruptible for the same reason: a contended lock is a place a cancelled query blocks.
@@ -1131,6 +1142,7 @@ internal sealed class QueryScanner
                 cancellationToken: cancellationToken)))
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                statementDeadline?.ThrowIfExpired();
 
                 rowsScanned++;
                 if (scanStats is not null)
@@ -1175,6 +1187,7 @@ internal sealed class QueryScanner
             for (int i = 0; i < page.Count; i++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                statementDeadline?.ThrowIfExpired();
 
                 ObjectIdValue batchRowId = page[i];
                 ReadOnlyMemory<byte>? data = batchResult[i];
@@ -1209,6 +1222,7 @@ internal sealed class QueryScanner
             cancellationToken: cancellationToken)))
         {
             cancellationToken.ThrowIfCancellationRequested();
+            statementDeadline?.ThrowIfExpired();
 
             rowsScanned++;
             if (scanStats is not null)

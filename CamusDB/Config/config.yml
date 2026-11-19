@@ -302,8 +302,9 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 # ── Inline functions ──────────────────────────────────────────────────────────
 # CREATE FUNCTION ... LANGUAGE csharp AS $$ body $$: a SQL function whose body is C# source, compiled
 # in memory by the server. A user with the CREATE privilege on a database can create one. Off by
-# default. All of these are restart settings; give the first five and the last one the same value
-# on every node. See docs/csharp-extensions.md, "Inline functions".
+# default. All of these are restart settings except max_inline_definitions_per_user_per_minute, a
+# runtime setting. Give each the same value on every node, except the two compile settings, which
+# protect one node's cores. See docs/csharp-extensions.md, "Inline functions".
 # inline_functions_enabled: false
 # inline_function_call_timeout_ms: 1000              # longest one call may run (CADB0840); <= 0 disables
 # inline_function_allocation_limit_bytes: 16777216   # managed memory one call may allocate (CADB0840); <= 0 disables
@@ -312,6 +313,7 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 # inline_function_compile_timeout_ms: 10000          # longest one compile may take (CADB0838)
 # inline_function_compile_concurrency: 2             # functions this node compiles at the same time
 # max_inline_functions_per_database: 256             # <= 0 disables
+# max_inline_definitions_per_user_per_minute: 60     # CREATE FUNCTION / inline CREATE TRIGGER one non-superuser runs per minute (CADB0848); runtime; <= 0 disables
 # inline_triggers_enabled: false                     # accept CREATE TRIGGER ... LANGUAGE csharp; uses the call limits above
 
 # ── Request resource limits ───────────────────────────────────────────────────
@@ -323,12 +325,13 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 # max_recursive_cte_iterations: 10000     # steps of one WITH RECURSIVE query that make rows (CADB0560)
 # max_recursive_cte_rows: 10000000        # rows one run of a WITH RECURSIVE query makes (CADB0560)
 # max_table_function_rows: 5000000        # rows one read of a function in FROM makes (CADB0561)
-# max_view_definition_bytes: 1048576      # bytes of one normalized view body, checked at CREATE (CADB0562)
-# max_view_definition_nodes: 200000       # syntax-tree nodes of one view body, checked at CREATE (CADB0562)
-# max_view_output_columns: 1600           # output columns of one view, checked at CREATE (CADB0562)
-# max_view_direct_dependencies: 1000      # relations one view body reads directly, checked at CREATE (CADB0562)
-# max_view_expanded_nodes: 2000000        # syntax-tree nodes the view expansion of one statement makes (CADB0562)
-# max_view_expanded_relations: 10000      # view references the expansion of one statement substitutes (CADB0562)
+# statement_timeout_ms: 0                 # longest one SQL statement may run, in ms (CADB0562); 0 = no limit
+# max_view_definition_bytes: 1048576      # bytes of one normalized view body, checked at CREATE (CADB0563)
+# max_view_definition_nodes: 200000       # syntax-tree nodes of one view body, checked at CREATE (CADB0563)
+# max_view_output_columns: 1600           # output columns of one view, checked at CREATE (CADB0563)
+# max_view_direct_dependencies: 1000      # relations one view body reads directly, checked at CREATE (CADB0563)
+# max_view_expanded_nodes: 2000000        # syntax-tree nodes the view expansion of one statement makes (CADB0563)
+# max_view_expanded_relations: 10000      # view references the expansion of one statement substitutes (CADB0563)
 # max_open_explicit_transactions: 10000   # explicit transactions open at one time on this node (CADB0558)
 # max_client_connections: 10000           # client connections on the HTTP, HTTPS and gRPC listeners
 # cluster_activity_max_concurrent_fan_outs: 8   # concurrent SHOW CLUSTER QUERIES/CONNECTIONS (CADB0558)

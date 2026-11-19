@@ -124,6 +124,19 @@ public sealed class QueryFragmentRequest
     /// — rejects it outright and the coordinator falls back to a local probe.
     /// </summary>
     public QueryFragmentJoinSpec? Join { get; set; }
+
+    /// <summary>
+    /// The milliseconds the coordinator's statement had left before its time limit
+    /// (<c>statement_timeout_ms</c>) when it sent the fragment; null when the statement has no limit.
+    /// The executing node stops the fragment after that long with <c>CADB0562</c>. A duration and
+    /// not a point in time, because the two nodes do not share a clock.
+    ///
+    /// <para>The coordinator also cancels its fragments when its own deadline passes, which ends the
+    /// request and so the fragment; this bound holds when that cancel does not reach the peer. A peer
+    /// on an older build ignores the unknown field and relies on the cancel alone, so the field needs
+    /// no format-version bump.</para>
+    /// </summary>
+    public long? StatementTimeoutRemainingMs { get; set; }
 }
 
 /// <summary>

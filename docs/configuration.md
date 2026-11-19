@@ -124,6 +124,7 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 | `max_recursive_cte_iterations` | — | `10000` (see [common-table-expressions.md](common-table-expressions.md#recursive-queries)) |
 | `max_recursive_cte_rows` | — | `10000000` |
 | `max_table_function_rows` | — | `5000000` (see [request-resource-limits.md](request-resource-limits.md#functions-in-from)) |
+| `statement_timeout_ms` | — | `0`, no limit (see [request-resource-limits.md](request-resource-limits.md#statement-timeout)) |
 | `max_open_explicit_transactions` | — | `10000` |
 | `max_client_connections` | — | `10000` |
 | `inline_functions_enabled` | — | `false` (accept `CREATE FUNCTION ... LANGUAGE csharp`; see [Inline functions](#inline-functions)) |
@@ -226,6 +227,7 @@ whole description. These settings are all restart-class: change the file on the 
 | `inline_function_compile_timeout_ms` | `10000` | node | The longest one compile may take, the wait for a compile slot included. Must be greater than 0. |
 | `inline_function_compile_concurrency` | `2` | node | How many functions the node compiles at the same time. Each compile uses one core. Must be greater than 0. |
 | `max_inline_functions_per_database` | `256` | cluster | The most inline functions in one database. `0` or less disables the limit. |
+| `max_inline_definitions_per_user_per_minute` | `60` | cluster | The most `CREATE [OR REPLACE] FUNCTION` and `CREATE TRIGGER ... LANGUAGE csharp` statements one user who is not a superuser runs per minute on a node; the next fails with `CADB0848`. A runtime setting. `0` or less disables the limit. See [Compile rate](csharp-extensions.md#compile-rate). |
 | `inline_triggers_enabled` | `false` | cluster | Accept `CREATE TRIGGER ... LANGUAGE csharp`. It is separate from `inline_functions_enabled`, because a trigger body runs SQL and a function body does not. With `false` the statement is refused with `CADB0841`; triggers that exist still fire. One fire of a trigger body for one row has the time, memory and array limits above. See [Triggers in C#](csharp-extensions.md#triggers-in-c). |
 
 Give the cluster-scope settings the same value on every node: a statement must pass or fail the

@@ -44,6 +44,10 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// per-table check of the ambient required privilege (<c>Alter</c>, mapped by the statement
 /// authorizer) runs, so trigger DDL needs the same grant as <c>ALTER TABLE</c>. One exception: the
 /// owner of an inline trigger drops it without that grant (see <see cref="DropAsync"/>).</para>
+///
+/// <para><b>Rate.</b> <c>CREATE TRIGGER ... LANGUAGE csharp</c> counts against the caller's limit of
+/// statements that compile inline C# (<see cref="InlineDefinitionRateLimiter"/>), the same count that
+/// <c>CREATE FUNCTION</c> adds to, right before the compile.</para>
 /// </summary>
 internal sealed class TriggerDdlService
 {
@@ -51,10 +55,13 @@ internal sealed class TriggerDdlService
 
     private readonly CatalogsManager catalogs;
 
-    public TriggerDdlService(ExecutorContext context, CatalogsManager catalogs)
+    private readonly InlineDefinitionRateLimiter definitionLimiter;
+
+    public TriggerDdlService(ExecutorContext context, CatalogsManager catalogs, InlineDefinitionRateLimiter definitionLimiter)
     {
         this.context = context;
         this.catalogs = catalogs;
+        this.definitionLimiter = definitionLimiter;
     }
 
     public async Task CreateAsync(DatabaseDescriptor database, NodeAst ast, ExecuteSQLTicket ticket)
@@ -110,6 +117,10 @@ internal sealed class TriggerDdlService
                 "CREATE TRIGGER ... LANGUAGE csharp is not enabled on this node: set inline_triggers_enabled: true in config.yml and restart");
 
         InlineTriggerSource source = InlineTriggerSources.For(database, table, triggerName, body);
+
+        // Before the compile, which is the cost the limit bounds; this node compiles before the
+        // schema-leader check, so a follower counts the statement too.
+        definitionLimiter.Admit(database.Options, ticket.Principal, "CREATE TRIGGER");
         runtime.ValidateTrigger(source, ticket.CancellationToken);
 
         await RequireSchemaLeaderAsync(database, "CREATE TRIGGER").ConfigureAwait(false);

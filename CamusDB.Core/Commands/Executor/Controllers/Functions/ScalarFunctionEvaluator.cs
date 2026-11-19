@@ -24,7 +24,11 @@ internal static class ScalarFunctionEvaluator
         QueryRowNameResolver? rowNameResolver,
         ScalarFunctionArguments.EvaluateExpressionDelegate evaluateExpression)
     {
-        string functionName = funcCallExpr.leftAst!.yytext!.ToLowerInvariant();
+        // The name and the argument nodes are built at the first evaluation of this node and reused
+        // for each row. The descriptor is resolved on each call, because the extension scope of the
+        // flow decides it.
+        FunctionCallShape shape = NodeShapes.CallOf(funcCallExpr);
+        string functionName = shape.Name;
 
         if (!TryResolve(functionName, out ScalarFunctionDescriptor? descriptor))
             throw NotCallable(functionName);
@@ -32,15 +36,13 @@ internal static class ScalarFunctionEvaluator
         // Checked before the argument list runs, because this path exists so that some arguments do not.
         if (descriptor.LazyEvaluator is not null)
         {
-            List<NodeAst> argumentNodes = ScalarFunctionArguments.ArgumentNodes(funcCallExpr.rightAst);
+            ScalarFunctionArguments.ValidateArity(functionName, descriptor.MinArity, descriptor.MaxArity, shape.Arguments.Length);
 
-            ScalarFunctionArguments.ValidateArity(functionName, descriptor.MinArity, descriptor.MaxArity, argumentNodes.Count);
-
-            return descriptor.LazyEvaluator(functionName, argumentNodes, row, parameters, rowNameResolver, evaluateExpression);
+            return descriptor.LazyEvaluator(functionName, shape.Arguments, row, parameters, rowNameResolver, evaluateExpression);
         }
 
-        IReadOnlyList<ColumnValue> arguments = ScalarFunctionArguments.EvaluateArgumentList(
-            funcCallExpr.rightAst,
+        IReadOnlyList<ColumnValue> arguments = ScalarFunctionArguments.EvaluateArguments(
+            shape.Arguments,
             row,
             parameters,
             rowNameResolver,

@@ -100,26 +100,29 @@ internal sealed class JoinLeafScanner
 
     /// <summary>
     /// Reads a <c>LATERAL</c> right side for one left row of a nested-loop join, see
-    /// <see cref="DerivedTableExecutor.StreamLateral"/>.
+    /// <see cref="DerivedTableExecutor.StreamLateral"/>. Under EXPLAIN (ANALYZE), <paramref name="joinStats"/>
+    /// is the join's counters, which count the run or the read of kept rows.
     /// </summary>
     internal IAsyncEnumerable<QueryResultRow> ScanLateralRightSource(
         BoundDerivedTableSource source,
         NodeAst? executionFilter,
         QueryPlan plan,
-        IReadOnlyDictionary<string, ColumnValue> leftRow) =>
-        derivedTableExecutor.StreamLateral(plan.Database, source, plan.Ticket, executionFilter, leftRow);
+        IReadOnlyDictionary<string, ColumnValue> leftRow,
+        PlanNodeStats? joinStats = null) =>
+        derivedTableExecutor.StreamLateral(plan.Database, source, plan.Ticket, executionFilter, leftRow, joinStats);
 
     /// <summary>
-    /// The one row of a <c>LATERAL</c> body of expressions only for one left row, or null when the right
-    /// filter drops it; see <see cref="DerivedTableExecutor.EvaluateLateralExpressionsAsync"/>.
+    /// Adds the rows of a <c>LATERAL</c> body of expressions only for one left row to <paramref name="output"/>,
+    /// less the rows the right filter drops; see <see cref="DerivedTableExecutor.EvaluateLateralExpressionsAsync"/>.
     /// </summary>
-    internal ValueTask<QueryResultRow?> EvaluateLateralExpressionsAsync(
+    internal ValueTask EvaluateLateralExpressionsAsync(
         BoundDerivedTableSource source,
         NodeAst? executionFilter,
         QueryPlan plan,
         IReadOnlyDictionary<string, ColumnValue> leftRow,
+        List<QueryResultRow> output,
         LateralExpressionBody.ParameterBuffer parameterBuffer) =>
-        derivedTableExecutor.EvaluateLateralExpressionsAsync(plan.Database, source, plan.Ticket, executionFilter, leftRow, parameterBuffer);
+        derivedTableExecutor.EvaluateLateralExpressionsAsync(plan.Database, source, plan.Ticket, executionFilter, leftRow, output, parameterBuffer);
 
     internal async IAsyncEnumerable<QueryResultRow> ScanBoundTable(
         BoundTableSource source,
@@ -212,6 +215,8 @@ internal sealed class JoinLeafScanner
 
         using CancellationTokenSource? linked = JoinCancellation.Link(plan, cancellationToken);
         CancellationToken scanToken = linked?.Token ?? plan.Ticket.CancellationToken;
+        // A write never observes the token at its deadline; it stops here instead (statement_timeout_ms).
+        StatementDeadline? statementDeadline = StatementDeadline.Current;
 
         // Phantom fence over the whole index range, as the single-table full index scan takes it.
         await table.Store.AcquireIndexRangeLockAsync(plan.Ticket.TxnState, index.KvId,
@@ -226,6 +231,7 @@ internal sealed class JoinLeafScanner
             from: null, to: null, unique: unique, cancellationToken: scanToken)).ConfigureAwait(false))
         {
             scanToken.ThrowIfCancellationRequested();
+            statementDeadline?.ThrowIfExpired();
 
             if (stats is not null)
                 stats.KvScanEntries++;
@@ -275,6 +281,8 @@ internal sealed class JoinLeafScanner
 
         using CancellationTokenSource? linked = JoinCancellation.Link(plan, cancellationToken);
         CancellationToken scanToken = linked?.Token ?? plan.Ticket.CancellationToken;
+        // A write never observes the token at its deadline; it stops here instead (statement_timeout_ms).
+        StatementDeadline? statementDeadline = StatementDeadline.Current;
 
         // Phantom fence over exactly the scanned sub-range, as the single-table range scan takes it;
         // a prefix bound spans every row of the prefix (keyColumnCount).
@@ -299,6 +307,7 @@ internal sealed class JoinLeafScanner
             unique: unique, cancellationToken: scanToken)).ConfigureAwait(false))
         {
             scanToken.ThrowIfCancellationRequested();
+            statementDeadline?.ThrowIfExpired();
 
             if (stats is not null)
                 stats.KvScanEntries++;
@@ -353,6 +362,8 @@ internal sealed class JoinLeafScanner
 
         using CancellationTokenSource? linked = JoinCancellation.Link(plan, cancellationToken);
         CancellationToken scanToken = linked?.Token ?? plan.Ticket.CancellationToken;
+        // A write never observes the token at its deadline; it stops here instead (statement_timeout_ms).
+        StatementDeadline? statementDeadline = StatementDeadline.Current;
 
         // Phantom fence, as the single-table IN-list scan takes it: a point lookup locks its own
         // key in LookupUnique, present or absent; a range seek locks the range of each value, or one
@@ -372,6 +383,7 @@ internal sealed class JoinLeafScanner
         foreach (ColumnValue value in inListNode.Values)
         {
             scanToken.ThrowIfCancellationRequested();
+            statementDeadline?.ThrowIfExpired();
 
             CompositeColumnValue lookupKey = new(new[] { value });
 
@@ -419,6 +431,7 @@ internal sealed class JoinLeafScanner
                     maxRows: null, cancellationToken: scanToken)).ConfigureAwait(false))
                 {
                     scanToken.ThrowIfCancellationRequested();
+                    statementDeadline?.ThrowIfExpired();
 
                     if (stats is not null)
                         stats.KvScanEntries++;
@@ -586,6 +599,8 @@ internal sealed class JoinLeafScanner
         RowLayout? qualifiedLayout = qualifyForFilter ? QueryRowMerger.BuildQualifiedLayout(layout, source.Alias) : null;
 
         CancellationToken statementToken = plan.Ticket.CancellationToken;
+        // A write never observes the token at its deadline; it stops here instead (statement_timeout_ms).
+        StatementDeadline? statementDeadline = StatementDeadline.Current;
         int checkInterval = function.CancellationCheckInterval;
         int untilCheck = checkInterval;
 
@@ -607,6 +622,7 @@ internal sealed class JoinLeafScanner
             {
                 untilCheck = checkInterval;
                 statementToken.ThrowIfCancellationRequested();
+                statementDeadline?.ThrowIfExpired();
                 ct.ThrowIfCancellationRequested();
             }
 

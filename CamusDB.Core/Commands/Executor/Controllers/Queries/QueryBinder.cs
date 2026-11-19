@@ -727,9 +727,11 @@ internal sealed class QueryBinder
         if (derivedSource.ColumnAliases is { } columnAliases)
             columns = DerivedTableSchemaBuilder.WithColumnAliases(columns, columnAliases, derivedSource.Alias, ref innerRowKeys);
 
-        // A body that only names expressions of the left row is evaluated for each left row, with no
-        // subquery run and no kept results.
-        LateralExpressionBody? expressions = body is null ? null : LateralExpressionBody.TryCreate(body, columns);
+        // A body that only names expressions of the left row, or a VALUES list of them, is evaluated for each
+        // left row, with no run of the body and no kept results of the body.
+        LateralExpressionBody? expressions = body is null || nested is not { } expressionBinder
+            ? null
+            : await LateralExpressionBody.TryCreateAsync(body, columns, expressionBinder, database).ConfigureAwait(false);
 
         return new BoundDerivedTableSource(derivedSource, derivedSource.Alias, columns, bodyBound)
         {

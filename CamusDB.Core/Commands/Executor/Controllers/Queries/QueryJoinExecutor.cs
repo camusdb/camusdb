@@ -245,8 +245,9 @@ internal sealed class QueryJoinExecutor : IJoinNodeExecutor
 
     /// <summary>
     /// Opens the cursor of one node of the join tree. Under EXPLAIN (ANALYZE) the node carries a
-    /// <see cref="PlanNodeStats"/>, and the cursor is wrapped to count the rows the node produced;
-    /// otherwise the node's stats are null and the cursor is returned as is.
+    /// <see cref="PlanNodeStats"/>, and the cursor is wrapped to count the rows the node produced and
+    /// time its requests (<see cref="PlanNodeCursor.CountAndTime"/>); otherwise the node's stats are
+    /// null and the cursor is returned as is.
     /// </summary>
     private IAsyncEnumerable<QueryResultRow> ExecuteJoinTree(
         PhysicalPlanNode node,
@@ -255,19 +256,8 @@ internal sealed class QueryJoinExecutor : IJoinNodeExecutor
         IAsyncEnumerable<QueryResultRow> cursor = ExecuteJoinNode(node, plan);
 
         return plan.CollectRuntimeStats && node.Stats is { } stats
-            ? CountRowsEmitted(cursor, stats)
+            ? PlanNodeCursor.CountAndTime(cursor, stats)
             : cursor;
-    }
-
-    private static async IAsyncEnumerable<QueryResultRow> CountRowsEmitted(
-        IAsyncEnumerable<QueryResultRow> source,
-        PlanNodeStats stats)
-    {
-        await foreach (QueryResultRow row in source.ConfigureAwait(false))
-        {
-            stats.RowsEmitted++;
-            yield return row;
-        }
     }
 
     private async IAsyncEnumerable<QueryResultRow> ExecuteJoinNode(

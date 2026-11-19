@@ -22,7 +22,7 @@ counters, and one time as a plain query, for the result.
 | Work | The sum of `rows_read`, `kv_lookups` and `kv_scan_entries` over all plan nodes. | **Gate.** The main quality number. |
 | Statement rows read | The rows the whole statement read, from the slow query log (`rows_read` in `SHOW SLOW QUERIES`). | **Gate.** It also counts reads that are on no plan node, such as a subquery that the bind folds into a literal, or a derived table inside a set operation or a subquery. The query of a view or a derived table in `FROM` has plan nodes of its own, so its reads are in the work too. |
 | Join steps costed | `join-steps-costed=` on the `plan-info` row of `EXPLAIN (ANALYZE)`. | **Gate.** It shows the work of the join-order search. |
-| Plan fingerprint | One line for each plan node: the node name and its detail, without estimates or costs. | Report. It shows what changed. |
+| Plan fingerprint | One line for each plan node: the node name and its detail, without estimates, costs or the time of a `LATERAL` body (`lateral-ms=`). | Report. It shows what changed. |
 | Join order | `join-order=` on the `plan-info` row: `cost-based`, `heuristic` or `cached`. | Report. |
 | Q-error | For each node, the larger of estimated/actual and actual/estimated (both values at least 1). A value of 1 is a perfect estimate. | Report: the median and the maximum for each query. |
 | Planning time, execution time | `planning-ms=` and the root node's `actual_time_ms`. | Report only. They never go into a baseline. |

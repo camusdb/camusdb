@@ -193,13 +193,25 @@ How it runs:
   function, such as `random()`, runs again for each left row.
 - A derived table that only names expressions of the left row, such as `LATERAL (SELECT p.width *
   p.depth AS area) v`, gives one row for each left row. The join evaluates its expressions on the left
-  row and runs no subquery, so the cost is close to the cost of the same expressions in a select list.
-  The body must be one `SELECT` with no `FROM`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`,
-  `OFFSET` or `DISTINCT`, and no volatile call. Each item can hold literals, parameters, left columns,
-  operators, `CAST`, `CASE`, scalar functions and uncorrelated subqueries, which run one time for the
-  statement. A nested subquery that reads the left row keeps the run for each left row. The rows,
-  column types, NULLs and errors are the same in both forms. `EXPLAIN` shows
-  `lateral=expressions(area)` with the column names in place of `lateral`.
+  row and runs no subquery for the body, so the cost is close to the cost of the same expressions in a
+  select list. The body must be one `SELECT` with no `FROM`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`,
+  `LIMIT`, `OFFSET` or `DISTINCT`, and no volatile call. Each item can hold literals, parameters, left
+  columns, operators, `CAST`, `CASE`, scalar functions and uncorrelated subqueries, which run one time
+  for the statement.
+- A `VALUES` list, such as `LATERAL (VALUES ('ceil', p.top), ('floor', p.bottom)) AS s (slot, h)`, is
+  evaluated in the same way: each row of the list gives one row for each left row, in list order. A
+  `UNION ALL` of such `SELECT`s is the same body. Each cell takes the type of its column, as in a
+  `UNION ALL`.
+- In both forms an item can also hold a scalar subquery that reads the left row, such as
+  `COALESCE((SELECT t.height FROM texture t WHERE t.name = p.tex), 128)`. The subquery binds one time
+  and runs for each left row. A left row whose values the subquery read for an earlier row gets the
+  earlier value, so the subquery runs one time for each distinct value. A subquery with no row gives
+  NULL, and a subquery with two rows fails the statement. Each subquery of the body runs before an item
+  is evaluated, also a subquery in a `CASE` branch that the row does not take, as in the run for each
+  left row. An `EXISTS` or `IN` subquery that reads the left row, or a subquery whose own nested subquery
+  reads it, keeps the run for each left row.
+- The rows, column types, NULLs and errors are the same in the evaluated form and in the run for each
+  left row. `EXPLAIN` shows `lateral=expressions(area)` with the column names in place of `lateral`.
 
 ## Expression keys
 

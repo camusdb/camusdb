@@ -42,6 +42,7 @@ public class ConfigReader
         "inline_function_compile_timeout_ms",
         "inline_function_compile_concurrency",
         "max_inline_functions_per_database",
+        "max_inline_definitions_per_user_per_minute",
 
         "join_existing",
         "pitr_bootstrap_from",
@@ -139,6 +140,7 @@ public class ConfigReader
         "max_recursive_cte_iterations",
         "max_recursive_cte_rows",
         "max_table_function_rows",
+        "statement_timeout_ms",
         "max_open_explicit_transactions",
         "max_client_connections",
         "max_index_columns",

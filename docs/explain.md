@@ -88,7 +88,7 @@ All columns from plain `EXPLAIN`, plus:
 |-------------------|------------|-------------|
 | `actual_rows`     | `INT64`    | Rows emitted (yielded) by this operator to its parent. |
 | `rows_read`       | `INT64`    | Rows fetched and decoded from storage before filtering (scan operators). `0` for pipeline operators (they read from a cursor, not storage). |
-| `actual_time_ms`  | `FLOAT64`  | Total wall-clock milliseconds for the **entire plan** (root node only). `NULL` on all other nodes (per-node timing is planned for a future release). |
+| `actual_time_ms`  | `FLOAT64`  | Inclusive wall-clock milliseconds of the operator, its inputs included. On the root row it is the time of the whole plan. See [Operator times](#operator-times). |
 | `kv_lookups`      | `INT64`    | KV point-lookups issued (unique-index lookups). |
 | `kv_scan_entries` | `INT64`    | KV scan entries visited (table or range-index scans). |
 | `estimate_trace`  | `STRING`   | How the node's row estimate was made, as one JSON object: the formula, the rule that dominates it, the input rows and one entry for each factor with the rule, the value and the statistics it read (`ndv`, `rows`, `alternative`, `textbook`, `keyed`). A join the join-order search estimated lists the leaves, the groups and the column classes of its table subset. `NULL` when the node has no estimate. The plan-quality harness records it for every node and reports the estimate errors by rule; see `docs/plan-quality-harness.md`. |
@@ -96,6 +96,31 @@ All columns from plain `EXPLAIN`, plus:
 `actual_rows` ≤ `rows_read` for scan nodes: `rows_read` counts rows decoded from storage
 before predicate evaluation; `actual_rows` counts rows that passed all filters and were
 yielded upstream.
+
+#### Operator times
+
+`EXPLAIN (ANALYZE)` puts a timer on the row cursor of each operator. A plain query has no timer.
+
+- The timer runs from each request for a row until the row, or the end of the rows, arrives. A
+  request runs the inputs of the operator, so the time includes their time.
+- The time between two requests is the work of the parent on the row it got. That time belongs to
+  the parent and is left out.
+- A parent asks for the rows of its inputs inside its own requests, so no row shows more time than
+  the row it hangs under.
+- The root row shows the time to read the whole plan. A `filter` row runs inside the scan below it,
+  so it shows the time of that scan.
+- A `derived-table-scan` row whose query is shown under it, and the root row of that query, show the
+  time of the requests to that query.
+- An operator that runs more than one time (a hash join fallback reads its build input again) adds
+  up the time of all runs.
+
+The timers cost two reads of the monotonic clock for each row at each operator. In a Release build
+on an Apple laptop, that is about 18 ns for each row at each operator, plus about 11 ns for the row
+counter that ANALYZE always kept. A render query with 64,000 result rows moves 715,764 rows through
+its operators. For that query the timers add about 13 ms to a run of about 2.4 s, which is less than
+1 %. The worst case is a query whose operators do almost no work for each row. A `count(*)` over a
+filtered derived table of 1,000,000 generated rows ran about 4 % slower under `EXPLAIN (ANALYZE)`
+with the timers. The figure compares the fastest of 7 runs with and without the timers.
 
 #### Join plans
 
@@ -113,12 +138,16 @@ reports a join row this way:
     filter calls a volatile function, or spilling is off and the right side has more rows than
     `HashJoinMaxBuildRows` or more estimated bytes than `HashJoinMaxBuildBytes`.
   - A `nested-loop-join` with `lateral` runs its `LATERAL` derived table for each left row. With
-    `lateral=expressions(<columns>)` it evaluates the expressions of the derived table on each left
-    row and runs no subquery. See [LATERAL](joins.md#lateral).
+    `lateral=expressions(<columns>)` it evaluates the expressions of the derived table, or of each row
+    of its `VALUES` list, on each left row and does not run the derived table. A scalar subquery inside
+    those expressions still runs for each distinct value it reads. The detail shows the runs of the
+    body and their time (`lateral-runs=`, `lateral-ms=`, see below). See [LATERAL](joins.md#lateral).
   - A `nested-loop-join` with `range-seek=<index>(<bounds>)` keeps nothing in memory. For each left
     row it reads only the index range that the left row's bounds give, so `kv_scan_entries` counts
     the index entries of all those ranges and `rows_read` the right rows fetched. See
-    [Range seek](joins.md#range-seek).
+    [Range seek](joins.md#range-seek). When the bounds close a range on one right column, the estimate
+    is left × right × 0.005 for each such range (rule `join-range`), as in PostgreSQL, in place of the
+    0.1 join fallback.
   - `index-nested-loop-join` probes a page of outer rows at a time (`IndexScanFetchBatchSize`
     rows): the distinct keys of the page cost one index read and one row read for the whole page,
     and the detail shows the number of pages as `probe-batches=`. Over a unique index it adds one
@@ -141,8 +170,9 @@ reports a join row this way:
   nothing to the join's `rows_read`. A `function-scan` row reads nothing from storage: its
   `rows_read`, `kv_lookups` and `kv_scan_entries` are `0`, and `actual_rows` counts the rows it
   generated.
-- `actual_time_ms` is on the root row, as on a single-table plan, and on each
-  `derived-table-scan` row whose query is shown under it, with the root of that query.
+- `actual_time_ms` is on each row, as on a single-table plan (see [Operator times](#operator-times)).
+  A `derived-table-scan` row whose query is shown under it has the time of that query, as the root of
+  that query has.
 
 The work after the last join is not a plan node for a join query: the filter that runs after the
 joins, grouping, ordering, `LIMIT` and projection. So the root row is the last join, not the final
@@ -159,6 +189,9 @@ A join row's detail can also show two values that only execution knows:
 | `probe-memo-hits=<n>` | The index nested-loop join answered `n` probes from its memo of earlier probes: outer rows whose key an earlier outer row had already probed, or whose key another outer row of the same probe page probes. A hit reads nothing, so `kv_lookups`, `kv_scan_entries` and `rows_read` count the distinct keys only. The marker appears only when `n` is above zero. |
 | `probe-batches=<n>` | The index nested-loop join probed its index in `n` pages of outer rows. Each page costs one batched index read and one batched row read for its distinct keys, instead of one or two reads per outer row. A page whose keys the memo all answered issues no call and is not counted; a non-unique key wider than one probe page is read on its own and is not part of the page's batch. The marker appears only when `n` is above zero. |
 | `join-order-est-rows=<n>` | The join-order search's estimate of the rows of this join. It appears only when the search costed the order (statistics loaded, cost-based join order on). |
+| `lateral-runs=<n>` | The left rows for which the `nested-loop-join` ran its `LATERAL` body. A body of expressions (`lateral=expressions(…)`) runs for each left row. It appears on each join with a `LATERAL` right side, also when `n` is 0. |
+| `lateral-kept-reads=<n>` | The left rows that read the kept rows of an earlier run of the `LATERAL` body with the same left values, instead of a run. So `lateral-runs` plus `lateral-kept-reads` is the left rows. The marker appears only when `n` is above zero. |
+| `lateral-ms=<ms>` | The time of all runs of the `LATERAL` body and of all reads of kept rows, the right-side filter included. It is part of the join's `actual_time_ms`. The rest of the join's time is its left input and its own work on each pair: the pairing of the rows and the `ON` predicate. The plan-quality fingerprint leaves this value out, because it changes on each run. |
 
 `estimated_rows` comes from the plan annotation, and the join-order search chose the order with
 its own estimate (`join-order-est-rows`). The two models can disagree. With both next to
@@ -209,9 +242,19 @@ hash-join(on=g.id=grp, build=g)
 - With `ANALYZE`, the query of a derived table runs from the plan shown, so its rows are the counters
   of that run. The `derived-table-scan` row and the root row of its query have the time of that run.
 - A CTE that the statement computes once shows its query once, under the first reader in the plan.
-  The other readers read the kept rows; their rows show `actual_rows` and no time.
+  The other readers read the kept rows; their rows show `actual_rows` and the time of their own reads.
+- The `estimated_rows` of a `derived-table-scan` row is the estimate of the root row of its query
+  (rule `derived-plan`), so a chain of CTEs carries its estimates up from the bottom. A set operation, a
+  work table and the reader of a recursive CTE have no single plan and count as 10,000 rows (rule
+  `derived-default`). A function in `FROM` with constant arguments has its exact count (`function-rows`).
+- A `nested-loop-join` with `lateral=expressions(…)` is estimated at the rows of the body for each left
+  row: one for a `SELECT`, one for each row of a `VALUES` list (rule `lateral-rows`). Its right filter and
+  its `ON` condition read computed columns, which have no statistics, so each comparison keeps a fixed
+  share: a third for a range, 0.1 for an equality, 0.9 for `<>`, combined through `AND`, `OR` and `NOT`
+  (factor `predicate-default`).
 - A `LATERAL` derived table runs its query for each left row, and keeps its one row with
-  `lateral` in the join detail. A set operation shows its operands (`operand(left)`,
+  `lateral` in the join detail. The join detail shows the runs and their time (`lateral-runs=`,
+  `lateral-kept-reads=`, `lateral-ms=`). A set operation shows its operands (`operand(left)`,
   `operand(right)`), a function in `FROM` shows `function-scan`, and a derived table inside a
   set-operation operand or a subquery keeps its one row.
 

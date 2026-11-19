@@ -311,7 +311,7 @@ internal static class CorrelatedSubqueryValues
     }
 
     /// <summary>The one value of a scalar subquery: NULL for no row, and an error for a second row.</summary>
-    private static async ValueTask<ColumnValue> SingleValueAsync(IAsyncEnumerable<QueryResultRow> rows, CancellationToken cancellationToken)
+    internal static async ValueTask<ColumnValue> SingleValueAsync(IAsyncEnumerable<QueryResultRow> rows, CancellationToken cancellationToken)
     {
         QueryResultRow? first = null;
 

@@ -15,6 +15,7 @@ using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Results;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Extensions.Inline;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Auth;
@@ -137,12 +138,15 @@ internal sealed class DdlStatementDispatcher
 
         this.context = context;
         this.catalogs = catalogs;
-        triggerDdl = new TriggerDdlService(context, catalogs);
+        // One count per engine of the statements that compile inline C#, shared by functions and
+        // triggers, so a user cannot double the limit by alternating the two.
+        InlineDefinitionRateLimiter inlineDefinitions = new();
+        triggerDdl = new TriggerDdlService(context, catalogs, inlineDefinitions);
         extensionDdl = new ExtensionDdlService(context, catalogs, sqlParserCache);
         this.sqlExecutor = sqlExecutor;
         this.sqlParserCache = sqlParserCache;
         this.statementAuthorizer = statementAuthorizer;
-        functionDdl = new FunctionDdlService(context, catalogs, sqlParserCache, statementAuthorizer, authService);
+        functionDdl = new FunctionDdlService(context, catalogs, sqlParserCache, statementAuthorizer, authService, inlineDefinitions);
         this.userAdmin = userAdmin;
         this.serverLevelDispatcher = serverLevelDispatcher;
         this.databaseLifecycle = databaseLifecycle;
@@ -277,6 +281,13 @@ internal sealed class DdlStatementDispatcher
 
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
         activity?.Describe(ast.nodeType);
+
+        // Schema DDL is not bounded by statement_timeout_ms: a backfill and a replicated schema change
+        // run as jobs that a statement error cannot stop honestly. Taken off in this async frame only,
+        // so the caller's deadline comes back when the statement returns. CREATE TABLE … AS keeps it:
+        // it loads its rows in the statement and drops the table when the load fails.
+        if (!StatementDeadline.BoundsSchemaStatement(ast.nodeType))
+            StatementDeadline.Suspend();
 
         // CREATE TABLE … AS with a CTE that its query computes once keeps that CTE's rows until it ends.
         await using Queries.ComputedOnceScope? computedOnce = Queries.ComputedOnceRows.Begin(ticket.TxnState, ast);
