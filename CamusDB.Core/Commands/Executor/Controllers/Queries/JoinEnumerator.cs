@@ -1213,6 +1213,9 @@ internal static class JoinEnumerator
 
         List<(JoinGraph.EquiSide A, JoinGraph.EquiSide B)> equalities = [];
 
+        // The conjuncts that are not column equalities, by the set of tables they name, in first-seen order.
+        List<(ulong Mask, List<NodeAst> Conjuncts)>? nonEqui = null;
+
         foreach (JoinGraph.Conjunct conjunct in graph.Conjuncts)
         {
             if (!conjunct.IsEdge)
@@ -1220,8 +1223,12 @@ internal static class JoinEnumerator
 
             if (conjunct.Left is not { } a || conjunct.Right is not { } b)
             {
-                groups.Add((conjunct.Mask, CardinalityEstimator.FallbackSelectivity));
-                groupFactors?.Add(new EstimateFactor { Rule = EstimateRule.JoinNonEqui, Stage = EstimateStage.Join, Selectivity = CardinalityEstimator.FallbackSelectivity, Raw = CardinalityEstimator.FallbackSelectivity });
+                nonEqui ??= [];
+                int at = nonEqui.FindIndex(g => g.Mask == conjunct.Mask);
+                if (at < 0)
+                    nonEqui.Add((conjunct.Mask, [conjunct.Node]));
+                else
+                    nonEqui[at].Conjuncts.Add(conjunct.Node);
                 continue;
             }
 
@@ -1231,6 +1238,9 @@ internal static class JoinEnumerator
             if (ra != rb)
                 parent[Math.Max(ra, rb)] = Math.Min(ra, rb);
         }
+
+        if (nonEqui is not null)
+            AddNonEquiGroups(graph, nonEqui, groups, groupFactors);
 
         Dictionary<int, List<int>> membersOf = [];
         for (int i = 0; i < nodes.Count; i++)
@@ -1453,10 +1463,12 @@ internal static class JoinEnumerator
     {
         TableDescriptor? table = FindTableDescriptor(alias, bound);
 
-        // A function in FROM has no statistics, but with constant arguments its count is exact.
+        // A function in FROM has no statistics, but with constant arguments its count is exact. A derived
+        // table with a query has the estimate of its plan (DerivedTableRowEstimator).
+        BoundDerivedTableSource? derived = table is null ? FindDerivedSource(alias, bound) : null;
         long tableRows = (table is not null
             ? stats.GetRowCountEstimate(database, table)
-            : FindFunctionRows(alias, bound)) ?? CostEstimator.DefaultTableRowCount;
+            : derived is not null ? DerivedTableRowEstimator.RowsOf(derived) : null) ?? CostEstimator.DefaultTableRowCount;
 
         pushdown.ScanFiltersByAlias.TryGetValue(alias, out NodeAst? filter);
 
@@ -1466,7 +1478,7 @@ internal static class JoinEnumerator
             card = tableRows;
             if (trace is not null)
             {
-                trace.Rule = table is null ? EstimateRule.FunctionRows : EstimateRule.TableRows;
+                trace.Rule = table is not null ? EstimateRule.TableRows : DerivedTableRowEstimator.RuleOf(derived);
                 trace.Complete(EstimateFormula.Fixed, tableRows, tableRows);
             }
             return;
@@ -1590,11 +1602,50 @@ internal static class JoinEnumerator
 
     // ─── Helpers ─────────────────────────────────────────────────────────────
 
-    private static long? FindFunctionRows(string alias, BoundSelectQuery bound)
+    /// <summary>
+    /// The factors of the conjuncts that are not column equalities, for each set of tables they name: one
+    /// <see cref="CardinalityEstimator.RangeJoinSelectivity"/> for each range on a column of one of those tables
+    /// (<see cref="CardinalityEstimator.CountJoinRanges"/>), and <see cref="CardinalityEstimator.FallbackSelectivity"/>
+    /// for each other conjunct.
+    /// </summary>
+    private static void AddNonEquiGroups(
+        JoinGraph graph,
+        List<(ulong Mask, List<NodeAst> Conjuncts)> nonEqui,
+        List<(ulong Mask, double Selectivity)> groups,
+        List<EstimateFactor>? groupFactors)
+    {
+        List<string> aliases = [];
+
+        foreach ((ulong mask, List<NodeAst> conjuncts) in nonEqui)
+        {
+            aliases.Clear();
+            for (int leaf = 0; leaf < graph.Leaves.Count; leaf++)
+            {
+                if ((mask & (1UL << leaf)) != 0)
+                    aliases.Add(graph.Leaves[leaf].Alias);
+            }
+
+            (int ranges, int others) = CardinalityEstimator.CountJoinRanges(conjuncts, aliases);
+
+            for (int i = 0; i < ranges; i++)
+            {
+                groups.Add((mask, CardinalityEstimator.RangeJoinSelectivity));
+                groupFactors?.Add(new EstimateFactor { Rule = EstimateRule.JoinRange, Stage = EstimateStage.Join, Selectivity = CardinalityEstimator.RangeJoinSelectivity, Raw = CardinalityEstimator.RangeJoinSelectivity });
+            }
+
+            for (int i = 0; i < others; i++)
+            {
+                groups.Add((mask, CardinalityEstimator.FallbackSelectivity));
+                groupFactors?.Add(new EstimateFactor { Rule = EstimateRule.JoinNonEqui, Stage = EstimateStage.Join, Selectivity = CardinalityEstimator.FallbackSelectivity, Raw = CardinalityEstimator.FallbackSelectivity });
+            }
+        }
+    }
+
+    private static BoundDerivedTableSource? FindDerivedSource(string alias, BoundSelectQuery bound)
     {
         foreach (BoundDerivedTableSource src in bound.DerivedSources)
             if (src.Alias == alias)
-                return TableFunctionEvaluation.TryCountRows(src);
+                return src;
 
         return null;
     }

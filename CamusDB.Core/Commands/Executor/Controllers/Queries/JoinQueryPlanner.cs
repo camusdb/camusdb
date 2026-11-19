@@ -65,14 +65,25 @@ internal sealed class JoinQueryPlanner
     /// </summary>
     private readonly bool _traceEstimates;
 
+    /// <summary>
+    /// Plans the query of each derived table that a query reads, for its row estimate, before this planner
+    /// plans the query (see <see cref="DerivedTableRowEstimator"/>).
+    /// </summary>
+    private readonly DerivedTableRowEstimator _rowEstimator;
+
     public JoinQueryPlanner(CamusDBOptions options, StatisticsManager? stats = null, bool traceEstimates = false) : this(stats, null, options, traceEstimates) { }
 
-    internal JoinQueryPlanner(StatisticsManager? stats, PlanCache? cache, CamusDBOptions options, bool traceEstimates = false)
+    /// <param name="rowEstimator">
+    /// The estimator of the derived tables, or null for a new one. The estimator passes itself, so its own join
+    /// planner shares it instead of making another.
+    /// </param>
+    internal JoinQueryPlanner(StatisticsManager? stats, PlanCache? cache, CamusDBOptions options, bool traceEstimates = false, DerivedTableRowEstimator? rowEstimator = null)
     {
         _stats = stats;
         _cache = cache;
         _options = options;
         _traceEstimates = traceEstimates;
+        _rowEstimator = rowEstimator ?? new DerivedTableRowEstimator(stats, options);
     }
 
     /// <param name="leafKeys">
@@ -97,6 +108,10 @@ internal sealed class JoinQueryPlanner
         }
 
         JoinPredicatePushdown.Result pushdown = JoinPredicatePushdown.Analyze(bound, ticket.Where);
+
+        // The search, the build-side choice and the annotation read the row estimate of each derived
+        // table, also on a plan-cache hit, so it is written first.
+        _rowEstimator.EstimateSources(database, bound, ticket);
 
         // Compute shape ID and schema deps early so the cache can be checked before
         // the potentially-expensive join-order enumeration / DP.
@@ -1086,8 +1101,11 @@ internal sealed class JoinQueryPlanner
         StatisticsManager stats,
         NodeAst? rightScanFilter)
     {
+        // A derived table: the estimate of its plan (DerivedTableRowEstimator). Its filter runs in its own
+        // scan, which the plan annotation prices as a pass-through, so it is not applied here either.
         if (rightSource.Table is null)
-            return CostEstimator.DefaultTableRowCount;
+            return (rightSource.Derived is { Lateral: null } derived ? DerivedTableRowEstimator.RowsOf(derived) : null)
+                   ?? CostEstimator.DefaultTableRowCount;
 
         long tableRows = stats.GetRowCountEstimate(database, rightSource.Table.Table)
                          ?? CostEstimator.DefaultTableRowCount;
@@ -1168,6 +1186,9 @@ internal sealed class JoinQueryPlanner
                 // Defensive: IndexRangeScanNode without BoundSource is a single-table leaf;
                 // use the default rather than recursing.
                 return CostEstimator.DefaultTableRowCount;
+
+            case DerivedTableScanNode { BoundSource: { } derivedSource }:
+                return DerivedTableRowEstimator.RowsOf(derivedSource) ?? CostEstimator.DefaultTableRowCount;
 
             default:
                 // For joined subtrees (IndexNestedLoopJoinNode, HashJoinNode, etc.) and any

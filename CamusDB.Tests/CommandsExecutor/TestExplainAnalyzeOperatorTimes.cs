@@ -120,6 +120,7 @@ internal class TestExplainAnalyzeOperatorTimes : SharedNodeBaseTest
         return double.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture);
     }
 
+
     [Test]
     public async Task EveryOperatorOfACteChainHasATimeWithinItsParent()
     {
@@ -132,9 +133,12 @@ internal class TestExplainAnalyzeOperatorTimes : SharedNodeBaseTest
             "c AS (SELECT grp, SUM(w) AS total FROM b GROUP BY grp) " +
             "SELECT g.name, c.total FROM groups g JOIN c ON c.grp = g.id"));
 
-        // The operators inside the plans of the derived tables: the join of b, the aggregate of c, the scans.
+        // The operators inside the plans of the derived tables: the join of b, and the scan of items in the plan
+        // of a, under the lines of c, b and a. The estimates choose the order of each join, and the right table of
+        // a hash join has no line of its own, so the scans of groups are not counted.
         Assert.That(rows.Count(r => r.Row["node"].StrValue!.EndsWith("join")), Is.GreaterThanOrEqualTo(2), Dump(rows));
-        Assert.That(rows.Count(r => r.Row["node"].StrValue == "table-scan"), Is.GreaterThanOrEqualTo(3), Dump(rows));
+        QueryResultRow itemsScan = rows.Single(r => r.Row["node"].StrValue == "table-scan" && r.Row["detail"].StrValue == "table=items");
+        Assert.That(itemsScan.Row["depth"].LongValue, Is.GreaterThanOrEqualTo(3), Dump(rows));
 
         TestExplainAnalyzeExecutor.AssertEachTimeIsWithinItsParent(rows);
     }

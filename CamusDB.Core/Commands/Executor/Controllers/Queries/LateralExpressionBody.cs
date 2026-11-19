@@ -83,6 +83,9 @@ internal sealed class LateralExpressionBody
     /// <summary>The output column names of the body, for EXPLAIN.</summary>
     public IReadOnlyList<string> ColumnNames { get; }
 
+    /// <summary>The rows that the body gives for each left row: one for each branch, before any join filter.</summary>
+    public int RowCount => rows.Length;
+
     /// <summary>
     /// The numeric columns of the derived table, whose cells are widened to the declared type after each
     /// evaluation (see <see cref="NumericWidening"/>), computed one time.

@@ -247,23 +247,29 @@ internal static class CostEstimator
         if (node is IndexInListScanNode { BoundSource: { } inListBoundSource })
             return stats?.GetRowCountEstimate(database, inListBoundSource.Table);
 
-        // A function in FROM: the exact count when its arguments are constants.
+        // A function in FROM: the exact count when its arguments are constants. A derived table with a
+        // query: the estimate of its plan (DerivedTableRowEstimator).
         if (node is DerivedTableScanNode { BoundSource: { } derivedSource })
-            return TableFunctionEvaluation.TryCountRows(derivedSource);
+            return DerivedTableRowEstimator.RowsOf(derivedSource);
 
         return null;
     }
 
     /// <summary>
-    /// Looks up the row count for a join's right-side table, used by
-    /// <see cref="NestedLoopJoinNode"/> to estimate inner-side size.
-    /// Returns null when stats are unavailable (falls back to DefaultTableRowCount in caller).
+    /// The row count of a join's right side: the statistics of a table, or the estimate of a derived table
+    /// (<see cref="DerivedTableRowEstimator.RowsOf"/>). Returns null when neither has one (the caller then
+    /// uses <see cref="DefaultTableRowCount"/>).
     /// </summary>
     private static long? ResolveRightTableRowCount(
-        BoundTableSource? rightTable,
+        BoundJoinRightSource rightSource,
         DatabaseDescriptor database,
         StatisticsManager? stats)
-        => rightTable is not null ? stats?.GetRowCountEstimate(database, rightTable.Table) : null;
+    {
+        if (rightSource.Table is { } rightTable)
+            return stats?.GetRowCountEstimate(database, rightTable.Table);
+
+        return rightSource.Derived is { Lateral: null } derived ? DerivedTableRowEstimator.RowsOf(derived) : null;
+    }
 
     /// <summary>
     /// Resolves the table descriptor for a scan node.
@@ -503,9 +509,37 @@ internal static class CostEstimator
                 TraceFixed(trace, EstimateRule.PassThrough, inputCardinality, inputCardinality);
                 return (inputCardinality, new PlanCost { EstimatedRows = inputCardinality });
 
+            case NestedLoopJoinNode { RightSource.Derived.LateralExpressions: { } lateralBody } lateralJoin:
+            {
+                // A body of expressions of the left row gives a fixed number of rows for each left row, so
+                // the join is no cross product. Its filters read the computed columns, which have no
+                // statistics.
+                double sel = CardinalityEstimator.DefaultPredicateSelectivity(lateralJoin.RightExecutionFilter, trace)
+                           * CardinalityEstimator.DefaultPredicateSelectivity(lateralJoin.OnPredicate, trace);
+
+                long evaluated = SaturatingMultiply(inputCardinality, lateralBody.RowCount);
+                long rows = Math.Max(1, (long)(evaluated * sel));
+
+                if (trace is not null)
+                {
+                    trace.Rule = EstimateRule.LateralRows;
+                    trace.RightRows = lateralBody.RowCount;
+                    trace.Complete(EstimateFormula.Product, inputCardinality, rows);
+                }
+
+                rows = ApplyOuterJoinFloor(lateralJoin.Kind, rows, inputCardinality, trace);
+
+                return (rows, new PlanCost
+                {
+                    // Each left row evaluates the body; nothing is read from storage.
+                    InMemoryRows  = evaluated,
+                    EstimatedRows = rows,
+                });
+            }
+
             case NestedLoopJoinNode nlj:
             {
-                long innerRows = ResolveRightTableRowCount(nlj.RightSource.Table, database, stats)
+                long innerRows = ResolveRightTableRowCount(nlj.RightSource, database, stats)
                               ?? DefaultTableRowCount;
 
                 // Extract equi-key columns from the ON predicate so NDV/FK formula applies.
@@ -513,11 +547,13 @@ internal static class CostEstimator
                     ExtractNljEquiKeyColumns(nlj.OnPredicate, nlj.RightSource.Alias);
 
                 TableDescriptor? nljLeftTable = TryResolveLeftTable(node.Input, nljLeftKeys, out bool nljLeftIsJoin);
-                long rows = CardinalityEstimator.EstimateJoinCardinality(
-                    inputCardinality, innerRows,
-                    nljRightCols, nlj.RightSource.Table?.Table,
-                    nljLeftCols, nljLeftTable,
-                    database, stats, nljLeftIsJoin, trace);
+                long rows = nljRightCols.Count == 0 && EstimateRangeJoin(nlj, inputCardinality, innerRows, trace) is { } rangeRows
+                    ? rangeRows
+                    : CardinalityEstimator.EstimateJoinCardinality(
+                        inputCardinality, innerRows,
+                        nljRightCols, nlj.RightSource.Table?.Table,
+                        nljLeftCols, nljLeftTable,
+                        database, stats, nljLeftIsJoin, trace);
                 rows = ApplyOuterJoinFloor(nlj.Kind, rows, inputCardinality, trace);
 
                 return (rows, new PlanCost
@@ -556,7 +592,7 @@ internal static class CostEstimator
                 //
                 // Total KV cost ≈ buildRows + probeRows   (vs NLJ's buildRows × probeRows)
                 // In-memory cost = buildRows               (hash table)
-                long rightRows = ResolveRightTableRowCount(hj.BuildSource.Table, database, stats)
+                long rightRows = ResolveRightTableRowCount(hj.BuildSource, database, stats)
                                  ?? DefaultTableRowCount;
 
                 long probeRows, buildRows;
@@ -600,7 +636,7 @@ internal static class CostEstimator
                 // No in-memory hash table → no build-side memory vs hash join.
                 // Sort memory is charged when a side is not free-ordered (i.e. the planner
                 // wrapped it in a SortNode); free-ordered sides (ForcedIndex scan) pay nothing.
-                long rightRows = ResolveRightTableRowCount(mj.RightSource.Table, database, stats)
+                long rightRows = ResolveRightTableRowCount(mj.RightSource, database, stats)
                                  ?? DefaultTableRowCount;
 
                 long sortMemory = 0;
@@ -628,9 +664,10 @@ internal static class CostEstimator
                 });
             }
 
-            case DerivedTableScanNode:
-                // A function in FROM arrives with its exact count as the row-count hint.
-                TraceFixed(trace, tableRowCount is not null ? EstimateRule.FunctionRows : EstimateRule.PassThrough, inputCardinality, inputCardinality);
+            case DerivedTableScanNode derivedScan:
+                // A function in FROM arrives with its exact count as the row-count hint, and a derived
+                // table with a query with the estimate of its plan.
+                TraceFixed(trace, DerivedTableRowEstimator.RuleOf(derivedScan.BoundSource), inputCardinality, inputCardinality);
                 return (inputCardinality, new PlanCost { EstimatedRows = inputCardinality });
 
             case SemiJoinNode:
@@ -1062,6 +1099,43 @@ internal static class CostEstimator
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// The rows of a nested-loop join with no equality whose <c>ON</c> bounds a column of the right side from
+    /// both ends, such as <c>JOIN numbers n ON n.n &gt;= s.lo AND n.n &lt;= s.hi</c>: left × right × one
+    /// <see cref="CardinalityEstimator.RangeJoinSelectivity"/> for each range, times one
+    /// <see cref="CardinalityEstimator.FallbackSelectivity"/> when other conjuncts remain (see
+    /// <see cref="CardinalityEstimator.CountJoinRanges"/>). Null when the <c>ON</c> holds no range; the caller then
+    /// keeps the general join estimate, whose fallback prices the whole predicate at a tenth of the cross product.
+    /// </summary>
+    private static long? EstimateRangeJoin(NestedLoopJoinNode nlj, long leftRows, long rightRows, EstimateTrace? trace)
+    {
+        List<NodeAst> conjuncts = [];
+        PredicateAnalyzer.CollectAndConjuncts(nlj.OnPredicate, conjuncts);
+
+        (int ranges, int others) = CardinalityEstimator.CountJoinRanges(conjuncts, [nlj.RightSource.Alias]);
+        if (ranges == 0)
+            return null;
+
+        double sel = Math.Pow(CardinalityEstimator.RangeJoinSelectivity, ranges)
+                   * (others > 0 ? CardinalityEstimator.FallbackSelectivity : 1.0);
+
+        long rows = Math.Max(1, (long)((double)leftRows * rightRows * sel));
+
+        if (trace is not null)
+        {
+            for (int i = 0; i < ranges; i++)
+                trace.Factors.Add(new EstimateFactor { Rule = EstimateRule.JoinRange, Stage = EstimateStage.Join, Selectivity = CardinalityEstimator.RangeJoinSelectivity, Raw = CardinalityEstimator.RangeJoinSelectivity });
+
+            if (others > 0)
+                trace.Factors.Add(new EstimateFactor { Rule = EstimateRule.JoinFallback, Stage = EstimateStage.Join, Selectivity = CardinalityEstimator.FallbackSelectivity, Raw = CardinalityEstimator.FallbackSelectivity });
+
+            trace.RightRows = rightRows;
+            trace.Complete(EstimateFormula.JoinProduct, leftRows, rows);
+        }
+
+        return rows;
     }
 
     /// <summary>

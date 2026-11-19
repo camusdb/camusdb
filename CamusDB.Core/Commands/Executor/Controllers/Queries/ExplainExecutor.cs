@@ -785,12 +785,23 @@ internal sealed class ExplainExecutor
             {
                 ExplainedDerivedTable explained = await ExplainDerivedAsync(plan, right, ticket, traceEstimates, analyze, registry).ConfigureAwait(false);
 
+                // The line shows the estimate that the join read for its right side.
+                long rows = DerivedTableRowEstimator.RowsOf(right) ?? CostEstimator.DefaultTableRowCount;
+
                 node.ExplainedRightScan = new DerivedTableScanNode
                 {
                     BoundSource = right,
                     Explained = explained,
                     Stats = analyze ? explained.ScanStats : null,
+                    EstimatedCardinality = rows,
                 };
+
+                if (traceEstimates)
+                {
+                    EstimateTrace trace = new() { Rule = DerivedTableRowEstimator.RuleOf(right) };
+                    trace.Complete(EstimateFormula.Fixed, rows, rows);
+                    node.ExplainedRightScan.EstimateTrace = trace;
+                }
             }
         }
     }

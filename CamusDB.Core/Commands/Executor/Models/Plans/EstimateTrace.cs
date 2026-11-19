@@ -109,6 +109,24 @@ public enum EstimateRule
     /// <summary>A function in <c>FROM</c> with constant arguments: its exact count.</summary>
     FunctionRows,
 
+    /// <summary>A derived table with a query of its own: the estimate of the root of that query's plan.</summary>
+    DerivedPlan,
+
+    /// <summary>A derived table with no estimate (a set operation, a work table, a recursive CTE reader): the fixed default row count.</summary>
+    DerivedDefault,
+
+    /// <summary>
+    /// A nested-loop join over a <c>LATERAL</c> body that only names expressions of the left row: the rows of
+    /// the body (one for each <c>VALUES</c> row) for each left row, times the share that the join filters keep.
+    /// </summary>
+    LateralRows,
+
+    /// <summary>
+    /// A predicate over columns with no statistics (the columns of a <c>LATERAL</c> body): a fixed share for
+    /// each comparison, combined through <c>AND</c>, <c>OR</c> and <c>NOT</c>.
+    /// </summary>
+    PredicateDefault,
+
     /// <summary>A small dimension leaf whose rows the planner read at plan time: the kept count.</summary>
     LeafLookup,
 
@@ -132,6 +150,12 @@ public enum EstimateRule
 
     /// <summary>A join conjunct that is not a column equality: the fallback selectivity.</summary>
     JoinNonEqui,
+
+    /// <summary>
+    /// A join range: a column of one side between a lower and an upper bound from the other side, priced at the
+    /// fixed range share, once for all bounds of the column.
+    /// </summary>
+    JoinRange,
 
     /// <summary>One column class factor from the skew-aware pair between the anchor and another member.</summary>
     ClassSkewPair,

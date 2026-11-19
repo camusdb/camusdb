@@ -1501,6 +1501,236 @@ internal static class CardinalityEstimator
 
     private static double Clamp(double v) => Math.Max(0.0, Math.Min(1.0, v));
 
+    // The share of a range comparison with no statistics, as in PostgreSQL (DEFAULT_INEQ_SEL).
+    private const double DefaultRangeSelectivity = 1.0 / 3.0;
+
+    // The share of IS NULL with no statistics: few columns are mostly NULL.
+    private const double DefaultNullSelectivity = 0.005;
+
+    // AND/OR chains are rebalanced by the parser, so a real predicate is far below this depth. A deeper
+    // tree gets the fallback for the rest instead of a deeper walk.
+    private const int MaxDefaultSelectivityDepth = 64;
+
+    /// <summary>
+    /// The selectivity of <paramref name="predicate"/> when its columns have no statistics, such as the
+    /// columns of a <c>LATERAL</c> body: a fixed share for each comparison (a third for a range,
+    /// <see cref="FallbackSelectivity"/> for an equality, the rest for an inequality), combined through
+    /// <c>AND</c> (product), <c>OR</c> (<c>a + b − ab</c>) and <c>NOT</c> (<c>1 − a</c>). Any other node
+    /// gets <see cref="FallbackSelectivity"/>. Null and a <c>TRUE</c> literal give 1.
+    ///
+    /// <para><see cref="EstimateFilterSelectivity"/> gives one <see cref="FallbackSelectivity"/> to a whole
+    /// predicate that it cannot price. That suits a scan of a table, whose filter usually keeps a small part
+    /// of the rows, but a filter on a computed column often keeps most of them
+    /// (<c>WHERE NOT (v.z1 &lt; 4 AND v.z2 &lt; 4)</c>), and the comparisons tell how much.</para>
+    /// </summary>
+    internal static double DefaultPredicateSelectivity(NodeAst? predicate, EstimateTrace? trace = null)
+    {
+        if (predicate is null || IsTrueLiteral(predicate))
+            return 1.0;
+
+        double sel = Clamp(DefaultSelectivityOf(predicate, 0));
+
+        trace?.Factors.Add(new EstimateFactor
+        {
+            Rule = EstimateRule.PredicateDefault,
+            Stage = EstimateStage.Comparison,
+            Selectivity = sel,
+            Raw = sel,
+        });
+
+        return sel;
+    }
+
+    private static double DefaultSelectivityOf(NodeAst node, int depth)
+    {
+        if (depth > MaxDefaultSelectivityDepth)
+            return FallbackSelectivity;
+
+        switch (node.nodeType)
+        {
+            case NodeType.ExprAnd when node.leftAst is not null && node.rightAst is not null:
+                return DefaultSelectivityOf(node.leftAst, depth + 1) * DefaultSelectivityOf(node.rightAst, depth + 1);
+
+            case NodeType.ExprOr when node.leftAst is not null && node.rightAst is not null:
+            {
+                double a = DefaultSelectivityOf(node.leftAst, depth + 1);
+                double b = DefaultSelectivityOf(node.rightAst, depth + 1);
+                return a + b - a * b;
+            }
+
+            case NodeType.ExprNot when node.leftAst is not null:
+                return 1.0 - DefaultSelectivityOf(node.leftAst, depth + 1);
+
+            case NodeType.ExprEquals:
+                return FallbackSelectivity;
+
+            case NodeType.ExprNotEquals:
+                return 1.0 - FallbackSelectivity;
+
+            case NodeType.ExprLessThan or NodeType.ExprGreaterThan
+                or NodeType.ExprLessEqualsThan or NodeType.ExprGreaterEqualsThan:
+                return DefaultRangeSelectivity;
+
+            case NodeType.ExprIsNull:
+                return DefaultNullSelectivity;
+
+            case NodeType.ExprIsNotNull:
+                return 1.0 - DefaultNullSelectivity;
+
+            default:
+                return IsTrueLiteral(node) ? 1.0 : FallbackSelectivity;
+        }
+    }
+
+    /// <summary>
+    /// The share of a join range with no statistics: the rows of one side whose column falls between a lower and
+    /// an upper bound that the other side gives, as PostgreSQL prices it (<c>DEFAULT_RANGE_INEQ_SEL</c>).
+    /// </summary>
+    internal const double RangeJoinSelectivity = 0.005;
+
+    /// <summary>
+    /// Finds the join ranges among the non-equality conjuncts of a join: a column of one of
+    /// <paramref name="rangeAliases"/> with a lower and an upper bound that do not read its own table, such as
+    /// <c>n.n &gt;= s.lo AND n.n &lt;= s.hi</c> or <c>n.n BETWEEN s.lo AND s.hi</c>. All bounds of one column make
+    /// one range, so <c>n.n &gt;= s.a AND n.n &gt;= s.b AND n.n &lt;= s.c</c> is one range. Returns the ranges
+    /// and the conjuncts that are in no range.
+    ///
+    /// <para>The callers price each range at <see cref="RangeJoinSelectivity"/> and keep their own fallback for
+    /// the other conjuncts. A range keeps only the rows between its bounds, but a fallback for each bound
+    /// multiplies two shares that are not independent: the product of 0.1 for each bound puts a range of four
+    /// bounds at 0.0001, and one 0.1 for the whole predicate puts it at a tenth of the other side.</para>
+    /// </summary>
+    /// <param name="conjuncts">The conjuncts of the join, without its equalities.</param>
+    /// <param name="rangeAliases">The tables whose columns can be the column of a range.</param>
+    internal static (int Ranges, int Others) CountJoinRanges(IReadOnlyList<NodeAst> conjuncts, IReadOnlyList<string> rangeAliases)
+    {
+        // The bounds of each column, by its qualified name, in the order the columns first appear.
+        List<(string Column, bool Lower, bool Upper, List<int> Conjuncts)> columns = [];
+
+        void AddBound(string column, bool lower, bool upper, int conjunct)
+        {
+            for (int i = 0; i < columns.Count; i++)
+            {
+                if (!string.Equals(columns[i].Column, column, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                (string name, bool l, bool u, List<int> list) = columns[i];
+                list.Add(conjunct);
+                columns[i] = (name, l || lower, u || upper, list);
+                return;
+            }
+
+            columns.Add((column, lower, upper, [conjunct]));
+        }
+
+        for (int i = 0; i < conjuncts.Count; i++)
+        {
+            NodeAst c = conjuncts[i];
+
+            switch (c.nodeType)
+            {
+                case NodeType.ExprGreaterThan or NodeType.ExprGreaterEqualsThan
+                    or NodeType.ExprLessThan or NodeType.ExprLessEqualsThan
+                    when c.leftAst is not null && c.rightAst is not null:
+                {
+                    bool greater = c.nodeType is NodeType.ExprGreaterThan or NodeType.ExprGreaterEqualsThan;
+
+                    // column > bound is a lower bound; bound > column is an upper bound.
+                    if (RangeColumnOf(c.leftAst, c.rightAst, null, rangeAliases) is { } leftColumn)
+                        AddBound(leftColumn, lower: greater, upper: !greater, i);
+
+                    if (RangeColumnOf(c.rightAst, c.leftAst, null, rangeAliases) is { } rightColumn)
+                        AddBound(rightColumn, lower: !greater, upper: greater, i);
+
+                    break;
+                }
+
+                case NodeType.ExprBetween when c.leftAst is not null && c.extendedOne is not null && c.extendedTwo is not null:
+                    if (RangeColumnOf(c.leftAst, c.extendedOne, c.extendedTwo, rangeAliases) is { } betweenColumn)
+                        AddBound(betweenColumn, lower: true, upper: true, i);
+                    break;
+            }
+        }
+
+        bool[] covered = new bool[conjuncts.Count];
+        int ranges = 0;
+
+        foreach ((_, bool lower, bool upper, List<int> members) in columns)
+        {
+            if (!lower || !upper || members.TrueForAll(m => covered[m]))
+                continue;
+
+            ranges++;
+            foreach (int m in members)
+                covered[m] = true;
+        }
+
+        int others = 0;
+        foreach (bool c in covered)
+        {
+            if (!c)
+                others++;
+        }
+
+        return (ranges, others);
+    }
+
+    /// <summary>
+    /// The qualified name of <paramref name="column"/> when it is a column of one of <paramref name="aliases"/> and
+    /// no bound reads that table; null otherwise.
+    /// </summary>
+    private static string? RangeColumnOf(NodeAst column, NodeAst bound, NodeAst? secondBound, IReadOnlyList<string> aliases)
+    {
+        if (column.nodeType != NodeType.Identifier || column.yytext is not { } name)
+            return null;
+
+        foreach (string alias in aliases)
+        {
+            if (name.Length > alias.Length + 1
+                && name[alias.Length] == '.'
+                && name.StartsWith(alias, StringComparison.OrdinalIgnoreCase)
+                && !ReadsAlias(bound, alias)
+                && (secondBound is null || !ReadsAlias(secondBound, alias)))
+                return name;
+        }
+
+        return null;
+    }
+
+    /// <summary>True when <paramref name="node"/> names a column of <paramref name="alias"/>. Iterative.</summary>
+    private static bool ReadsAlias(NodeAst node, string alias)
+    {
+        Stack<NodeAst> pending = new();
+        pending.Push(node);
+
+        while (pending.Count > 0)
+        {
+            NodeAst n = pending.Pop();
+
+            if (n.nodeType == NodeType.Identifier && n.yytext is { } name
+                && name.Length > alias.Length + 1
+                && name[alias.Length] == '.'
+                && name.StartsWith(alias, StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            if (n.leftAst is not null) pending.Push(n.leftAst);
+            if (n.rightAst is not null) pending.Push(n.rightAst);
+            if (n.extendedOne is not null) pending.Push(n.extendedOne);
+            if (n.extendedTwo is not null) pending.Push(n.extendedTwo);
+            if (n.extendedThree is not null) pending.Push(n.extendedThree);
+            if (n.extendedFour is not null) pending.Push(n.extendedFour);
+            if (n.extendedFive is not null) pending.Push(n.extendedFive);
+            if (n.extendedSix is not null) pending.Push(n.extendedSix);
+            if (n.extendedSeven is not null) pending.Push(n.extendedSeven);
+        }
+
+        return false;
+    }
+
+    private static bool IsTrueLiteral(NodeAst node) =>
+        ReferenceEquals(node, NodeAst.True)
+        || (node.nodeType == NodeType.Bool && string.Equals(node.yytext, "true", StringComparison.OrdinalIgnoreCase));
+
     // Strips a table-alias prefix ("alias.column" → "column") so that stats lookups work
     // regardless of whether a column name was extracted from a qualified (join-context)
     // or unqualified (single-table) identifier.

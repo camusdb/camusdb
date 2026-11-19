@@ -561,6 +561,14 @@ holds the check.
 
 **File:** `Controllers/Queries/JoinQueryPlanner.cs`. Runs when `IsMultiSource`:
 
+0. **Derived-table estimates** — `DerivedTableRowEstimator` plans the query of each derived table with a
+   query of its own, with no plan cache and no trace, and keeps the estimate of the plan root. The join-order
+   search, the build-side choice and `CostEstimator` read it in place of the fixed 10,000 rows. The plan of
+   an inner query runs the same step for its own derived tables, so a CTE chain gets its estimates from the
+   bottom up. The step runs on every plan, a plan-cache hit included, because the annotation of a cached
+   plan reads the estimates too. The derived-table executor plans each query again when it runs, so a chain
+   of `n` levels costs about `n²/2` extra plans. A set operation, a work table and a recursive CTE reader
+   keep the default.
 1. **Join order** — `JoinEnumerator` (cost-based, the default) or `JoinOrderOptimizer.Choose`
    (heuristic, with the cross-product repair) may reorder sources first and move a conjunct to the join
    where its last table enters (§Part V). A tree that contains an outer join keeps its declared order.
@@ -1412,6 +1420,12 @@ rows[S] = Π leafRows[t ∈ S] × Π selectivity(g ⊆ S) × Π classFactor(C, S
 - The distinct count of a column is its **table row count** when it covers a unique index, else its column
   or composite-key NDV. The conjunct's own alias gives the table of each column, so a unique key is
   recognized wherever its table sits in the tree.
+- The non-equi edges of one set of tables that bound a column of one of those tables from both ends
+  (`n.n >= s.lo AND n.n <= s.hi`, or `n.n BETWEEN s.lo AND s.hi`) make one range group with
+  `RangeJoinSelectivity` (0.005, PostgreSQL's default for a range), whatever the number of bounds
+  (`CardinalityEstimator.CountJoinRanges`). A fallback for each bound would multiply shares that are not
+  independent: four bounds at 0.1 each give 0.0001. The plan annotation of a nested-loop join with no
+  equality uses the same rule, with one `FallbackSelectivity` for the conjuncts that are in no range.
 - Every other edge (non-equi, an expression, three or more tables) is its own group with
   `FallbackSelectivity`. Single-table conjuncts and constants are not counted.
 - The values are doubles with no floor or clamp; a caller that needs a row count floors and clamps it.

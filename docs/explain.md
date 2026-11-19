@@ -145,7 +145,9 @@ reports a join row this way:
   - A `nested-loop-join` with `range-seek=<index>(<bounds>)` keeps nothing in memory. For each left
     row it reads only the index range that the left row's bounds give, so `kv_scan_entries` counts
     the index entries of all those ranges and `rows_read` the right rows fetched. See
-    [Range seek](joins.md#range-seek).
+    [Range seek](joins.md#range-seek). When the bounds close a range on one right column, the estimate
+    is left × right × 0.005 for each such range (rule `join-range`), as in PostgreSQL, in place of the
+    0.1 join fallback.
   - `index-nested-loop-join` probes a page of outer rows at a time (`IndexScanFetchBatchSize`
     rows): the distinct keys of the page cost one index read and one row read for the whole page,
     and the detail shows the number of pages as `probe-batches=`. Over a unique index it adds one
@@ -241,6 +243,15 @@ hash-join(on=g.id=grp, build=g)
   of that run. The `derived-table-scan` row and the root row of its query have the time of that run.
 - A CTE that the statement computes once shows its query once, under the first reader in the plan.
   The other readers read the kept rows; their rows show `actual_rows` and the time of their own reads.
+- The `estimated_rows` of a `derived-table-scan` row is the estimate of the root row of its query
+  (rule `derived-plan`), so a chain of CTEs carries its estimates up from the bottom. A set operation, a
+  work table and the reader of a recursive CTE have no single plan and count as 10,000 rows (rule
+  `derived-default`). A function in `FROM` with constant arguments has its exact count (`function-rows`).
+- A `nested-loop-join` with `lateral=expressions(…)` is estimated at the rows of the body for each left
+  row: one for a `SELECT`, one for each row of a `VALUES` list (rule `lateral-rows`). Its right filter and
+  its `ON` condition read computed columns, which have no statistics, so each comparison keeps a fixed
+  share: a third for a range, 0.1 for an equality, 0.9 for `<>`, combined through `AND`, `OR` and `NOT`
+  (factor `predicate-default`).
 - A `LATERAL` derived table runs its query for each left row, and keeps its one row with
   `lateral` in the join detail. The join detail shows the runs and their time (`lateral-runs=`,
   `lateral-kept-reads=`, `lateral-ms=`). A set operation shows its operands (`operand(left)`,
