@@ -16,6 +16,7 @@ For every limit, a value of `0` or less disables it. All of them are runtime set
 | `max_recursive_cte_rows` | `10000000` | Rows that one run of a `WITH RECURSIVE` query makes | CADB0560, HTTP 400 |
 | `max_table_function_rows` | `5000000` | Rows that one read of a function in `FROM` makes | CADB0561, HTTP 400 |
 | `statement_timeout_ms` | `0` (no limit) | Time that one SQL statement runs | CADB0562, HTTP 400 |
+| `max_inline_definitions_per_user_per_minute` | `60` | Statements that compile inline C# that one user runs per minute | CADB0848, HTTP 429 |
 | `max_open_explicit_transactions` | `10000` | Explicit transactions open at one time on this node | CADB0558, HTTP 503 |
 | `max_client_connections` | `10000` | Client connections open at one time on this node | The connection is closed |
 | `max_databases` | `10000` | Databases in the registry | CADB0408, HTTP 500 |
@@ -108,6 +109,16 @@ can only be rolled back. Nothing the statement wrote is kept.
   when the load fails, so it is bounded like `INSERT … SELECT`.
 - Requests that are not SQL statements, such as the typed row endpoints and backups, are not bounded.
 
+## Inline C# compile rate
+
+`CREATE [OR REPLACE] FUNCTION ... LANGUAGE csharp` and `CREATE TRIGGER ... LANGUAGE csharp` compile
+C# on the node that runs them, and every node compiles the new code again at its next call. The
+compile limits bound one compile; `max_inline_definitions_per_user_per_minute` bounds how many such
+statements one user runs per minute on a node. The statement past it fails with **CADB0848**
+(`InlineDefinitionRateExceeded`, HTTP 429, gRPC `RESOURCE_EXHAUSTED`) before it compiles, and the
+message says when the next one can run. Superusers are not limited, and with authentication off
+nobody is. See [Compile rate](csharp-extensions.md#compile-rate).
+
 ## Buffered results
 
 `/execute-sql-query` and `/query` keep the whole result in memory, and send it only after the last
@@ -177,8 +188,9 @@ The result is the same as the scan, including the rules for `NULL` items and mix
 
 ## What these limits do not cover
 
-- There is no per-client rate limit. Put a rate-limiting proxy in front of a node that faces an
-  untrusted network.
+- There is no per-client rate limit, except for the statements that compile inline C#
+  ([Compile rate](csharp-extensions.md#compile-rate)). Put a rate-limiting proxy in front of a node
+  that faces an untrusted network.
 - The statement timeout is off by default. Until you set `statement_timeout_ms`, a statement that
   reads many rows and returns few, such as `SELECT count(*) FROM a, b` over two tables of 100,000
   rows, uses CPU until it ends or until the client disconnects. See [Statement timeout](#statement-timeout).

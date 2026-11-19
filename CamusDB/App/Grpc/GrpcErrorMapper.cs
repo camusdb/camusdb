@@ -178,6 +178,7 @@ public static class GrpcErrorMapper
         CamusDBErrorCodes.StatementTimeout                  => StatusCode.ResourceExhausted,
         CamusDBErrorCodes.ConcurrencyLimitExceeded          => StatusCode.ResourceExhausted,
         CamusDBErrorCodes.InlineFunctionBudgetExceeded      => StatusCode.ResourceExhausted,
+        CamusDBErrorCodes.InlineDefinitionRateExceeded      => StatusCode.ResourceExhausted,
 
         CamusDBErrorCodes.StatementTooLarge                 => StatusCode.InvalidArgument,
 

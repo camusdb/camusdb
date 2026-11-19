@@ -2352,6 +2352,29 @@ public sealed record CamusDBOptions
     [ConfigSetting(ConfigMutability.Restart, ConfigScope.Cluster)]
     public int MaxInlineFunctionsPerDatabase { get; init; } = 256;
 
+    /// <summary>
+    /// The most statements that compile inline C# one user may run per minute on a node:
+    /// <c>CREATE [OR REPLACE] FUNCTION ... LANGUAGE csharp</c> and <c>CREATE TRIGGER ... LANGUAGE csharp</c>.
+    /// Each one compiles the body on the node that runs it, and every node compiles a changed function
+    /// or trigger again at its next call. The compile limits bound one compile; this one bounds how
+    /// often one user can start them. A statement past the limit fails with <c>CADB0848</c> before it
+    /// compiles. Superusers, and every client when authentication is off, are not limited. Zero or less
+    /// disables the limit.
+    ///
+    /// <para>A count that drains by this value each minute: a user can run this many such statements at
+    /// once, and then one every <c>60 / value</c> seconds. The count is kept on each node (see
+    /// <see cref="Extensions.Inline.InlineDefinitionRateLimiter"/>).</para>
+    ///
+    /// <para>Runtime-class: the DDL services read it from the database's current options for each
+    /// statement. Cluster scope: the node that runs the statement decides, and that is the schema
+    /// leader of the database, so every node must give the same answer.</para>
+    ///
+    /// <para>Set via <c>max_inline_definitions_per_user_per_minute</c> in <c>config.yml</c>. Default:
+    /// <c>60</c>.</para>
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
+    public int MaxInlineDefinitionsPerUserPerMinute { get; init; } = 60;
+
 
     /// <summary>
     /// Resolved Kahuna engine overrides from <c>config.yml</c>. Applied when constructing embedded

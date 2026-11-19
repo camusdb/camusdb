@@ -227,6 +227,7 @@ whole description. These settings are all restart-class: change the file on the 
 | `inline_function_compile_timeout_ms` | `10000` | node | The longest one compile may take, the wait for a compile slot included. Must be greater than 0. |
 | `inline_function_compile_concurrency` | `2` | node | How many functions the node compiles at the same time. Each compile uses one core. Must be greater than 0. |
 | `max_inline_functions_per_database` | `256` | cluster | The most inline functions in one database. `0` or less disables the limit. |
+| `max_inline_definitions_per_user_per_minute` | `60` | cluster | The most `CREATE [OR REPLACE] FUNCTION` and `CREATE TRIGGER ... LANGUAGE csharp` statements one user who is not a superuser runs per minute on a node; the next fails with `CADB0848`. A runtime setting. `0` or less disables the limit. See [Compile rate](csharp-extensions.md#compile-rate). |
 | `inline_triggers_enabled` | `false` | cluster | Accept `CREATE TRIGGER ... LANGUAGE csharp`. It is separate from `inline_functions_enabled`, because a trigger body runs SQL and a function body does not. With `false` the statement is refused with `CADB0841`; triggers that exist still fire. One fire of a trigger body for one row has the time, memory and array limits above. See [Triggers in C#](csharp-extensions.md#triggers-in-c). |
 
 Give the cluster-scope settings the same value on every node: a statement must pass or fail the

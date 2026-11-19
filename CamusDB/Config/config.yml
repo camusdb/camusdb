@@ -302,8 +302,9 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 # ── Inline functions ──────────────────────────────────────────────────────────
 # CREATE FUNCTION ... LANGUAGE csharp AS $$ body $$: a SQL function whose body is C# source, compiled
 # in memory by the server. A user with the CREATE privilege on a database can create one. Off by
-# default. All of these are restart settings; give the first five and the last one the same value
-# on every node. See docs/csharp-extensions.md, "Inline functions".
+# default. All of these are restart settings except max_inline_definitions_per_user_per_minute, a
+# runtime setting. Give each the same value on every node, except the two compile settings, which
+# protect one node's cores. See docs/csharp-extensions.md, "Inline functions".
 # inline_functions_enabled: false
 # inline_function_call_timeout_ms: 1000              # longest one call may run (CADB0840); <= 0 disables
 # inline_function_allocation_limit_bytes: 16777216   # managed memory one call may allocate (CADB0840); <= 0 disables
@@ -312,6 +313,7 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 # inline_function_compile_timeout_ms: 10000          # longest one compile may take (CADB0838)
 # inline_function_compile_concurrency: 2             # functions this node compiles at the same time
 # max_inline_functions_per_database: 256             # <= 0 disables
+# max_inline_definitions_per_user_per_minute: 60     # CREATE FUNCTION / inline CREATE TRIGGER one non-superuser runs per minute (CADB0848); runtime; <= 0 disables
 # inline_triggers_enabled: false                     # accept CREATE TRIGGER ... LANGUAGE csharp; uses the call limits above
 
 # ── Request resource limits ───────────────────────────────────────────────────

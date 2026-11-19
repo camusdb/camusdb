@@ -1215,6 +1215,17 @@ public static class CamusDBErrorCodes
     public const string SnapshotTooOld = "CADB0847";
 
     /// <summary>
+    /// A user ran more statements that compile inline C# than
+    /// <c>max_inline_definitions_per_user_per_minute</c> allows: <c>CREATE [OR REPLACE] FUNCTION ...
+    /// LANGUAGE csharp</c> and <c>CREATE TRIGGER ... LANGUAGE csharp</c>. Each one compiles the body on
+    /// the node that runs it, and every node compiles a changed function or trigger again, so the limit
+    /// bounds how often one user can start that work. The statement did nothing; the message says when
+    /// it can run again. Superusers are not limited. Maps to HTTP 429 and gRPC
+    /// <c>RESOURCE_EXHAUSTED</c>.
+    /// </summary>
+    public const string InlineDefinitionRateExceeded = "CADB0848";
+
+    /// <summary>
     /// Returns the HTTP status code that should be used when surfacing <paramref name="code"/>
     /// to an API caller. Client errors (permanent, non-retryable caller mistakes) map to 400;
     /// all other codes map to 500.
@@ -1357,6 +1368,7 @@ public static class CamusDBErrorCodes
         InlineFunctionUnavailableOnNode => 503,
         TriggerOwnerMissing => 403,
         SnapshotTooOld => 409,
+        InlineDefinitionRateExceeded => 429,
         _ => 500
 
     };

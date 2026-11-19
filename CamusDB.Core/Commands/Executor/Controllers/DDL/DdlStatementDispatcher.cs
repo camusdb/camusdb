@@ -15,6 +15,7 @@ using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Results;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Extensions.Inline;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Auth;
@@ -137,12 +138,15 @@ internal sealed class DdlStatementDispatcher
 
         this.context = context;
         this.catalogs = catalogs;
-        triggerDdl = new TriggerDdlService(context, catalogs);
+        // One count per engine of the statements that compile inline C#, shared by functions and
+        // triggers, so a user cannot double the limit by alternating the two.
+        InlineDefinitionRateLimiter inlineDefinitions = new();
+        triggerDdl = new TriggerDdlService(context, catalogs, inlineDefinitions);
         extensionDdl = new ExtensionDdlService(context, catalogs, sqlParserCache);
         this.sqlExecutor = sqlExecutor;
         this.sqlParserCache = sqlParserCache;
         this.statementAuthorizer = statementAuthorizer;
-        functionDdl = new FunctionDdlService(context, catalogs, sqlParserCache, statementAuthorizer, authService);
+        functionDdl = new FunctionDdlService(context, catalogs, sqlParserCache, statementAuthorizer, authService, inlineDefinitions);
         this.userAdmin = userAdmin;
         this.serverLevelDispatcher = serverLevelDispatcher;
         this.databaseLifecycle = databaseLifecycle;

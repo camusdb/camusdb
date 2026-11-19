@@ -42,6 +42,7 @@ public class ConfigReader
         "inline_function_compile_timeout_ms",
         "inline_function_compile_concurrency",
         "max_inline_functions_per_database",
+        "max_inline_definitions_per_user_per_minute",
 
         "join_existing",
         "pitr_bootstrap_from",

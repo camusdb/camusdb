@@ -139,6 +139,11 @@ public class ConfigDefinition
     /// <c>CamusDBOptions.MaxInlineFunctionsPerDatabase</c>. Default 256.</summary>
     public int MaxInlineFunctionsPerDatabase { get; set; } = 256;
 
+    /// <summary>Most statements that compile inline C# one user who is not a superuser may run per
+    /// minute on a node. &lt;= 0 disables. Maps to
+    /// <c>CamusDBOptions.MaxInlineDefinitionsPerUserPerMinute</c>. Default 60.</summary>
+    public int MaxInlineDefinitionsPerUserPerMinute { get; set; } = 60;
+
     /// <summary>
     /// Join a <b>running</b> cluster as a new member instead of bootstrapping one, using
     /// <see cref="Peers"/> as the seed list. The node enters the committed roster as a learner and

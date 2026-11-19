@@ -237,6 +237,7 @@ public static class ConfigResolver
         InlineFunctionCompileTimeoutMs = config.InlineFunctionCompileTimeoutMs,
         InlineFunctionCompileConcurrency = config.InlineFunctionCompileConcurrency,
         MaxInlineFunctionsPerDatabase = config.MaxInlineFunctionsPerDatabase,
+        MaxInlineDefinitionsPerUserPerMinute = config.MaxInlineDefinitionsPerUserPerMinute,
 
 
         StatsFlushIntervalMs = config.StatsFlushIntervalMs,

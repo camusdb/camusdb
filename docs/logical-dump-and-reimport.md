@@ -95,6 +95,10 @@ the target server compiles it again. Three things follow:
 
 - The target server must accept the statement: set `inline_functions_enabled: true` on every node
   before you load the dump (see [csharp-extensions.md](csharp-extensions.md#inline-functions)).
+- A user who is not a superuser runs at most `max_inline_definitions_per_user_per_minute` (60)
+  `CREATE FUNCTION` statements a minute (see
+  [Compile rate](csharp-extensions.md#compile-rate)). Load a dump with more functions as a superuser,
+  or raise the setting while it loads.
 - The user who loads the dump owns the functions it creates. For a function whose owner was another
   user, the dump also writes `ALTER FUNCTION name OWNER TO user`. That statement needs the user to
   exist on the target, which is why the users are restored first, and the loading user to be a
