@@ -368,6 +368,46 @@ public sealed class TestMaterializedViewDropAndRename : SharedNodeBaseTest
     }
 
     /// <summary>
+    /// A refresh that resolved the view, then waited for the fence while a drop took it, dropped the
+    /// view and released it. The refresh then staged rows for the dropped view, the swap applied as a
+    /// no-op, and the staging relation was left with no record pointing at it.
+    /// </summary>
+    [Test]
+    public async Task ARefreshThatLostTheViewToADropBeforeItsFenceStagesNothing()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await SeedOrders(database, executor, dbname);
+
+        await ExecDdl(database, executor, dbname,
+            "CREATE MATERIALIZED VIEW open_orders AS SELECT id, total FROM orders WHERE status = 'open'");
+        string viewTableId = database.Schema.Tables["open_orders"].Id!;
+
+        MaterializedViewRefresher.BeforeRefreshFenceForTesting = async _ =>
+        {
+            MaterializedViewRefresher.BeforeRefreshFenceForTesting = null;
+            await ExecDdl(database, executor, dbname, "DROP MATERIALIZED VIEW open_orders");
+        };
+
+        CamusDBException? refused;
+        try
+        {
+            refused = Assert.ThrowsAsync<CamusDBException>(async () =>
+                await ExecNonQuery(database, executor, dbname, "REFRESH MATERIALIZED VIEW open_orders"));
+        }
+        finally
+        {
+            MaterializedViewRefresher.BeforeRefreshFenceForTesting = null;
+        }
+
+        Assert.AreEqual(CamusDBErrorCodes.ViewDoesntExist, refused!.Code);
+        Assert.IsFalse(database.Schema.Tables.ContainsKey("open_orders"));
+        AssertNoStagingLeft(database);
+
+        CatalogsManager catalogs = executor.GetCatalogsManagerForTesting();
+        Assert.IsNull(await catalogs.TryGetRefreshJobAsync(database, viewTableId), "no record is left either");
+    }
+
+    /// <summary>
     /// The apply-time half, for a rename that commits on another node after the proposer's checks: a
     /// drop entry whose name now resolves to a different id is refused, and drops nothing.
     /// </summary>

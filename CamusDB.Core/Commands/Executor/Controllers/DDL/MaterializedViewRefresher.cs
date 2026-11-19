@@ -180,6 +180,9 @@ internal sealed class MaterializedViewRefresher
         // the other's staging relation out from under it.
         string fenceId = RegistryDropMarkers.TableFenceId(database.Id, viewTableId);
 
+        if (BeforeRefreshFenceForTesting is { } beforeFence)
+            await beforeFence(viewName).ConfigureAwait(false);
+
         if (!await AcquireRefreshFenceAsync(registry, fenceId).ConfigureAwait(false))
             throw new CamusDBException(
                 CamusDBErrorCodes.RefreshAlreadyInProgress,
@@ -187,6 +190,16 @@ internal sealed class MaterializedViewRefresher
 
         try
         {
+            // Read again by id now that the fence is held. A drop can take the fence first, drop the
+            // view and release it while this statement waited; the copy read before the fence would
+            // then stage rows for a view that is gone, and the swap would have nothing to publish onto.
+            view = FindRelationById(database, viewTableId) is { IsMaterializedView: true } current
+                ? current
+                : throw new CamusDBException(
+                    CamusDBErrorCodes.ViewDoesntExist,
+                    $"Materialized view '{viewName}' was dropped before its refresh started; nothing was refreshed");
+            viewName = view.Name ?? viewName;
+
             // Safe only because the fence is held: a run still in progress anywhere would still hold
             // it, so whatever is found here belongs to one that is gone. The user asked for this
             // rebuild, so it simply subsumes the abandoned one rather than taking it over — which is
@@ -204,6 +217,23 @@ internal sealed class MaterializedViewRefresher
             await registry.DropMarkers.ReleaseDropIntentAsync(fenceId).ConfigureAwait(false);
         }
     }
+
+    /// <summary>
+    /// Test-only seam: invoked with the view's name after a <c>REFRESH</c> resolved the view and before
+    /// it takes the refresh fence, so a test can drop the view inside that window. Null in production.
+    /// </summary>
+    internal static Func<string, Task>? BeforeRefreshFenceForTesting { get; set; }
+
+    /// <summary>
+    /// The relation with id <paramref name="relationId"/>, or null when no relation has it. Reads the
+    /// id index, which every applied delta keeps current, so it is safe without the schema lock.
+    /// </summary>
+    private static TableSchema? FindRelationById(DatabaseDescriptor database, string relationId)
+        => database.Schema.TryGetRelationNameById(relationId, out string? name)
+            && database.Schema.Tables.TryGetValue(name, out TableSchema? relation)
+            && string.Equals(relation.Id, relationId, StringComparison.Ordinal)
+                ? relation
+                : null;
 
     /// <summary>
     /// Builds the new contents and publishes them, with the refresh fence already held by the caller
@@ -305,6 +335,14 @@ internal sealed class MaterializedViewRefresher
                 publishHlc: run.Publish.Value,
                 expectedMetadataGeneration: metadataGeneration).ConfigureAwait(false);
 
+            // The swap applies as a no-op when the view is gone, and then the staging relation is
+            // still a relation of its own. Raised as a failure, so the cleanup below removes it.
+            if (database.Schema.Tables.TryGetValue(stagingName, out TableSchema? unswapped)
+                && string.Equals(unswapped.Id, stagingTableId, StringComparison.Ordinal))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.ViewDoesntExist,
+                    $"Materialized view '{viewName}' was dropped while it was being refreshed; nothing was published");
+
             run.Phase = "published";
             await InjectAsync(FaultPoint.AfterPublish).ConfigureAwait(false);
 
@@ -347,6 +385,11 @@ internal sealed class MaterializedViewRefresher
             {
                 await executor.DropStagingRelationAsync(database, stagingName).ConfigureAwait(false);
                 await InjectAsync(FaultPoint.DuringCleanup).ConfigureAwait(false);
+
+                // A view that is gone has no rebuild left to finish, so its record goes with the
+                // storage it named.
+                if (FindRelationById(database, viewTableId) is null)
+                    await catalogs.DeleteRefreshJobAsync(database, viewTableId).ConfigureAwait(false);
             }
             catch (SimulatedCrashForTesting)
             {
@@ -360,9 +403,9 @@ internal sealed class MaterializedViewRefresher
                     viewName, ErrorCode(cleanupError));
             }
 
-            // The ownership record is deliberately left in place. It is what the sweep reads to find
-            // this run's storage if the drop above did not happen, and what tells it a rebuild was
-            // interrupted rather than never started.
+            // For a view that still exists, the ownership record is deliberately left in place. It is
+            // what the sweep reads to find this run's storage if the drop above did not happen, and
+            // what tells it a rebuild was interrupted rather than never started.
             throw;
         }
     }
