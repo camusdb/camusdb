@@ -154,6 +154,7 @@ public class ConfigReader
         "materialized_view_refresh_chunk_rows",
         "materialized_view_refresh_enabled",
         "materialized_view_refresh_takeover_attempts",
+        "materialized_view_refresh_hold_lease_ms",
         "branch_snapshot_hold_lease_ms",
         "snapshot_hold_retry_budget_ms",
         "spill_enabled",

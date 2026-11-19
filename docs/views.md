@@ -378,6 +378,7 @@ Specifics:
 | `materialized_view_refresh_chunk_rows` | 10000 | Rows written per transaction while rebuilding a materialized view. |
 | `materialized_view_refresh_enabled` | true | Set false to refuse refreshes on a node that should not run bulk work. `WITH NO DATA` still works. |
 | `materialized_view_refresh_takeover_attempts` | 3 | How many times a refresh interrupted by a crash or a leadership change is restarted for you. 0 restarts none of them and only reclaims the abandoned storage. |
+| `materialized_view_refresh_hold_lease_ms` | 300000 | Lease on the hold that keeps the history a refresh reads from being garbage-collected. The hold is renewed every lease/3 while the rebuild runs; if renewal stops, the refresh fails and the view keeps its previous contents. Must be at least 5000. |
 
 All settings appear in `SHOW VARIABLES`.
 

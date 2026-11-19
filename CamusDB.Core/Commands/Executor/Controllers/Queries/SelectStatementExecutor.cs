@@ -1742,8 +1742,13 @@ internal sealed class SelectStatementExecutor
         // The hold is leased, and the lease is shorter than a large copy. Renewing it — and failing
         // closed when renewal stops being confirmed — is what makes "one pinned snapshot" true for the
         // whole read rather than only for its first few minutes.
+        // A refresh has its own lease knob; an AS OF SYSTEM TIME copy still shares the branch one.
+        int leaseMs = explicitSnapshot is null
+            ? options.BranchSnapshotHoldLeaseMs
+            : options.MaterializedViewRefreshHoldLeaseMs;
+
         SnapshotHoldLease lease = await SnapshotHoldLease.AcquireAsync(
-            kahuna, context.Logger, holderId, snapshotT, options.BranchSnapshotHoldLeaseMs,
+            kahuna, context.Logger, holderId, snapshotT, leaseMs,
             options.SnapshotHoldRetryBudgetMs, statementName)
             .ConfigureAwait(false);
 

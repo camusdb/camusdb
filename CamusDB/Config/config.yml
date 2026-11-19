@@ -353,11 +353,14 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 #   of max_mutations_per_transaction, because each row also costs one mutation per index.
 # materialized_view_refresh_takeover_attempts: restarts of an interrupted refresh before the sweep
 #   gives up; 0 only reclaims the abandoned staging storage.
+# materialized_view_refresh_hold_lease_ms: lease on the snapshot-floor hold a refresh takes on the
+#   history it reads; renewed every lease/3 while the rebuild runs. Must be >= 5000.
 # branch_snapshot_hold_lease_ms: lease on a branch's snapshot-floor hold on its parent's MVCC history;
 #   the leader renews it well inside the lease. Must be >= 5000.
 # materialized_view_refresh_enabled: true
 # materialized_view_refresh_chunk_rows: 10000
 # materialized_view_refresh_takeover_attempts: 3
+# materialized_view_refresh_hold_lease_ms: 300000
 # branch_snapshot_hold_lease_ms: 300000
 
 # ── Database lifecycle ────────────────────────────────────────────────────────

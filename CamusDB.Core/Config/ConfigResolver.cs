@@ -398,6 +398,7 @@ public static class ConfigResolver
         MaterializedViewRefreshChunkRows = config.MaterializedViewRefreshChunkRows,
         MaterializedViewRefreshEnabled = config.MaterializedViewRefreshEnabled,
         MaterializedViewRefreshTakeoverAttempts = config.MaterializedViewRefreshTakeoverAttempts,
+        MaterializedViewRefreshHoldLeaseMs = config.MaterializedViewRefreshHoldLeaseMs,
         BranchSnapshotHoldLeaseMs = config.BranchSnapshotHoldLeaseMs,
         SnapshotHoldRetryBudgetMs = config.SnapshotHoldRetryBudgetMs,
 

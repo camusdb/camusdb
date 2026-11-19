@@ -1468,6 +1468,27 @@ public sealed record CamusDBOptions
     public int MaterializedViewRefreshTakeoverAttempts { get; init; } = 3;
 
     /// <summary>
+    /// Lease, in milliseconds, on the snapshot-floor hold a materialized-view <c>REFRESH</c> takes on
+    /// the MVCC history it reads.
+    ///
+    /// <para>A rebuild reads its source at one pinned snapshot for its whole duration, and the hold is
+    /// what keeps revision GC from reclaiming that history under it. The hold is renewed every
+    /// lease/3 while the rebuild runs and fails closed — the refresh aborts and the view keeps its
+    /// previous contents — once renewal stops being confirmed inside the lease. A longer lease rides
+    /// out a longer stall of the renewing node; a shorter one releases history sooner after a node
+    /// dies mid-rebuild.</para>
+    ///
+    /// <para>Separate from <see cref="BranchSnapshotHoldLeaseMs"/>, which the refresh used to borrow:
+    /// a branch's hold lives as long as the branch, a refresh's only as long as one rebuild, and an
+    /// operator tuning one should not be tuning the other by accident. Read when each refresh acquires
+    /// its hold, so a change applies from the next refresh. Must be &gt;= 5000.</para>
+    ///
+    /// Default: <c>300_000</c> (5 min).
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
+    public int MaterializedViewRefreshHoldLeaseMs { get; init; } = 300_000;
+
+    /// <summary>
     /// How long, in milliseconds, a row read of an optimistic read-write transaction waits for a write
     /// that another transaction has staged on the row and not yet committed. Without the wait the read
     /// returns the committed value below that write, and an <c>UPDATE</c> of the row by the reading

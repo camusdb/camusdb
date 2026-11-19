@@ -1006,6 +1006,13 @@ public class ConfigDefinition
     public int MaterializedViewRefreshTakeoverAttempts { get; set; } = 3;
 
     /// <summary>
+    /// Lease, in milliseconds, on the snapshot-floor hold a materialized-view refresh takes on the
+    /// history it reads; renewed every lease/3 while the rebuild runs. Must be &gt;= 5000. Default
+    /// 300 000 (5 min). Maps to <c>CamusDBOptions.MaterializedViewRefreshHoldLeaseMs</c>.
+    /// </summary>
+    public int MaterializedViewRefreshHoldLeaseMs { get; set; } = 300_000;
+
+    /// <summary>
     /// Lease window, in milliseconds, for a branch's snapshot-floor hold on its parent's MVCC history;
     /// the leader-owned renewer must renew well inside it for as long as the branch exists. Must be
     /// &gt;= 5000: the renewer never ticks faster than once per second (renewing every lease/3), and a
@@ -1529,6 +1536,12 @@ public class ConfigDefinition
         // lapsed hold permanently fails the branch closed — refuse the configuration instead.
         if (BranchSnapshotHoldLeaseMs < 5000)
             throw Invalid($"'branch_snapshot_hold_lease_ms' must be >= 5000 (the renewer ticks at most once a second and needs a wide margin inside the lease), got {BranchSnapshotHoldLeaseMs}");
+
+        // Same floor as the branch hold, for the same reason: the refresh renews every lease/3 and
+        // fails closed once renewal stops being confirmed, so a lease near the renewal tick would
+        // abort rebuilds that were never actually stalled.
+        if (MaterializedViewRefreshHoldLeaseMs < 5000)
+            throw Invalid($"'materialized_view_refresh_hold_lease_ms' must be >= 5000 (the hold is renewed every lease/3 and needs a wide margin inside the lease), got {MaterializedViewRefreshHoldLeaseMs}");
 
         if (SqlParserCacheTtlSeconds < 0)
             throw Invalid(

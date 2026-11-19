@@ -443,6 +443,27 @@ public sealed class TestConfigReaderCharacterization
     }
 
     /// <summary>
+    /// A refresh's snapshot hold has its own lease knob rather than borrowing the branch one: setting
+    /// one leaves the other alone, and the resolver carries it into the options the refresh reads.
+    /// </summary>
+    [Test]
+    public void ReadsTheRefreshHoldLeaseSeparatelyFromTheBranchOne()
+    {
+        ConfigDefinition config = new ConfigReader().Read("materialized_view_refresh_hold_lease_ms: 60000");
+
+        Assert.That(config.MaterializedViewRefreshHoldLeaseMs, Is.EqualTo(60000));
+        Assert.That(config.BranchSnapshotHoldLeaseMs, Is.EqualTo(300_000));
+        Assert.That(new ConfigDefinition().MaterializedViewRefreshHoldLeaseMs, Is.EqualTo(300_000));
+        Assert.That(CamusDBOptions.Default.MaterializedViewRefreshHoldLeaseMs, Is.EqualTo(300_000));
+    }
+
+    [Test]
+    public void RejectsARefreshHoldLeaseBelowTheRenewalFloor()
+    {
+        Assert.Throws<CamusDBException>(() => new ConfigReader().Read("materialized_view_refresh_hold_lease_ms: 4999"));
+    }
+
+    /// <summary>
     /// Guards the allow-list against drift: every settable <see cref="ConfigDefinition"/> property
     /// binds from an underscored root YAML key, so each one MUST have a matching entry in
     /// <see cref="ConfigReader.AllowedRootKeys"/> or the reader rejects a config that sets it.
