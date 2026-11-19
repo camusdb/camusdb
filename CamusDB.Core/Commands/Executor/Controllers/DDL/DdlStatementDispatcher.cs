@@ -229,6 +229,13 @@ internal sealed class DdlStatementDispatcher
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
         activity?.Describe(ast.nodeType);
 
+        // Schema DDL is not bounded by statement_timeout_ms: a backfill and a replicated schema change
+        // run as jobs that a statement error cannot stop honestly. Taken off in this async frame only,
+        // so the caller's deadline comes back when the statement returns. CREATE TABLE … AS keeps it:
+        // it loads its rows in the statement and drops the table when the load fails.
+        if (!StatementDeadline.BoundsSchemaStatement(ast.nodeType))
+            StatementDeadline.Suspend();
+
         // CREATE TABLE … AS with a CTE that its query computes once keeps that CTE's rows until it ends.
         await using Queries.ComputedOnceScope? computedOnce = Queries.ComputedOnceRows.Begin(ticket.TxnState, ast);
 

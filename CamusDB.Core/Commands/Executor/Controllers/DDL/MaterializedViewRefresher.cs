@@ -254,6 +254,10 @@ internal sealed class MaterializedViewRefresher
         }
         catch (Exception)
         {
+            // The refresh can have failed because the statement ran out of time; the cleanup must not
+            // be stopped by the same deadline.
+            StatementDeadline.Suspend();
+
             // The swap never happened, so the materialized view still holds its previous contents
             // and the only thing worth removing is the half-built relation. A failure to remove it
             // must not replace the caller's real error: it costs storage, nothing more, and the

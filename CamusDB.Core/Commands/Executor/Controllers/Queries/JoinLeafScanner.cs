@@ -213,6 +213,8 @@ internal sealed class JoinLeafScanner
 
         using CancellationTokenSource? linked = JoinCancellation.Link(plan, cancellationToken);
         CancellationToken scanToken = linked?.Token ?? plan.Ticket.CancellationToken;
+        // A write never observes the token at its deadline; it stops here instead (statement_timeout_ms).
+        StatementDeadline? statementDeadline = StatementDeadline.Current;
 
         // Phantom fence over the whole index range, as the single-table full index scan takes it.
         await table.Store.AcquireIndexRangeLockAsync(plan.Ticket.TxnState, index.KvId,
@@ -227,6 +229,7 @@ internal sealed class JoinLeafScanner
             from: null, to: null, unique: unique, cancellationToken: scanToken)).ConfigureAwait(false))
         {
             scanToken.ThrowIfCancellationRequested();
+            statementDeadline?.ThrowIfExpired();
 
             if (stats is not null)
                 stats.KvScanEntries++;
@@ -276,6 +279,8 @@ internal sealed class JoinLeafScanner
 
         using CancellationTokenSource? linked = JoinCancellation.Link(plan, cancellationToken);
         CancellationToken scanToken = linked?.Token ?? plan.Ticket.CancellationToken;
+        // A write never observes the token at its deadline; it stops here instead (statement_timeout_ms).
+        StatementDeadline? statementDeadline = StatementDeadline.Current;
 
         // Phantom fence over exactly the scanned sub-range, as the single-table range scan takes it;
         // a prefix bound spans every row of the prefix (keyColumnCount).
@@ -300,6 +305,7 @@ internal sealed class JoinLeafScanner
             unique: unique, cancellationToken: scanToken)).ConfigureAwait(false))
         {
             scanToken.ThrowIfCancellationRequested();
+            statementDeadline?.ThrowIfExpired();
 
             if (stats is not null)
                 stats.KvScanEntries++;
@@ -354,6 +360,8 @@ internal sealed class JoinLeafScanner
 
         using CancellationTokenSource? linked = JoinCancellation.Link(plan, cancellationToken);
         CancellationToken scanToken = linked?.Token ?? plan.Ticket.CancellationToken;
+        // A write never observes the token at its deadline; it stops here instead (statement_timeout_ms).
+        StatementDeadline? statementDeadline = StatementDeadline.Current;
 
         // Phantom fence, as the single-table IN-list scan takes it: a point lookup locks its own
         // key in LookupUnique, present or absent; a range seek locks the range of each value, or one
@@ -373,6 +381,7 @@ internal sealed class JoinLeafScanner
         foreach (ColumnValue value in inListNode.Values)
         {
             scanToken.ThrowIfCancellationRequested();
+            statementDeadline?.ThrowIfExpired();
 
             CompositeColumnValue lookupKey = new(new[] { value });
 
@@ -420,6 +429,7 @@ internal sealed class JoinLeafScanner
                     maxRows: null, cancellationToken: scanToken)).ConfigureAwait(false))
                 {
                     scanToken.ThrowIfCancellationRequested();
+                    statementDeadline?.ThrowIfExpired();
 
                     if (stats is not null)
                         stats.KvScanEntries++;
@@ -587,6 +597,8 @@ internal sealed class JoinLeafScanner
         RowLayout? qualifiedLayout = qualifyForFilter ? QueryRowMerger.BuildQualifiedLayout(layout, source.Alias) : null;
 
         CancellationToken statementToken = plan.Ticket.CancellationToken;
+        // A write never observes the token at its deadline; it stops here instead (statement_timeout_ms).
+        StatementDeadline? statementDeadline = StatementDeadline.Current;
         int checkInterval = function.CancellationCheckInterval;
         int untilCheck = checkInterval;
 
@@ -608,6 +620,7 @@ internal sealed class JoinLeafScanner
             {
                 untilCheck = checkInterval;
                 statementToken.ThrowIfCancellationRequested();
+                statementDeadline?.ThrowIfExpired();
                 ct.ThrowIfCancellationRequested();
             }
 

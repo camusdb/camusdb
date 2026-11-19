@@ -562,12 +562,12 @@ public static class DecidedDivergences
         new("A recursive WITH query stops after max_recursive_cte_iterations steps", NoSetup,
             "WITH RECURSIVE r (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 20000) SELECT COUNT(*) FROM r",
             CamusDBErrorCodes.RecursiveQueryLimitExceeded, "20000",
-            "A statement has no time limit in CamusDB, so a recursion with no end would run until the disk is full. The cluster settings max_recursive_cte_iterations (10,000 steps) and max_recursive_cte_rows (10,000,000 rows) stop it. Both can be raised, and 0 turns a limit off. PostgreSQL has no such limit."),
+            "A statement has no time limit by default in CamusDB, so a recursion with no end would run until the disk is full. The cluster settings max_recursive_cte_iterations (10,000 steps) and max_recursive_cte_rows (10,000,000 rows) stop it. Both can be raised, and 0 turns a limit off. PostgreSQL has no such limit."),
 
         new("One read of a function in FROM makes at most max_table_function_rows rows", NoSetup,
             "SELECT COUNT(*) FROM generate_series(1, 5000001)",
             CamusDBErrorCodes.TableFunctionRowLimitExceeded, "5000001",
-            "A statement has no time limit in CamusDB, so one short statement over a series of a trillion rows would run for hours. The cluster setting max_table_function_rows (5,000,000 rows) stops one read of a function in FROM. A LIMIT that stops the read early keeps it under the limit. The setting can be raised, and 0 turns the limit off. PostgreSQL has no such limit."),
+            "A statement has no time limit by default in CamusDB, so one short statement over a series of a trillion rows would run for hours. The cluster setting max_table_function_rows (5,000,000 rows) stops one read of a function in FROM. A LIMIT that stops the read early keeps it under the limit. The setting can be raised, and 0 turns the limit off. PostgreSQL has no such limit."),
 
         new("A recursive WITH query that the statement reads two times runs to its end first", NoSetup,
             "WITH RECURSIVE r (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r) SELECT a.n + b.n FROM (SELECT n FROM r LIMIT 1) a, (SELECT n FROM r LIMIT 1) b",

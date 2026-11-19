@@ -272,13 +272,62 @@ internal sealed class SelectStatementExecutor
         try
         {
             (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) =
-                await ExecuteSQLQueryTracked(ticket, metaOut, schemaOut).ConfigureAwait(false);
+                await ExecuteSQLQueryBounded(ticket, metaOut, schemaOut).ConfigureAwait(false);
 
             return (database, tx is null ? cursor : tx.AbortOnFailure(cursor));
         }
         catch (Exception ex)
         {
             tx?.MarkRollbackOnly(ex);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Runs the statement under its time limit, <see cref="CamusDBOptions.StatementTimeoutMs"/> (see
+    /// <see cref="StatementDeadline"/>).
+    ///
+    /// <para>The ticket from here on carries a token linked to the transport's, and the deadline fires
+    /// it once the parse shows a read (<see cref="StatementDeadline.ArmReadToken"/>, next to the
+    /// running-statement list's own <c>AllowCancel</c>). This path also runs writes with a RETURNING
+    /// list, and those never get the token: they check the deadline themselves. The deadline ends when
+    /// the cursor ends, because the cursor is lazy and the read has not started when this method
+    /// returns.</para>
+    /// </summary>
+    private Task<(DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)> ExecuteSQLQueryBounded(
+        ExecuteSQLTicket ticket, CacheMetadataHolder? metaOut, QuerySchemaHolder? schemaOut)
+    {
+        // Not an async method, so the statement without a limit pays no extra frame. The ambient value
+        // Begin sets lands in the frame of the async caller, which ends with the statement's method.
+        StatementDeadline? deadline = StatementDeadline.Begin(options.StatementTimeoutMs, out bool owned);
+
+        // No limit, or the deadline of the statement this one runs inside, which that statement ends.
+        return owned
+            ? ExecuteSQLQueryUnderDeadline(deadline!, ticket, metaOut, schemaOut)
+            : ExecuteSQLQueryTracked(ticket, metaOut, schemaOut);
+    }
+
+    /// <summary>The statement of <see cref="ExecuteSQLQueryBounded"/> that started its own deadline.</summary>
+    private async Task<(DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)> ExecuteSQLQueryUnderDeadline(
+        StatementDeadline deadline, ExecuteSQLTicket ticket, CacheMetadataHolder? metaOut, QuerySchemaHolder? schemaOut)
+    {
+        try
+        {
+            (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await ExecuteSQLQueryTracked(
+                ticket.WithCancellationToken(deadline.LinkReadToken(ticket.CancellationToken)), metaOut, schemaOut)
+                .ConfigureAwait(false);
+
+            return (database, deadline.Wrap(cursor));
+        }
+        catch (OperationCanceledException) when (deadline.TimedOut)
+        {
+            // The deadline passed while the statement planned.
+            deadline.End();
+            throw deadline.Exceeded();
+        }
+        catch
+        {
+            deadline.End();
             throw;
         }
     }
@@ -426,6 +475,9 @@ internal sealed class SelectStatementExecutor
 
         // Every other statement on this path is a read, which observes its token for its whole run.
         activity?.AllowCancel();
+
+        // For the same reason the statement's deadline may fire that token from now on.
+        StatementDeadline.Current?.ArmReadToken();
 
         // Reading the log must not change it. Recording this statement would make every read evict
         // an entry, so a dashboard polling the log every few seconds would erase the history it

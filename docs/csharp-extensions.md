@@ -968,12 +968,24 @@ A call that goes over a budget fails its statement with `CADB0840`. The node goe
 | Managed memory one call allocates | `inline_function_allocation_limit_bytes` | 16777216 (16 MiB) |
 | Elements of one array made with `new T[n]` | `inline_function_array_limit` | 1048576 |
 | Depth of the body's own calls | none: the free stack of the thread | |
+| Time of the whole statement | `statement_timeout_ms` | 0 (no limit) |
 
-**A budget covers one call. No budget covers a whole statement.** `SELECT f(x) FROM big_table` calls `f`
-once for each row, and each call gets the full budget. A user who may create a function can
-therefore write a statement that runs for a very long time, with each call inside its budget. There
-is no statement timeout in this version. Watch for long statements, and give `CREATE` on a database
-only to users who may use that much of the node.
+**A budget covers one call. `statement_timeout_ms` covers the statement.** `SELECT f(x) FROM big_table`
+calls `f` once for each row, and each call gets the full budget, so the call budgets alone do not
+bound the statement: with each call inside its budget, it runs for as long as the table is large.
+`statement_timeout_ms` does (see [request-resource-limits.md](request-resource-limits.md#statement-timeout)).
+A statement still running at that limit fails with `CADB0562`, a read or a write, and a write keeps
+nothing.
+
+- A call that runs when the statement's time is up gets only the time that is left. It stops at the
+  statement's deadline with `CADB0562`, not at the end of its own budget. A trigger fire does the
+  same, and the time its SQL takes does not move the deadline.
+- The SQL that a trigger runs is part of the statement that fired it and has the same deadline.
+- Schema DDL is not bounded by the setting, except `CREATE TABLE … AS`.
+
+The setting is off by default, as in PostgreSQL, because a limit would fail long statements that
+work today. On a node where the users who may create a function are not trusted with its CPU, set
+it, and give `CREATE` on a database only to users who may use that much of the node for that long.
 
 The server compiles a check into the start of every loop body, lambda and local function. An
 endless loop ends at the time limit, and a recursion with no end fails with `CADB0840` before the

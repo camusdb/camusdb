@@ -180,9 +180,13 @@ internal sealed class RowUpserter
         int inserted = 0;
         int updated = 0;
 
+        // A write checks its time limit itself, at each chunk (statement_timeout_ms).
+        StatementDeadline? statementDeadline = StatementDeadline.Current;
+
         for (int offset = 0; offset < proposed.Count; offset += chunkSize)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            statementDeadline?.ThrowIfExpired();
 
             int count = Math.Min(chunkSize, proposed.Count - offset);
 

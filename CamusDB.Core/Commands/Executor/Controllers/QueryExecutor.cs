@@ -1069,6 +1069,7 @@ internal sealed class QueryExecutor
                     GroupByJson = groupByJson,
                     TopK = spanTopK,
                     RequiredColumns = plan.ScanRequiredColumns?.ToArray(),
+                    StatementTimeoutRemainingMs = StatementDeadline.Current?.RemainingMs,
                 };
 
                 List<Dictionary<string, ColumnValue>> partials = [];
@@ -1431,6 +1432,8 @@ internal sealed class QueryExecutor
         CamusDB.Core.Diagnostics.StatementProbe? probe = plan.Ticket.Probe;
         QueryDependencyCollector? deps = plan.DepCollector;
         CancellationToken cancellationToken = ticket.CancellationToken;
+        // A write never observes the token at its deadline; it stops here instead (statement_timeout_ms).
+        StatementDeadline? statementDeadline = StatementDeadline.Current;
 
         deps?.RecordRange(table.Store.IndexKeySpace(index.KvId));
         deps?.RecordSchema(table.Id, table.Schema.Version, table.Schema.ContentsGeneration);
@@ -1463,6 +1466,7 @@ internal sealed class QueryExecutor
                 cancellationToken: cancellationToken)))
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                statementDeadline?.ThrowIfExpired();
 
                 if (scanStats is not null)
                     scanStats.KvScanEntries++;
@@ -1503,6 +1507,7 @@ internal sealed class QueryExecutor
             for (int i = 0; i < page.Count; i++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                statementDeadline?.ThrowIfExpired();
 
                 ObjectIdValue batchRowId = page[i];
                 ReadOnlyMemory<byte>? data = batchResult[i];
@@ -1534,6 +1539,7 @@ internal sealed class QueryExecutor
             cancellationToken: cancellationToken)))
         {
             cancellationToken.ThrowIfCancellationRequested();
+            statementDeadline?.ThrowIfExpired();
 
             if (scanStats is not null)
                 scanStats.KvScanEntries++;
@@ -1578,6 +1584,8 @@ internal sealed class QueryExecutor
         ColumnType[] keyTypes = GetIndexColumnTypes(table, index);
         QueryDependencyCollector? deps = plan.DepCollector;
         CancellationToken cancellationToken = ticket.CancellationToken;
+        // A write never observes the token at its deadline; it stops here instead (statement_timeout_ms).
+        StatementDeadline? statementDeadline = StatementDeadline.Current;
 
         deps?.RecordRange(table.Store.IndexKeySpace(index.KvId));
         deps?.RecordSchema(table.Id, table.Schema.Version, table.Schema.ContentsGeneration);
@@ -1614,6 +1622,7 @@ internal sealed class QueryExecutor
         foreach (ColumnValue value in inListNode.Values)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            statementDeadline?.ThrowIfExpired();
 
             CompositeColumnValue lookupKey = new(new[] { value });
 
@@ -1669,6 +1678,7 @@ internal sealed class QueryExecutor
                     maxRows: null, cancellationToken: cancellationToken)).ConfigureAwait(false))
                 {
                     cancellationToken.ThrowIfCancellationRequested();
+                    statementDeadline?.ThrowIfExpired();
 
                     if (scanStats is not null)
                         scanStats.KvScanEntries++;
@@ -1738,6 +1748,8 @@ internal sealed class QueryExecutor
         TableIndexSchema index = ginNode.Index;
         QueryDependencyCollector? deps = plan.DepCollector;
         CancellationToken cancellationToken = ticket.CancellationToken;
+        // A write never observes the token at its deadline; it stops here instead (statement_timeout_ms).
+        StatementDeadline? statementDeadline = StatementDeadline.Current;
 
         deps?.RecordRange(table.Store.IndexKeySpace(index.KvId));
         deps?.RecordSchema(table.Id, table.Schema.Version, table.Schema.ContentsGeneration);
@@ -1760,6 +1772,7 @@ internal sealed class QueryExecutor
             foreach (JsonbGinEntries.Requirement requirement in group)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                statementDeadline?.ThrowIfExpired();
 
                 CompositeColumnValue fromBound = JsonbGinIndexKeys.Bound(requirement.Text);
                 (CompositeColumnValue toBound, bool toInclusive) = requirement.IsPrefix
@@ -1780,6 +1793,7 @@ internal sealed class QueryExecutor
                     maxRows: null, cancellationToken: cancellationToken)).ConfigureAwait(false))
                 {
                     cancellationToken.ThrowIfCancellationRequested();
+                    statementDeadline?.ThrowIfExpired();
 
                     if (scanStats is not null)
                         scanStats.KvScanEntries++;
@@ -1839,6 +1853,7 @@ internal sealed class QueryExecutor
         for (int start = 0; start < rowIds.Length; start += batchSize)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            statementDeadline?.ThrowIfExpired();
 
             ArraySegment<ObjectIdValue> page = new(rowIds, start, Math.Min(batchSize, rowIds.Length - start));
             ReadOnlyMemory<byte>?[] batchResult = await table.Store.GetRowsBatchForRead(
@@ -1847,6 +1862,7 @@ internal sealed class QueryExecutor
             for (int i = 0; i < page.Count; i++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                statementDeadline?.ThrowIfExpired();
 
                 ObjectIdValue rowId = page[i];
                 ReadOnlyMemory<byte>? data = batchResult[i];
