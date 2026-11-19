@@ -61,14 +61,13 @@ internal sealed class ViewCreator
                 CamusDBErrorCodes.TableAlreadyExists,
                 $"'{viewName}' is a table, not a view; CREATE OR REPLACE VIEW cannot replace it");
 
-        // The view a replace starts from, read once. Its owner, its shape and the cycle check below are
-        // all computed from this one snapshot, and its generation travels with the replace: if another
-        // statement changes the view before the replace lands, the replace is refused rather than
-        // published over a definition it was never checked against.
-        ViewSchema? existing = replace && database.Schema.Views.TryGetValue(viewName, out ViewSchema? current)
-            && current.Definition is not null
-                ? current
-                : null;
+        // The view a replace starts from, copied under the schema lock. The owner, the authorization,
+        // the shape check and the cycle check below all read this copy, and its generation travels
+        // with the replace, so a change another statement commits after the copy makes the apply
+        // refuse the replace.
+        ViewSchema? existing = replace
+            ? await CaptureViewAsync(database, viewName).ConfigureAwait(false)
+            : null;
 
         // A stored body is evaluated once per reader, an unbounded number of times, so a sequence
         // call in one cannot be counted before it runs — and the count is what lets the engine
@@ -269,6 +268,39 @@ internal sealed class ViewCreator
             CamusDBErrorCodes.SequenceCallNotAllowedHere,
             $"A sequence function cannot be used in {what}: the definition is stored and evaluated " +
             "once per reader, so the engine cannot bound how many values it would draw.");
+    }
+
+    /// <summary>
+    /// Copies a view's id, name, generation, definition and comment in one step under the schema
+    /// lock. Returns null when no view has the name.
+    /// </summary>
+    /// <remarks>
+    /// Schema apply changes a live <see cref="ViewSchema"/> in place under the same lock. Reading its
+    /// fields one at a time without the lock can mix two versions of the view, for example an owner
+    /// read before an <c>ALTER VIEW … OWNER TO</c> applied and a generation read after it. A replace
+    /// built from that mix would pass the generation check and put the old owner back.
+    /// </remarks>
+    private static async Task<ViewSchema?> CaptureViewAsync(DatabaseDescriptor database, string viewName)
+    {
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+        try
+        {
+            if (!database.Schema.Views.TryGetValue(viewName, out ViewSchema? live) || live.Definition is null)
+                return null;
+
+            return new ViewSchema
+            {
+                Id = live.Id,
+                Name = live.Name,
+                Definition = live.Definition.Copy(),
+                Generation = live.Generation,
+                Comment = live.Comment,
+            };
+        }
+        finally
+        {
+            database.Schema.ReleaseLock();
+        }
     }
 
     private static CheckOptionKind ParseCheckOption(string? text) => text switch

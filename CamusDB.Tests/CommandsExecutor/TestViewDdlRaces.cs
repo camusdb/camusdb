@@ -189,6 +189,39 @@ public sealed class TestViewDdlRaces : SharedNodeBaseTest
     }
 
     /// <summary>
+    /// An owner change that commits while a replace is checked. The replace used to read the owner
+    /// before the change and the generation after it, so it passed the generation check and put the
+    /// old owner back.
+    /// </summary>
+    [Test]
+    public async Task AReplaceCannotPutBackAnOwnerAnotherStatementChanged()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await Seed(database, executor, dbname);
+        await ExecDdl(database, executor, dbname, "CREATE VIEW v AS SELECT id FROM t");
+
+        // The same delta ALTER VIEW … OWNER TO commits: a copy of the definition with a new owner,
+        // checked against the generation it was taken from.
+        InWindow(async () =>
+        {
+            ViewSchema live = database.Schema.Views["v"];
+            ViewDefinition moved = live.Definition!.Copy();
+            moved.Owner = "new_owner";
+            moved.OwnerId = "new-owner-id";
+            await executor.Catalogs.SetViewDefinitionAsync(database, "v", moved, expectedGeneration: live.Generation);
+        });
+
+        CamusDBException? refused = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await ExecDdl(database, executor, dbname, "CREATE OR REPLACE VIEW v AS SELECT id, a FROM t"));
+        Assert.AreEqual(CamusDBErrorCodes.ConcurrentSchemaChange, refused!.Code);
+
+        ViewDefinition stored = database.Schema.Views["v"].Definition!;
+        Assert.AreEqual("new_owner", stored.Owner, "the owner change stands");
+        Assert.AreEqual("new-owner-id", stored.OwnerId);
+        CollectionAssert.AreEqual(new[] { "id" }, stored.Columns!.Select(c => c.Name).ToArray(), "and the replace changed nothing");
+    }
+
+    /// <summary>
     /// The apply-time half. A committed entry whose precondition no longer holds is refused alike on
     /// every node: it changes nothing, it still consumes its version so the log keeps moving, and the
     /// refusal is recorded so the proposer reports it. Letting it throw out of a live apply instead
