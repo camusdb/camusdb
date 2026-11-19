@@ -124,6 +124,71 @@ public sealed class TestCommitTransportFaultUnresolved
         Assert.IsFalse(mgr.HasUnfinishedTransactions);
     }
 
+    /// <summary>
+    /// Commits through the real coordinator, then throws on the first call, so the commit lands and
+    /// its answer is lost. Later calls delegate. Keeps the answer the caller never saw.
+    /// </summary>
+    private sealed class LostCommitAnswerKahuna : DelegatingKahuna
+    {
+        private int lostAnswers = 1;
+
+        internal TransactionCommitAnswer LostAnswer;
+
+        internal LostCommitAnswerKahuna(IKahuna inner) : base(inner)
+        {
+        }
+
+        public override async Task<TransactionCommitAnswer> LocateAndCommitTransaction(
+            TransactionHandle handle, CancellationToken cancellationToken)
+        {
+            TransactionCommitAnswer answer = await base.LocateAndCommitTransaction(handle, cancellationToken);
+
+            if (Interlocked.Decrement(ref lostAnswers) >= 0)
+            {
+                LostAnswer = answer;
+                throw new InvalidOperationException("simulated loss of the commit answer");
+            }
+
+            return answer;
+        }
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task ARetryAfterALostCommitAnswerReportsTheSameCommitTimestamp()
+    {
+        EmbeddedKahuna node = new();
+        await node.StartAsync(CancellationToken.None);
+        await node.WaitForLeaderAsync("TF-04/warmup", CancellationToken.None);
+        await using EmbeddedKahuna __ = node;
+
+        LostCommitAnswerKahuna kahuna = new(node.Kahuna);
+        KvTransactionsManager mgr = new(kahuna, CamusDBOptions.Default);
+
+        KvTransaction tx = await mgr.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite, locking: KeyValueTransactionLocking.Optimistic);
+
+        // A persistent write registered with the coordinator, so the commit takes the durable path
+        // and Kahuna mints a commit timestamp.
+        (KeyValueResponseType set, _, _) = await kahuna.LocateAndTrySetKeyValue(
+            tx.TransactionId, "lostanswer/" + Guid.NewGuid().ToString("n"), [1, 2, 3], null, -1,
+            KeyValueFlags.Set, 0, KeyValueDurability.Persistent, CancellationToken.None,
+            coordinatorKey: tx.CoordinatorKey, operationId: TransactionOperationId.NewRandom());
+        Assert.AreEqual(KeyValueResponseType.Set, set);
+
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () => await mgr.CommitAsync(tx));
+        Assert.AreEqual(CamusDBErrorCodes.TransactionFinalizeUnresolved, ex!.Code);
+        Assert.AreEqual(KeyValueResponseType.Committed, kahuna.LostAnswer.Type, "the first attempt committed");
+        Assert.IsFalse(kahuna.LostAnswer.CommitTimestamp.IsNull(), "a durable commit has a commit timestamp");
+        Assert.IsTrue(tx.CommitTimestamp.IsNull(), "an unknown outcome records no commit timestamp");
+
+        await mgr.CommitAsync(tx);
+
+        Assert.AreEqual(KvTransactionStatus.Committed, tx.Status);
+        Assert.AreEqual(kahuna.LostAnswer.CommitTimestamp, tx.CommitTimestamp,
+            "the retry on the same handle reports the timestamp of the commit that landed");
+    }
+
     [Test]
     [NonParallelizable]
     public async Task CancellationDuringCommitPropagatesUnchanged()

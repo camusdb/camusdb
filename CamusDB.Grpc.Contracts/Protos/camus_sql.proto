@@ -487,6 +487,14 @@ message CommitReply {
   int64 causal_token_l = 1;
   int64 causal_token_c = 2;
   int32 causal_token_n = 3;
+
+  // The Kahuna commit timestamp: the HLC timestamp that every write of the transaction carries.
+  // (N, L, C) mirror HLCTimestamp, as in TxnHandle. All three are zero when the transaction wrote
+  // nothing. Two transactions that write the same row commit in this order. The causal token above
+  // is a later reading of the server clock, so it does not give the position of the commit.
+  int32 commit_timestamp_n = 4;
+  int64 commit_timestamp_l = 5;
+  int64 commit_timestamp_c = 6;
 }
 
 message RollbackReply {}

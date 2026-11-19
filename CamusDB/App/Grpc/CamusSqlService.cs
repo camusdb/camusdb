@@ -1927,7 +1927,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
 
     /// <summary>
     /// Commits the transaction named by a batched COMMIT op's <c>txn_handle</c> and returns its causal
-    /// token in-band. The handle is removed from <paramref name="startedHandles"/> only on success, so a
+    /// token and its commit timestamp in-band. The handle is removed from <paramref name="startedHandles"/> only on success, so a
     /// failed commit (e.g. a conflict, or the finalize gate rejecting a duplicate) still leaves teardown
     /// free to roll back if the transaction is somehow still open. Chained after the handle's statements.
     /// </summary>
@@ -1948,6 +1948,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         CommitReply reply = new();
         if (!token.IsNull())
             ApplyCausalToken(reply, token);
+        ApplyCommitTimestamp(reply, txnState.CommitTimestamp);
 
         await writer.TryWriteAsync(new BatchExecuteResponse
         {
@@ -2067,6 +2068,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     /// Commits an explicit transaction identified by its <see cref="TxnHandle"/>.
     /// A duplicate commit on the same handle is rejected by the finalize gate in
     /// <see cref="HttpTransactionCoordinator"/> rather than being double-driven.
+    /// The reply carries the causal token and the commit timestamp
+    /// (see <see cref="KvTransaction.CommitTimestamp"/>).
     /// </summary>
     public override Task<CommitReply> CommitTransaction(TxnHandle request, ServerCallContext context)
         => InvokeAsync(async () =>
@@ -2076,6 +2079,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             CommitReply reply = new();
             if (!token.IsNull())
                 ApplyCausalToken(reply, token);
+            ApplyCommitTimestamp(reply, txnState.CommitTimestamp);
             return reply;
         });
 
@@ -2320,6 +2324,20 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         reply.CausalTokenN = token.N;
         reply.CausalTokenL = token.L;
         reply.CausalTokenC = (long)(uint)token.C;
+    }
+
+    /// <summary>
+    /// Copies the Kahuna commit timestamp of the transaction into the reply. A zero value leaves the
+    /// three fields at zero, which tells the client that the transaction wrote nothing.
+    /// </summary>
+    private static void ApplyCommitTimestamp(CommitReply reply, HLCTimestamp commitTimestamp)
+    {
+        if (commitTimestamp.IsNull())
+            return;
+
+        reply.CommitTimestampN = commitTimestamp.N;
+        reply.CommitTimestampL = commitTimestamp.L;
+        reply.CommitTimestampC = (long)(uint)commitTimestamp.C;
     }
 
     // ─── Request helpers ─────────────────────────────────────────────────────

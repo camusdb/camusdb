@@ -110,7 +110,11 @@ public sealed class TransactionsController : CommandsController
 
             HLCTimestamp causalToken = await transactions.CommitAsync(database, txnState).ConfigureAwait(false);
 
-            return new JsonResult(new CommitTransactionResponse("ok") { CausalToken = causalToken.IsNull() ? null : causalToken });
+            return new JsonResult(new CommitTransactionResponse("ok")
+            {
+                CausalToken = causalToken.IsNull() ? null : causalToken,
+                CommitTimestamp = txnState.CommitTimestamp.IsNull() ? null : txnState.CommitTimestamp,
+            });
         }
         catch (CamusDBException e)
         {

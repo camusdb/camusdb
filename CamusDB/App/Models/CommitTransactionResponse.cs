@@ -19,12 +19,20 @@ public sealed class CommitTransactionResponse
     public string? Message { get; set; }
 
     /// <summary>
-    /// The commit timestamp of the transaction, as a causal token (<c>n</c>, <c>l</c>, <c>c</c>; all
-    /// three are needed). Send it as <c>causalToken</c> on a later <c>/start-transaction</c> or
-    /// autocommit query, so that read sees this commit even on a node whose clock is behind. Null when
-    /// the commit has no timestamp, for example a transaction that never opened a session.
+    /// The causal token of the commit (<c>n</c>, <c>l</c>, <c>c</c>; all three are needed): a reading
+    /// of the server clock after the commit, at or above <see cref="CommitTimestamp"/>. Send it as
+    /// <c>causalToken</c> on a later <c>/start-transaction</c> or autocommit query, so that read sees
+    /// this commit even on a node whose clock is behind. Null when the server has no clock reading to
+    /// give.
     /// </summary>
     public HLCTimestamp? CausalToken { get; set; }
+
+    /// <summary>
+    /// The Kahuna commit timestamp (<c>n</c>, <c>l</c>, <c>c</c>): the HLC timestamp that every write
+    /// of the transaction carries. Two transactions that write the same row commit in this order. Null
+    /// when the transaction wrote nothing.
+    /// </summary>
+    public HLCTimestamp? CommitTimestamp { get; set; }
 
     public CommitTransactionResponse(string status)
     {
