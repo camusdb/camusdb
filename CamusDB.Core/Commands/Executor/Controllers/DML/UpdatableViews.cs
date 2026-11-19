@@ -331,6 +331,7 @@ internal static class UpdatableViewRewriter
         List<(string ViewName, NodeAst Condition)> checks = [];
         bool cascaded = false;
         int depth = 0;
+        RewriteBudget budget = new(database.Options.MaxViewExpandedNodes, target);
 
         while (schema.Views.TryGetValue(target, out ViewSchema? view))
         {
@@ -346,7 +347,7 @@ internal static class UpdatableViewRewriter
 
             // The conditions gathered so far name this view's columns; carry them down a level.
             for (int i = 0; i < checks.Count; i++)
-                checks[i] = (checks[i].ViewName, RewriteColumns(checks[i].Condition, level, qualifier));
+                checks[i] = (checks[i].ViewName, RewriteColumns(checks[i].Condition, level, qualifier, budget));
 
             // PostgreSQL's rule. CASCADED checks this view and every view beneath it, whatever their own
             // option; LOCAL checks this one, and beneath it only views that ask for a check themselves.
@@ -358,7 +359,7 @@ internal static class UpdatableViewRewriter
             if (checksThisLevel && !deletes && level.Where is not null)
                 checks.Add((level.ViewName, level.Where));
 
-            statement = RewriteStatement(statement, level, qualifier);
+            statement = RewriteStatement(statement, level, qualifier, budget);
             qualifier = level.BaseAlias;
             target = level.BaseName;
         }
@@ -369,9 +370,9 @@ internal static class UpdatableViewRewriter
 
         // The table's row is keyed by bare column names, and an INSERT names its table without an alias.
         for (int i = 0; i < checks.Count; i++)
-            checks[i] = (checks[i].ViewName, StripQualifier(checks[i].Condition, qualifier, inSubquery: false));
+            checks[i] = (checks[i].ViewName, StripQualifier(checks[i].Condition, qualifier, budget));
 
-        statement = StripFinalQualifier(statement, qualifier);
+        statement = StripFinalQualifier(statement, qualifier, budget);
 
         return (statement, new ViewWriteContext
         {
@@ -454,7 +455,7 @@ internal static class UpdatableViewRewriter
         _ => null,
     };
 
-    private static NodeAst RewriteStatement(NodeAst statement, UpdatableViewLevel level, string qualifier)
+    private static NodeAst RewriteStatement(NodeAst statement, UpdatableViewLevel level, string qualifier, RewriteBudget budget)
     {
         switch (statement.nodeType)
         {
@@ -480,7 +481,7 @@ internal static class UpdatableViewRewriter
                         Identifier(level.BaseName),
                         List(baseFields),
                         statement.extendedOne,
-                        statement.extendedTwo is { } returning ? RewriteReturning(returning, level, qualifier) : null,
+                        statement.extendedTwo is { } returning ? RewriteReturning(returning, level, qualifier, budget) : null,
                         null,
                         statement.extendedFour,
                         statement.extendedFive,
@@ -506,7 +507,7 @@ internal static class UpdatableViewRewriter
                         assignments.Add(new NodeAst(
                             NodeType.UpdateItem,
                             Identifier(WritableColumn(level, column, "update")),
-                            RewriteColumns(item.rightAst!, level, qualifier),
+                            RewriteColumns(item.rightAst!, level, qualifier, budget),
                             null, null, null, null, null, null));
                     }
 
@@ -514,9 +515,9 @@ internal static class UpdatableViewRewriter
                         NodeType.Update,
                         Identifier(level.BaseName),
                         UpdateList(assignments),
-                        And(level.Where, RewriteColumns(statement.extendedOne!, level, qualifier)),
+                        And(level.Where, RewriteColumns(statement.extendedOne!, level, qualifier, budget)),
                         statement.extendedTwo,
-                        statement.extendedThree is { } returning ? RewriteReturning(returning, level, qualifier) : null,
+                        statement.extendedThree is { } returning ? RewriteReturning(returning, level, qualifier, budget) : null,
                         null,
                         Identifier(level.BaseAlias),
                         statement.yytext,
@@ -534,9 +535,9 @@ internal static class UpdatableViewRewriter
                     return new NodeAst(
                         NodeType.Delete,
                         Identifier(level.BaseName),
-                        And(level.Where, RewriteColumns(statement.rightAst!, level, qualifier)),
+                        And(level.Where, RewriteColumns(statement.rightAst!, level, qualifier, budget)),
                         statement.extendedOne,
-                        statement.extendedTwo is { } returning ? RewriteReturning(returning, level, qualifier) : null,
+                        statement.extendedTwo is { } returning ? RewriteReturning(returning, level, qualifier, budget) : null,
                         null,
                         Identifier(level.BaseAlias),
                         statement.extendedFive,
@@ -572,7 +573,7 @@ internal static class UpdatableViewRewriter
     /// A RETURNING list over the view, in terms of the relation below. A column keeps the view's name for
     /// its output, and <c>*</c> is every column of the view.
     /// </summary>
-    private static NodeAst RewriteReturning(NodeAst list, UpdatableViewLevel level, string qualifier)
+    private static NodeAst RewriteReturning(NodeAst list, UpdatableViewLevel level, string qualifier, RewriteBudget budget)
     {
         List<NodeAst> items = [];
 
@@ -586,15 +587,15 @@ internal static class UpdatableViewRewriter
                     break;
 
                 case NodeType.ExprAlias:
-                    items.Add(Alias(RewriteColumns(item.leftAst!, level, qualifier), item.rightAst!.yytext!));
+                    items.Add(Alias(RewriteColumns(item.leftAst!, level, qualifier, budget), item.rightAst!.yytext!));
                     break;
 
                 case NodeType.Identifier when item.yytext is { } text:
-                    items.Add(Alias(RewriteColumns(item, level, qualifier), ViewUpdatability.Split(text).Column));
+                    items.Add(Alias(RewriteColumns(item, level, qualifier, budget), ViewUpdatability.Split(text).Column));
                     break;
 
                 default:
-                    items.Add(RewriteColumns(item, level, qualifier));
+                    items.Add(RewriteColumns(item, level, qualifier, budget));
                     break;
             }
         }
@@ -604,21 +605,30 @@ internal static class UpdatableViewRewriter
 
     /// <summary>
     /// <paramref name="expression"/> with each reference to a column of the view replaced by that column's
-    /// expression in the view's body. Outside a subquery a bare name is the view's; inside one only a
-    /// name qualified by the view's alias is, since a bare name there belongs to the subquery's own FROM.
+    /// expression in the view's body. Outside a subquery a bare name is the view's. Inside one, a bare
+    /// name belongs to the subquery's own FROM, and a qualified name is the view's only when its
+    /// qualifier is the view's alias and no enclosing subquery's FROM introduces a relation by that
+    /// name: <c>SELECT n.key_id FROM labels AS n</c> reads <c>labels</c>, even when the view's alias is
+    /// <c>n</c> too.
     /// </summary>
-    internal static NodeAst RewriteColumns(NodeAst expression, UpdatableViewLevel level, string qualifier)
-        => Map(expression, inSubquery: false, (node, inSubquery) =>
+    internal static NodeAst RewriteColumns(NodeAst expression, UpdatableViewLevel level, string qualifier, RewriteBudget budget)
+        => Map(expression, subqueryAliases: null, (node, subqueryAliases) =>
         {
             if (node.nodeType != NodeType.Identifier || node.yytext is not { } text)
                 return null;
 
+            bool inSubquery = subqueryAliases is not null;
             (string? nodeQualifier, string column) = ViewUpdatability.Split(text);
 
             if (nodeQualifier is null)
             {
                 if (inSubquery)
                     return node;
+            }
+            else if (inSubquery && subqueryAliases!.Contains(nodeQualifier))
+            {
+                // Bound by the subquery's own FROM, which hides the view's alias of the same name.
+                return node;
             }
             else if (!string.Equals(nodeQualifier, qualifier, StringComparison.OrdinalIgnoreCase))
             {
@@ -633,34 +643,45 @@ internal static class UpdatableViewRewriter
             return level.Expressions.TryGetValue(column, out NodeAst? replacement)
                 ? replacement
                 : throw UnknownColumn(level, column);
-        });
+        }, budget);
 
     /// <summary><paramref name="expression"/> with <c>alias.column</c> written as <c>column</c>, outside subqueries.</summary>
-    private static NodeAst StripQualifier(NodeAst expression, string alias, bool inSubquery)
-        => Map(expression, inSubquery, (node, nested) =>
+    private static NodeAst StripQualifier(NodeAst expression, string alias, RewriteBudget budget)
+        => Map(expression, subqueryAliases: null, (node, subqueryAliases) =>
         {
-            if (nested || node.nodeType != NodeType.Identifier || node.yytext is not { } text)
+            if (subqueryAliases is not null || node.nodeType != NodeType.Identifier || node.yytext is not { } text)
                 return null;
 
             (string? nodeQualifier, string column) = ViewUpdatability.Split(text);
             return nodeQualifier is not null && string.Equals(nodeQualifier, alias, StringComparison.OrdinalIgnoreCase)
                 ? Identifier(column)
                 : node;
-        });
+        }, budget);
 
     /// <summary>
     /// Rebuilds <paramref name="node"/> bottom-up with <paramref name="replace"/> applied to each node; a
     /// subtree <paramref name="replace"/> leaves alone is shared. The slots that hold a name
     /// rather than a column — a function's name, a cast's type, an alias — are never visited.
     /// </summary>
-    private static NodeAst Map(NodeAst node, bool inSubquery, Func<NodeAst, bool, NodeAst?> replace)
+    /// <remarks>
+    /// <paramref name="subqueryAliases"/> is null outside every subquery. Inside one it holds the
+    /// relation names and aliases that the FROM of each enclosing subquery introduces, so
+    /// <paramref name="replace"/> can tell a qualified name the subquery binds from one that reaches the
+    /// statement's target. Every visited node is charged to <paramref name="budget"/>.
+    /// </remarks>
+    private static NodeAst Map(
+        NodeAst node, HashSet<string>? subqueryAliases, Func<NodeAst, HashSet<string>?, NodeAst?> replace, RewriteBudget budget)
     {
-        if (replace(node, inSubquery) is { } replaced)
+        budget.Visit();
+
+        if (replace(node, subqueryAliases) is { } replaced)
             return replaced;
 
-        bool nested = inSubquery || node.nodeType == NodeType.Select;
+        HashSet<string>? nested = node.nodeType == NodeType.Select
+            ? WithFromAliases(subqueryAliases, node.rightAst)
+            : subqueryAliases;
 
-        NodeAst? Child(NodeAst? child) => child is null ? null : Map(child, nested, replace);
+        NodeAst? Child(NodeAst? child) => child is null ? null : Map(child, nested, replace, budget);
 
         NodeAst? left = node.nodeType == NodeType.ExprFuncCall ? node.leftAst : Child(node.leftAst);
         NodeAst? right = node.nodeType is NodeType.ExprCast or NodeType.ExprAlias ? node.rightAst : Child(node.rightAst);
@@ -683,13 +704,94 @@ internal static class UpdatableViewRewriter
     }
 
     /// <summary>
+    /// The names visible inside a subquery whose FROM is <paramref name="from"/>: those of every
+    /// enclosing subquery, plus the relation names and aliases this FROM introduces.
+    /// </summary>
+    private static HashSet<string> WithFromAliases(HashSet<string>? outer, NodeAst? from)
+    {
+        HashSet<string> aliases = outer is null
+            ? new(StringComparer.OrdinalIgnoreCase)
+            : new(outer, StringComparer.OrdinalIgnoreCase);
+
+        CollectFromAliases(from, aliases);
+        return aliases;
+    }
+
+    /// <summary>
+    /// Adds the name each item of a FROM clause is known by: a table's alias or else its name, a table
+    /// function's alias or else its name, a derived table's alias, and the items of a join.
+    /// </summary>
+    private static void CollectFromAliases(NodeAst? from, HashSet<string> into)
+    {
+        if (from is null)
+            return;
+
+        switch (from.nodeType)
+        {
+            case NodeType.Identifier:
+                Add(from.yytext);
+                break;
+
+            case NodeType.TableReference:
+                Add(from.rightAst?.yytext ?? from.leftAst?.yytext);
+                break;
+
+            case NodeType.TableFunctionReference:
+                Add(from.extendedOne?.yytext ?? from.leftAst?.yytext);
+                break;
+
+            case NodeType.DerivedTableReference:
+                Add(from.rightAst?.yytext);
+                break;
+
+            case NodeType.Join:
+            case NodeType.CommaJoin:
+            case NodeType.CommaJoinTableList:
+                CollectFromAliases(from.leftAst, into);
+                CollectFromAliases(from.rightAst, into);
+                break;
+        }
+
+        void Add(string? name)
+        {
+            if (!string.IsNullOrEmpty(name))
+                into.Add(name);
+        }
+    }
+
+    /// <summary>
+    /// Counts the syntax-tree nodes one write through a view visits while its view levels are
+    /// substituted, against <see cref="CamusDBOptions.MaxViewExpandedNodes"/>.
+    /// </summary>
+    /// <remarks>
+    /// A substituted column expression is shared in memory, but the next level visits each occurrence
+    /// again, so a chain of views whose columns each name a lower column twice doubles the work at every
+    /// level. Charging each visit bounds the work before it grows. The read path charges its expansion
+    /// against the same setting; this is the write path's counterpart. Zero or less means no limit.
+    /// </remarks>
+    internal sealed class RewriteBudget(long maxNodes, string viewName)
+    {
+        private long visited;
+
+        public void Visit()
+        {
+            if (maxNodes > 0 && ++visited > maxNodes)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.ViewComplexityLimitExceeded,
+                    $"Writing through view '{viewName}' visits more than {maxNodes} syntax-tree nodes " +
+                    "(max_view_expanded_nodes). A view whose columns read a column of the view below more than " +
+                    "once multiplies at every level; simplify the views, or raise the setting.");
+        }
+    }
+
+    /// <summary>
     /// Writes the table's columns bare in the statement's own expressions. An INSERT names its table with
     /// no alias at all; an UPDATE or DELETE keeps its alias for a correlated subquery, which reads the
     /// target through it, but its own expressions no longer depend on how the alias is resolved.
     /// </summary>
-    private static NodeAst StripFinalQualifier(NodeAst statement, string alias)
+    private static NodeAst StripFinalQualifier(NodeAst statement, string alias, RewriteBudget budget)
     {
-        NodeAst? Strip(NodeAst? node) => node is null ? null : StripQualifier(node, alias, inSubquery: false);
+        NodeAst? Strip(NodeAst? node) => node is null ? null : StripQualifier(node, alias, budget);
 
         return statement.nodeType switch
         {
