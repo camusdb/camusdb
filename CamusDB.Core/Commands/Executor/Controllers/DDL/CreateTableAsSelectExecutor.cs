@@ -125,6 +125,10 @@ internal sealed class CreateTableAsSelectExecutor
         else
             ticket.TxnState?.RequireWritable("CREATE TABLE AS");
 
+        // The source's own clause copies rows from the past; one on a query below it would be parsed and
+        // never read. Checked first, so the answer does not depend on whether the table exists.
+        NestedAsOfSystemTime.RequireOnlyOnTheOuterQuery(sourceAst);
+
         // Checked before anything else so an IF NOT EXISTS over an existing table does not execute the
         // source query: running it would take locks and read rows on behalf of a statement that is
         // meant to do nothing.

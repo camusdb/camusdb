@@ -66,6 +66,13 @@ an earlier point.
   transaction, which is already pinned to its own read snapshot and cannot be moved to an arbitrary
   past point. It is also read-only — there is no
   historical `UPDATE`/`DELETE`.
+- **Only on the outer query.** The clause is read on the outer query of a `SELECT`, and on the
+  outer source query of `INSERT … SELECT` and `CREATE TABLE … AS SELECT`, which copy rows from the
+  past. Every subquery reads in the snapshot of its statement, so the clause is refused on a CTE
+  body, a derived table, a scalar, `IN`, `EXISTS` or `LATERAL` subquery, and on any subquery of
+  `INSERT`, `UPDATE` or `DELETE` (`WHERE`, `SET`, `VALUES`, `FROM`, `USING`, `ON CONFLICT`,
+  `RETURNING`). An operand of `UNION`, `INTERSECT` or `EXCEPT` is refused too; see
+  [Set operations](set-operations.md).
 - **Only past instants.** A value resolving to a future time, or to a time at or before the Unix
   epoch, is rejected.
 - **A truncated table cannot be read before its current contents began.** `TRUNCATE` replaces the

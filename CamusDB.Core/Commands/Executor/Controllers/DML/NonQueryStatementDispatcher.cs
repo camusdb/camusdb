@@ -395,6 +395,10 @@ internal sealed class NonQueryStatementDispatcher
             selectExecutor.EnforceTableLimit(ast);
         }
 
+        // A subquery of a write reads in the statement's snapshot, so AS OF SYSTEM TIME on one would be
+        // parsed and never read. Refused on the rewritten tree, before any subquery runs.
+        NestedAsOfSystemTime.RequireNoneInWrite(ast);
+
         // column = DEFAULT in UPDATE ... SET and in ON CONFLICT DO UPDATE SET takes the table's default
         // for the column; see UpdateDefaults.
         (ast, ticket) = UpdateDefaults.Resolve(database.Schema, ast, ticket);
