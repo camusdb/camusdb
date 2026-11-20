@@ -1113,16 +1113,18 @@ public sealed class KvTransactionsManager : IDisposable
                 // transaction record on a retry after the coordinator lost the session.
                 tx.CommitTimestamp = commitTimestamp;
 
-                long committedElapsedMs = commitTimer.GetElapsedMilliseconds();
-                
+                // The histogram takes the fractional duration. A whole-millisecond value truncates every
+                // sample, which lowers the mean by about half a millisecond.
+                double committedElapsedMs = commitTimer.GetElapsedTime().TotalMilliseconds;
+
                 Diagnostics.ServerDiagnostics.RecordCommitDuration(
-                    Diagnostics.ServerDiagnostics.Tags.Outcome.Ok, 
+                    Diagnostics.ServerDiagnostics.Tags.Outcome.Ok,
                     committedElapsedMs
                 );
-                
+
                 Diagnostics.ServerDiagnostics.RecordStagedMutations(tx.MutationCount);
                 if (logger.IsEnabled(LogLevel.Debug))
-                    Log.LogTransactionFinalized(logger, "committed", tx.UniqueId, committedElapsedMs);
+                    Log.LogTransactionFinalized(logger, "committed", tx.UniqueId, (long)committedElapsedMs);
 
                 // Gate: bump generation, evict stale entries, clear in-flight mark — all inside
                 // the gate's write lock so no concurrent publish can insert a stale entry.
