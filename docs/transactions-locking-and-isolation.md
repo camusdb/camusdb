@@ -651,10 +651,14 @@ different strategies, picked automatically from whether the transaction is read-
 via the isolation field on the begin-request, or as the **first** statement of an explicit transaction:
 
 ```sql
-SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;            -- read-write (strict locking) — the default
-SET TRANSACTION ISOLATION LEVEL SERIALIZABLE READ ONLY;  -- snapshot, no locks
-SET TRANSACTION ISOLATION LEVEL READ COMMITTED;          -- opt down to read committed
+SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;             -- keeps the access mode (read-write by default)
+SET TRANSACTION ISOLATION LEVEL SERIALIZABLE READ ONLY;   -- snapshot, no locks, no writes
+SET TRANSACTION ISOLATION LEVEL SERIALIZABLE READ WRITE;  -- strict locking
+SET TRANSACTION ISOLATION LEVEL READ COMMITTED;           -- opt down to read committed, keeps the access mode
 ```
+
+A form that names no access mode keeps the mode the transaction has, as in PostgreSQL. It does not
+make a read-only transaction writable. §9.6 describes read-only transactions.
 
 It must come *before* any read or write — CamusDB rejects it once the transaction has executed a
 statement, because retroactively upgrading the level would skip locks the earlier reads needed.
@@ -789,6 +793,57 @@ To put the requests of one client session in order, make each request write the 
 example a row that holds the session's last request number. The write-write rule then puts the
 commits of the session in commit-timestamp order, on every node.
 
+### 9.6 Read-only transactions
+
+A transaction is read-only when one of these is true:
+
+- It was started with `"transactionMode": "ReadOnly"` on HTTP, or `TRANSACTION_MODE_READ_ONLY` on
+  gRPC. This applies to `/start-transaction` and to a single autocommit statement.
+- Its first statement was `SET TRANSACTION ISOLATION LEVEL SERIALIZABLE READ ONLY`.
+
+A read-only transaction refuses two groups of statements with `CADB0849` (HTTP 400, gRPC
+`FAILED_PRECONDITION`). The message names the command, for example
+`cannot execute UPDATE in a read-only transaction`. This is PostgreSQL's `read_only_sql_transaction`.
+
+- Statements that write rows: `INSERT` (with or without `ON CONFLICT`), `UPSERT`, `INSERT … SELECT`,
+  `UPDATE`, `DELETE`, `UPDATE … FROM`, `DELETE … USING`, and `CREATE TABLE … AS`.
+- Statements that change state outside the transaction, which a rollback cannot undo: schema DDL,
+  `COMMENT ON`, `REFRESH MATERIALIZED VIEW`, `nextval()` and `setval()`. DDL and `REFRESH` commit in
+  transactions of their own, and a sequence is not transactional.
+
+The statement is refused before it changes anything, reads a row or takes a lock. The `RETURNING`
+form, the typed row endpoints, and the SQL of a procedure or a trigger get the same refusal. A refused
+statement is a failed statement, so §9.4 applies to the transaction after it. `SELECT … FOR UPDATE` is
+refused too (§6.6), with `CADB0400`, at both isolation levels.
+
+The second group is refused only when the client asked for the read-only mode
+(`KvTransaction.IsDeclaredReadOnly`). An autocommit `SELECT` runs in a read-only snapshot that the
+server picks, and a request that asked for no mode can still call `nextval()` there. The same request
+with `"transactionMode": "ReadOnly"` is refused. An internal job, such as a restarted materialized-view
+rebuild, runs `REFRESH` under a server-picked snapshot too. The first group is refused in every
+read-only transaction, because such a snapshot cannot write.
+
+The rule protects against a lost write. The commit of a Serializable read-only transaction is a
+rollback of its empty Kahuna transaction, so a write in it would be discarded while the client is told
+that it committed. As a second guard, the commit of a read-only transaction that staged a write fails
+with `CADB0849` and rolls the transaction back.
+
+Database-scoped statements (`CREATE DATABASE`, `CREATE USER`, `GRANT`, `SET CLUSTER SETTING`) are not
+affected: every transport runs them with no transaction, so no access mode applies to them.
+`CREATE TABLE … AS … WITH NO DATA` loads no rows and is DDL, so it is in the second group.
+
+`SET TRANSACTION` and the access mode:
+
+- `SET TRANSACTION ISOLATION LEVEL SERIALIZABLE READ ONLY` pins one snapshot when it runs, as a
+  transaction started read-only at Serializable has. Every later read sees the data as of that
+  instant, and takes no lock.
+- `SET TRANSACTION … READ WRITE` is refused with `CADB0400` in a transaction that reads at a fixed
+  snapshot: one started read-only at Serializable, or one that `SET TRANSACTION … READ ONLY` already
+  pinned. Such a transaction has no write session.
+- A Read Committed read-only transaction has no fixed snapshot. As its first statement,
+  `SET TRANSACTION ISOLATION LEVEL SERIALIZABLE READ WRITE` makes it a Serializable read-write
+  transaction. PostgreSQL also allows a read-only transaction to become read-write there.
+
 ---
 
 ## 10. Where this lives in the code
@@ -805,6 +860,8 @@ A map for when you want to read the real thing:
   write path. `SelectStatementExecutor` opens the statement snapshot and closes it when the cursor
   ends. A write statement opens it only for its read phase (`StatementSnapshotScope`, minted in
   `NonQueryStatementDispatcher.MintStatementTimestamp`) and closes it before the write phase.
+  `ReadOnlyStatementRule` (in `Commands/Executor/Controllers/`) decides which statements a read-only
+  transaction refuses (§9.6); the CTAS executor and `SequenceStatementBinder` check their own cases.
 - **`CamusDB.Core/Storage/Kv/KvTableStore.cs`** — the per-table data layer: how rows and index entries
   are written/read as keys, the batched write path, and the range-lock methods
   (`AcquireRowRangeLockAsync`, `AcquireIndexRangeLockAsync`, `AcquireBoundedIndexRangeLockAsync`).

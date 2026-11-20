@@ -207,14 +207,19 @@ public sealed class HttpTransactionCoordinator
     /// <see cref="KvTransactionsManager.BeginReadOnly"/>): no <c>StartTransaction</c> /
     /// <c>CommitTransaction</c> round trips and no range locks, so commit and rollback are no-ops and
     /// the transaction is not registered here.
+    ///
+    /// <para><paramref name="declaredReadOnly"/> is true when the request asked for
+    /// <c>ReadOnly</c>. Then the statement also refuses <c>nextval()</c> and <c>setval()</c> (see
+    /// <see cref="KvTransaction.IsDeclaredReadOnly"/>). A request that asked for no mode can still
+    /// draw from a sequence.</para>
     /// </summary>
-    public async Task<KvTransaction> BeginReadOnlyAsync(string databaseName, HLCTimestamp? causalToken = null)
+    public async Task<KvTransaction> BeginReadOnlyAsync(string databaseName, HLCTimestamp? causalToken = null, bool declaredReadOnly = false)
     {
         if (string.IsNullOrEmpty(databaseName))
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "DatabaseName is required");
 
         DatabaseDescriptor database = await executor.OpenDatabase(databaseName).ConfigureAwait(false);
-        return database.Transactions.BeginReadOnly(causalToken);
+        return database.Transactions.BeginReadOnly(causalToken, declaredReadOnly);
     }
 
     public KvTransaction GetState(long txnIdPT, uint txnIdCounter)

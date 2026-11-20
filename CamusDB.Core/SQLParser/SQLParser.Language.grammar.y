@@ -551,7 +551,9 @@ rollback_stmt : TROLLBACK { $$.n = NodeAst.Rollback; }
  *
  * Layout of the resulting NodeAst:
  *   yytext   = isolation level string ("Serializable" or "ReadCommitted")
- *   leftAst  = NodeType.String whose yytext is the mode ("ReadOnly" or "ReadWrite")
+ *   leftAst  = NodeType.String whose yytext is the mode ("ReadOnly" or "ReadWrite"), or null
+ *              when the statement names no mode. A null mode keeps the transaction's current
+ *              mode, so a read-only transaction stays read-only.
  *
  * The 5-identifier form covers:
  *     SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
@@ -578,13 +580,14 @@ set_transaction_stmt
                       "Unknown isolation level '" + $5.s + "'. Expected: SERIALIZABLE or READ COMMITTED")
           };
           $$.n = new(NodeType.SetTransaction,
-                     NodeAst.TransactionModeReadWrite,
+                     null,
                      null, null, null, null, null, null, level);
       }
     | TSET TTRANSACTION TIDENTIFIER TIDENTIFIER TIDENTIFIER TIDENTIFIER
       {
           // SET TRANSACTION ISOLATION LEVEL READ COMMITTED — the two-word level opts down from
-          // the Serializable default. Read Committed is read-write; there is no READ ONLY|WRITE variant.
+          // the Serializable default. There is no READ ONLY|WRITE variant, so the mode is left null
+          // and the transaction keeps the mode it has.
           if (!string.Equals($3.s, "isolation", StringComparison.OrdinalIgnoreCase) ||
               !string.Equals($4.s, "level", StringComparison.OrdinalIgnoreCase) ||
               !string.Equals($5.s, "read", StringComparison.OrdinalIgnoreCase) ||
@@ -593,7 +596,7 @@ set_transaction_stmt
                   CamusDBErrorCodes.InvalidInput,
                   "Expected: SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
           $$.n = new(NodeType.SetTransaction,
-                     NodeAst.TransactionModeReadWrite,
+                     null,
                      null, null, null, null, null, null, "ReadCommitted");
       }
     | TSET TTRANSACTION TIDENTIFIER TIDENTIFIER

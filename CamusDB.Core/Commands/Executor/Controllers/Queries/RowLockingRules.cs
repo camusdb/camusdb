@@ -82,10 +82,10 @@ internal static class RowLockingRules
     /// <summary>The transaction rules of the class summary, for a statement that takes the row locks.</summary>
     internal static void RequireLockingTransaction(KvTransaction tx, RowLockWaitPolicy policy)
     {
-        // Read-only covers the identity-less autocommit snapshot too. A writable transaction may not
-        // have its identity yet (the Kahuna session starts with its first lock), so the identity is not
-        // what is checked here.
-        if (tx.IsReadOnly)
+        // Read-only covers the identity-less autocommit snapshot, and a transaction begun or set
+        // READ ONLY at Read Committed. A writable transaction may not have its identity yet (the
+        // Kahuna session starts with its first lock), so the identity is not what is checked here.
+        if (tx.RefusesWrites)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "FOR UPDATE is not allowed in a read-only transaction");
 
         if (tx.Locking == KeyValueTransactionLocking.Optimistic)

@@ -218,6 +218,22 @@ internal sealed class SequenceStatementBinder
             }
         }
 
+        // A transaction that the client declared read-only draws no value and moves no counter. A
+        // sequence is not transactional, so a rollback could not undo either. The check comes before
+        // anything is reserved or set. A snapshot that the server picked for an autocommit SELECT
+        // allows both, because the client asked for no read-only transaction.
+        if (ticket.TxnState is { IsDeclaredReadOnly: true } readOnlyTransaction)
+        {
+            if (setValRequests.Count > 0)
+                readOnlyTransaction.RequireReadWriteMode("setval()");
+
+            foreach (int needed in demandById.Values)
+            {
+                if (needed > 0)
+                    readOnlyTransaction.RequireReadWriteMode("nextval()");
+            }
+        }
+
         // Seeded for every sequence the statement names, before anything is reserved. A statement
         // that both reads currval and draws from the same sequence needs the prior value present:
         // seeding only the no-demand case made `SELECT currval('s'), nextval('s')` report the

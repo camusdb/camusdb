@@ -334,7 +334,9 @@ public sealed class ExecuteSQLController : CommandsController
                     ? await transactions.StartAsync(
                         resolved.Database, reqLevel, reqMode, reqLocking, priority: reqPriority,
                         cancellationToken: ct).ConfigureAwait(false)
-                    : await transactions.BeginReadOnlyAsync(resolved.Database, request.CausalToken).ConfigureAwait(false);
+                    : await transactions.BeginReadOnlyAsync(
+                        resolved.Database, request.CausalToken,
+                        declaredReadOnly: reqMode == CamusTransactionMode.ReadOnly).ConfigureAwait(false);
                 try
                 {
                     QuerySchemaHolder schemaHolder = new();
@@ -552,8 +554,11 @@ public sealed class ExecuteSQLController : CommandsController
             else
             {
                 // The read-only snapshot holds no Kahuna session and no lock, so only the read
-                // below observes the client's disconnect.
-                KvTransaction tx = await transactions.BeginReadOnlyAsync(resolved.Database, request.CausalToken).ConfigureAwait(false);
+                // below observes the client's disconnect. A request that asked for ReadOnly makes it
+                // a declared read-only transaction, which refuses nextval() and setval().
+                bool declaredReadOnly = ParseRequestLevelMode(request).mode == CamusTransactionMode.ReadOnly;
+                KvTransaction tx = await transactions.BeginReadOnlyAsync(
+                    resolved.Database, request.CausalToken, declaredReadOnly).ConfigureAwait(false);
                 try
                 {
                     ExecuteSQLTicket ticket = new(

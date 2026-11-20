@@ -1245,6 +1245,26 @@ public static class CamusDBErrorCodes
     public const string InlineDefinitionRateExceeded = "CADB0848";
 
     /// <summary>
+    /// A statement that changes data or schema ran in a read-only transaction. A transaction is
+    /// read-only when it was started with the <c>ReadOnly</c> transaction mode, or after
+    /// <c>SET TRANSACTION … READ ONLY</c>. This is PostgreSQL's <c>read_only_sql_transaction</c>
+    /// (SQLSTATE 25006). Two groups of statements are refused:
+    /// <list type="bullet">
+    ///   <item>Statements that write rows: <c>INSERT</c> (with or without <c>ON CONFLICT</c>),
+    ///   <c>UPSERT</c>, <c>INSERT … SELECT</c>, <c>UPDATE</c>, <c>DELETE</c>, and
+    ///   <c>CREATE TABLE … AS</c>.</item>
+    ///   <item>Statements that change state outside the transaction, which a rollback cannot undo:
+    ///   schema DDL, <c>COMMENT ON</c>, <c>REFRESH MATERIALIZED VIEW</c>, <c>nextval()</c> and
+    ///   <c>setval()</c>. These are refused only when the client asked for the read-only mode; the
+    ///   snapshot that the server picks for an autocommit <c>SELECT</c> allows them.</item>
+    /// </list>
+    /// The statement is refused before it changes anything. As with any failed statement in an
+    /// explicit transaction, the transaction can then only roll back
+    /// (<see cref="TransactionRollbackOnly"/>). Maps to HTTP 400 and gRPC <c>FailedPrecondition</c>.
+    /// </summary>
+    public const string ReadOnlyTransaction = "CADB0849";
+
+    /// <summary>
     /// Returns the HTTP status code that should be used when surfacing <paramref name="code"/>
     /// to an API caller. Client errors (permanent, non-retryable caller mistakes) map to 400;
     /// all other codes map to 500.
@@ -1390,6 +1410,7 @@ public static class CamusDBErrorCodes
         TriggerOwnerMissing => 403,
         SnapshotTooOld => 409,
         InlineDefinitionRateExceeded => 429,
+        ReadOnlyTransaction => 400,
         _ => 500
 
     };

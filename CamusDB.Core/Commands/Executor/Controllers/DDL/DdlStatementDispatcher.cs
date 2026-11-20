@@ -289,6 +289,10 @@ internal sealed class DdlStatementDispatcher
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
         activity?.Describe(ast.nodeType);
 
+        // A transaction that the client declared read-only refuses schema DDL before anything runs:
+        // the DDL commits in transactions of its own, so a rollback of the caller's could not undo it.
+        ReadOnlyStatementRule.Enforce(ticket.TxnState, ast);
+
         // Schema DDL is not bounded by statement_timeout_ms: a backfill and a replicated schema change
         // run as jobs that a statement error cannot stop honestly. Taken off in this async frame only,
         // so the caller's deadline comes back when the statement returns. CREATE TABLE … AS keeps it:

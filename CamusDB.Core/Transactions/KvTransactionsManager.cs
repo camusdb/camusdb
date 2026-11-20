@@ -759,13 +759,18 @@ public sealed class KvTransactionsManager : IDisposable
     /// <c>KvRangeLockManager.ScanTakesPredicateLock</c>). So a writer can neither refuse the read nor
     /// be made to wait for it. A transaction that needs to hold a range lock is an explicit one,
     /// begun with <see cref="BeginAsync"/>.</para>
+    ///
+    /// <para><paramref name="declaredReadOnly"/> is true when the request asked for a read-only
+    /// transaction. The snapshot is the same either way. A declared one also refuses the statements
+    /// that change state outside it, such as <c>nextval()</c> (see
+    /// <see cref="KvTransaction.IsDeclaredReadOnly"/>).</para>
     /// </summary>
-    public KvTransaction BeginReadOnly(Kommander.Time.HLCTimestamp? causalToken = null)
+    public KvTransaction BeginReadOnly(Kommander.Time.HLCTimestamp? causalToken = null, bool declaredReadOnly = false)
     {
         if (mintLocalT is not null)
-            return KvTransaction.CreateSnapshotReadOnly(mintLocalT(causalToken), options.DefaultIsolationLevel);
+            return KvTransaction.CreateSnapshotReadOnly(mintLocalT(causalToken), options.DefaultIsolationLevel, declaredReadOnly);
 
-        return KvTransaction.CreateReadOnly();
+        return KvTransaction.CreateReadOnly(declaredReadOnly);
     }
 
     /// <summary>
@@ -787,6 +792,23 @@ public sealed class KvTransactionsManager : IDisposable
 
         timestamp = mintLocalT(tx.CausalFloor.IsNull() ? null : tx.CausalFloor);
         return true;
+    }
+
+    /// <summary>
+    /// Mints the snapshot timestamp of a deferred transaction that <c>SET TRANSACTION</c> makes
+    /// Serializable and read-only (see <see cref="KvTransaction.ApplyIsolationLevel"/>): a local HLC
+    /// reading at least the transaction's <see cref="KvTransaction.CausalFloor"/>, as
+    /// <see cref="BeginReadOnly"/> mints for an autocommit SELECT. Returns Zero when no local clock is
+    /// attached. The mint is a local clock event, with no Kahuna round trip.
+    /// </summary>
+    public Kommander.Time.HLCTimestamp MintReadSnapshot(KvTransaction tx)
+    {
+        ArgumentNullException.ThrowIfNull(tx);
+
+        if (mintLocalT is null)
+            return Kommander.Time.HLCTimestamp.Zero;
+
+        return mintLocalT(tx.CausalFloor.IsNull() ? null : tx.CausalFloor);
     }
 
     /// <summary>
@@ -820,6 +842,19 @@ public sealed class KvTransactionsManager : IDisposable
             throw new CamusDBException(
                 CamusDBErrorCodes.TransactionRollbackOnly,
                 $"Transaction {tx.UniqueId} was aborted by a failed statement and has been rolled back: {rollbackOnly}");
+        }
+
+        // A read-only transaction must have staged no write: every write path refuses one first
+        // (KvTransaction.RefusesWrites). The Serializable read-only commit below is a rollback of the
+        // Kahuna transaction, so a write that got past those checks would be discarded while the
+        // client is told it committed. Fail the commit and roll back instead.
+        if (tx.RefusesWrites && tx.WriteCount > 0)
+        {
+            await RollbackIfNotCompletedAsync(tx, cancellationToken).ConfigureAwait(false);
+
+            throw new CamusDBException(
+                CamusDBErrorCodes.ReadOnlyTransaction,
+                $"Transaction {tx.UniqueId} is read-only but staged a write; it has been rolled back and nothing was committed");
         }
 
         if (tx.TransactionId == Kommander.Time.HLCTimestamp.Zero)

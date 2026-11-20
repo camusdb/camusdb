@@ -329,6 +329,12 @@ internal sealed class NonQueryStatementDispatcher
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
         activity?.Describe(ast.nodeType);
 
+        // A read-only transaction refuses a write, or a statement that changes state in transactions
+        // of its own, before anything else runs: before the privilege check (as in PostgreSQL), and
+        // before a subquery, a lock or a staged write. The RETURNING form sent to the query endpoint,
+        // and the SQL of a trigger or a procedure, also come through here.
+        ReadOnlyStatementRule.Enforce(ticket.TxnState, ast);
+
         // The subqueries of a plain INSERT, UPDATE or DELETE are planned without view expansion, so
         // the parsed tree is the whole count for them. A source query that reads a view is counted
         // again after expansion, where it is built (SelectStatementExecutor.BuildSelectSourceAsync).
@@ -735,7 +741,7 @@ internal sealed class NonQueryStatementDispatcher
             case NodeType.SetTransaction:
             case NodeType.SetTransactionLocking:
             case NodeType.SetTransactionPriority:
-                 SetTransactionStatement.Apply(ast, ticket);
+                 SetTransactionStatement.Apply(ast, ticket, database.Transactions);
                 return new(database, null!, 0);
 
             // Reachable here too: a client routes any non-SELECT statement to whichever endpoint it
@@ -1017,4 +1023,5 @@ internal sealed class NonQueryStatementDispatcher
         NodeType.Update => ServerDiagnostics.Tags.Statement.Update,
         NodeType.Delete => ServerDiagnostics.Tags.Statement.Delete,
         _ => ServerDiagnostics.Tags.Statement.Other,
-    };}
+    };
+}

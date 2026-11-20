@@ -31,27 +31,40 @@ internal static class SetTransactionStatement
     /// <c>SET TRANSACTION LOCKING</c> previously threw "Unknown non-query AST stmt" when a client
     /// sent it to the non-query endpoint. Callers must exempt these node types from the
     /// "must be the first statement" gate before invoking this.
+    ///
+    /// <para><paramref name="transactions"/> is the manager of the database the transaction belongs
+    /// to. It mints the snapshot of a transaction that becomes Serializable and read-only; see
+    /// <see cref="KvTransaction.ApplyIsolationLevel"/>.</para>
     /// </summary>
-    internal static void Apply(NodeAst ast, ExecuteSQLTicket ticket)
+    internal static void Apply(NodeAst ast, ExecuteSQLTicket ticket, KvTransactionsManager transactions)
     {
         switch (ast.nodeType)
         {
             case NodeType.SetTransaction:
                 {
                     // yytext holds the isolation level ("Serializable"); leftAst.yytext holds the mode
-                    // ("ReadOnly" or "ReadWrite"). Both are set by the grammar.
+                    // ("ReadOnly" or "ReadWrite"), and leftAst is null when the statement names no
+                    // mode. Both are set by the grammar.
                     if (!Enum.TryParse(ast.yytext, out CamusIsolationLevel level))
                         throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
                             $"Unknown isolation level '{ast.yytext}' in SET TRANSACTION");
 
-                    string modeStr = ast.leftAst?.yytext ?? "ReadWrite";
-                    if (!Enum.TryParse(modeStr, out CamusTransactionMode mode))
-                        throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
-                            $"Unknown transaction mode '{modeStr}' in SET TRANSACTION");
+                    // No mode keeps the current one, so SET TRANSACTION ISOLATION LEVEL … does not
+                    // make a read-only transaction writable.
+                    CamusTransactionMode? mode = null;
+                    if (ast.leftAst?.yytext is { } modeStr)
+                    {
+                        if (!Enum.TryParse(modeStr, out CamusTransactionMode parsedMode))
+                            throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
+                                $"Unknown transaction mode '{modeStr}' in SET TRANSACTION");
+
+                        mode = parsedMode;
+                    }
 
                     // ApplyIsolationLevel throws if locks are already held, ensuring the level
                     // change cannot silently skip required read-locks already missed.
-                    ticket.TxnState.ApplyIsolationLevel(level, mode);
+                    KvTransaction tx = ticket.TxnState;
+                    tx.ApplyIsolationLevel(level, mode, () => transactions.MintReadSnapshot(tx));
                     return;
                 }
 

@@ -3,8 +3,8 @@
 // (see accompanying GPPGcopyright.rtf)
 
 // GPPG version 1.6.0
-// DateTime: 11/18/2026 8:52:05 PM
-// Input file <SQLParser/SQLParser.Language.grammar.y - 11/18/2026 7:55:28 PM>
+// DateTime: 11/19/2026 9:46:11 PM
+// Input file <SQLParser/SQLParser.Language.grammar.y - 11/19/2026 9:45:08 PM>
 
 // options: no-lines gplex
 
@@ -6840,7 +6840,7 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                       "Unknown isolation level '" + ValueStack[ValueStack.Depth-1].s + "'. Expected: SERIALIZABLE or READ COMMITTED")
           };
           CurrentSemanticValue.n = new(NodeType.SetTransaction,
-                     NodeAst.TransactionModeReadWrite,
+                     null,
                      null, null, null, null, null, null, level);
       }
   }
@@ -6852,7 +6852,8 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
   {
 {
           // SET TRANSACTION ISOLATION LEVEL READ COMMITTED — the two-word level opts down from
-          // the Serializable default. Read Committed is read-write; there is no READ ONLY|WRITE variant.
+          // the Serializable default. There is no READ ONLY|WRITE variant, so the mode is left null
+          // and the transaction keeps the mode it has.
           if (!string.Equals(ValueStack[ValueStack.Depth-4].s, "isolation", StringComparison.OrdinalIgnoreCase) ||
               !string.Equals(ValueStack[ValueStack.Depth-3].s, "level", StringComparison.OrdinalIgnoreCase) ||
               !string.Equals(ValueStack[ValueStack.Depth-2].s, "read", StringComparison.OrdinalIgnoreCase) ||
@@ -6861,7 +6862,7 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                   CamusDBErrorCodes.InvalidInput,
                   "Expected: SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
           CurrentSemanticValue.n = new(NodeType.SetTransaction,
-                     NodeAst.TransactionModeReadWrite,
+                     null,
                      null, null, null, null, null, null, "ReadCommitted");
       }
   }

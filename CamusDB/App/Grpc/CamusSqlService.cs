@@ -412,7 +412,9 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         {
             // The read-only snapshot holds no Kahuna session and no lock, so only the read
             // observes the caller's token.
-            KvTransaction tx = await transactions.BeginReadOnlyAsync(request.Database, causalToken).ConfigureAwait(false);
+            KvTransaction tx = await transactions.BeginReadOnlyAsync(
+                request.Database, causalToken,
+                declaredReadOnly: ToTransactionMode(request.TransactionMode) == CamusTransactionMode.ReadOnly).ConfigureAwait(false);
             try
             {
                 ExecuteSQLTicket ticket = new(
@@ -1669,7 +1671,9 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             // observes the stream's token.
             KvTransaction tx;
             using (QueryStageProfile.Measure(QueryStage.Begin))
-                tx = await transactions.BeginReadOnlyAsync(resolved.Database, causalToken).ConfigureAwait(false);
+                tx = await transactions.BeginReadOnlyAsync(
+                    resolved.Database, causalToken,
+                    declaredReadOnly: ToTransactionMode(request.TransactionMode) == CamusTransactionMode.ReadOnly).ConfigureAwait(false);
             try
             {
                 routingCollector = BeginRoutingCollection(request);

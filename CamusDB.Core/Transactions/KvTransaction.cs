@@ -228,12 +228,88 @@ public sealed class KvTransaction
     private bool commitInFlight;
 
     /// <summary>
-    /// When true this is a synthetic read-only transaction backed by <see cref="HLCTimestamp.Zero"/>.
-    /// Kahuna uses <c>HLCTimestamp.Zero</c> as the non-transactional snapshot signal (read-committed
-    /// semantics per key, no MVCC context). No <c>StartTransaction</c> / <c>CommitTransaction</c>
-    /// round-trips are issued; commit and rollback are no-ops.
+    /// True when this transaction was built as a read-only snapshot: the synthetic
+    /// <see cref="CreateReadOnly"/> and <see cref="CreateSnapshotReadOnly"/> transactions (identity
+    /// <see cref="HLCTimestamp.Zero"/>, so commit and rollback are no-ops), and the Serializable
+    /// read-only transaction of <see cref="KvTransactionsManager.BeginAsync"/> (a real identity, kept
+    /// only to track the transaction, and finalized by a rollback).
+    ///
+    /// <para>Fixed at construction. The active-transaction gauge tags the begin and the end with it,
+    /// so it must not change in between. It does not cover every read-only transaction: a transaction
+    /// begun with <see cref="CamusTransactionMode.ReadOnly"/> at Read Committed, or made read-only by
+    /// <c>SET TRANSACTION</c>, has it false. Use <see cref="RefusesWrites"/> to decide whether a
+    /// write is allowed.</para>
     /// </summary>
     public bool IsReadOnly { get; }
+
+    /// <summary>
+    /// True when this transaction must not write: it is a read-only snapshot
+    /// (<see cref="IsReadOnly"/>), or its <see cref="TransactionMode"/> is
+    /// <see cref="CamusTransactionMode.ReadOnly"/>. Every write path checks this before it takes a
+    /// lock or stages a write (<see cref="RequireWritable"/>, <see cref="ReserveMutations"/>), and the
+    /// commit refuses a read-only transaction that staged one.
+    ///
+    /// <para>A Serializable read-only commit is a rollback of the Kahuna transaction, so a write that
+    /// got through would be discarded while the client is told it committed. That is why a write is
+    /// refused here and not left to the commit.</para>
+    ///
+    /// <para>This covers the snapshot that the server picks for an autocommit <c>SELECT</c> too,
+    /// because that snapshot cannot write. A statement that changes state in transactions of its own
+    /// is refused only when the client declared the transaction read-only
+    /// (<see cref="IsDeclaredReadOnly"/>).</para>
+    /// </summary>
+    public bool RefusesWrites => IsReadOnly || TransactionMode == CamusTransactionMode.ReadOnly;
+
+    /// <summary>
+    /// True for a read-only snapshot that the server picked itself, where the client asked for no
+    /// access mode: the snapshot of an autocommit <c>SELECT</c>, and the internal readers built with
+    /// <see cref="CreateReadOnly"/> or <see cref="CreateSnapshotReadOnly"/>. Fixed at construction.
+    /// </summary>
+    private readonly bool serverChosenSnapshot;
+
+    /// <summary>
+    /// True when the client declared this transaction read-only: it began with
+    /// <see cref="CamusTransactionMode.ReadOnly"/>, a <c>SET TRANSACTION … READ ONLY</c> made it
+    /// read-only, or an autocommit request asked for <c>ReadOnly</c>. False for a snapshot that the
+    /// server picked for an autocommit <c>SELECT</c> on its own.
+    ///
+    /// <para>A declared read-only transaction also refuses the statements that change state outside
+    /// it (<see cref="RequireReadWriteMode"/>): schema DDL, <c>COMMENT ON</c>,
+    /// <c>REFRESH MATERIALIZED VIEW</c>, <c>nextval()</c> and <c>setval()</c>. They commit in
+    /// transactions of their own, or are not transactional, so a rollback cannot undo them. A
+    /// server-picked snapshot allows them: an autocommit <c>SELECT nextval('s')</c> runs in one, and
+    /// the client asked for no read-only transaction.</para>
+    /// </summary>
+    public bool IsDeclaredReadOnly => TransactionMode == CamusTransactionMode.ReadOnly && !serverChosenSnapshot;
+
+    /// <summary>
+    /// Refuses <paramref name="statement"/> with <see cref="CamusDBErrorCodes.ReadOnlyTransaction"/>
+    /// when this transaction is read-only (<see cref="RefusesWrites"/>). A write statement calls it
+    /// before it takes a lock or stages a write. <paramref name="statement"/> is the SQL verb the client
+    /// wrote, such as <c>UPDATE</c>; the message uses PostgreSQL's wording.
+    /// </summary>
+    public void RequireWritable(string statement)
+    {
+        if (RefusesWrites)
+            throw new CamusDBException(
+                CamusDBErrorCodes.ReadOnlyTransaction,
+                $"cannot execute {statement} in a read-only transaction");
+    }
+
+    /// <summary>
+    /// Refuses <paramref name="statement"/> with <see cref="CamusDBErrorCodes.ReadOnlyTransaction"/>
+    /// when the client declared this transaction read-only (<see cref="IsDeclaredReadOnly"/>). A
+    /// statement that changes state outside this transaction calls it before it changes anything:
+    /// schema DDL, <c>COMMENT ON</c>, <c>REFRESH MATERIALIZED VIEW</c>, <c>nextval()</c> and
+    /// <c>setval()</c>. The message uses PostgreSQL's wording.
+    /// </summary>
+    public void RequireReadWriteMode(string statement)
+    {
+        if (IsDeclaredReadOnly)
+            throw new CamusDBException(
+                CamusDBErrorCodes.ReadOnlyTransaction,
+                $"cannot execute {statement} in a read-only transaction");
+    }
 
     /// <summary>
     /// True when a client explicitly opened this transaction and owns its commit or rollback —
@@ -343,20 +419,27 @@ public sealed class KvTransaction
 
     /// <summary>
     /// Mode (read-write or read-only) for this transaction. Defaults to <see cref="CamusTransactionMode.ReadWrite"/>.
-    /// May be changed via <c>SET TRANSACTION … READ ONLY</c> before any locks are acquired.
+    /// May be changed by <c>SET TRANSACTION … READ ONLY | READ WRITE</c> before the first statement
+    /// (<see cref="ApplyIsolationLevel"/>). A read-only mode refuses every write
+    /// (<see cref="RefusesWrites"/>).
     /// </summary>
     public CamusTransactionMode TransactionMode { get; private set; }
 
     /// <summary>
-    /// Server-minted HLC timestamp that defines the MVCC snapshot for a
+    /// The HLC timestamp that defines the MVCC snapshot of a
     /// <see cref="CamusIsolationLevel.Serializable"/> + <see cref="CamusTransactionMode.ReadOnly"/>
     /// transaction. Every read in the transaction uses this single <c>T</c> so the whole transaction
     /// observes one consistent point in the version history.
     ///
+    /// <para>Set at construction for a transaction begun read-only. Set once more by
+    /// <see cref="ApplyIsolationLevel"/> when <c>SET TRANSACTION</c> makes a read-write transaction
+    /// Serializable and read-only before its first statement. It never changes after the first
+    /// statement, and never goes back to Zero.</para>
+    ///
     /// <para><see cref="HLCTimestamp.Zero"/> on all other transaction types — the default
     /// (Read Committed) path is unchanged.</para>
     /// </summary>
-    public HLCTimestamp ReadTimestamp { get; }
+    public HLCTimestamp ReadTimestamp { get; private set; }
 
     /// <summary>
     /// Concurrency strategy for this transaction. Pessimistic (the default) acquires explicit
@@ -684,11 +767,23 @@ public sealed class KvTransaction
     /// <see cref="CamusDBErrorCodes.InsufficientDiskSpace"/> while the node's data volume is below
     /// its free-space watermark — before the mutation is counted or any write is issued.
     /// No-op when the limit is disabled (<c>&lt;= 0</c>) or <paramref name="count"/> is zero.
+    ///
+    /// <para>Throws <see cref="CamusDBErrorCodes.ReadOnlyTransaction"/> for a read-only transaction
+    /// (<see cref="RefusesWrites"/>). Every storage write path calls this before it takes the write
+    /// locks, so this is the last check before a write reaches Kahuna. The write statements refuse
+    /// earlier, with the statement's name (<see cref="RequireWritable"/>); this check catches a write
+    /// path that does not.</para>
     /// </summary>
     public void ReserveMutations(int count)
     {
         if (count == 0)
             return;
+
+        // Checked before the write mark moves, so a refused write leaves WriteCount unchanged.
+        if (RefusesWrites)
+            throw new CamusDBException(
+                CamusDBErrorCodes.ReadOnlyTransaction,
+                $"cannot write in a read-only transaction (transaction {UniqueId})");
 
         // Counted whatever the limit: the schema-fence retry reads it to tell an attempt that wrote
         // nothing from one that did. See WriteCount.
@@ -865,7 +960,8 @@ public sealed class KvTransaction
         KeyValueTransactionLocking locking = KeyValueTransactionLocking.Pessimistic,
         ReadValidation readValidation = ReadValidation.None,
         HLCTimestamp clientId = default,
-        TransactionPriority priority = TransactionPriority.Normal)
+        TransactionPriority priority = TransactionPriority.Normal,
+        bool serverChosenSnapshot = false)
     {
         TransactionId = transactionId;
         // ClientId is the stable tracking identity for HttpTransactionCoordinator; the manager
@@ -877,6 +973,7 @@ public sealed class KvTransaction
         UniqueId = uniqueId;
         CoordinatorKey = uniqueId;
         IsReadOnly = isReadOnly;
+        this.serverChosenSnapshot = serverChosenSnapshot;
         IsolationLevel = isolationLevel;
         TransactionMode = transactionMode;
         ReadTimestamp = readTimestamp;
@@ -931,10 +1028,13 @@ public sealed class KvTransaction
     /// <summary>
     /// Creates a read-only snapshot transaction. Uses <see cref="HLCTimestamp.Zero"/> so Kahuna
     /// performs non-transactional reads of the latest committed value — no Kahuna round-trips.
+    /// <paramref name="declaredReadOnly"/> is true when the client asked for a read-only transaction
+    /// (<see cref="IsDeclaredReadOnly"/>); an internal reader leaves it false.
     /// </summary>
-    public static KvTransaction CreateReadOnly() =>
+    public static KvTransaction CreateReadOnly(bool declaredReadOnly = false) =>
         new(HLCTimestamp.Zero, string.Empty, isReadOnly: true,
-            transactionMode: CamusTransactionMode.ReadOnly);
+            transactionMode: CamusTransactionMode.ReadOnly,
+            serverChosenSnapshot: !declaredReadOnly);
 
     /// <summary>
     /// Creates a cheap serializable read-only snapshot transaction pinned to
@@ -949,12 +1049,19 @@ public sealed class KvTransaction
     /// transaction with a fixed <see cref="ReadTimestamp"/> takes no lock, folds no read and takes no
     /// statement snapshot. The autocommit SELECT passes the server's default level, so a Read Committed
     /// deployment does not see its reads reported as Serializable.</para>
+    ///
+    /// <para><paramref name="declaredReadOnly"/> is true when the client asked for a read-only
+    /// transaction (<see cref="IsDeclaredReadOnly"/>). The autocommit SELECT passes it only when the
+    /// request said <c>ReadOnly</c>; the server picks this snapshot for every other one too.</para>
     /// </summary>
     public static KvTransaction CreateSnapshotReadOnly(
-        HLCTimestamp snapshotT, CamusIsolationLevel isolationLevel = CamusIsolationLevel.Serializable) =>
+        HLCTimestamp snapshotT,
+        CamusIsolationLevel isolationLevel = CamusIsolationLevel.Serializable,
+        bool declaredReadOnly = false) =>
         new(HLCTimestamp.Zero, string.Empty, isReadOnly: true,
             isolationLevel, CamusTransactionMode.ReadOnly,
-            readTimestamp: snapshotT);
+            readTimestamp: snapshotT,
+            serverChosenSnapshot: !declaredReadOnly);
 
     /// <summary>
     /// Whether any statement (SELECT, INSERT, UPDATE, DELETE, SHOW, EXPLAIN …) has executed
@@ -1113,8 +1220,34 @@ public sealed class KvTransaction
     /// statement. A ReadCommitted read acquires no locks but still "touches" the transaction —
     /// upgrading to Serializable after that read would silently omit the shared lock the new level
     /// requires for the data already read.</para>
+    ///
+    /// <para>A null <paramref name="mode"/> keeps the current mode, as in PostgreSQL: a
+    /// <c>SET TRANSACTION ISOLATION LEVEL …</c> that names no access mode does not make a read-only
+    /// transaction writable.</para>
+    ///
+    /// <para><b>READ WRITE on a snapshot.</b> A transaction that reads at a fixed
+    /// <see cref="ReadTimestamp"/>, or that was built read-only (<see cref="IsReadOnly"/>), has no
+    /// write session and cannot get one, so <c>READ WRITE</c> is refused with
+    /// <see cref="CamusDBErrorCodes.InvalidInput"/>. Accepting it would report a change that does not
+    /// happen, and every later write would fail.</para>
+    ///
+    /// <para><b>Becoming Serializable read-only.</b> A read-only transaction without a fixed snapshot
+    /// takes no read lock, so at Serializable each read would see the latest committed value. When the
+    /// change leaves the transaction Serializable and read-only, it therefore pins one snapshot, as a
+    /// transaction begun that way has. A transaction whose Kahuna session is open reads at its own
+    /// identity, which is how <see cref="KvTransactionsManager.BeginAsync"/> builds a Serializable
+    /// read-only transaction. A deferred transaction reads at <paramref name="mintSnapshot"/>'s value,
+    /// and never opens a session: it is then the same as the snapshot of an autocommit SELECT, and its
+    /// commit is the zero-identity no-op. With no <paramref name="mintSnapshot"/>, or when it returns
+    /// Zero (a manager with no local clock), the transaction reads the latest committed value, as
+    /// <see cref="KvTransactionsManager.BeginReadOnly"/> does then.</para>
     /// </summary>
-    public void ApplyIsolationLevel(CamusIsolationLevel level, CamusTransactionMode mode)
+    /// <param name="level">The isolation level to apply.</param>
+    /// <param name="mode">The access mode to apply, or null to keep the current one.</param>
+    /// <param name="mintSnapshot">Returns the read timestamp of a deferred transaction that becomes
+    /// Serializable and read-only; see above.</param>
+    public void ApplyIsolationLevel(
+        CamusIsolationLevel level, CamusTransactionMode? mode, Func<HLCTimestamp>? mintSnapshot = null)
     {
         lock (trackSync)
         {
@@ -1124,8 +1257,33 @@ public sealed class KvTransaction
                     "SET TRANSACTION must be the first statement of a transaction — " +
                     $"transaction {UniqueId} has already executed a statement");
 
+            if (mode == CamusTransactionMode.ReadWrite && (IsReadOnly || !ReadTimestamp.IsNull()))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "SET TRANSACTION READ WRITE cannot be applied to a read-only snapshot transaction — " +
+                    $"transaction {UniqueId} reads at a fixed snapshot and has no write session; " +
+                    "start a read-write transaction instead");
+
+            CamusTransactionMode nextMode = mode ?? TransactionMode;
+
+            if (level == CamusIsolationLevel.Serializable &&
+                nextMode == CamusTransactionMode.ReadOnly &&
+                !IsReadOnly &&
+                ReadTimestamp.IsNull())
+            {
+                if (TransactionId != HLCTimestamp.Zero)
+                {
+                    ReadTimestamp = TransactionId;
+                }
+                else if (mintSnapshot?.Invoke() is { } snapshot && !snapshot.IsNull())
+                {
+                    ReadTimestamp = snapshot;
+                    SessionStarter = null;
+                }
+            }
+
             IsolationLevel  = level;
-            TransactionMode = mode;
+            TransactionMode = nextMode;
         }
     }
 

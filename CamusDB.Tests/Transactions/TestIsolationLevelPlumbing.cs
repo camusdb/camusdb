@@ -32,7 +32,7 @@ namespace CamusDB.Tests.Transactions;
 ///   - All four {level} × {mode} combinations are readable from KvTransaction.
 ///   - the configured default isolation level is honoured when no explicit level is passed.
 ///   - SET TRANSACTION ISOLATION LEVEL SERIALIZABLE parses to NodeType.SetTransaction with
-///     correct yytext ("Serializable") and leftAst.yytext ("ReadWrite").
+///     correct yytext ("Serializable") and no mode (leftAst null), so the mode is left unchanged.
 ///   - SET TRANSACTION ISOLATION LEVEL SERIALIZABLE READ ONLY / READ WRITE parse correctly.
 ///   - Unknown level and unknown mode throw parse errors.
 ///   - Zero observable change: all behaviour is metadata-only (no locking change).
@@ -155,17 +155,28 @@ public sealed class TestIsolationLevelPlumbing
     // 4. SQL parser: SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
     // ------------------------------------------------------------------
 
+    /// <summary>
+    /// A statement that names no access mode carries none, so applying it keeps the transaction's
+    /// mode: a read-only transaction stays read-only, as in PostgreSQL.
+    /// </summary>
     [Test]
-    public void SetTransaction_Parse_Serializable_DefaultsToReadWrite()
+    public void SetTransaction_Parse_Serializable_NamesNoMode()
     {
         NodeAst ast = SQLParserProcessor.Parse("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE");
 
         Assert.AreEqual(NodeType.SetTransaction, ast.nodeType);
         Assert.AreEqual("Serializable", ast.yytext);
-        // leftAst is NodeType.String (not Identifier) so IdentifierNormalizer leaves it as-is
-        Assert.IsNotNull(ast.leftAst);
-        Assert.AreEqual(NodeType.String, ast.leftAst!.nodeType);
-        Assert.AreEqual("ReadWrite", ast.leftAst.yytext);
+        Assert.IsNull(ast.leftAst);
+    }
+
+    [Test]
+    public void SetTransaction_Parse_ReadCommitted_NamesNoMode()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
+
+        Assert.AreEqual(NodeType.SetTransaction, ast.nodeType);
+        Assert.AreEqual("ReadCommitted", ast.yytext);
+        Assert.IsNull(ast.leftAst);
     }
 
     [Test]

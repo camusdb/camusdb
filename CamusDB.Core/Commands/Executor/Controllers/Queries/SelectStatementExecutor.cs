@@ -1138,7 +1138,7 @@ internal sealed class SelectStatementExecutor
             case NodeType.SetTransaction:
             case NodeType.SetTransactionLocking:
             case NodeType.SetTransactionPriority:
-                DML.SetTransactionStatement.Apply(ast, ticket);
+                DML.SetTransactionStatement.Apply(ast, ticket, database.Transactions);
                 return (database, AsyncEnumerable.Empty<QueryResultRow>());
 
             default:
@@ -1375,7 +1375,9 @@ internal sealed class SelectStatementExecutor
         HLCTimestamp now = context.SharedNode.Raft.HybridLogicalClock.SendOrLocalEvent(context.SharedNode.Raft.GetLocalNodeId());
         HLCTimestamp snapshotT = AsOfSystemTimeResolver.Resolve(ast.extendedSeven, ticket.Parameters, now);
 
-        KvTransaction snapshotTx = KvTransaction.CreateSnapshotReadOnly(snapshotT);
+        // A request that declared ReadOnly keeps that declaration on the time-travel snapshot.
+        KvTransaction snapshotTx = KvTransaction.CreateSnapshotReadOnly(
+            snapshotT, declaredReadOnly: current.IsDeclaredReadOnly);
         // Only the transaction is replaced. Every other per-statement value is carried forward,
         // because a rebuild that drops one loses it for the rest of the statement with nothing to
         // say so.

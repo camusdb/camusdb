@@ -116,6 +116,15 @@ internal sealed class CreateTableAsSelectExecutor
         bool ifNotExists = ast.nodeType == NodeType.CreateTableAsSelectIfNotExists;
         bool withNoData = string.Equals(ast.yytext, "no data", StringComparison.Ordinal);
 
+        // The table is created in a transaction of its own, but its rows are loaded through the
+        // caller's. A read-only caller is refused before the table exists, so the statement does not
+        // leave an empty table behind. WITH NO DATA loads no rows and is DDL only, like CREATE TABLE:
+        // it is refused only when the client declared the transaction read-only.
+        if (withNoData)
+            ticket.TxnState?.RequireReadWriteMode("CREATE TABLE AS");
+        else
+            ticket.TxnState?.RequireWritable("CREATE TABLE AS");
+
         // Checked before anything else so an IF NOT EXISTS over an existing table does not execute the
         // source query: running it would take locks and read rows on behalf of a statement that is
         // meant to do nothing.

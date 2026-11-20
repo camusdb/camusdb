@@ -75,7 +75,9 @@ internal sealed class RowCommandService
     /// PostgreSQL's rule: a ticket on an aborted transaction is refused, and a ticket that fails (a
     /// later row's key conflict, a foreign-key check, a validation error) aborts the transaction, so
     /// the caller cannot commit the rows it was told were refused, nor run anything else on them. See
-    /// <see cref="Transactions.KvTransaction.MarkRollbackOnly(string)"/>.
+    /// <see cref="Transactions.KvTransaction.MarkRollbackOnly(string)"/>. A read-only transaction is
+    /// refused before anything is read or locked (<see cref="Transactions.KvTransaction.RequireWritable"/>),
+    /// and so are <see cref="Update"/> and <see cref="Delete"/>.
     /// </summary>
     internal async Task<InsertResult> Insert(InsertTicket ticket)
     {
@@ -83,6 +85,7 @@ internal sealed class RowCommandService
 
         try
         {
+            ticket.TxnState.RequireWritable("INSERT");
             context.Validator.Validate(ticket);
             return await InsertCore(ticket).ConfigureAwait(false);
         }
@@ -237,6 +240,7 @@ internal sealed class RowCommandService
 
         try
         {
+            ticket.TxnState.RequireWritable("UPDATE");
             context.Validator.Validate(ticket);
             return await UpdateCore(ticket).ConfigureAwait(false);
         }
@@ -281,6 +285,7 @@ internal sealed class RowCommandService
 
         try
         {
+            ticket.TxnState.RequireWritable("DELETE");
             context.Validator.Validate(ticket);
             return await DeleteCore(ticket).ConfigureAwait(false);
         }

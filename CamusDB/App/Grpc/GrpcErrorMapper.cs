@@ -154,6 +154,9 @@ public static class GrpcErrorMapper
         CamusDBErrorCodes.InlineFunctionsDisabled  => StatusCode.FailedPrecondition,
         CamusDBErrorCodes.ExtensionClusterMismatch => StatusCode.FailedPrecondition,
 
+        // The statement is valid, but the transaction it ran in is read-only.
+        CamusDBErrorCodes.ReadOnlyTransaction      => StatusCode.FailedPrecondition,
+
         // Retryable transaction conflicts → ABORTED (trailer code disambiguates)
         CamusDBErrorCodes.TransactionConflict        => StatusCode.Aborted,
         CamusDBErrorCodes.TransactionMustRetry       => StatusCode.Aborted,
