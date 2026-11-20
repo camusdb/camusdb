@@ -341,7 +341,48 @@ internal sealed class RowDeleter
         if (TestBeforeLocateHook is { } beforeLocateHook)
             await beforeLocateHook().ConfigureAwait(false);
 
-        IAsyncEnumerable<QueryResultRow> cursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);
+        state.LocateTicket = queryTicket;
+
+        // A delete by primary key whose row id the store remembers has nothing to locate: the write
+        // phase reads that row under its lock and re-checks the predicate there. The plan is built
+        // once, and it runs only when it is not such a lookup.
+        QueryPlan? plan = null;
+
+        if (RememberedRowLocate.StatementQualifies(ticket.TxnState, state.StatementTimestamp, ticket.Where, ticket.Limit, ticket.ExistsSubqueries))
+        {
+            plan = state.QueryExecutor.PlanQuery(state.Database, state.Table, queryTicket);
+
+            if (RememberedRowLocate.TryFrom(plan, out RememberedRowLocate? remembered))
+            {
+                SpillableRowList rememberedList = new(QueryExecutionContext.For(state.Database, queryTicket));
+
+                await state.RowsToDelete.DisposeAsync().ConfigureAwait(false);
+                state.RowsToDelete = rememberedList;
+
+                await rememberedList.AddAsync(new(remembered!.RowId, QueryResultRow.EmptyRow)).ConfigureAwait(false);
+                await rememberedList.SealAsync().ConfigureAwait(false);
+
+                state.RememberedRow = remembered;
+
+                return FluxAction.Continue;
+            }
+        }
+
+        await LocateByQueryAsync(state, queryTicket, plan).ConfigureAwait(false);
+
+        return FluxAction.Continue;
+    }
+
+    /// <summary>
+    /// Runs the locate query and buffers the id of every row it matches in
+    /// <see cref="DeleteFluxState.RowsToDelete"/>. <paramref name="plan"/> is the query's plan when the
+    /// caller already built it, and must not have been executed; null plans it here.
+    /// </summary>
+    private static async Task LocateByQueryAsync(DeleteFluxState state, QueryTicket queryTicket, QueryPlan? plan)
+    {
+        IAsyncEnumerable<QueryResultRow> cursor = plan is null
+            ? state.QueryExecutor.Query(state.Database, state.Table, queryTicket)
+            : state.QueryExecutor.ExecuteQueryPlan(plan);
 
         // Buffer row-id-only records: the mutation phase reads RowId alone and re-reads every row
         // under its lock (FlushDeleteChunk), so the scanned values are dead weight after the
@@ -354,7 +395,8 @@ internal sealed class RowDeleter
 
         // Handed to the state before the scan, so DeleteInternal disposes it on every path. A scan
         // or a spill write that throws (a conflict, a cancellation, a spill limit) must still delete
-        // the spill files the list wrote. The list it replaces never received a row, so it holds no file.
+        // the spill files the list wrote. The list it replaces holds no file: it never received a row,
+        // or it held the one remembered row id.
         await state.RowsToDelete.DisposeAsync().ConfigureAwait(false);
         state.RowsToDelete = rowList;
 
@@ -362,10 +404,6 @@ internal sealed class RowDeleter
             await rowList.AddAsync(new(row.RowId, QueryResultRow.EmptyRow)).ConfigureAwait(false);
 
         await rowList.SealAsync().ConfigureAwait(false);
-
-        state.LocateTicket = queryTicket;
-
-        return FluxAction.Continue;
     }
 
     private async Task<FluxAction> DeleteRowsAndIndexesFromDisk(DeleteFluxState state)
@@ -382,6 +420,34 @@ internal sealed class RowDeleter
         // Re-evaluated on each row read under the write lock; see FlushDeleteChunk.
         MutationRowRecheck recheck = MutationRowRecheck.Build(table.Schema, state.Ticket.Where, state.Ticket.Filters);
 
+        await DeleteBufferedRowsAsync(state, table, tx, recheck).ConfigureAwait(false);
+
+        if (state.RememberedRow is not { } remembered)
+            return FluxAction.Continue;
+
+        // The one row came from the row-id cache. A row that was there is the statement's answer,
+        // whether or not it passed the re-check.
+        state.RememberedRow = null;
+        remembered.Settle(state.Ticket.Probe);
+
+        if (!remembered.RowGone)
+            return FluxAction.Continue;
+
+        // The remembered row is gone, and nothing was deleted. Its key may be absent, or live under a
+        // new row id: the locate query answers that through the index, as it would have without the
+        // remembered id.
+        await LocateByQueryAsync(state, state.LocateTicket, remembered.Plan).ConfigureAwait(false);
+        await DeleteBufferedRowsAsync(state, table, tx, recheck).ConfigureAwait(false);
+
+        return FluxAction.Continue;
+    }
+
+    /// <summary>
+    /// Drains <see cref="DeleteFluxState.RowsToDelete"/> and deletes its rows chunk by chunk, with the
+    /// statement's predicate as the re-check on each locked read.
+    /// </summary>
+    private async Task DeleteBufferedRowsAsync(DeleteFluxState state, TableDescriptor table, KvTransaction tx, MutationRowRecheck recheck)
+    {
         // Drain RowsToDelete in bounded chunks so a DELETE over a huge matched set does not
         // hold an O(matched) list on the heap between scan and the Kahuna round-trip. The chunk
         // size is tied to SpillEffectiveThreshold so force-spill tests drive both the row-buffer
@@ -415,8 +481,6 @@ internal sealed class RowDeleter
 
         if (chunk.Count > 0)
             await FlushDeleteChunk(table, tx, chunk, state, recheck).ConfigureAwait(false);
-
-        return FluxAction.Continue;
     }
 
     /// <summary>
@@ -459,7 +523,13 @@ internal sealed class RowDeleter
                 : (_, row) => recheck.MatchesAsync(state.QueryExecutor, state.Database, state.LocateTicket!, row),
         };
 
-        state.DeletedRows += await DeleteLocatedRowsAsync(delete, chunk).ConfigureAwait(false);
+        // A row id taken from the row-id cache may name a row that is gone; the caller acts on that.
+        bool[]? missing = state.RememberedRow is not null ? new bool[chunk.Count] : null;
+
+        state.DeletedRows += await DeleteLocatedRowsAsync(delete, chunk, missing).ConfigureAwait(false);
+
+        if (missing is [true] && state.RememberedRow is { } remembered)
+            remembered.RowGone = true;
     }
 
     /// <summary>
@@ -516,8 +586,11 @@ internal sealed class RowDeleter
     /// the list reads would reach the projection as NULL, with no error. The deleted rows go to the
     /// collector only after the batch delete succeeded, so the returned rows are exactly the counted
     /// rows.</para>
+    ///
+    /// <para><paramref name="missing"/> (when given, aligned with <paramref name="chunk"/>) records each
+    /// row that has no read, so a caller that expected the row can act on the absence.</para>
     /// </summary>
-    internal async Task<int> DeleteLocatedRowsAsync(LocatedRowDelete delete, List<ObjectIdValue> chunk)
+    internal async Task<int> DeleteLocatedRowsAsync(LocatedRowDelete delete, List<ObjectIdValue> chunk, bool[]? missing = null)
     {
         TableDescriptor table = delete.Table;
         KvTransaction tx = delete.Transaction;
@@ -573,7 +646,12 @@ internal sealed class RowDeleter
 
             // A concurrent transaction deleted the row and committed after the caller found it.
             if (data is null || data.Value.Length == 0)
+            {
+                if (missing is not null)
+                    missing[i] = true;
+
                 continue;
+            }
 
             Dictionary<string, ColumnValue> writableRow = await RowEncoder.DecodeWritableAsync(
                 table.Schema, tx.TransactionId, rowId, data.Value,

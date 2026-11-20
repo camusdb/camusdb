@@ -22,6 +22,10 @@ namespace CamusDB.Core.Storage.Kv;
 /// and the caller then falls back to the index read, which is authoritative, and drops the entry.
 /// A mapping is therefore never trusted for a negative answer, only for a positive one.</para>
 ///
+/// <para><b>Writers use it too.</b> An UPDATE or DELETE by primary key takes the remembered id and skips
+/// its locate read; its write phase reads the row and reports a missing one
+/// (<see cref="CamusDB.Core.CommandsExecutor.Controllers.RememberedRowLocate"/>).</para>
+///
 /// <para><b>Scope.</b> One instance per <see cref="KvTableStore"/>, so it dies with the store on
 /// TRUNCATE, materialized-view refresh, index DDL, drop and eviction. Root databases only: a branch
 /// walks ancestor levels and carries tombstones, which this shortcut does not model. Bounded by

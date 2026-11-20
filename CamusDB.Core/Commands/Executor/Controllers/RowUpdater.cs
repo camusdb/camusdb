@@ -455,7 +455,46 @@ public sealed class RowUpdater
         if (TestBeforeLocateHook is { } beforeLocateHook)
             await beforeLocateHook().ConfigureAwait(false);
 
-        IAsyncEnumerable<QueryResultRow> cursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);
+        state.LocateTicket = queryTicket;
+
+        // An update by primary key whose row id the store remembers has nothing to locate: the write
+        // phase reads that row under its lock and re-checks the predicate there. The plan is built
+        // once, and it runs only when it is not such a lookup.
+        QueryPlan? plan = null;
+
+        if (!setSubqueries && RememberedRowLocate.StatementQualifies(ticket.TxnState, state.StatementTimestamp, ticket.Where, ticket.Limit, ticket.ExistsSubqueries))
+        {
+            plan = state.QueryExecutor.PlanQuery(state.Database, state.Table, queryTicket);
+
+            if (RememberedRowLocate.TryFrom(plan, out RememberedRowLocate? remembered))
+            {
+                SpillableRowList rememberedList = new(QueryExecutionContext.For(state.Database, queryTicket));
+                state.RowsToUpdate = rememberedList;
+
+                await rememberedList.AddAsync(new(remembered!.RowId, QueryResultRow.EmptyRow)).ConfigureAwait(false);
+                await rememberedList.SealAsync().ConfigureAwait(false);
+
+                state.RememberedRow = remembered;
+
+                return FluxAction.Continue;
+            }
+        }
+
+        return await LocateByQueryAsync(state, queryTicket, plan, setSubqueries).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Runs the locate query and buffers the id of every row it matches in
+    /// <see cref="UpdateFluxState.RowsToUpdate"/>. <paramref name="plan"/> is the query's plan when the
+    /// caller already built it, and must not have been executed; null plans it here.
+    /// </summary>
+    private static async Task<FluxAction> LocateByQueryAsync(UpdateFluxState state, QueryTicket queryTicket, QueryPlan? plan, bool setSubqueries)
+    {
+        UpdateTicket ticket = state.Ticket;
+
+        IAsyncEnumerable<QueryResultRow> cursor = plan is null
+            ? state.QueryExecutor.Query(state.Database, state.Table, queryTicket)
+            : state.QueryExecutor.ExecuteQueryPlan(plan);
 
         // The buffer keeps row-id-only records. The write phase never reads the located row's values:
         // it locks each row, reads it again, re-checks the predicate and evaluates every SET expression
@@ -489,8 +528,6 @@ public sealed class RowUpdater
             return FluxAction.Abort;
 
         await rowList.SealAsync().ConfigureAwait(false);
-
-        state.LocateTicket = queryTicket;
 
         return FluxAction.Continue;
     }
@@ -748,6 +785,42 @@ public sealed class RowUpdater
             }
         };
 
+        if (await WriteLocatedRowsAsync(state, update, chunkCells).ConfigureAwait(false) == FluxAction.Abort)
+            return FluxAction.Abort;
+
+        if (state.RememberedRow is not { } remembered)
+            return FluxAction.Continue;
+
+        // The one row came from the row-id cache. A row that was there is the statement's answer,
+        // whether or not it passed the re-check.
+        state.RememberedRow = null;
+        remembered.Settle(ticket.Probe);
+
+        if (!remembered.RowGone)
+            return FluxAction.Continue;
+
+        // The remembered row is gone, and nothing was written. Its key may be absent, or live under a
+        // new row id: the locate query answers that through the index, as it would have without the
+        // remembered id.
+        await state.RowsToUpdate.DisposeAsync().ConfigureAwait(false);
+        state.RowsToUpdate = null;
+
+        if (await LocateByQueryAsync(state, locateTicket, remembered.Plan, setSubqueries: false).ConfigureAwait(false) == FluxAction.Abort)
+            return FluxAction.Abort;
+
+        return await WriteLocatedRowsAsync(state, update, chunkCells).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Drains <see cref="UpdateFluxState.RowsToUpdate"/> and rewrites its rows chunk by chunk.
+    /// <paramref name="chunkCells"/> collects, per chunk, the correlated-subquery values of the SET
+    /// list that <see cref="LocatedRowUpdate.ComputeNewRow"/> reads by position, or is null.
+    /// </summary>
+    private async Task<FluxAction> WriteLocatedRowsAsync(
+        UpdateFluxState state,
+        LocatedRowUpdate update,
+        List<IReadOnlyDictionary<string, ColumnValue>>? chunkCells)
+    {
         // Drain the matched-row buffer in bounded chunks so the heap retains at most chunkSize
         // writable rows and their index mutation sets simultaneously. Mirrors the delete path.
         int chunkSize = state.Database.Options.SpillEffectiveThreshold;
@@ -756,7 +829,7 @@ public sealed class RowUpdater
         // A write checks its time limit itself, at each row (statement_timeout_ms).
         StatementDeadline? statementDeadline = StatementDeadline.Current;
 
-        await foreach (QueryResultRow queryRow in state.RowsToUpdate.EnumerateAsync().ConfigureAwait(false))
+        await foreach (QueryResultRow queryRow in state.RowsToUpdate!.EnumerateAsync().ConfigureAwait(false))
         {
             statementDeadline?.ThrowIfExpired();
 
@@ -798,9 +871,15 @@ public sealed class RowUpdater
     {
         Dictionary<string, ColumnValue>?[]? newImages = state.Returning is not null ? new Dictionary<string, ColumnValue>?[rowIds.Count] : null;
 
-        int written = await UpdateLocatedRowsAsync(update, rowIds, newImages).ConfigureAwait(false);
+        // A row id taken from the row-id cache may name a row that is gone; the caller acts on that.
+        bool[]? missing = state.RememberedRow is not null ? new bool[rowIds.Count] : null;
+
+        int written = await UpdateLocatedRowsAsync(update, rowIds, newImages, missing).ConfigureAwait(false);
         if (state.RetryableAborts is { HasAbort: true })
             return;
+
+        if (missing is [true] && state.RememberedRow is { } remembered)
+            remembered.RowGone = true;
 
         state.ModifiedRows += written;
 

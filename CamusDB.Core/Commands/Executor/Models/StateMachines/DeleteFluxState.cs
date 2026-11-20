@@ -38,6 +38,13 @@ internal sealed class DeleteFluxState
     /// </summary>
     public QueryTicket? LocateTicket { get; set; }
 
+    /// <summary>
+    /// Set by the locate step when it took the statement's one row from the row-id cache and ran no
+    /// query. The write phase reports there whether the row exists, and clears this once it has acted
+    /// on the answer. See <see cref="RememberedRowLocate"/>.
+    /// </summary>
+    internal RememberedRowLocate? RememberedRow { get; set; }
+
     public int DeletedRows { get; set; }
 
     /// <summary>

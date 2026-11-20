@@ -490,6 +490,15 @@ internal sealed class QueryExecutor
         => ExecuteQueryPlanInternal(plan);
 
     /// <summary>
+    /// Plans a single-table query without running it, for a caller that reads the plan before it
+    /// decides to run it (see <see cref="RememberedRowLocate"/>). Run it with
+    /// <see cref="ExecuteQueryPlan"/>, which is what <see cref="Query"/> does with its own plan for a
+    /// ticket with no cache hint.
+    /// </summary>
+    internal QueryPlan PlanQuery(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
+        => queryPlanner.GetPlan(database, table, ticket);
+
+    /// <summary>
     /// Executes a pre-built join plan through the join executor. Used by EXPLAIN ANALYZE, which
     /// builds the plan itself (see <see cref="QueryJoinExecutor.ExecuteJoinPlan"/>).
     /// </summary>

@@ -92,7 +92,7 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 | `spill_max_total_bytes` | — | `8589934592` (8 GiB; `<= 0` = no limit) |
 | `hash_join_max_build_rows` | — | `1000000`; with spill off, a hash-join build past this many rows runs as a nested-loop join (see [spill-to-disk.md](spill-to-disk.md#configuration)) |
 | `hash_join_max_build_bytes` | — | `1073741824` (1 GiB; `<= 0` = no byte limit); with spill off, a hash-join build past this many estimated bytes runs as a nested-loop join, and a nested-loop join keeps its right side in memory only under this limit |
-| `point_read_row_id_cache_enabled` | — | `true` (a primary-key point lookup remembers its row id and skips the index read next time; root databases only. A row id is never reused and a primary key never changes, so a remembered mapping can only point at a deleted row, which the row read detects before falling back to the index. Set `false` to turn it off) |
+| `point_read_row_id_cache_enabled` | — | `true` (a primary-key point lookup remembers its row id and skips the index read next time; root databases only. A row id is never reused and a primary key never changes, so a remembered mapping can only point at a deleted row, which the row read detects before falling back to the index. An `UPDATE` or `DELETE` by primary key in an optimistic or Serializable transaction takes the remembered id too and skips its locate read; see [query-planner.md](query-planner.md). Set `false` to turn it off) |
 | `point_read_row_id_cache_max_entries` | — | `1000000` |
 | `query_result_cache_enabled` | — | `true` |
 | `query_result_cache_default_ttl_ms` | — | `5000` |
