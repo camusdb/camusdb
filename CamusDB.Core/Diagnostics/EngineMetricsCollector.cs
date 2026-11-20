@@ -79,11 +79,13 @@ internal readonly ref struct EngineMeasurementKey(
 /// <see cref="Snapshot"/> and report only that instant. An observable <i>counter</i> is reported as a
 /// gauge whose value is its cumulative total, since that is what the instrument publishes.</para>
 ///
-/// <para><b>Hot path.</b> Measurement callbacks fire inside the Raft executor and the WAL writer, so
-/// the recording path allocates nothing once a tag-set has been seen: the canonical tag string is
-/// built only on first sight, via an alternate lookup that hashes and compares the incoming tag span
-/// directly against the stored string. Dispose stops the listener — the test suite builds and tears
-/// down many engines, and a leaked listener would keep observing forever.</para>
+/// <para><b>Hot path.</b> Measurement callbacks fire inside the Raft executor and the WAL writer, and
+/// a statement makes tens of measurements, so the recording path allocates nothing once a tag-set has
+/// been seen. Each instrument remembers its first tag-sets and finds them again by comparing
+/// references. The rest go through an alternate lookup that hashes and compares the incoming tag span
+/// against the stored canonical string, which is built only on first sight. Dispose stops the
+/// listener — the test suite builds and tears down many engines, and a leaked listener would keep
+/// observing forever.</para>
 /// </summary>
 internal sealed class EngineMetricsCollector : IDisposable
 {
@@ -223,18 +225,25 @@ internal sealed class EngineMetricsCollector : IDisposable
     }
 
     /// <summary>
-    /// Folds one measurement into its aggregate. The alternate lookup handles the steady state without
-    /// building a string; only a tag-set never seen before takes the materializing path.
+    /// Folds one measurement into its aggregate. A tag-set the instrument has remembered is found by
+    /// comparing references (<see cref="InstrumentDescriptor.TryFind"/>). Any other tag-set goes
+    /// through the alternate lookup, which renders and hashes the tags without building a string, and
+    /// only a tag-set never seen before takes the materializing path.
     /// </summary>
     private void Record(double value, ReadOnlySpan<KeyValuePair<string, object?>> tags, object? state)
     {
         if (state is not InstrumentDescriptor descriptor)
             return;
 
-        EngineMeasurementKey measurement = new(descriptor.Source, descriptor.Metric, descriptor.Kind, tags);
+        if (!descriptor.TryFind(tags, out Aggregate? aggregate))
+        {
+            EngineMeasurementKey measurement = new(descriptor.Source, descriptor.Metric, descriptor.Kind, tags);
 
-        if (!lookup.TryGetValue(measurement, out Aggregate? aggregate))
-            aggregate = aggregates.GetOrAdd(Comparer.Create(measurement), static _ => new Aggregate());
+            if (!lookup.TryGetValue(measurement, out aggregate))
+                aggregate = aggregates.GetOrAdd(Comparer.Create(measurement), static _ => new Aggregate());
+
+            descriptor.Remember(tags, aggregate);
+        }
 
         lock (aggregate)
         {
@@ -268,8 +277,106 @@ internal sealed class EngineMetricsCollector : IDisposable
         _ => EngineMetricKind.Counter,
     };
 
-    /// <summary>Per-instrument constants resolved at publish time and handed back on every measurement.</summary>
-    private sealed record InstrumentDescriptor(string Source, string Metric, EngineMetricKind Kind);
+    /// <summary>
+    /// Per-instrument constants resolved at publish time and handed back on every measurement, plus
+    /// the tag-sets this instrument has been recorded with.
+    ///
+    /// <para><b>Remembered tag-sets.</b> A call site passes the same tag keys and, for most
+    /// instruments, the same value objects on every measurement: string constants and cached boxes.
+    /// Comparing those references is cheaper than rendering and hashing the tag text, which the
+    /// shared dictionary needs. A remembered entry maps one tag sequence, in call-site order, to the
+    /// aggregate the dictionary resolved for it, so two call sites that pass the same tags in a
+    /// different order keep two entries that point at one aggregate.</para>
+    ///
+    /// <para><b>Bound.</b> At most <see cref="MaxRemembered"/> tag-sets are remembered. An instrument
+    /// with more of them (a tag per partition, for example) resolves the rest through the dictionary.</para>
+    ///
+    /// <para><b>Concurrency.</b> The entries are an immutable array replaced with a compare-and-swap,
+    /// so measurement callbacks on any thread read it without a lock. A lost race drops one entry,
+    /// and the next measurement with those tags remembers it again.</para>
+    /// </summary>
+    private sealed class InstrumentDescriptor(string source, string metric, EngineMetricKind kind)
+    {
+        /// <summary>Most tag-sets one instrument remembers. The search is linear, so it stays small.</summary>
+        internal const int MaxRemembered = 16;
+
+        public string Source { get; } = source;
+
+        public string Metric { get; } = metric;
+
+        public EngineMetricKind Kind { get; } = kind;
+
+        private RememberedTags[] remembered = [];
+
+        /// <summary>Finds the aggregate of a remembered tag-set. False sends the caller to the dictionary.</summary>
+        public bool TryFind(ReadOnlySpan<KeyValuePair<string, object?>> tags, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Aggregate? aggregate)
+        {
+            RememberedTags[] entries = Volatile.Read(ref remembered);
+
+            for (int i = 0; i < entries.Length; i++)
+            {
+                if (SameTags(entries[i].Tags, tags))
+                {
+                    aggregate = entries[i].Aggregate;
+                    return true;
+                }
+            }
+
+            aggregate = null;
+            return false;
+        }
+
+        /// <summary>Remembers the aggregate the dictionary resolved for <paramref name="tags"/>, while there is room.</summary>
+        public void Remember(ReadOnlySpan<KeyValuePair<string, object?>> tags, Aggregate aggregate)
+        {
+            RememberedTags[] entries = Volatile.Read(ref remembered);
+
+            if (entries.Length >= MaxRemembered)
+                return;
+
+            // Another thread may have remembered the same tags since this measurement searched.
+            for (int i = 0; i < entries.Length; i++)
+            {
+                if (SameTags(entries[i].Tags, tags))
+                    return;
+            }
+
+            RememberedTags[] grown = new RememberedTags[entries.Length + 1];
+            entries.CopyTo(grown, 0);
+            grown[entries.Length] = new RememberedTags(tags.ToArray(), aggregate);
+
+            Interlocked.CompareExchange(ref remembered, grown, entries);
+        }
+
+        /// <summary>
+        /// True when the two sequences hold the same keys and values in the same order. Equal values
+        /// render to the same canonical text, so a match here names the aggregate the dictionary
+        /// would return. A value that is equal only as text (the number 1 and the string "1") does
+        /// not match and resolves through the dictionary.
+        /// </summary>
+        private static bool SameTags(KeyValuePair<string, object?>[] known, ReadOnlySpan<KeyValuePair<string, object?>> tags)
+        {
+            if (known.Length != tags.Length)
+                return false;
+
+            for (int i = 0; i < known.Length; i++)
+            {
+                ref readonly KeyValuePair<string, object?> a = ref known[i];
+                ref readonly KeyValuePair<string, object?> b = ref tags[i];
+
+                if (!ReferenceEquals(a.Key, b.Key) && !string.Equals(a.Key, b.Key, StringComparison.Ordinal))
+                    return false;
+
+                if (!ReferenceEquals(a.Value, b.Value) && (a.Value is null || !a.Value.Equals(b.Value)))
+                    return false;
+            }
+
+            return true;
+        }
+    }
+
+    /// <summary>One remembered tag sequence of an instrument and the aggregate it resolves to.</summary>
+    private readonly record struct RememberedTags(KeyValuePair<string, object?>[] Tags, Aggregate Aggregate);
 
     /// <summary>
     /// Mutable running state for one instrument + tag-set. Guarded by locking the instance itself:

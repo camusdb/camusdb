@@ -170,6 +170,98 @@ internal sealed class TestEngineMetricsCollector
         Assert.AreEqual("partition_id=7,ratio=1.5", Single("numeric").Tags);
     }
 
+    /// <summary>
+    /// A tag value boxed again on every measurement is a different object each time. It must still
+    /// land on one row, and a value that is equal only as text must join that row too.
+    /// </summary>
+    [Test]
+    public void Tags_EqualValuesInDistinctObjects_ShareOneRow()
+    {
+        Counter<long> counter = meter.CreateCounter<long>(prefix + "boxed");
+
+        for (int i = 0; i < 50; i++)
+            counter.Add(1, new KeyValuePair<string, object?>("partition_id", 7));
+
+        counter.Add(1, new KeyValuePair<string, object?>("partition_id", 7L));
+        counter.Add(1, new KeyValuePair<string, object?>("partition_id", new string('7', 1)));
+
+        EngineMetricRow row = Single("boxed");
+
+        Assert.AreEqual("partition_id=7", row.Tags);
+        Assert.AreEqual(52, row.Count);
+    }
+
+    /// <summary>
+    /// An instrument remembers a bounded number of tag-sets. The sets past that bound, and the sets
+    /// before it, must each keep their own exact total, also when their measurements interleave.
+    /// </summary>
+    [Test]
+    public void Tags_MoreSetsThanAnInstrumentRemembers_KeepExactTotals()
+    {
+        const int sets = 100;
+        const int rounds = 30;
+
+        Counter<long> counter = meter.CreateCounter<long>(prefix + "many");
+
+        for (int round = 0; round < rounds; round++)
+        {
+            for (int set = 0; set < sets; set++)
+                counter.Add(set + 1, new KeyValuePair<string, object?>("shard", "s" + set.ToString("D3")));
+        }
+
+        List<EngineMetricRow> rows = Rows().Where(r => r.Metric == prefix + "many").OrderBy(r => r.Tags, StringComparer.Ordinal).ToList();
+
+        Assert.AreEqual(sets, rows.Count);
+
+        for (int set = 0; set < sets; set++)
+        {
+            Assert.AreEqual("shard=s" + set.ToString("D3"), rows[set].Tags);
+            Assert.AreEqual((long)rounds * (set + 1), rows[set].Count);
+        }
+    }
+
+    /// <summary>
+    /// Measurement callbacks run on whichever thread records. Threads that record the same few
+    /// tag-sets at once, from the first measurement on, must lose no measurement and split no row.
+    /// </summary>
+    [Test]
+    public void ConcurrentMeasurements_OfTheSameTagSets_LoseNothing()
+    {
+        const int threads = 8;
+        const int perThread = 20_000;
+
+        Histogram<long> histogram = meter.CreateHistogram<long>(prefix + "concurrent");
+        string[] stages = ["register", "confirm", "actor", "complete"];
+
+        using System.Threading.Barrier start = new(threads);
+
+        System.Threading.Thread[] workers = new System.Threading.Thread[threads];
+        for (int t = 0; t < threads; t++)
+        {
+            workers[t] = new System.Threading.Thread(() =>
+            {
+                start.SignalAndWait();
+
+                for (int i = 0; i < perThread; i++)
+                    histogram.Record(2, new KeyValuePair<string, object?>("stage", stages[i % stages.Length]));
+            });
+            workers[t].Start();
+        }
+
+        foreach (System.Threading.Thread worker in workers)
+            worker.Join();
+
+        List<EngineMetricRow> rows = Rows().Where(r => r.Metric == prefix + "concurrent").ToList();
+
+        Assert.AreEqual(stages.Length, rows.Count);
+
+        foreach (EngineMetricRow row in rows)
+        {
+            Assert.AreEqual((long)threads * perThread / stages.Length, row.Count, row.Tags);
+            Assert.AreEqual(2.0 * threads * perThread / stages.Length, row.Total, row.Tags);
+        }
+    }
+
     [Test]
     public void ObservableInstrument_IsSampledAtSnapshotTime()
     {
