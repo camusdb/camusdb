@@ -207,6 +207,14 @@ internal static class QueryExpressionWalker
                     CamusDBErrorCodes.InvalidInput,
                     "Window functions are only allowed in the select list and ORDER BY of a query");
 
+            // VALUES and SET replace a whole-value DEFAULT before binding (InsertRowShaper,
+            // UpdateDefaults), so one met here is inside an expression or in a clause that has no
+            // column to take a default from.
+            case NodeType.ExprDefault:
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "DEFAULT is allowed only as a whole value in INSERT ... VALUES, UPDATE ... SET or ON CONFLICT DO UPDATE SET");
+
             default:
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidAstStmt,

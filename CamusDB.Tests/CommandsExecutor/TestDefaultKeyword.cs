@@ -190,4 +190,96 @@ public sealed class TestDefaultKeyword : SharedNodeBaseTest
 
         Refused(() => Write(database, executor, dbname, "UPDATE numbered SET n = DEFAULT WHERE id = 1"), CamusDBErrorCodes.FeatureNotSupported);
     }
+
+    [Test]
+    public async Task OnConflictDoUpdateSetDefaultAppliesTheDefault()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        await Ddl(database, executor, dbname,
+            "CREATE TABLE t (id INT64 PRIMARY KEY, status STRING DEFAULT ('new'), touched TIMESTAMP DEFAULT (now()), note STRING NULL)");
+        await Write(database, executor, dbname, "INSERT INTO t (id, status, touched, note) VALUES (1, 'paid', NULL, 'x')");
+
+        // Row 1 conflicts and takes every default; row 2 does not conflict and is inserted as written.
+        Assert.AreEqual(2, await Write(database, executor, dbname,
+            "INSERT INTO t (id, status) VALUES (1, 'x'), (2, 'y') " +
+            "ON CONFLICT (id) DO UPDATE SET status = DEFAULT, touched = DEFAULT, note = DEFAULT"));
+
+        Dictionary<long, IReadOnlyDictionary<string, ColumnValue>> rows = (await Rows(database, executor, dbname, "SELECT id, status, touched, note FROM t"))
+            .ToDictionary(r => r["id"].LongValue);
+
+        Assert.AreEqual("new", rows[1]["status"].StrValue, "the constant default, not the proposed value");
+        Assert.AreNotEqual(ColumnType.Null, rows[1]["touched"].Type, "the function default ran");
+        Assert.AreEqual(ColumnType.Null, rows[1]["note"].Type, "a column with no default is set to NULL");
+        Assert.AreEqual("y", rows[2]["status"].StrValue);
+    }
+
+    [Test]
+    public async Task OnConflictDoUpdateSetDefaultMixesWithOtherAssignments()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        await Ddl(database, executor, dbname, "CREATE TABLE t (id INT64 PRIMARY KEY, status STRING DEFAULT ('new'), n INT64)");
+        await Write(database, executor, dbname, "INSERT INTO t (id, status, n) VALUES (1, 'paid', 10), (2, 'paid', 20)");
+
+        // The DEFAULT sits next to assignments that read the stored and the proposed row, under a
+        // WHERE that skips row 2.
+        Assert.AreEqual(1, await Write(database, executor, dbname,
+            "INSERT INTO t (id, status, n) VALUES (1, 'x', 5), (2, 'x', 5) " +
+            "ON CONFLICT (id) DO UPDATE SET n = t.n + excluded.n, status = DEFAULT WHERE t.n < 15"));
+
+        CollectionAssert.AreEqual(
+            new[] { "1|new|15", "2|paid|20" },
+            (await Rows(database, executor, dbname, "SELECT id, status, n FROM t ORDER BY id"))
+                .Select(r => $"{r["id"].LongValue}|{r["status"].StrValue}|{r["n"].LongValue}"));
+    }
+
+    [Test]
+    public async Task OnConflictDoUpdateSetDefaultInInsertSelect()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        await Ddl(database, executor, dbname, "CREATE TABLE t (id INT64 PRIMARY KEY, status STRING DEFAULT ('new'))");
+        await Ddl(database, executor, dbname, "CREATE TABLE src (id INT64 PRIMARY KEY, status STRING)");
+        await Write(database, executor, dbname, "INSERT INTO t (id, status) VALUES (1, 'paid')");
+        await Write(database, executor, dbname, "INSERT INTO src (id, status) VALUES (1, 'x'), (2, 'y')");
+
+        Assert.AreEqual(2, await Write(database, executor, dbname,
+            "INSERT INTO t (id, status) SELECT id, status FROM src ON CONFLICT (id) DO UPDATE SET status = DEFAULT"));
+
+        CollectionAssert.AreEqual(
+            new[] { "1|new", "2|y" },
+            (await Rows(database, executor, dbname, "SELECT id, status FROM t ORDER BY id"))
+                .Select(r => $"{r["id"].LongValue}|{r["status"].StrValue}"));
+    }
+
+    [Test]
+    public async Task OnConflictDoUpdateSetDefaultRefusals()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        await Ddl(database, executor, dbname, "CREATE SEQUENCE order_no");
+        await Ddl(database, executor, dbname,
+            "CREATE TABLE t (id INT64 PRIMARY KEY, status STRING DEFAULT ('new'), code STRING NOT NULL, n INT64 DEFAULT (nextval('order_no')))");
+        await Write(database, executor, dbname, "INSERT INTO t (id, status, code) VALUES (1, 'paid', 'c')");
+
+        // A sequence default cannot be drawn by an update.
+        Refused(() => Write(database, executor, dbname,
+            "INSERT INTO t (id, code) VALUES (1, 'c') ON CONFLICT (id) DO UPDATE SET n = DEFAULT"), CamusDBErrorCodes.FeatureNotSupported);
+
+        // A NOT NULL column with no default gets NULL, which the column refuses.
+        Refused(() => Write(database, executor, dbname,
+            "INSERT INTO t (id, code) VALUES (1, 'c') ON CONFLICT (id) DO UPDATE SET code = DEFAULT"), CamusDBErrorCodes.NotNullViolation);
+
+        // DEFAULT inside an expression has no column to take a default from.
+        Refused(() => Write(database, executor, dbname,
+            "INSERT INTO t (id, code) VALUES (1, 'c') ON CONFLICT (id) DO UPDATE SET status = DEFAULT || 'x'"), CamusDBErrorCodes.InvalidInput);
+        Refused(() => Write(database, executor, dbname, "UPDATE t SET status = DEFAULT || 'x' WHERE id = 1"), CamusDBErrorCodes.InvalidInput);
+
+        CollectionAssert.AreEqual(
+            new[] { "1|paid|c" },
+            (await Rows(database, executor, dbname, "SELECT id, status, code FROM t"))
+                .Select(r => $"{r["id"].LongValue}|{r["status"].StrValue}|{r["code"].StrValue}"),
+            "no refused statement changed the row");
+    }
 }

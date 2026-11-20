@@ -15,7 +15,9 @@ using CamusDB.Core.SQLParser;
 namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
 
 /// <summary>
-/// Resolves <c>UPDATE … SET column = DEFAULT</c> to the column's default before the statement binds.
+/// Resolves <c>column = DEFAULT</c> in a SET list to the column's default before the statement binds.
+/// The SET list is the one of <c>UPDATE … SET</c>, or the one of <c>INSERT … ON CONFLICT … DO UPDATE
+/// SET</c> (VALUES and SELECT forms).
 /// </summary>
 /// <remarks>
 /// <para>A constant default becomes a statement parameter holding the value. A function default
@@ -23,21 +25,33 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
 /// clock function reads the statement's time. A column with no default is set to NULL, as in
 /// PostgreSQL.</para>
 ///
-/// <para>A default that draws from a sequence, including an identity column's, is refused: an UPDATE
+/// <para>A default that draws from a sequence, including an identity column's, is refused: an update
 /// cannot draw sequence values, because the values are reserved before the rows are known and an
-/// UPDATE does not know how many rows it changes.</para>
+/// update does not know how many rows it changes. <c>nextval</c> written in the same SET list is
+/// refused for the same reason (<see cref="SequenceStatementBinder"/>).</para>
+///
+/// <para>Only a whole SET value is resolved. A <c>DEFAULT</c> inside a larger expression stays in the
+/// tree, and the binder refuses it.</para>
 ///
 /// <para>Runs after a write through a view is rewritten onto its table, so the default is the
-/// table's.</para>
+/// table's. An INSERT with ON CONFLICT cannot target a view.</para>
 /// </remarks>
 internal static class UpdateDefaults
 {
     private const string ParameterPrefix = "@__set_default_";
 
+    /// <summary>
+    /// Returns <paramref name="ast"/> with every whole-value <c>DEFAULT</c> of its SET list replaced,
+    /// and <paramref name="ticket"/> with the parameters and statement times the replacements read. A
+    /// statement with no such <c>DEFAULT</c> is returned unchanged, with no allocation. The caller's
+    /// parameter dictionary is never changed.
+    /// </summary>
     internal static (NodeAst Ast, ExecuteSQLTicket Ticket) Resolve(Schema schema, NodeAst ast, ExecuteSQLTicket ticket)
     {
-        if (ast.nodeType != NodeType.Update || ast.rightAst is null || !HasDefault(ast.rightAst))
+        if (SetListOf(ast) is not { } setList || !HasDefault(setList))
             return (ast, ticket);
+
+        string statementForm = ast.nodeType == NodeType.Update ? "UPDATE ... SET" : "ON CONFLICT DO UPDATE SET";
 
         // An unknown table is reported when the statement opens it; the DEFAULT becomes a NULL meanwhile.
         schema.Tables.TryGetValue(ast.leftAst?.yytext ?? "", out TableSchema? table);
@@ -76,8 +90,8 @@ internal static class UpdateDefaults
             if (column.DefaultSequenceId is { Length: > 0 })
                 throw new CamusDBException(
                     CamusDBErrorCodes.FeatureNotSupported,
-                    $"UPDATE ... SET {column.Name} = DEFAULT is not supported: the default of column '{column.Name}' " +
-                    "draws from a sequence, and an UPDATE cannot draw sequence values. Assign a value instead.");
+                    $"{statementForm} {column.Name} = DEFAULT is not supported: the default of column '{column.Name}' " +
+                    "draws from a sequence, and an update cannot draw sequence values. Assign a value instead.");
 
             if (column.DefaultFunction is { } function)
             {
@@ -101,9 +115,28 @@ internal static class UpdateDefaults
             return new NodeAst(NodeType.Placeholder, null, null, null, null, null, null, null, name);
         }
 
-        NodeAst updated = new(
-            ast.nodeType, ast.leftAst, Replace(ast.rightAst), ast.extendedOne, ast.extendedTwo, ast.extendedThree,
-            ast.extendedFour, ast.extendedFive, ast.yytext, ast.extendedSix, ast.extendedSeven);
+        NodeAst resolved = Replace(setList);
+        NodeAst updated;
+
+        if (ast.nodeType == NodeType.Update)
+        {
+            updated = new(
+                ast.nodeType, ast.leftAst, resolved, ast.extendedOne, ast.extendedTwo, ast.extendedThree,
+                ast.extendedFour, ast.extendedFive, ast.yytext, ast.extendedSix, ast.extendedSeven);
+        }
+        else
+        {
+            // The ON CONFLICT node keeps its target (leftAst), WHERE (extendedOne) and action (yytext).
+            NodeAst onConflict = ast.extendedThree!;
+            NodeAst resolvedOnConflict = new(
+                onConflict.nodeType, onConflict.leftAst, resolved, onConflict.extendedOne, onConflict.extendedTwo,
+                onConflict.extendedThree, onConflict.extendedFour, onConflict.extendedFive, onConflict.yytext,
+                onConflict.extendedSix, onConflict.extendedSeven);
+
+            updated = new(
+                ast.nodeType, ast.leftAst, ast.rightAst, ast.extendedOne, ast.extendedTwo, resolvedOnConflict,
+                ast.extendedFour, ast.extendedFive, ast.yytext, ast.extendedSix, ast.extendedSeven);
+        }
 
         if (parameters is not null)
             ticket = WithParameters(ticket, parameters);
@@ -113,6 +146,18 @@ internal static class UpdateDefaults
 
         return (updated, ticket);
     }
+
+    /// <summary>
+    /// The SET list of an UPDATE, or the DO UPDATE SET list of an INSERT's ON CONFLICT clause (the
+    /// grammar puts it in the ON CONFLICT node's rightAst). Null for any other statement, and for DO
+    /// NOTHING and UPSERT, which have no SET list.
+    /// </summary>
+    private static NodeAst? SetListOf(NodeAst ast) => ast.nodeType switch
+    {
+        NodeType.Update => ast.rightAst,
+        NodeType.Insert or NodeType.InsertSelect when ast.extendedThree is { nodeType: NodeType.OnConflict } onConflict => onConflict.rightAst,
+        _ => null,
+    };
 
     private static bool HasDefault(NodeAst list) => list.nodeType switch
     {

@@ -395,7 +395,8 @@ internal sealed class NonQueryStatementDispatcher
             selectExecutor.EnforceTableLimit(ast);
         }
 
-        // UPDATE ... SET column = DEFAULT takes the table's default for the column; see UpdateDefaults.
+        // column = DEFAULT in UPDATE ... SET and in ON CONFLICT DO UPDATE SET takes the table's default
+        // for the column; see UpdateDefaults.
         (ast, ticket) = UpdateDefaults.Resolve(database.Schema, ast, ticket);
 
         switch (ast.nodeType)
