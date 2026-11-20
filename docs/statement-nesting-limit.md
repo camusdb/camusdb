@@ -44,6 +44,9 @@ Shapes that still cost one level per step:
 - `CASE` with many `WHEN` branches
 - long select lists and column lists
 - nested subqueries
+- comma lists and `JOIN` chains, one level for each relation. The number of relations in a whole
+  statement has its own limit, `max_tables_per_statement` (see
+  [Tables per statement](request-resource-limits.md#tables-per-statement)).
 
 A statement that names every column of a table at the default column limit (512) is about half the
 limit deep.

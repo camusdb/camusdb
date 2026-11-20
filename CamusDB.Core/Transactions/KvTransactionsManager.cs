@@ -800,6 +800,11 @@ public sealed class KvTransactionsManager : IDisposable
     /// or lost response, a cancellation or exception after the first commit request) fence the
     /// generations and evict the frozen key set, because the write may already be readable on this
     /// node; only a definite abort leaves cached entries intact.</para>
+    ///
+    /// <para>The return value is the causal token: a reading of the local clock after the commit. A
+    /// commit sets <see cref="KvTransaction.CommitTimestamp"/> from the Kahuna answer, and the token is
+    /// above that value. A commit that skips Kahuna (a zero-snapshot transaction, or a Serializable
+    /// read-only one) leaves the commit timestamp at zero.</para>
     /// </summary>
     public async Task<Kommander.Time.HLCTimestamp> CommitAsync(KvTransaction tx, CancellationToken cancellationToken = default)
     {
@@ -976,6 +981,7 @@ public sealed class KvTransactionsManager : IDisposable
         // leaves cached entries in place. Over-evicting costs a re-execution; under-evicting serves
         // rows that predate a committed write.
         KeyValueResponseType result = KeyValueResponseType.MustRetry;
+        Kommander.Time.HLCTimestamp commitTimestamp = Kommander.Time.HLCTimestamp.Zero;
 
         // Cache-fencing discriminator: set the instant the first commit request leaves this node.
         // Before it, any failure is a definite non-commit (nothing was ever asked to commit), so the
@@ -1018,6 +1024,7 @@ public sealed class KvTransactionsManager : IDisposable
                     commitCall.Dispose();
 
                     result = answer.Type;
+                    commitTimestamp = answer.CommitTimestamp;
                     string? anchor = answer.RecordAnchorKey;
                     lastRefusal = answer.Refusal;
                     lastReason = answer.Reason;
@@ -1065,7 +1072,12 @@ public sealed class KvTransactionsManager : IDisposable
             if (result == KeyValueResponseType.Committed)
             {
                 tx.Status = KvTransactionStatus.Committed;
-                
+
+                // Kahuna answers zero for a commit that wrote no persistent key. Every committed
+                // answer of one durable commit carries the same value, also one answered from the
+                // transaction record on a retry after the coordinator lost the session.
+                tx.CommitTimestamp = commitTimestamp;
+
                 long committedElapsedMs = commitTimer.GetElapsedMilliseconds();
                 
                 Diagnostics.ServerDiagnostics.RecordCommitDuration(
@@ -1086,7 +1098,14 @@ public sealed class KvTransactionsManager : IDisposable
                 }
 
                 Untrack(tx);
-                return mintLocalT?.Invoke(null) ?? tx.TransactionId;
+
+                // The coordinator can run on another node with a faster clock. Fold the commit
+                // timestamp into the local clock first, so the causal token is above it, and a read at
+                // the token sees this commit.
+                if (mintLocalT is not null)
+                    return mintLocalT(commitTimestamp.IsNull() ? null : commitTimestamp);
+
+                return commitTimestamp.IsNull() ? tx.TransactionId : commitTimestamp;
             }
 
             if (result == KeyValueResponseType.MustRetry)

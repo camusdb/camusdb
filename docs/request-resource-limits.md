@@ -12,6 +12,7 @@ For every limit, a value of `0` or less disables it. All of them are runtime set
 | `max_buffered_result_rows` | `1000000` | Rows in one buffered response | CADB0556, HTTP 400 |
 | `max_buffered_result_bytes` | `268435456` (256 MiB) | Estimated memory of one buffered response | CADB0556, HTTP 400 |
 | `max_statement_bytes` | `8388608` (8 MiB) | Inline SQL text that one statement may send to the parser | CADB0557, HTTP 413 |
+| `max_tables_per_statement` | `64` | Relations that one statement reads, view bodies included | CADB0564, HTTP 400 |
 | `max_recursive_cte_iterations` | `10000` | Steps of one `WITH RECURSIVE` query that make rows | CADB0560, HTTP 400 |
 | `max_recursive_cte_rows` | `10000000` | Rows that one run of a `WITH RECURSIVE` query makes | CADB0560, HTTP 400 |
 | `max_table_function_rows` | `5000000` | Rows that one read of a function in `FROM` makes | CADB0561, HTTP 400 |
@@ -172,6 +173,58 @@ Bound parameter values do not count, because the node does not parse them. A lar
 can bind its values instead of putting them in the text. A prepared statement also has the smaller
 limit `max_prepared_statement_bytes`, because the node keeps its text; see
 [prepared-statements.md](prepared-statements.md).
+
+## Tables per statement
+
+Planning time and memory grow with the square of the relations in one join. On one node, a join of
+64 tables plans in about 5 ms, and a join of 300 tables takes about 100 ms and 30 MB. The
+[nesting limit](statement-nesting-limit.md) stops one join at about 300 relations, but a statement can
+hold many joins of that size in derived tables, `UNION` branches and subqueries, so one statement of a
+few megabytes could keep a node planning for minutes.
+
+A statement that reads more than `max_tables_per_statement` relations fails with **CADB0564**
+(`TooManyTablesInStatement`; HTTP 400, gRPC `INVALID_ARGUMENT`) before it is planned, and the message
+names the setting. Nothing runs. The default, 64, is also the most relations that the planner's join
+graph handles in one join.
+
+```sql
+SET CLUSTER SETTING max_tables_per_statement = 128;
+```
+
+### What counts
+
+- Each table, materialized view and function in `FROM` counts as one each time the statement names
+  it: in every `FROM` list and `JOIN`, in `UPDATE … FROM` and `DELETE … USING`, and in subqueries. A
+  self join counts two.
+- The table that an `UPDATE` or a `DELETE` changes counts as one. The table that an `INSERT` writes
+  does not count.
+- A view counts as the relations of its body, nested views included. `SELECT * FROM v` over a view of
+  three tables counts three.
+- A derived table and a CTE reference count as the relations of their query. A `VALUES` list, or a
+  derived table with no `FROM`, counts as one.
+- A CTE that is inlined counts at each reference. A CTE that the statement computes once counts its
+  query once, and each further reference counts as one. See
+  [WITH queries](common-table-expressions.md).
+- Each branch of a `UNION`, `INTERSECT` or `EXCEPT` counts its own relations.
+
+### When it is checked
+
+- Every SQL statement is checked when it runs, with its views expanded. A change of the setting
+  applies to the next statement.
+- `CREATE VIEW` and `CREATE MATERIALIZED VIEW` check their body with its views expanded, so a view
+  that no statement could read is refused when it is created. A view created before the limit was
+  lowered is refused when a statement reads it.
+- `CREATE TABLE … AS`, `INSERT … SELECT` and `REFRESH MATERIALIZED VIEW` check their source query.
+- A write through a view is checked again after it is rewritten onto the view's table. Each mention
+  of a computed view column becomes a copy of that column's expression, so a column with a subquery
+  counts that subquery's relations at each mention.
+
+For a statement that reads views, this limit is usually reached long before the
+[view budgets](#views): `max_view_expanded_relations` counts the view references one statement
+expands, and its default of 10000 bounds expansion work. `max_tables_per_statement` counts the
+relations the expanded statement reads.
+
+It is a cluster setting: every node must give the same answer to the same statement.
 
 ## Explicit transactions
 

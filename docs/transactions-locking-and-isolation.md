@@ -590,7 +590,8 @@ This is the lock-free behavior described in §4/§5. What it does **not** promis
   (`causal_token_*` on gRPC `StartTxnRequest` or on the batch `START`, `causalToken` on HTTP
   `/start-transaction`). Every statement timestamp of the transaction is then at least that token.
   A commit returns its token: gRPC `CommitReply`, and `causalToken` in the HTTP `/commit-transaction`
-  response and in the HTTP autocommit query and write responses (not in the DDL response).
+  response and in the HTTP autocommit query and write responses (not in the DDL response). The token
+  is not the commit timestamp, which a commit also reports (§9.5).
 - ✅ **An autocommit `SELECT` reads one snapshot under a Read Committed default too.** It reads at
   one timestamp, which the node takes from its clock when the statement starts, as under the
   Serializable default. Every page, partition and sub-read (a join, a subquery, an index lookup) of
@@ -737,6 +738,57 @@ handle. The engine rule is the guarantee underneath: a caller that reaches the e
 extension that catches its own SQL error, or a future transport that forgets the rollback cannot
 commit, and cannot run anything else on the aborted transaction.
 
+### 9.5 Commit timestamp
+
+The commit of an explicit transaction reports its **commit timestamp**. This is the HLC timestamp
+that Kahuna gives to every write of the transaction. The Kahuna transaction coordinator mints it on
+its own clock, and that clock can be on a node other than the one that ran your statements.
+
+Where a client reads it:
+
+- gRPC: `commit_timestamp_n`, `commit_timestamp_l` and `commit_timestamp_c` on `CommitReply`, from
+  the unary `CommitTransaction` and from a batched `COMMIT` or `COMMIT_IF_OK`.
+- HTTP: `commitTimestamp` (`n`, `l`, `c`) on the `/commit-transaction` response.
+
+Compare two values by `l`, then `c`, then `n`, as `HLCTimestamp` does. Keep all three parts. The
+value is zero on gRPC, and null on HTTP, in these cases:
+
+- The transaction wrote nothing, for example a read-only transaction or `BEGIN` then `COMMIT`.
+- The transaction rolled back, or its commit failed.
+- The server is older than these fields.
+
+An autocommit statement does not report a commit timestamp. Use an explicit transaction when you
+need the value. A commit that you retry on the same transaction after `CADB0509` reports the same
+value as the commit that landed. This is also true when the node that coordinated the commit died
+before it answered.
+
+These rules state which transactions are in commit-timestamp order. T1 commits first at c1, and T2
+commits at c2.
+
+- ✅ **Write-write on one row.** When T1 and T2 write the same row, c2 is above c1. Each write of a
+  Kahuna key gets a later commit timestamp than the write before it, on every node.
+- ⚠️ **Write-read across partitions.** T2 reads a value that T1 wrote, and then T2 commits. Kahuna
+  mints c2 above c1 only when T2's read was registered with the coordinator. CamusDB registers the
+  reads of an optimistic transaction and of a transaction with read validation, and a read of a key
+  that the transaction already wrote. A pessimistic transaction (the default locking mode) does not
+  register its other reads. For such a read, c2 can be below c1 when T1's coordinator clock is ahead
+  of T2's nodes. Raft messages carry a clock lead from node to node, so the lag is usually about one
+  Raft heartbeat, and it can be longer on an idle partition. The Kahuna transaction lifecycle guide
+  (section 6.1.1, "Commit timestamp order") gives the full rule.
+- ⚠️ **Read-write anti-dependency.** T1 reads a row, T2 then overwrites that row, and T1 commits
+  after T2. No order is promised: c1 can be above c2.
+- ⚠️ **No shared row.** Two transactions that share no row and no read have no order promise. Their
+  commit timestamps come from clocks that can differ between nodes.
+
+The **causal token** is a different value. It is a reading of the clock of the node that ran the
+commit, taken after the commit, so it is at or above the commit timestamp. Use the token as the floor
+for a later read (§9.2). Do not use it to put commits in order: when two commits run through different
+nodes, their tokens can be in the opposite order of their commits.
+
+To put the requests of one client session in order, make each request write the same row, for
+example a row that holds the session's last request number. The write-write rule then puts the
+commits of the session in commit-timestamp order, on every node.
+
 ---
 
 ## 10. Where this lives in the code
@@ -747,6 +799,7 @@ A map for when you want to read the real thing:
   and coordinator key — plus the concurrency policy it was begun with) and `KvTransactionsManager`
   (begin / commit / rollback, including the retry on transient commit conflicts). The authoritative set
   of modified keys and held locks lives in the Kahuna coordinator, not on `KvTransaction`.
+  `KvTransaction.CommitTimestamp` keeps the commit timestamp from the Kahuna commit answer (§9.5).
   `KvTransaction.QueryReadView` decides the timestamp and Kahuna read mode of a query read (the
   statement timestamp of a Read Committed `SELECT`, §9.2), and `LatestReadView` is the read of a
   write path. `SelectStatementExecutor` opens the statement snapshot and closes it when the cursor

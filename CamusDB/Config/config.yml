@@ -325,6 +325,7 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 # max_recursive_cte_iterations: 10000     # steps of one WITH RECURSIVE query that make rows (CADB0560)
 # max_recursive_cte_rows: 10000000        # rows one run of a WITH RECURSIVE query makes (CADB0560)
 # max_table_function_rows: 5000000        # rows one read of a function in FROM makes (CADB0561)
+# max_tables_per_statement: 64            # relations one SQL statement reads, view bodies included (CADB0564)
 # statement_timeout_ms: 0                 # longest one SQL statement may run, in ms (CADB0562); 0 = no limit
 # max_view_definition_bytes: 1048576      # bytes of one normalized view body, checked at CREATE (CADB0563)
 # max_view_definition_nodes: 200000       # syntax-tree nodes of one view body, checked at CREATE (CADB0563)

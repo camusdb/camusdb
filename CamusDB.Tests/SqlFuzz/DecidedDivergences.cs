@@ -6,6 +6,7 @@
  */
 
 using System.Collections.Generic;
+using System.Linq;
 
 using CamusDB.Core;
 
@@ -568,6 +569,11 @@ public static class DecidedDivergences
             "SELECT COUNT(*) FROM generate_series(1, 5000001)",
             CamusDBErrorCodes.TableFunctionRowLimitExceeded, "5000001",
             "A statement has no time limit by default in CamusDB, so one short statement over a series of a trillion rows would run for hours. The cluster setting max_table_function_rows (5,000,000 rows) stops one read of a function in FROM. A LIMIT that stops the read early keeps it under the limit. The setting can be raised, and 0 turns the limit off. PostgreSQL has no such limit."),
+
+        new("A statement reads at most max_tables_per_statement relations", NoSetup,
+            "SELECT COUNT(*) FROM " + string.Join(", ", Enumerable.Range(1, 65).Select(i => $"generate_series(1, 1) g{i}")),
+            CamusDBErrorCodes.TooManyTablesInStatement, "1",
+            "Planning time grows with the square of the relations in one join, and a statement can hold many joins. The cluster setting max_tables_per_statement (64 relations) refuses a statement that reads more, before it is planned. Every join, subquery, derived table, CTE and view body counts. The setting can be raised, and 0 turns the limit off. PostgreSQL has no such limit."),
 
         new("A recursive WITH query that the statement reads two times runs to its end first", NoSetup,
             "WITH RECURSIVE r (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r) SELECT a.n + b.n FROM (SELECT n FROM r LIMIT 1) a, (SELECT n FROM r LIMIT 1) b",

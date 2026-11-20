@@ -746,6 +746,10 @@ internal sealed class SelectStatementExecutor
 
         ast = ExpandViews(database, ast);
 
+        // On the expanded tree, so the relations of every view body count, and before any binding or
+        // planning work.
+        EnforceTableLimit(ast);
+
         // Expansion can pull a session call (current_user() and friends) or a clock call (now()) in
         // from a view body that the statement itself never names, so both are reconsidered against
         // the expanded tree. A clock already attached keeps its times.
@@ -1216,6 +1220,15 @@ internal sealed class SelectStatementExecutor
             options.MaxViewExpandedRelations);
 
     /// <summary>
+    /// Refuses <paramref name="ast"/> with <see cref="CamusDBErrorCodes.TooManyTablesInStatement"/>
+    /// when it reads more relations than <see cref="CamusDBOptions.MaxTablesPerStatement"/> allows
+    /// (see <see cref="StatementTableCount"/>). Reads the current options, so a published change
+    /// applies to the next statement. Pass a tree after <see cref="ExpandViews"/>, or the relations
+    /// of a view body are not counted.
+    /// </summary>
+    internal void EnforceTableLimit(NodeAst ast) => StatementTableCount.Enforce(ast, options.MaxTablesPerStatement);
+
+    /// <summary>
     /// Plans and starts one SELECT statement whose AST has been expanded: a FROM-less projection, a join
     /// plan, or a single-source query. The caller owns the statement snapshot around it.
     /// </summary>
@@ -1629,6 +1642,10 @@ internal sealed class SelectStatementExecutor
         HLCTimestamp? explicitSnapshot = null)
     {
         sourceAst = ExpandViews(database, sourceAst);
+
+        // A CREATE TABLE … AS, a view body and a materialized-view refresh reach this method without
+        // passing a statement entry point's check, and the entry points cannot count a view's body.
+        EnforceTableLimit(sourceAst);
 
         // The expanded source may call a session or clock function that the outer statement never named.
         ticket = StatementScopedValues.Attach(ticket, sourceAst);

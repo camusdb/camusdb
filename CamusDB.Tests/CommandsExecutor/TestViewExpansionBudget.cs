@@ -31,6 +31,14 @@ namespace CamusDB.Tests.CommandsExecutor;
 [NonParallelizable]
 public sealed class TestViewExpansionBudget : SharedNodeBaseTest
 {
+    /// <summary>
+    /// A doubling chain of eight levels reads 256 tables, and <c>max_tables_per_statement</c> would refuse
+    /// it at create from the seventh level on. These tests measure the view budgets, so the table limit is
+    /// off; <c>TestStatementTableLimit</c> covers a view refused by it.
+    /// </summary>
+    protected override CamusDBOptions ConfigureOptions(CamusDBOptions defaults) =>
+        defaults with { MaxTablesPerStatement = 0 };
+
     private static async Task ExecDdl(DatabaseDescriptor database, CommandExecutor executor, string dbname, string sql)
     {
         KvTransaction tx = await database.Transactions.BeginAsync();

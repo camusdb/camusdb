@@ -98,6 +98,27 @@ public sealed class KvTransaction
     public HLCTimestamp TransactionId { get; private set; }
 
     /// <summary>
+    /// The Kahuna commit timestamp: the HLC timestamp that every write of this transaction carries.
+    /// <see cref="KvTransactionsManager.CommitAsync"/> sets it from the commit answer. It is
+    /// <see cref="HLCTimestamp.Zero"/> before a commit, after a rollback, and after a commit of a
+    /// transaction that wrote nothing.
+    ///
+    /// <para>Two transactions that write the same key commit in this order. A transaction that read a
+    /// committed value commits above that value's commit timestamp, on any partition, only when the
+    /// read was registered with the coordinator (see <see cref="ReadRegistrationKey(string)"/>): a
+    /// read of an optimistic transaction or of one with read validation, or a read of a key this
+    /// transaction wrote. Other pessimistic reads give no such bound. A read-write anti-dependency has
+    /// no order: a reader can commit above a writer that later overwrote what it read. See
+    /// <c>docs/transactions-locking-and-isolation.md</c> §9.5.</para>
+    ///
+    /// <para>The causal token that <see cref="KvTransactionsManager.CommitAsync"/> returns is a
+    /// different value. It is a reading of the local clock after the commit, at or above this value,
+    /// and it gives a floor for later reads. It does not give the position of the commit among other
+    /// commits.</para>
+    /// </summary>
+    public HLCTimestamp CommitTimestamp { get; internal set; }
+
+    /// <summary>
     /// The transaction's own unique identifier: a GUID minted at <see cref="KvTransactionsManager.BeginAsync"/>,
     /// used in logs and conflict messages and as the unique tail of <see cref="CoordinatorKey"/>.
     /// It is <b>not</b> the coordinator key on its own once a deferred session anchors itself.

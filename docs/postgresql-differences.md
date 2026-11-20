@@ -183,6 +183,14 @@ See [set-returning functions](set-returning-functions.md#how-it-runs).
 |---|---|---|---|
 | `SELECT COUNT(*) FROM generate_series(1, 5000001)` | `CADB0561` | `5000001` | A statement has no time limit by default, so one short statement over a series of a trillion rows would run for hours. The cluster setting `max_table_function_rows` (5,000,000 rows) stops one read of a function in `FROM`. A `LIMIT` that stops the read early keeps it under the limit. The setting can be raised, and `0` turns the limit off. |
 
+## Relations in one statement
+
+See [Tables per statement](request-resource-limits.md#tables-per-statement).
+
+| Statement | CamusDB | PostgreSQL | Why |
+|---|---|---|---|
+| `SELECT COUNT(*) FROM generate_series(1, 1) g1, generate_series(1, 1) g2, …` with 65 functions | `CADB0564` | `1` | Planning time grows with the square of the relations in one join, and a statement can hold many joins. The cluster setting `max_tables_per_statement` (64 relations) refuses a statement that reads more, before it is planned. Every join, subquery, derived table, CTE and view body counts. The setting can be raised, and `0` turns the limit off. |
+
 ## NULL in ORDER BY
 
 NULL sorts as the smallest value, the GoogleSQL rule: it comes first in ascending order and last in

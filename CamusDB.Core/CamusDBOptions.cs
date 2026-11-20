@@ -1960,6 +1960,26 @@ public sealed record CamusDBOptions
     public long MaxTableFunctionRows { get; init; } = 5_000_000;
 
     /// <summary>
+    /// Most relations one SQL statement may read. A statement past the limit fails with
+    /// <see cref="CamusDBErrorCodes.TooManyTablesInStatement"/> before it is bound or planned.
+    /// Planning time and memory grow about with the square of the relations in one join block, and
+    /// nothing else bounds the relations of a whole statement: the nesting limit stops one block at
+    /// about 300, but many blocks of that size stay within it.
+    /// <para>The count covers the tables, materialized views and functions in <c>FROM</c> of every
+    /// join, subquery, derived table, CTE and view body, after view expansion, and the table that an
+    /// <c>UPDATE</c> or <c>DELETE</c> changes. A derived table, view or CTE reference counts as the
+    /// relations of its query, or as one when it reads none. See
+    /// <see cref="SQLParser.StatementTableCount"/>.</para>
+    /// <para>The SQL entry points read the value for each statement, so a change applies to the next
+    /// statement. Cluster scope: a node with another value would refuse a statement that another node
+    /// runs, and a view body that one node accepts.</para>
+    /// <para><c>&lt;= 0</c> — limit is disabled.</para>
+    /// Default: <c>64</c>, the most leaves the join graph of one block handles.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
+    public int MaxTablesPerStatement { get; init; } = 64;
+
+    /// <summary>
     /// Most milliseconds one SQL statement may run. A statement still running at the limit fails with
     /// <see cref="CamusDBErrorCodes.StatementTimeout"/>; the transaction rules of any failed statement
     /// apply, so nothing it wrote is kept.
