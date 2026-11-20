@@ -64,7 +64,8 @@ internal static class SchemaDeltaApplier
     {
         TableSchema? tableSchema = entry.Op switch
         {
-            SchemaOp.CreateTable => TableDeltaApplier.ApplyCreateTable(schema, SchemaDeltaApplier.DecodePayload<SchemaCreateTablePayload>(entry)),
+            SchemaOp.CreateTable or SchemaOp.CreatePopulatedMaterializedView
+                => TableDeltaApplier.ApplyCreateTable(schema, SchemaDeltaApplier.DecodePayload<SchemaCreateTablePayload>(entry)),
             SchemaOp.RelinkTable => TableDeltaApplier.ApplyRelinkTable(schema, database, SchemaDeltaApplier.DecodePayload<SchemaRelinkTablePayload>(entry)),
             SchemaOp.DropTable => TableDeltaApplier.ApplyDropTable(schema, SchemaDeltaApplier.DecodePayload<SchemaDropTablePayload>(entry)),
             SchemaOp.AddColumn => ColumnDeltaApplier.ApplyAlterColumn(schema, SchemaDeltaApplier.DecodePayload<SchemaAlterColumnPayload>(entry), entry.Op),
@@ -236,9 +237,10 @@ internal static class SchemaDeltaApplier
 
         return entry.Op switch
         {
-            SchemaOp.CreateTable => schema.Tables.ContainsKey(DecodePayload<SchemaCreateTablePayload>(entry).TableName),
+            SchemaOp.CreateTable or SchemaOp.CreatePopulatedMaterializedView
+                => schema.Tables.ContainsKey(DecodePayload<SchemaCreateTablePayload>(entry).TableName),
             SchemaOp.RelinkTable => schema.Tables.ContainsKey(DecodePayload<SchemaRelinkTablePayload>(entry).TableName),
-            SchemaOp.DropTable => !schema.Tables.ContainsKey(DecodePayload<SchemaDropTablePayload>(entry).TableName),
+            SchemaOp.DropTable => WasDropped(schema, DecodePayload<SchemaDropTablePayload>(entry)),
             SchemaOp.AddColumn => HasColumn(schema, DecodePayload<SchemaAlterColumnPayload>(entry)),
             SchemaOp.DropColumn => !HasColumn(schema, DecodePayload<SchemaAlterColumnPayload>(entry)),
             SchemaOp.SetElementState => HasElementState(schema, DecodePayload<SchemaElementStatePayload>(entry)),
@@ -308,6 +310,19 @@ internal static class SchemaDeltaApplier
         return schema.Tables.TryGetValue(payload.TableName, out TableSchema? table) &&
                table.Indexes is not null &&
                table.Indexes.Any(ix => string.Equals(ix.Name, payload.IndexName, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// True when no relation with the dropped id still has the name. A different relation that took
+    /// the name since does not make the drop look unapplied.
+    /// </summary>
+    internal static bool WasDropped(Schema schema, SchemaDropTablePayload payload)
+    {
+        if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? current))
+            return true;
+
+        return payload.ExpectedTableId is { Length: > 0 } expected
+            && !string.Equals(current.Id, expected, StringComparison.Ordinal);
     }
 
     internal static bool HasColumn(Schema schema, SchemaAlterColumnPayload payload)

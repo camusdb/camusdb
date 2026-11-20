@@ -1556,4 +1556,43 @@ public sealed class TestMaterializedViews : SharedNodeBaseTest
         Assert.IsNull(await catalogs.TryGetTableOrphanAsync(database, retiredStorageId),
             "a completed relink must consume the orphan record");
     }
+
+    /// <summary>
+    /// Each refresh listed the contents it replaced in <c>SHOW ORPHAN TABLES</c> as a "dropped table"
+    /// under the live view's name, and RELINK failed on the row whose id the view still used. Those
+    /// contents are no longer listed; a table the user dropped still is.
+    /// </summary>
+    [Test]
+    public async Task ShowOrphanTablesListsNoContentsARefreshReplaced()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await SeedOrders(database, executor, dbname);
+
+        await ExecDdl(database, executor, dbname,
+            "CREATE MATERIALIZED VIEW open_orders AS SELECT id, total FROM orders WHERE status = 'open'");
+        await ExecDdl(database, executor, dbname,
+            "CREATE MATERIALIZED VIEW late_orders AS SELECT id, total FROM orders WHERE status = 'open' WITH NO DATA");
+
+        string lateId = database.Schema.Tables["late_orders"].Id!;
+
+        await ExecNonQuery(database, executor, dbname, "REFRESH MATERIALIZED VIEW open_orders");
+        await ExecNonQuery(database, executor, dbname, "REFRESH MATERIALIZED VIEW late_orders");
+        await ExecNonQuery(database, executor, dbname, "REFRESH MATERIALIZED VIEW late_orders");
+
+        await ExecDdl(database, executor, dbname, "CREATE TABLE scratch (id int64 PRIMARY KEY)");
+        await ExecDdl(database, executor, dbname, "DROP TABLE scratch");
+
+        List<QueryResultRow> orphans = await ExecQuery(database, executor, dbname, "SHOW ORPHAN TABLES");
+        CollectionAssert.AreEqual(
+            new[] { "scratch" },
+            orphans.Select(row => row.Row["former_name"].StrValue).ToArray(),
+            "only the table the user dropped is listed");
+
+        // The first contents of a view created WITH NO DATA live under the view's own id, which the
+        // view still uses, so they cannot be relinked; the refusal says why.
+        CamusDBException? refused = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await ExecDdl(database, executor, dbname, $"CREATE TABLE late_before RELINK TO '{lateId}'"));
+        Assert.AreEqual(CamusDBErrorCodes.OrphanNotFound, refused!.Code);
+        StringAssert.Contains("late_orders", refused.Message);
+    }
 }

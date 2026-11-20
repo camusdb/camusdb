@@ -8,6 +8,7 @@
 
 using System.Linq;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.Catalogs.Replication;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 
@@ -144,6 +145,35 @@ internal sealed class DdlForwardingCoordinator
             (leader, opId, ct) => schemaDdlForwarder!.ForwardCommentAsync(leader, ticket, opId, ct),
             () => ForwardedCommentApplied(database, ticket)
         );
+
+    /// <summary>
+    /// Sends a schema change this node built and checked to the schema leader, and waits until this
+    /// node has applied the version the leader committed it at. Answers null when this node should
+    /// propose it itself. See <see cref="SchemaChangePublisher.ForwardWhenNotLeader"/>.
+    /// </summary>
+    /// <remarks>
+    /// A refusal at the leader, a change committed but refused in log order included, is raised with
+    /// its own code before this node waits for anything.
+    /// </remarks>
+    internal Task<bool?> TryForwardSchemaEntryAsync(DatabaseDescriptor database, SchemaChangeLogEntry entry)
+    {
+        long committedVersion = long.MaxValue;
+        SchemaDeltaForward delta = new(database.Name, entry.Op, entry.Payload, entry.Ts);
+
+        return TryForwardDdlAsync(
+            database,
+            async (leader, opId, ct) =>
+            {
+                long? version = await schemaDdlForwarder!.ForwardSchemaDeltaAsync(leader, delta, opId, ct).ConfigureAwait(false);
+                if (version is null)
+                    return null;
+
+                committedVersion = version.Value;
+                return true;
+            },
+            () => database.Schema.SchemaVersion >= committedVersion
+        );
+    }
 
     /// <summary>
     /// Forwards one DDL operation to the schema leader and waits for it to become visible locally.

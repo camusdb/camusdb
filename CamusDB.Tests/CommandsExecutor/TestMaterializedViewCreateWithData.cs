@@ -13,7 +13,9 @@ using NUnit.Framework;
 
 using CamusDB.Core;
 using CamusDB.Core.Catalogs;
+using CamusDB.Core.Catalogs.Apply;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.Catalogs.Replication;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Controllers.DDL;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -229,5 +231,57 @@ public sealed class TestMaterializedViewCreateWithData : SharedNodeBaseTest
         await reopened.Transactions.CommitAsync(tx);
         await ExecDdl(reopened, executor, dbname, "DROP MATERIALIZED VIEW totals");
         AssertNothingLeft(reopened, "totals");
+    }
+
+    /// <summary>
+    /// The adopting create used the plain CreateTable op with a new payload field. A node on an older
+    /// build ignored the field and created the view populated over an empty key-space. The create now
+    /// has its own op, which an older build refuses loudly instead of applying differently.
+    /// </summary>
+    [Test]
+    public async Task AnAdoptingCreateHasItsOwnOpAndAnUnknownOpStopsTheApply()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        ColumnInfo[] columns = [new ColumnInfo("id", ColumnType.Integer64, notNull: true)];
+        KvTransaction tx = await database.Transactions.BeginAsync();
+
+        try
+        {
+            SchemaChangeLogEntry plain = SchemaChangeEntryFactory.CreateTableEntry(
+                database, new CreateTableTicket(dbname, "plain", columns, [], ifNotExists: false), tx, "P1");
+            Assert.AreEqual(SchemaOp.CreateTable, plain.Op);
+
+            SchemaChangeLogEntry adopting = SchemaChangeEntryFactory.CreateTableEntry(
+                database,
+                new CreateTableTicket(dbname, "adopting", columns, [], ifNotExists: false,
+                    kind: RelationKind.MaterializedView,
+                    viewDefinition: new ViewDefinition { Sql = "SELECT 1 AS id", Columns = [] })
+                {
+                    AdoptStagingTableId = "S1",
+                },
+                tx,
+                "M1");
+            Assert.AreEqual(SchemaOp.CreatePopulatedMaterializedView, adopting.Op);
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(tx);
+        }
+
+        // An op this build does not know is not turned into a refusal that would let the log move on.
+        SchemaChangeLogEntry unknown = new()
+        {
+            Database = database.Id,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = (SchemaOp)999,
+            Payload = [],
+        };
+
+        Schema clone = SchemaReplicator.CloneSchema(database.Schema);
+        CamusDBException? stopped = Assert.Throws<CamusDBException>(() => SchemaDeltaApplier.ApplyOrRefuse(clone, database, unknown));
+        Assert.That(stopped!.Message, Does.Contain("Unknown schema operation"));
+        Assert.IsNotInstanceOf<SchemaDeltaRefusedException>(stopped);
     }
 }

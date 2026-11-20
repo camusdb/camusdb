@@ -1924,6 +1924,11 @@ internal sealed class SchemaQuerier
     {
         foreach (OrphanTableRecord orphan in await catalogs.LoadTableOrphansAsync(database).ConfigureAwait(false))
         {
+            // A materialized view's replaced contents are derived data that a refresh rebuilds, and
+            // their former name is the live view's, so they are not offered as a dropped table.
+            if (orphan.ReplacedMaterializedViewContents)
+                continue;
+
             string kind = orphan.Kind == OrphanKind.RetiredContents ? "retired contents" : "dropped table";
             yield return OrphanRow(orphan.TableId, kind, orphan.FormerName, orphan.DroppedAt);
         }

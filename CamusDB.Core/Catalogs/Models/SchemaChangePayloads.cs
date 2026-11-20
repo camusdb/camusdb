@@ -452,6 +452,14 @@ public sealed class SchemaDropTablePayload
     /// and for old replayed entries) the drop is immediate and no orphan record is written.
     /// </summary>
     public bool Deferred { get; set; }
+
+    /// <summary>
+    /// The id of the relation the proposer dropped. The apply refuses the entry when
+    /// <see cref="TableName"/> names a relation with a different id: a rename and a create committed
+    /// between the proposer's checks and this entry would otherwise make it drop the newcomer. Null on
+    /// entries written before the field existed, which drop by name.
+    /// </summary>
+    public string? ExpectedTableId { get; set; }
 }
 
 /// <summary>

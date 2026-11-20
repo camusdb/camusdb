@@ -61,14 +61,13 @@ internal sealed class ViewCreator
                 CamusDBErrorCodes.TableAlreadyExists,
                 $"'{viewName}' is a table, not a view; CREATE OR REPLACE VIEW cannot replace it");
 
-        // The view a replace starts from, read once. Its owner, its shape and the cycle check below are
-        // all computed from this one snapshot, and its generation travels with the replace: if another
-        // statement changes the view before the replace lands, the replace is refused rather than
-        // published over a definition it was never checked against.
-        ViewSchema? existing = replace && database.Schema.Views.TryGetValue(viewName, out ViewSchema? current)
-            && current.Definition is not null
-                ? current
-                : null;
+        // The view a replace starts from, copied under the schema lock. The owner, the authorization,
+        // the shape check and the cycle check below all read this copy, and its generation travels
+        // with the replace, so a change another statement commits after the copy makes the apply
+        // refuse the replace.
+        ViewSchema? existing = replace
+            ? await CaptureViewAsync(database, viewName).ConfigureAwait(false)
+            : null;
 
         // A stored body is evaluated once per reader, an unbounded number of times, so a sequence
         // call in one cannot be counted before it runs — and the count is what lets the engine
@@ -85,7 +84,11 @@ internal sealed class ViewCreator
         ViewDefinitionLimits.Require(database.Options, viewName, definition);
 
         // A check option is a promise about writes through the view, so, as in PostgreSQL, only a view
-        // that can be written through may make it. Refused here rather than at the first write.
+        // that can be written through may make it. This checks the view's own body only, as
+        // PostgreSQL does: when the body reads another view, only that view's column names are read
+        // here, and an inner view that cannot be written through is refused at the first write. A
+        // check of the whole chain here could not hold anyway, since a later replace of the inner view
+        // can make it unwritable.
         if (checkOption != CheckOptionKind.None)
         {
             try
@@ -208,8 +211,19 @@ internal sealed class ViewCreator
             // so each one is checked on its own, and all of them before any goes. A materialized view
             // that reads this view is a dependent too, and is dropped by its own path.
             if (cascade)
-                await DependentRelationDropper.DropTransitiveDependentsAsync(
-                    executor, catalogs, await registryTask.ConfigureAwait(false), database, viewId, logger).ConfigureAwait(false);
+            {
+                List<DependentRelationDropper.Dependent> plan = DependentRelationDropper.PlanTransitiveDependents(database, viewId);
+
+                // Every materialized view the cascade reaches is fenced before anything is dropped,
+                // so a running refresh of one of them refuses the statement while the cascade is whole.
+                RefreshFenceSet fences = await RefreshFenceSet.AcquireAsync(
+                    await registryTask.ConfigureAwait(false),
+                    database,
+                    DependentRelationDropper.MaterializedViewsIn(plan)).ConfigureAwait(false);
+
+                await using (fences.ConfigureAwait(false))
+                    await DependentRelationDropper.DropPlannedAsync(executor, catalogs, database, plan, logger).ConfigureAwait(false);
+            }
 
             if (BeforeProposeForTesting is { } beforeDrop)
                 await beforeDrop(name).ConfigureAwait(false);
@@ -269,6 +283,39 @@ internal sealed class ViewCreator
             CamusDBErrorCodes.SequenceCallNotAllowedHere,
             $"A sequence function cannot be used in {what}: the definition is stored and evaluated " +
             "once per reader, so the engine cannot bound how many values it would draw.");
+    }
+
+    /// <summary>
+    /// Copies a view's id, name, generation, definition and comment in one step under the schema
+    /// lock. Returns null when no view has the name.
+    /// </summary>
+    /// <remarks>
+    /// Schema apply changes a live <see cref="ViewSchema"/> in place under the same lock. Reading its
+    /// fields one at a time without the lock can mix two versions of the view, for example an owner
+    /// read before an <c>ALTER VIEW … OWNER TO</c> applied and a generation read after it. A replace
+    /// built from that mix would pass the generation check and put the old owner back.
+    /// </remarks>
+    private static async Task<ViewSchema?> CaptureViewAsync(DatabaseDescriptor database, string viewName)
+    {
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+        try
+        {
+            if (!database.Schema.Views.TryGetValue(viewName, out ViewSchema? live) || live.Definition is null)
+                return null;
+
+            return new ViewSchema
+            {
+                Id = live.Id,
+                Name = live.Name,
+                Definition = live.Definition.Copy(),
+                Generation = live.Generation,
+                Comment = live.Comment,
+            };
+        }
+        finally
+        {
+            database.Schema.ReleaseLock();
+        }
     }
 
     private static CheckOptionKind ParseCheckOption(string? text) => text switch

@@ -22,6 +22,8 @@ using Kahuna;
 
 using CamusDB.Core;
 using CamusDB.Core.Catalogs;
+using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.Catalogs.Replication;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -586,6 +588,67 @@ public sealed class TestSchemaDdlForwardController
     /// and a materialized view is refused unless the request says the caller is DROP MATERIALIZED VIEW.
     /// Before the rules lived in the shared path, the forward skipped both.
     /// </summary>
+    /// <summary>
+    /// A schema change a follower built and forwarded: the leader wraps the payload at its own
+    /// version, publishes it and answers with that version. A payload whose precondition no longer
+    /// holds is refused with its own code, and a node that does not lead answers not-leader.
+    /// </summary>
+    [Test]
+    public async Task ForwardSchemaDelta_AsLeader_PublishesTheChangeOrRefusesIt()
+    {
+        string db = await CreateTestDatabaseAsync();
+        try
+        {
+            DatabaseDescriptor descriptor = await executor!.OpenDatabase(db);
+
+            foreach (string sql in new[]
+            {
+                "CREATE TABLE cities (id int64 PRIMARY KEY NOT NULL, name string NOT NULL)",
+                "CREATE VIEW city_list AS SELECT id, name FROM cities",
+            })
+            {
+                KvTransaction tx = await descriptor.Transactions.BeginAsync();
+                await executor.ExecuteDDLSQL(new ExecuteSQLTicket(tx, db, sql, null));
+                await descriptor.Transactions.CommitAsync(tx);
+            }
+
+            string viewId = descriptor.Schema.Views["city_list"].Id!;
+
+            static string Body(string db, string expectedViewId) =>
+                JsonSerializer.Serialize(new ForwardSchemaDeltaRequest
+                {
+                    OperationId = Guid.NewGuid().ToString("N"),
+                    DatabaseName = db,
+                    Op = (int)SchemaOp.DropView,
+                    Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaDropViewPayload
+                    {
+                        ViewName = "city_list",
+                        ExpectedViewId = expectedViewId,
+                    }),
+                    TsNode = 1,
+                    TsPhysical = 10,
+                    TsCounter = 0,
+                }, JsonOpts);
+
+            SchemaDdlForwardResponse? notLeader = ExtractResponse(await BuildController(Body(db, viewId), clusterNode: null).ForwardSchemaDelta());
+            Assert.AreEqual("not-leader", notLeader!.Status);
+
+            SchemaDdlForwardResponse? stale = ExtractResponse(await BuildController(Body(db, "not-its-id"), clusterNode: node).ForwardSchemaDelta());
+            Assert.AreEqual("failed", stale!.Status);
+            Assert.AreEqual(CamusDBErrorCodes.ConcurrentSchemaChange, stale.Code);
+            Assert.IsTrue(descriptor.Schema.Views.ContainsKey("city_list"));
+
+            SchemaDdlForwardResponse? dropped = ExtractResponse(await BuildController(Body(db, viewId), clusterNode: node).ForwardSchemaDelta());
+            Assert.AreEqual("ok", dropped!.Status);
+            Assert.AreEqual(descriptor.Schema.SchemaVersion, dropped.Version, "the answer carries the version the change was committed at");
+            Assert.IsFalse(descriptor.Schema.Views.ContainsKey("city_list"));
+        }
+        finally
+        {
+            await DropTestDatabaseAsync(db);
+        }
+    }
+
     [Test]
     public async Task ForwardDropTable_AsLeader_RefusesATableAViewReadsAndAMaterializedView()
     {
@@ -633,9 +696,17 @@ public sealed class TestSchemaDdlForwardController
             Assert.AreEqual(indexes, descriptor.Schema.Tables["cities"].Indexes!.Count, "A refused drop must not have dropped any index");
             Assert.IsTrue(descriptor.Schema.Tables.ContainsKey("city_names"));
 
-            // The request DROP MATERIALIZED VIEW forwards carries the flag, and goes through.
+            // A forwarded drop whose expected id the name no longer has is refused on the leader.
+            SchemaDdlForwardResponse? staleId = ExtractResponse(await BuildController(
+                DropBody(db, "city_names", force: false, allowMaterializedView: true, expectedTableId: "not-its-id"), clusterNode: node).ForwardDropTable());
+            Assert.AreEqual("failed", staleId!.Status);
+            Assert.AreEqual(CamusDBErrorCodes.ConcurrentSchemaChange, staleId.Code);
+            Assert.IsTrue(descriptor.Schema.Tables.ContainsKey("city_names"));
+
+            // The request DROP MATERIALIZED VIEW forwards carries the flag and the id, and goes through.
             SchemaDdlForwardResponse? dropAsMatView = ExtractResponse(await BuildController(
-                DropBody(db, "city_names", force: false, allowMaterializedView: true), clusterNode: node).ForwardDropTable());
+                DropBody(db, "city_names", force: false, allowMaterializedView: true,
+                    expectedTableId: descriptor.Schema.Tables["city_names"].Id), clusterNode: node).ForwardDropTable());
             Assert.AreEqual("ok", dropAsMatView!.Status);
             Assert.IsTrue(dropAsMatView.Applied);
             Assert.IsFalse(descriptor.Schema.Tables.ContainsKey("city_names"));
@@ -645,7 +716,7 @@ public sealed class TestSchemaDdlForwardController
             await DropTestDatabaseAsync(db);
         }
 
-        static string DropBody(string db, string table, bool force, bool allowMaterializedView = false) =>
+        static string DropBody(string db, string table, bool force, bool allowMaterializedView = false, string? expectedTableId = null) =>
             JsonSerializer.Serialize(new ForwardDropTableRequest
             {
                 OperationId = Guid.NewGuid().ToString("N"),
@@ -653,6 +724,7 @@ public sealed class TestSchemaDdlForwardController
                 TableName = table,
                 Force = force,
                 AllowMaterializedView = allowMaterializedView,
+                ExpectedTableId = expectedTableId,
             }, JsonOpts);
     }
 

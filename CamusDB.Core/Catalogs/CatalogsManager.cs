@@ -272,6 +272,60 @@ public sealed class CatalogsManager
         => await views.CreateViewAsync(database, viewId, viewName, definition, comment, replace, expectedGeneration).ConfigureAwait(false);
 
     /// <summary>
+    /// Sends the schema changes this node builds to the schema leader when this node does not lead;
+    /// see <see cref="SchemaChangePublisher.ForwardWhenNotLeader"/>. Called once at startup in cluster
+    /// mode.
+    /// </summary>
+    internal void SetSchemaChangeForwarder(Func<DatabaseDescriptor, SchemaChangeLogEntry, Task<bool?>> forward)
+        => publisher.ForwardWhenNotLeader = forward;
+
+    /// <summary>
+    /// Publishes a schema change a follower built and forwarded, as the schema leader. Returns the
+    /// version it was committed at.
+    /// </summary>
+    /// <remarks>
+    /// The payload is wrapped at this node's version and checked again under the DDL gate and the
+    /// schema lock, as a local proposal is, then published. The follower checked it against its own
+    /// schema, which can be behind; each payload carries the preconditions its apply checks, so a
+    /// stale one is refused here or in log order. A refusal is raised to the follower with its code.
+    /// </remarks>
+    internal async Task<long> PublishForwardedSchemaDeltaAsync(DatabaseDescriptor database, SchemaOp op, byte[] payload, HLCTimestamp ts)
+    {
+        await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            SchemaChangeLogEntry entry;
+
+            await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+            try
+            {
+                entry = new SchemaChangeLogEntry
+                {
+                    Ts = ts,
+                    Database = database.Id,
+                    FromVersion = database.Schema.SchemaVersion,
+                    ToVersion = database.Schema.SchemaVersion + 1,
+                    Op = op,
+                    Payload = payload,
+                };
+
+                SchemaDeltaApplier.ValidateSchemaDelta(database, entry);
+            }
+            finally
+            {
+                database.Schema.ReleaseLock();
+            }
+
+            await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+            return entry.ToVersion;
+        }
+        finally
+        {
+            database.SchemaDdlSemaphore.Release();
+        }
+    }
+
+    /// <summary>
     /// Test-only. Commits a view creation through the schema log without taking this node's DDL gate,
     /// the way a delta proposed on another node arrives while a DDL here holds the gate. Production
     /// code creates views through <see cref="CreateViewAsync"/>, which takes the gate.

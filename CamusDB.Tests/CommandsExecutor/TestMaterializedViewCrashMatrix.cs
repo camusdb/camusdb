@@ -175,6 +175,53 @@ internal sealed class TestMaterializedViewCrashMatrix : SharedNodeBaseTest
     }
 
     /// <summary>
+    /// A failure after the publish, such as the job-record delete failing, used to run the failure path:
+    /// the statement reported an error for contents that were already published, and a retried
+    /// <c>CREATE MATERIALIZED VIEW</c> then failed on the name the view held. Both statements now report
+    /// success, and the sweep removes the record they left.
+    /// </summary>
+    [Test]
+    public async Task AFailureAfterThePublishReportsSuccessAndLeavesTheRecordToTheSweep()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await Seed();
+        CatalogsManager catalogs = executor.GetCatalogsManagerForTesting();
+
+        int faults = 0;
+        FaultInjectionForTesting = at =>
+        {
+            if (at == FaultPoint.AfterPublish)
+            {
+                faults++;
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "the record delete fails");
+            }
+
+            return Task.CompletedTask;
+        };
+
+        await NonQuery(database, executor, dbname, "REFRESH MATERIALIZED VIEW open_orders");
+        await ExecDdl(database, executor, dbname,
+            "CREATE MATERIALIZED VIEW closed_orders AS SELECT id FROM orders WHERE status = 'closed'");
+
+        FaultInjectionForTesting = null;
+        Assert.AreEqual(2, faults, "the fault ran once for each statement");
+
+        Assert.AreEqual(NewContents, await Ids(database, executor, dbname), "the refresh published");
+        Assert.IsTrue(database.Schema.Tables["closed_orders"].IsPopulated, "the create published");
+
+        string refreshedId = database.Schema.Tables["open_orders"].Id!;
+        string createdId = database.Schema.Tables["closed_orders"].Id!;
+        Assert.IsNotNull(await catalogs.TryGetRefreshJobAsync(database, refreshedId));
+        Assert.IsNotNull(await catalogs.TryGetRefreshJobAsync(database, createdId));
+
+        Assert.AreEqual(2, await executor.ReclaimAbandonedRefreshesForTesting(dbname));
+
+        Assert.IsNull(await catalogs.TryGetRefreshJobAsync(database, refreshedId), "the sweep removes the records");
+        Assert.IsNull(await catalogs.TryGetRefreshJobAsync(database, createdId));
+        Assert.AreEqual(NewContents, await Ids(database, executor, dbname), "and leaves the published contents");
+        CollectionAssert.IsEmpty(database.Schema.Tables.Keys.Where(MaterializedViewNaming.IsStagingRelation).ToList());
+    }
+
+    /// <summary>
     /// The swap entry delivered again — as a Raft re-delivery or a WAL replay would — changes nothing: the
     /// view keeps the storage it adopted, and the relation it adopted from does not come back.
     /// </summary>

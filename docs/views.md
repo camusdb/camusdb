@@ -406,8 +406,13 @@ A row whose condition is NULL is not shown by the view, so it fails too — unli
 constraint, where NULL passes. `WITH CASCADED CHECK OPTION` (the meaning of a bare `WITH CHECK
 OPTION`) checks this view's condition and the condition of every view beneath it.
 `WITH LOCAL CHECK OPTION` checks this view's condition, and beneath it only views that have a check
-option of their own. Only a view that can be written through may have a check option; `CREATE VIEW`
-refuses it on any other.
+option of their own.
+
+`CREATE VIEW` refuses a check option on a view that cannot be written through. It checks the view's
+own body only, as PostgreSQL does. When the body reads another view, that view's body is checked at
+the first write: a check-option view over an aggregate view is created, and every write through it
+then fails with `CADB0525`. A later `CREATE OR REPLACE VIEW` of the inner view can have the same
+effect.
 
 ### Privileges
 

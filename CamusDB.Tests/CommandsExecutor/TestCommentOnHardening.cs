@@ -502,6 +502,46 @@ internal sealed class TestCommentOnHardening : BaseTest
         Assert.AreEqual(CamusDBErrorCodes.CommentTooLong, ex.Code);
     }
 
+    /// <summary>
+    /// The length error names the object kind and name for every <c>COMMENT ON</c> target. The
+    /// <c>COMMENT ON</c> path used to say "Comment comment is N characters", and <c>COMMENT ON VIEW</c>
+    /// had no bound at all.
+    /// </summary>
+    [Test]
+    public async Task CommentOnLengthErrorsNameTheObject()
+    {
+        // A named database, so COMMENT ON DATABASE can spell its name.
+        (string dbname, CommandExecutor executor) = await CreateNamedDatabase();
+        await ExecuteDdl(executor, dbname,
+            "CREATE TABLE users (id oid PRIMARY KEY NOT NULL, email string NULL, KEY email_idx (email))");
+        await ExecuteDdl(executor, dbname, "CREATE VIEW user_emails AS SELECT id, email FROM users");
+        await ExecuteDdl(executor, dbname, "CREATE MATERIALIZED VIEW user_count AS SELECT COUNT(*) AS n FROM users");
+        await ExecuteDdl(executor, dbname, "CREATE SEQUENCE user_no");
+
+        (string Target, string Subject)[] cases =
+        [
+            ("TABLE users", "Table 'users'"),
+            ("COLUMN users.email", "Column 'users.email'"),
+            ("INDEX users.email_idx", "Index 'users.email_idx'"),
+            ($"DATABASE {dbname}", $"Database '{dbname}'"),
+            ("VIEW user_emails", "View 'user_emails'"),
+            ("MATERIALIZED VIEW user_count", "Materialized view 'user_count'"),
+            ("SEQUENCE user_no", "Sequence 'user_no'"),
+        ];
+
+        foreach ((string target, string subject) in cases)
+        {
+            CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+                await ExecuteDdl(executor, dbname, $"COMMENT ON {target} IS '{TooLong}'"))!;
+
+            Assert.AreEqual(CamusDBErrorCodes.CommentTooLong, ex.Code, target);
+            Assert.AreEqual(
+                $"{subject} comment is {TooLong.Length} characters, exceeding the maximum of {CamusDBConstants.MaxCommentLength}",
+                ex.Message,
+                target);
+        }
+    }
+
     [Test]
     public async Task InlineCommentsAtExactlyTheLimitAreAccepted()
     {

@@ -95,19 +95,9 @@ internal sealed class TableSettingsService
             // separately where the two could disagree.
             ApplyDerivedTtlMarker(settings, merged);
 
-            // Settings DDL replicates through the schema log, which only the schema leader may propose.
-            // There is no HTTP forwarder for it yet, so a non-leader rejects with a clear error and the
-            // client retargets the leader (the in-process path issues it on the leader). A standalone
-            // node is the only member of its own schema group, so the check is a cluster concern only.
-            if (context.IsClusterMode &&
-                !await database.Kahuna.AmISchemaLeaderAsync(database.Id, CancellationToken.None).ConfigureAwait(false))
-            {
-                string leader = await database.Kahuna.WaitForSchemaLeaderAsync(database.Id, CancellationToken.None).ConfigureAwait(false);
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInternalOperation,
-                    $"ALTER TABLE SET must be executed by schema leader '{leader}' for database '{database.Name}'");
-            }
-
+            // Settings DDL replicates through the schema log. On a node that does not lead it, the
+            // change is sent to the schema leader, which proposes it; see
+            // SchemaChangePublisher.ForwardWhenNotLeader.
             await catalogs.ReplicateSetTableSettingsAsync(database, ticket.TableName, settings).ConfigureAwait(false);
 
             tableId = table.Id;
@@ -153,15 +143,7 @@ internal sealed class TableSettingsService
             if (keys.Contains(CamusDB.Core.Catalogs.Models.TableSettings.TtlExpirationExpressionKey))
                 keys.Add(CamusDB.Core.Catalogs.Models.TableSettings.TtlKey);
 
-            if (context.IsClusterMode &&
-                !await database.Kahuna.AmISchemaLeaderAsync(database.Id, CancellationToken.None).ConfigureAwait(false))
-            {
-                string leader = await database.Kahuna.WaitForSchemaLeaderAsync(database.Id, CancellationToken.None).ConfigureAwait(false);
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInternalOperation,
-                    $"ALTER TABLE RESET must be executed by schema leader '{leader}' for database '{database.Name}'");
-            }
-
+            // Sent to the schema leader from a node that does not lead, as the SET path is.
             await catalogs.ReplicateSetTableSettingsAsync(
                 database, ticket.TableName, new Dictionary<string, string>(StringComparer.Ordinal), keys).ConfigureAwait(false);
         }

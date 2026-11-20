@@ -44,4 +44,33 @@ public interface ISchemaDdlForwarder
     /// here — it writes the cross-database registry directly and needs no schema leader.
     /// </summary>
     Task<bool?> ForwardCommentAsync(string leader, CommentTicket ticket, string operationId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Forwards a schema change a follower built and checked itself: its op, payload and timestamp.
+    /// The leader wraps the payload at its own schema version, checks it again under its DDL gate and
+    /// schema lock, and publishes it. Returns the version the change was committed at, or null when
+    /// the target does not lead the database's schema log or could not be reached.
+    /// </summary>
+    /// <remarks>
+    /// Used for the changes that have no statement-level forward of their own: view DDL, the
+    /// relations a materialized view is created with, a refresh's publish, and table settings. Each
+    /// payload carries the preconditions its apply checks, so a payload built against an older schema
+    /// is refused in log order rather than applied over a newer one. A forwarder that does not support
+    /// it refuses with an error that names the leader.
+    /// </remarks>
+    Task<long?> ForwardSchemaDeltaAsync(string leader, SchemaDeltaForward delta, string operationId, CancellationToken cancellationToken)
+        => throw new CamusDBException(
+            CamusDBErrorCodes.InvalidInternalOperation,
+            $"This node cannot forward a '{delta.Op}' schema change to the schema leader '{leader}' of database " +
+            $"'{delta.DatabaseName}'; run the statement on the schema leader");
 }
+
+/// <summary>
+/// One schema change forwarded to the schema leader, as <see cref="ISchemaDdlForwarder.ForwardSchemaDeltaAsync"/>
+/// carries it. <paramref name="Payload"/> is the encoded payload exactly as the follower built it.
+/// </summary>
+public sealed record SchemaDeltaForward(
+    string DatabaseName,
+    Catalogs.Models.SchemaOp Op,
+    byte[] Payload,
+    Kommander.Time.HLCTimestamp Ts);

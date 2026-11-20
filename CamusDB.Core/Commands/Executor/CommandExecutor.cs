@@ -720,6 +720,14 @@ public sealed class CommandExecutor : IAsyncDisposable
             // checkpoint the leader persisted before answering. No cooldown: this probe runs once per
             // forwarded statement, not per miss.
             reconcileSchema: database => catalogs.ReconcileSchemaFreshnessAsync(database, cooldownMs: 0));
+
+        // A change built by code with no statement-level forward (view DDL, a materialized view's
+        // relations and refresh, table settings) goes to the schema leader through the same retries.
+        if (isClusterMode)
+        {
+            Controllers.DDL.DdlForwardingCoordinator forwarding = ddlForwarding;
+            catalogs.SetSchemaChangeForwarder((database, entry) => forwarding.TryForwardSchemaEntryAsync(database, entry));
+        }
         sequenceDdl = new Controllers.DDL.SequenceDdlService(executorContext, catalogs, sequenceAllocator);
         schemaDdl = new Controllers.DDL.SchemaDdlService(
             executorContext,
@@ -1507,6 +1515,22 @@ public sealed class CommandExecutor : IAsyncDisposable
     public Task<bool> AlterIndex(AlterIndexTicket ticket) => schemaDdl.AlterIndex(ticket);
 
     public Task<bool> DropTable(DropTableTicket ticket) => schemaDdl.DropTable(ticket);
+
+    /// <summary>
+    /// Publishes a schema change a follower forwarded, when this node leads the database's schema log.
+    /// Returns the version it was committed at, or null when this node does not lead, so the follower
+    /// tries the leader again. See <see cref="ISchemaDdlForwarder.ForwardSchemaDeltaAsync"/>.
+    /// </summary>
+    public async Task<long?> ApplyForwardedSchemaDeltaAsync(SchemaDeltaForward delta)
+    {
+        DatabaseDescriptor database = await OpenDatabase(delta.DatabaseName).ConfigureAwait(false);
+        using DatabaseUseHandle _ = database.Use();
+
+        if (!await database.Kahuna.AmISchemaLeaderAsync(database.Id, CancellationToken.None).ConfigureAwait(false))
+            return null;
+
+        return await catalogs.PublishForwardedSchemaDeltaAsync(database, delta.Op, delta.Payload, delta.Ts).ConfigureAwait(false);
+    }
 
     /// <summary>
     /// Empties a base table by replacing the key-space its rows live in. The relation keeps its

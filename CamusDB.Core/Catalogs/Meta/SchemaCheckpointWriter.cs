@@ -233,7 +233,7 @@ internal sealed class SchemaCheckpointWriter
                 // A materialized view created WITH DATA adopted its staging relation in this entry. The
                 // staging relation is gone from the schema; its meta key goes in the same transaction, or a
                 // reopen would load a relation nothing can reach that owns the view's key-space.
-                if (entry.Op == SchemaOp.CreateTable
+                if (entry.Op is SchemaOp.CreateTable or SchemaOp.CreatePopulatedMaterializedView
                     && SchemaDeltaApplier.DecodePayload<SchemaCreateTablePayload>(entry).AdoptStagingTableId is { Length: > 0 } adopted)
                     await MetaKeyWriter.DeleteMetaKey(database.Kahuna.Kahuna, tx, MetaKeys.TableKey(database.Id, adopted)).ConfigureAwait(false);
 
@@ -326,7 +326,8 @@ internal sealed class SchemaCheckpointWriter
 
     private static string GetEntryTableName(SchemaChangeLogEntry entry) => entry.Op switch
     {
-        SchemaOp.CreateTable => SchemaDeltaApplier.DecodePayload<SchemaCreateTablePayload>(entry).TableName,
+        SchemaOp.CreateTable or SchemaOp.CreatePopulatedMaterializedView
+            => SchemaDeltaApplier.DecodePayload<SchemaCreateTablePayload>(entry).TableName,
         SchemaOp.RelinkTable => SchemaDeltaApplier.DecodePayload<SchemaRelinkTablePayload>(entry).TableName,
         SchemaOp.AddColumn or SchemaOp.DropColumn => SchemaDeltaApplier.DecodePayload<SchemaAlterColumnPayload>(entry).TableName,
         SchemaOp.SetElementState => SchemaDeltaApplier.DecodePayload<SchemaElementStatePayload>(entry).TableName,

@@ -24,6 +24,7 @@ using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Storage.Kv;
+using Kommander.Time;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -348,6 +349,49 @@ public sealed class TestHttpSchemaDdlForwarder
         Assert.That(handler.LastRequest!.RequestUri!.ToString(), Does.EndWith("/internal/schema-ddl/drop-table"));
     }
 
+    [Test]
+    public async Task ForwardSchemaDelta_PostsTheChangeAndReturnsTheCommittedVersion()
+    {
+        FakeMessageHandler handler = new(new StringContent(
+            JsonSerializer.Serialize(new SchemaDdlForwardResponse { Status = "ok", Applied = true, Version = 42 }, JsonOptions),
+            Encoding.UTF8, "application/json"));
+        HttpSchemaDdlForwarder forwarder = BuildForwarder(handler);
+
+        SchemaDeltaForward delta = new("mydb", SchemaOp.DropView, [1, 2, 3], new HLCTimestamp(1, 10, 2));
+        long? version = await forwarder.ForwardSchemaDeltaAsync("leader:7070", delta, StableOperationId, CancellationToken.None);
+
+        Assert.AreEqual(42, version);
+        Assert.That(handler.LastRequest!.RequestUri!.ToString(), Does.EndWith("/internal/schema-ddl/schema-delta"));
+
+        ForwardSchemaDeltaRequest sent = JsonSerializer.Deserialize<ForwardSchemaDeltaRequest>(handler.LastBody!, JsonOptions)!;
+        Assert.AreEqual("mydb", sent.DatabaseName);
+        Assert.AreEqual((int)SchemaOp.DropView, sent.Op);
+        CollectionAssert.AreEqual(new byte[] { 1, 2, 3 }, sent.Payload);
+        Assert.AreEqual((1, 10L, 2u), (sent.TsNode, sent.TsPhysical, sent.TsCounter));
+    }
+
+    [Test]
+    public async Task ForwardSchemaDelta_ReturnsNullWhenTheTargetDoesNotLead()
+    {
+        FakeMessageHandler handler = new(NotLeaderResponse());
+        HttpSchemaDdlForwarder forwarder = BuildForwarder(handler);
+
+        SchemaDeltaForward delta = new("mydb", SchemaOp.DropView, [1], new HLCTimestamp(1, 10, 2));
+        Assert.IsNull(await forwarder.ForwardSchemaDeltaAsync("leader:7070", delta, StableOperationId, CancellationToken.None));
+    }
+
+    [Test]
+    public async Task ForwardDropTable_CarriesTheExpectedTableId()
+    {
+        FakeMessageHandler handler = new(OkResponse(true));
+        HttpSchemaDdlForwarder forwarder = BuildForwarder(handler);
+
+        DropTableTicket ticket = new("mydb", "robots", ifExists: true, allowMaterializedView: true, expectedTableId: "A7");
+        await forwarder.ForwardDropTableAsync("leader:7070", ticket, StableOperationId, CancellationToken.None);
+
+        Assert.That(handler.LastBody, Does.Contain("xpectedTableId\":\"A7\""));
+    }
+
     // ── Transport-failure → null ─────────────────────────────────────────
 
     [Test]
@@ -425,16 +469,19 @@ public sealed class TestHttpSchemaDdlForwarder
 
         public HttpRequestMessage? LastRequest { get; private set; }
 
+        public string? LastBody { get; private set; }
+
         public FakeMessageHandler(HttpContent content, HttpStatusCode statusCode = HttpStatusCode.OK)
         {
             this.responseContent = content;
             this.statusCode = statusCode;
         }
 
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             LastRequest = request;
-            return Task.FromResult(new HttpResponseMessage(statusCode) { Content = responseContent });
+            LastBody = request.Content is null ? null : await request.Content.ReadAsStringAsync(cancellationToken);
+            return new HttpResponseMessage(statusCode) { Content = responseContent };
         }
     }
 

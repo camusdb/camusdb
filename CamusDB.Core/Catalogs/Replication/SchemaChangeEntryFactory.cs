@@ -60,7 +60,7 @@ internal static class SchemaChangeEntryFactory
         SchemaColumnPayload[] columns = [.. ticket.Columns.Select(column =>
         {
             SchemaColumnPayload payload = SchemaColumnPayload.FromColumnInfo(column);
-            payload.Id = ObjectIdGenerator.Generate().ToString();
+            payload.Id = string.IsNullOrEmpty(column.PreservedId) ? ObjectIdGenerator.Generate().ToString() : column.PreservedId;
             return payload;
         })];
 
@@ -85,7 +85,9 @@ internal static class SchemaChangeEntryFactory
             Database = database.Id,
             FromVersion = database.Schema.SchemaVersion,
             ToVersion = database.Schema.SchemaVersion + 1,
-            Op = SchemaOp.CreateTable,
+            // An adopting create has its own op, so an older node that cannot apply it stops at the
+            // entry instead of creating the view empty; see SchemaOp.CreatePopulatedMaterializedView.
+            Op = string.IsNullOrEmpty(ticket.AdoptStagingTableId) ? SchemaOp.CreateTable : SchemaOp.CreatePopulatedMaterializedView,
             Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaCreateTablePayload
             {
                 TableId = tableId,
@@ -157,7 +159,8 @@ internal static class SchemaChangeEntryFactory
         };
     }
 
-    internal static SchemaChangeLogEntry DropTableEntry(DatabaseDescriptor database, string tableName, KvTransaction tx, bool deferred)
+    internal static SchemaChangeLogEntry DropTableEntry(
+        DatabaseDescriptor database, string tableName, string tableId, KvTransaction tx, bool deferred)
     {
         return new()
         {
@@ -166,7 +169,12 @@ internal static class SchemaChangeEntryFactory
             FromVersion = database.Schema.SchemaVersion,
             ToVersion = database.Schema.SchemaVersion + 1,
             Op = SchemaOp.DropTable,
-            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaDropTablePayload { TableName = tableName, Deferred = deferred })
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaDropTablePayload
+            {
+                TableName = tableName,
+                Deferred = deferred,
+                ExpectedTableId = tableId,
+            })
         };
     }
 

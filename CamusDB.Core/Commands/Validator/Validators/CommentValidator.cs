@@ -34,6 +34,15 @@ internal sealed class CommentValidator : ValidatorBase
                 $"{(ticket.Target == CommentTarget.Column ? "Column" : "Index")} name is required");
 
         // Null is legal — it is how a comment is removed — so only a present value is checked.
-        ValidateCommentLength(ticket.Comment, "Comment");
+        ValidateCommentLength(ticket.Comment, Subject(ticket));
     }
+
+    /// <summary>The object the comment is for, as the length error names it.</summary>
+    private static string Subject(CommentTicket ticket) => ticket.Target switch
+    {
+        CommentTarget.Database => $"Database '{ticket.DatabaseName}'",
+        CommentTarget.Column => $"Column '{ticket.TableName}.{ticket.ElementName}'",
+        CommentTarget.Index => $"Index '{ticket.TableName}.{ticket.ElementName}'",
+        _ => $"Table '{ticket.TableName}'",
+    };
 }

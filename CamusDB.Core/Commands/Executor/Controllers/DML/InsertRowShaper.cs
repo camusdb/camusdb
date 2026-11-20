@@ -30,8 +30,8 @@ internal sealed class InsertRowShaper
 {
     private readonly IReadOnlyList<string> fields;
 
-    /// <summary>Per-target-column schema entry (null when the name is not a column) and constant default.</summary>
-    private readonly (TableColumnSchema? Schema, ColumnValue Default)[] fieldMeta;
+    /// <summary>Per-target-column schema entry, null when the name is not a column.</summary>
+    private readonly TableColumnSchema?[] fieldSchemas;
 
     /// <summary>
     /// Per-target-column flag: the statement supplies a value for this position but the value is
@@ -48,9 +48,10 @@ internal sealed class InsertRowShaper
     private readonly List<TableColumnSchema> extraDefaults;
 
     /// <summary>
-    /// The sequence each omitted default draws from, <b>one entry per column</b> — with duplicates
-    /// when two columns default from the same sequence, because shaping then consumes two values a
-    /// row and a deduplicated list would buy one.
+    /// The sequence each default the statement takes draws from, <b>one entry per column</b> — with
+    /// duplicates when two columns default from the same sequence, because shaping then consumes two
+    /// values a row and a deduplicated list would buy one. A column counts when the target list
+    /// omits it, or when a VALUES row writes <c>DEFAULT</c> for it.
     ///
     /// <para>The insert path reserves against this before any row is shaped: a sequence default
     /// cannot be evaluated per row, because drawing a value is an asynchronous call and this class
@@ -59,7 +60,7 @@ internal sealed class InsertRowShaper
     public IReadOnlyList<string> DefaultSequenceIds { get; }
 
     /// <summary>
-    /// True when an omitted default is a clock function (<c>DEFAULT now()</c>). The insert path then
+    /// True when a default the statement takes is a clock function (<c>DEFAULT now()</c>). The insert path then
     /// attaches the transaction and statement times to the parameters it shapes the rows with
     /// (<see cref="Functions.ClockScalarFunctions.AttachStatementClock(Models.Tickets.ExecuteSQLTicket)"/>),
     /// so every row of the statement takes the same default time.
@@ -68,14 +69,14 @@ internal sealed class InsertRowShaper
 
     private InsertRowShaper(
         IReadOnlyList<string> fields,
-        (TableColumnSchema?, ColumnValue)[] fieldMeta,
+        TableColumnSchema?[] fieldSchemas,
         bool[]? ignoredFields,
         List<TableColumnSchema> extraDefaults,
         IReadOnlyList<string> defaultSequenceIds,
         bool defaultsReadStatementClock)
     {
         this.fields = fields;
-        this.fieldMeta = fieldMeta;
+        this.fieldSchemas = fieldSchemas;
         this.ignoredFields = ignoredFields;
         this.extraDefaults = extraDefaults;
         DefaultSequenceIds = defaultSequenceIds;
@@ -97,7 +98,17 @@ internal sealed class InsertRowShaper
     /// <see cref="SequenceDefaults.ApplyIdentityRules"/>). The row still has to supply a value at
     /// that position: only what happens to it changes. Null for none.
     /// </param>
-    public static InsertRowShaper Create(TableSchema schema, IReadOnlyList<string> fields, IReadOnlySet<string>? ignoredColumns = null)
+    /// <param name="defaultSlots">
+    /// Per target position, true when some VALUES row writes <c>DEFAULT</c> there. Such a position takes
+    /// the column's full default, as an omitted column does, so its sequence is reserved and its clock
+    /// attached like an omitted column's. Null when no row writes <c>DEFAULT</c>, and on paths whose
+    /// values come from a query.
+    /// </param>
+    public static InsertRowShaper Create(
+        TableSchema schema,
+        IReadOnlyList<string> fields,
+        IReadOnlySet<string>? ignoredColumns = null,
+        IReadOnlyList<bool>? defaultSlots = null)
     {
         List<TableColumnSchema> schemaColumns = schema.Columns!;
 
@@ -105,11 +116,11 @@ internal sealed class InsertRowShaper
         foreach (TableColumnSchema col in schemaColumns)
             colSchemaByName[col.Name] = col;
 
-        (TableColumnSchema? Schema, ColumnValue Default)[] fieldMeta = new (TableColumnSchema?, ColumnValue)[fields.Count];
+        TableColumnSchema?[] fieldSchemas = new TableColumnSchema?[fields.Count];
         for (int i = 0; i < fields.Count; i++)
         {
             colSchemaByName.TryGetValue(fields[i], out TableColumnSchema? colDef);
-            fieldMeta[i] = (colDef, colDef?.DefaultValue ?? ColumnValue.Null);
+            fieldSchemas[i] = colDef;
         }
 
         bool[]? ignoredFields = null;
@@ -152,12 +163,27 @@ internal sealed class InsertRowShaper
                 defaultsReadStatementClock = true;
         }
 
-        return new InsertRowShaper(fields, fieldMeta, ignoredFields, extraDefaults, defaultSequenceIds, defaultsReadStatementClock);
+        // A listed column that a VALUES row writes DEFAULT for draws its default too.
+        for (int i = 0; defaultSlots is not null && i < fields.Count; i++)
+        {
+            if (!defaultSlots[i] || fieldSchemas[i] is not { } col || (ignoredFields is not null && ignoredFields[i]))
+                continue;
+
+            if (col.DefaultSequenceId is { Length: > 0 } sequenceId)
+                defaultSequenceIds.Add(sequenceId);
+
+            if (col.DefaultFunction is { } function && ScalarFunctionEvaluator.IsStatementClockFunction(function))
+                defaultsReadStatementClock = true;
+        }
+
+        return new InsertRowShaper(fields, fieldSchemas, ignoredFields, extraDefaults, defaultSequenceIds, defaultsReadStatementClock);
     }
 
     /// <summary>
-    /// Builds one row. A null slot means "no value was supplied for this column" and takes the
-    /// column's default; <paramref name="slots"/> must have exactly <see cref="FieldCount"/> entries.
+    /// Builds one row. A null slot is a <c>DEFAULT</c> in the VALUES row and takes the column's
+    /// default, the same one an omitted column takes: a constant, a function evaluated for this row, or
+    /// the next value of the column's sequence or identity. <paramref name="slots"/> must have exactly
+    /// <see cref="FieldCount"/> entries.
     ///
     /// <para>The row is keyed case-insensitively on purpose: the statement may name a column in a
     /// different case than the schema does (<c>INSERT INTO t (UserName)</c> for a column stored as
@@ -180,8 +206,13 @@ internal sealed class InsertRowShaper
             if (ignoredFields is not null && ignoredFields[i])
                 continue;
 
-            ColumnValue val = slots[i] ?? fieldMeta[i].Default;
-            if (fieldMeta[i].Schema is { } schema)
+            if (slots[i] is not { } val)
+            {
+                row[fields[i]] = fieldSchemas[i] is { } defaulted ? DefaultOf(defaulted, parameters) : ColumnValue.Null;
+                continue;
+            }
+
+            if (fieldSchemas[i] is { } schema)
                 val = CastScalarFunctions.CoerceToColumnType(val, schema);
             row[fields[i]] = val;
         }
@@ -218,19 +249,27 @@ internal sealed class InsertRowShaper
             if (row.ContainsKey(col.Name))
                 continue;
 
-            if (col.DefaultSequenceId is { Length: > 0 } sequenceId)
-            {
-                row[col.Name] = SequenceDefaults.TakeNextValue(sequenceId, col.Name, parameters);
-                continue;
-            }
-
-            // The default goes through the same coercion as a supplied value. A function default is
-            // evaluated here, so its type is known only now (CURRENT_DATE() on a datetime column),
-            // and a constant stored by an older schema can predate a coercion rule.
-            ColumnValue value = col.DefaultFunction is not null
-                ? ScalarFunctionEvaluator.EvaluateNullary(col.DefaultFunction, parameters)
-                : col.DefaultValue!;
-            row[col.Name] = CastScalarFunctions.CoerceToColumnType(value, col);
+            row[col.Name] = DefaultOf(col, parameters);
         }
+    }
+
+    /// <summary>
+    /// The default of <paramref name="col"/> for one row: the next value of its sequence, its function
+    /// evaluated now, its constant, or NULL when it has none.
+    /// </summary>
+    private static ColumnValue DefaultOf(TableColumnSchema col, Dictionary<string, ColumnValue>? parameters)
+    {
+        if (col.DefaultSequenceId is { Length: > 0 } sequenceId)
+            return SequenceDefaults.TakeNextValue(sequenceId, col.Name, parameters);
+
+        // The default goes through the same coercion as a supplied value. A function default is
+        // evaluated here, so its type is known only now (CURRENT_DATE() on a datetime column),
+        // and a constant stored by an older schema can predate a coercion rule.
+        if (col.DefaultFunction is not null)
+            return CastScalarFunctions.CoerceToColumnType(ScalarFunctionEvaluator.EvaluateNullary(col.DefaultFunction, parameters), col);
+
+        return col.DefaultValue is { } constant
+            ? CastScalarFunctions.CoerceToColumnType(constant, col)
+            : ColumnValue.Null;
     }
 }

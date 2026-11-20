@@ -276,11 +276,7 @@ internal sealed class SequenceDdlService
 
         // The same ceiling every other COMMENT ON target is held to. Checked here because this
         // statement builds no CommentTicket and so never reaches the shared comment validator.
-        if (comment is not null && comment.Length > CamusDBConstants.MaxCommentLength)
-            throw new CamusDBException(
-                CamusDBErrorCodes.CommentTooLong,
-                $"Sequence comment is {comment.Length} characters, exceeding the maximum of " +
-                $"{CamusDBConstants.MaxCommentLength}");
+        CommandsValidator.Validators.ValidatorBase.ValidateCommentLength(comment, $"Sequence '{sequenceName}'");
 
         await catalogs.AlterSequenceAsync(database, new SchemaAlterSequencePayload
         {

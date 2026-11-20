@@ -270,6 +270,14 @@ internal static class TableDeltaApplier
         if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? tableSchema))
             return null;
 
+        // The name moved to a different relation after the proposer resolved it. Dropping by name
+        // would remove that relation, which can be an ordinary table nobody asked to drop.
+        if (payload.ExpectedTableId is { Length: > 0 } expected
+            && !string.Equals(tableSchema.Id, expected, StringComparison.Ordinal))
+            throw new SchemaDeltaRefusedException(
+                CamusDBErrorCodes.ConcurrentSchemaChange,
+                $"'{payload.TableName}' was renamed or replaced by another statement while it was being dropped; nothing was dropped");
+
         // In log order on every node: a child or a view created by another node since this drop was
         // validated still stops it.
         ForeignKeyDependencyRules.RequireNotReferencedByOtherTables(schema, tableSchema, "drop table");

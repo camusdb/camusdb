@@ -105,8 +105,8 @@ ALTER TABLE application_logs SET (sql_stats_automatic_collection_enabled = true)
 
 The setting gates **only the background scheduler** — a manual `ANALYZE TABLE application_logs` still
 runs. It defaults to enabled (an unset table is analyzed normally), rides the table's schema without
-affecting row encoding, and survives restarts. In a clustered deployment over HTTP the statement must
-be issued on the schema leader.
+affecting row encoding, and survives restarts. In a cluster it can be issued on any node: a node that
+does not lead the database's schema log sends the change to the node that does.
 
 ## Scheduling and cluster behavior
 

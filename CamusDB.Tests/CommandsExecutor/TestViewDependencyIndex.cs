@@ -79,6 +79,31 @@ public sealed class TestViewDependencyIndex : SharedNodeBaseTest
             "the cascade took everything that read t");
     }
 
+    /// <summary>
+    /// The clone a DDL dry-runs against shares the live index instead of rebuilding it from every
+    /// definition, and a change applied to the clone leaves the live index as it was.
+    /// </summary>
+    [Test]
+    public async Task ADryRunCloneSharesTheIndexWithoutRebuildingIt()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await ExecDdl(database, executor, dbname, "CREATE TABLE t (id int64 PRIMARY KEY, a int64)");
+        await ExecDdl(database, executor, dbname, "CREATE VIEW v1 AS SELECT id, a FROM t");
+        await ExecDdl(database, executor, dbname, "CREATE VIEW v2 AS SELECT id FROM v1");
+
+        ViewDependencyIndex live = database.Schema.ViewDependencies;
+        Schema clone = Core.Catalogs.SchemaReplicator.CloneSchema(database.Schema);
+
+        Assert.AreSame(live, clone.ViewDependencies, "the clone carries the live index");
+
+        ViewSchema v2 = clone.Views["v2"];
+        clone.ReplaceViewDependencyEdges(v2.Id, v2.Definition, after: null);
+
+        Assert.AreNotSame(live, clone.ViewDependencies, "a change on the clone replaces the clone's reference");
+        Assert.AreSame(live, database.Schema.ViewDependencies, "and leaves the live index alone");
+        AssertMatchesForwardEdges(database, "a change applied to the clone");
+    }
+
     [Test]
     public async Task TheIndexAnswersEveryDependencyQuestionAndSurvivesAReopen()
     {

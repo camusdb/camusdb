@@ -87,6 +87,15 @@ public sealed class ColumnInfo
     public string? Comment { get; }
 
     /// <summary>
+    /// The column id to create the column with. Null for a column a user declares, which gets a new
+    /// id. Set only when a relation is created as a copy of another one's layout and must keep its
+    /// column ids: a materialized view's refresh builds its new contents in a staging relation, the
+    /// swap moves that relation's columns onto the view, and a view that reads the materialized view
+    /// stores the column ids it reads.
+    /// </summary>
+    public string? PreservedId { get; init; }
+
+    /// <summary>
     /// Storage strategy declared inline with <c>STORAGE PLAIN | MAIN | EXTERNAL | EXTENDED</c>.
     /// Null when the column was declared without one, which means the default
     /// (<see cref="ColumnStorageStrategy.Extended"/>).

@@ -277,7 +277,7 @@ public sealed class SchemaReplicator
         // A materialized view created WITH DATA adopted its staging relation: the name the rows were
         // loaded under no longer answers, and its descriptor would otherwise be handed to a later
         // relation of that name.
-        if (entry.Op == SchemaOp.CreateTable)
+        if (entry.Op is SchemaOp.CreateTable or SchemaOp.CreatePopulatedMaterializedView)
         {
             SchemaCreateTablePayload created = DecodePayload<SchemaCreateTablePayload>(entry);
             if (created.AdoptStagingTableId is { Length: > 0 } adopted && created.TableId is { Length: > 0 } viewId)
@@ -554,10 +554,17 @@ public sealed class SchemaReplicator
 
     private static bool WasSchemaDeltaApplied(Schema schema, SchemaChangeLogEntry entry)
     {
+        // A refused entry was applied as a no-op, so the structure it would have produced is absent
+        // by design. Without this, a re-delivered refused entry would look unapplied and be reported
+        // as out of order.
+        if (schema.FindRefusal(entry) is not null)
+            return true;
+
         return entry.Op switch
         {
-            SchemaOp.CreateTable => schema.Tables.ContainsKey(DecodePayload<SchemaCreateTablePayload>(entry).TableName),
-            SchemaOp.DropTable => !schema.Tables.ContainsKey(DecodePayload<SchemaDropTablePayload>(entry).TableName),
+            SchemaOp.CreateTable or SchemaOp.CreatePopulatedMaterializedView
+                => schema.Tables.ContainsKey(DecodePayload<SchemaCreateTablePayload>(entry).TableName),
+            SchemaOp.DropTable => SchemaDeltaApplier.WasDropped(schema, DecodePayload<SchemaDropTablePayload>(entry)),
             SchemaOp.AddColumn => HasColumn(schema, DecodePayload<SchemaAlterColumnPayload>(entry)),
             SchemaOp.DropColumn => !HasColumn(schema, DecodePayload<SchemaAlterColumnPayload>(entry)),
             SchemaOp.SetElementState => HasElementState(schema, DecodePayload<SchemaElementStatePayload>(entry)),
@@ -694,6 +701,9 @@ public sealed class SchemaReplicator
         // catalog saw removed, which the proposer-side reference check reads from the clone.
         clone.FunctionCatalog.CopyFrom(schema.FunctionCatalog);
 
+        // The clone holds the same view and materialized-view definitions, so it shares the immutable
+        // reverse dependency index instead of rebuilding it from every definition.
+        clone.ShareViewDependencyIndexFrom(schema);
 
         return clone;
     }

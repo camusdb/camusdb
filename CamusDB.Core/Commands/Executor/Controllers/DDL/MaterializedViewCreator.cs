@@ -139,20 +139,39 @@ internal sealed class MaterializedViewCreator
 
             DatabaseRegistry registry = await registryTask.ConfigureAwait(false);
 
-            if (cascade)
-                await DependentRelationDropper.DropTransitiveDependentsAsync(
-                    executor, catalogs, registry, database, view.Id!, logger).ConfigureAwait(false);
+            List<DependentRelationDropper.Dependent> dependents = cascade
+                ? DependentRelationDropper.PlanTransitiveDependents(database, view.Id!)
+                : [];
 
-            if (await DropFencedAsync(executor, catalogs, registry, database, name, view.Id!, logger).ConfigureAwait(false))
-                droppedAny = true;
+            // The fence of this view and of every materialized view the cascade reaches is taken
+            // before anything is dropped, so a running refresh refuses the statement while every
+            // dependent still exists.
+            RefreshFenceSet fences = await RefreshFenceSet.AcquireAsync(
+                registry,
+                database,
+                DependentRelationDropper.MaterializedViewsIn(dependents).Append((name, view.Id!))).ConfigureAwait(false);
+
+            await using (fences.ConfigureAwait(false))
+            {
+                // Checked before the dependents go: a view that was dropped or renamed while the
+                // fences were taken must not lose its dependents to a statement that then drops
+                // nothing.
+                if (!RequireStillNamed(database, name, view.Id!))
+                    continue;
+
+                await DependentRelationDropper.DropPlannedAsync(executor, catalogs, database, dependents, logger).ConfigureAwait(false);
+
+                if (await DropUnderFenceAsync(executor, catalogs, database, name, view.Id!, logger).ConfigureAwait(false))
+                    droppedAny = true;
+            }
         }
 
         return droppedAny;
     }
 
     /// <summary>
-    /// Drops one materialized view while holding its refresh fence, so no rebuild of it can be running
-    /// when it goes.
+    /// Drops one materialized view. The caller holds its refresh fence, taken through
+    /// <see cref="RefreshFenceSet"/>, so no rebuild of it can be running when it goes.
     /// </summary>
     /// <remarks>
     /// <para><b>The fence.</b> A rebuild that is still running when the view is
@@ -161,57 +180,68 @@ internal sealed class MaterializedViewCreator
     /// rebuild then deletes its own ownership record, leaving registered storage nothing points at. The
     /// swap is right to do nothing; what was missing is that the drop excluded nothing.</para>
     ///
-    /// <para><b>Refusal.</b> The drop refuses while a rebuild runs. A rebuild can run for as long as its source takes to
-    /// scan, and a <c>DROP</c> that stalled for that long would look hung. The fence is retried briefly,
-    /// exactly as <c>REFRESH</c> retries it, so a background sweep holding it for a few milliseconds
-    /// does not turn the drop away; a real rebuild does, with <c>RefreshAlreadyInProgress</c>.</para>
+    /// <para><b>Refusal.</b> The drop refuses while a rebuild runs. A rebuild can run for as long as its
+    /// source takes to scan, and a <c>DROP</c> that stalled for that long would look hung. The fence is
+    /// retried briefly, exactly as <c>REFRESH</c> retries it, so a background sweep holding it for a few
+    /// milliseconds does not turn the drop away; a real rebuild does, with
+    /// <c>RefreshAlreadyInProgress</c>.</para>
     ///
     /// <para>Both the reclamation of an abandoned rebuild's staging relation and the relation drop
     /// happen under the fence: a record found while it is held belongs to a run that is gone.</para>
     /// </remarks>
     /// <returns>False when the materialized view was already gone by the time the fence was held.</returns>
-    internal static async Task<bool> DropFencedAsync(
+    internal static async Task<bool> DropUnderFenceAsync(
         CommandExecutor executor,
         CatalogsManager catalogs,
-        DatabaseRegistry registry,
         DatabaseDescriptor database,
         string name,
         string viewId,
         ILogger<ICamusDB> logger)
     {
-        string fenceId = RegistryDropMarkers.TableFenceId(database.Id, viewId);
+        if (!RequireStillNamed(database, name, viewId))
+            return false;
 
-        if (!await MaterializedViewRefresher.AcquireRefreshFenceAsync(registry, fenceId).ConfigureAwait(false))
+        // Reclaim any staging relation an unfinished refresh of this view left behind, before the
+        // view itself goes. Once it is gone nothing would look for that storage again — the record
+        // is keyed by the view's id, and no later refresh of a dropped view will ever run.
+        await MaterializedViewRefresher.ReclaimAbandonedRefreshAsync(
+            executor, catalogs, database, viewId, logger).ConfigureAwait(false);
+
+        if (BeforeRelationDropForTesting is { } beforeDrop)
+            await beforeDrop(name).ConfigureAwait(false);
+
+        // The rename that the refresh fence does not exclude can give the name to a different relation
+        // during the awaits above. The drop carries the id, and the table-drop path refuses a name that
+        // now resolves to anything else.
+        return await executor.DropTable(
+            new DropTableTicket(
+                database.Name, name, ifExists: true, force: false, allowMaterializedView: true, expectedTableId: viewId)).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Test-only seam: invoked with the materialized view's name after a drop checked the name under
+    /// the refresh fence and reclaimed any abandoned staging relation, and before the relation drop
+    /// runs, so a test can commit a rename and a create inside that window. Null in production.
+    /// </summary>
+    internal static Func<string, Task>? BeforeRelationDropForTesting { get; set; }
+
+    /// <summary>
+    /// Checks, under the refresh fence, that <paramref name="name"/> still names the materialized view
+    /// <paramref name="viewId"/>. Returns false when the name is gone, which is the outcome a drop asked
+    /// for, and raises <c>ConcurrentSchemaChange</c> when a rename gave the name to a different
+    /// relation, which dropping by name would remove.
+    /// </summary>
+    private static bool RequireStillNamed(DatabaseDescriptor database, string name, string viewId)
+    {
+        if (!database.Schema.Tables.TryGetValue(name, out TableSchema? current))
+            return false;
+
+        if (!string.Equals(current.Id, viewId, StringComparison.Ordinal))
             throw new CamusDBException(
-                CamusDBErrorCodes.RefreshAlreadyInProgress,
-                $"Cannot drop materialized view '{name}' while a REFRESH of it is running; wait for the refresh to finish and retry");
+                CamusDBErrorCodes.ConcurrentSchemaChange,
+                $"Materialized view '{name}' was renamed or dropped while it was being dropped; retry the statement");
 
-        try
-        {
-            // Re-resolved under the fence. The name was looked up before the fence was taken: a
-            // concurrent drop may have removed it, which is the outcome asked for, and a rename may
-            // have handed the name to a different relation, which dropping by name would then remove.
-            if (!database.Schema.Tables.TryGetValue(name, out TableSchema? current))
-                return false;
-
-            if (!string.Equals(current.Id, viewId, StringComparison.Ordinal))
-                throw new CamusDBException(
-                    CamusDBErrorCodes.ConcurrentSchemaChange,
-                    $"Materialized view '{name}' was renamed or dropped while it was being dropped; retry the statement");
-
-            // Reclaim any staging relation an unfinished refresh of this view left behind, before the
-            // view itself goes. Once it is gone nothing would look for that storage again — the record
-            // is keyed by the view's id, and no later refresh of a dropped view will ever run.
-            await MaterializedViewRefresher.ReclaimAbandonedRefreshAsync(
-                executor, catalogs, database, viewId, logger).ConfigureAwait(false);
-
-            return await executor.DropTable(
-                new DropTableTicket(database.Name, name, ifExists: true, force: false, allowMaterializedView: true)).ConfigureAwait(false);
-        }
-        finally
-        {
-            await registry.DropMarkers.ReleaseDropIntentAsync(fenceId).ConfigureAwait(false);
-        }
+        return true;
     }
 
     /// <summary>

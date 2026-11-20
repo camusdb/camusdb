@@ -333,4 +333,126 @@ public sealed class TestUpdatableViews : SharedNodeBaseTest
             CamusDBErrorCodes.ViewNotUpdatable, "WITH CHECK OPTION");
         Assert.IsFalse(database.Schema.Views.ContainsKey("agg"));
     }
+
+    /// <summary>
+    /// As in PostgreSQL, <c>CREATE VIEW … WITH CHECK OPTION</c> checks the view's own body only. A
+    /// check-option view over a view that cannot be written through is created, and every write through
+    /// it is refused at the write, which is where the rule is enforced.
+    /// </summary>
+    [Test]
+    public async Task ACheckOptionOverAnUnwritableInnerViewIsRefusedAtTheFirstWrite()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await Seed();
+
+        await ExecDdl(database, executor, dbname,
+            "CREATE VIEW spent AS SELECT customer, SUM(total) AS total FROM orders GROUP BY customer");
+        await ExecDdl(database, executor, dbname,
+            "CREATE VIEW big_spent AS SELECT customer, total FROM spent WHERE total > 25 WITH CHECK OPTION");
+
+        Refused(() => Write(database, executor, dbname, "INSERT INTO big_spent (customer, total) VALUES ('initech', 50)"),
+            CamusDBErrorCodes.ViewNotUpdatable);
+        Refused(() => Write(database, executor, dbname, "UPDATE big_spent SET total = 60 WHERE customer = 'acme'"),
+            CamusDBErrorCodes.ViewNotUpdatable);
+    }
+
+    /// <summary>
+    /// A replace of the inner view can make a check-option view above it unwritable after it was
+    /// created. The replace is allowed, and the writes through the outer view are refused from then on.
+    /// </summary>
+    [Test]
+    public async Task ReplacingTheInnerViewWithAnUnwritableBodyRefusesLaterWrites()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await Seed();
+
+        await ExecDdl(database, executor, dbname,
+            "CREATE VIEW totals AS SELECT customer, total FROM orders");
+        await ExecDdl(database, executor, dbname,
+            "CREATE VIEW acme_totals AS SELECT customer, total FROM totals WHERE customer = 'acme' WITH CHECK OPTION");
+
+        Assert.AreEqual(1, await Write(database, executor, dbname, "UPDATE acme_totals SET total = 11 WHERE total = 10"));
+
+        await ExecDdl(database, executor, dbname,
+            "CREATE OR REPLACE VIEW totals AS SELECT customer, SUM(total) AS total FROM orders GROUP BY customer");
+
+        Refused(() => Write(database, executor, dbname, "UPDATE acme_totals SET total = 12 WHERE total = 11"),
+            CamusDBErrorCodes.ViewNotUpdatable);
+    }
+
+    private async Task<(string, DatabaseDescriptor, CommandExecutor)> SeedNamed()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        await ExecDdl(database, executor, dbname, "CREATE TABLE items (id int64 PRIMARY KEY, total int64 NULL)");
+        await Write(database, executor, dbname, "INSERT INTO items (id, total) VALUES (1, 10), (2, 20), (3, 3)");
+        await ExecDdl(database, executor, dbname, "CREATE TABLE labels (key_id int64 PRIMARY KEY, total int64 NULL)");
+        await Write(database, executor, dbname, "INSERT INTO labels (key_id, total) VALUES (2, 1)");
+        await ExecDdl(database, executor, dbname, "CREATE VIEW named (order_id, total) AS SELECT id, total FROM items");
+
+        return (dbname, database, executor);
+    }
+
+    private static async Task<Dictionary<long, long>> Totals(DatabaseDescriptor database, CommandExecutor executor, string dbname)
+        => (await Query(database, executor, dbname, "SELECT id, total FROM items"))
+            .ToDictionary(r => r.Row["id"].LongValue, r => r.Row["total"].LongValue);
+
+    /// <summary>
+    /// A subquery that names its own relation with the alias the statement gave the view. The rewriter
+    /// treated <c>n.key_id</c> as a column of the view and failed; with a column the view also has,
+    /// <c>n.total</c>, it read the outer row and wrote rows the statement did not select.
+    /// </summary>
+    [Test]
+    public async Task ASubqueryAliasThatMatchesTheViewAliasBindsTheSubquery()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SeedNamed();
+
+        Assert.AreEqual(1, await Write(database, executor, dbname,
+            "UPDATE named AS n SET total = 7 WHERE order_id IN (SELECT n.key_id FROM labels AS n)"));
+        Assert.AreEqual(new Dictionary<long, long> { [1] = 10, [2] = 7, [3] = 3 }, await Totals(database, executor, dbname));
+
+        // labels.total is 1, so only item 1 matches. Read as the outer row, it matched item 3 (id = total).
+        Assert.AreEqual(1, await Write(database, executor, dbname,
+            "UPDATE named AS n SET total = 8 WHERE order_id IN (SELECT n.total FROM labels AS n)"));
+        Assert.AreEqual(new Dictionary<long, long> { [1] = 8, [2] = 7, [3] = 3 }, await Totals(database, executor, dbname));
+    }
+
+    [Test]
+    public async Task ASubqueryAliasThatMatchesTheViewAliasBindsTheSubqueryInADelete()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SeedNamed();
+
+        Assert.AreEqual(1, await Write(database, executor, dbname,
+            "DELETE FROM named AS n WHERE order_id IN (SELECT n.key_id FROM labels AS n)"));
+        Assert.AreEqual(new Dictionary<long, long> { [1] = 10, [3] = 3 }, await Totals(database, executor, dbname));
+
+        Assert.AreEqual(1, await Write(database, executor, dbname,
+            "DELETE FROM named AS n WHERE order_id IN (SELECT n.total FROM labels AS n)"));
+        Assert.AreEqual(new Dictionary<long, long> { [3] = 3 }, await Totals(database, executor, dbname));
+    }
+
+    /// <summary>
+    /// The write path substituted view columns with no work bound. Each level here computes its column
+    /// from the level below twice, so the expression doubles at every level, and a write through the
+    /// top view visited about 2^26 nodes. It is now refused once it passes max_view_expanded_nodes.
+    /// </summary>
+    [Test]
+    public async Task AWriteThroughADoublingViewChainIsRefusedByTheNodeBudget()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        await ExecDdl(database, executor, dbname, "CREATE TABLE base (id int64 PRIMARY KEY, a int64 NULL)");
+        await Write(database, executor, dbname, "INSERT INTO base (id, a) VALUES (1, 1)");
+        await ExecDdl(database, executor, dbname, "CREATE VIEW l0 AS SELECT id, a, a AS c FROM base");
+
+        const int levels = 26;
+        for (int i = 1; i <= levels; i++)
+            await ExecDdl(database, executor, dbname, $"CREATE VIEW l{i} AS SELECT id, a, c + c AS c FROM l{i - 1}");
+
+        // A short chain stays well inside the budget.
+        Assert.AreEqual(1, await Write(database, executor, dbname, "UPDATE l3 SET a = 2 WHERE c > 0"));
+
+        System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
+        Refused(() => Write(database, executor, dbname, $"UPDATE l{levels} SET a = 3 WHERE c > 0"),
+            CamusDBErrorCodes.ViewComplexityLimitExceeded, "max_view_expanded_nodes");
+        Assert.Less(clock.Elapsed.TotalSeconds, 30, "refused once the budget is spent, not after the whole expansion");
+    }
 }

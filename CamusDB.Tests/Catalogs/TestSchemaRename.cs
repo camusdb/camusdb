@@ -202,6 +202,71 @@ public sealed class TestSchemaRename
 
     // ─── RenameTable — idempotency/re-delivery ────────────────────────────────
 
+    /// <summary>
+    /// Re-delivered drop entries. A refused drop changed nothing and a drop whose name a newcomer has
+    /// since taken left that name in the schema; both used to look unapplied on re-delivery, and the
+    /// replicator reported them as out of order.
+    /// </summary>
+    [Test]
+    public async Task ApplyAsync_DropTable_RedeliveredRefusedOrOvertakenDropIsNoOp()
+    {
+        await using EmbeddedKahuna kahuna = new();
+        await kahuna.StartAsync(CancellationToken.None);
+
+        string db = NextSchemaLogDatabaseName(kahuna);
+        DatabaseDescriptor database = CreateDescriptor(db, kahuna);
+        SchemaReplicator replicator = CreateReplicator();
+        int partitionId = database.Kahuna.SchemaLogPartition(db);
+
+        byte[] Create(long from, string tableId) => SchemaChangeLogEntryCodec.Encode(new SchemaChangeLogEntry
+        {
+            Database = db,
+            FromVersion = from,
+            ToVersion = from + 1,
+            Op = SchemaOp.CreateTable,
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaCreateTablePayload
+            {
+                TableId = tableId,
+                TableName = "robots",
+                Columns = [new() { Id = tableId + "-col", Name = "id", Type = ColumnType.Id, NotNull = true }]
+            })
+        });
+
+        byte[] Drop(long from, string expectedTableId) => SchemaChangeLogEntryCodec.Encode(new SchemaChangeLogEntry
+        {
+            Database = db,
+            FromVersion = from,
+            ToVersion = from + 1,
+            Op = SchemaOp.DropTable,
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaDropTablePayload
+            {
+                TableName = "robots",
+                ExpectedTableId = expectedTableId,
+            })
+        });
+
+        await replicator.ApplyAsync(database, partitionId, Create(0, "first-id"));
+
+        // Refused: the name has a different id. It consumes its version and changes nothing.
+        byte[] refused = Drop(1, "some-other-id");
+        await replicator.ApplyAsync(database, partitionId, refused);
+        Assert.True(database.Schema.Tables.ContainsKey("robots"));
+        Assert.AreEqual(2, database.Schema.SchemaVersion);
+
+        Assert.DoesNotThrowAsync(() => replicator.ApplyAsync(database, partitionId, refused));
+        Assert.AreEqual(2, database.Schema.SchemaVersion);
+
+        // Applied, and then a newcomer takes the name.
+        byte[] dropped = Drop(2, "first-id");
+        await replicator.ApplyAsync(database, partitionId, dropped);
+        await replicator.ApplyAsync(database, partitionId, Create(3, "second-id"));
+        Assert.AreEqual("second-id", database.Schema.Tables["robots"].Id);
+
+        Assert.DoesNotThrowAsync(() => replicator.ApplyAsync(database, partitionId, dropped));
+        Assert.AreEqual("second-id", database.Schema.Tables["robots"].Id, "the re-delivered drop leaves the newcomer");
+        Assert.AreEqual(4, database.Schema.SchemaVersion);
+    }
+
     [Test]
     public async Task ApplyAsync_RenameTable_RedeliveredEntryIsNoOp()
     {

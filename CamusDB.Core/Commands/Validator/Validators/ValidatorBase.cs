@@ -89,9 +89,13 @@ internal abstract class ValidatorBase
     /// every comment-bearing field on every comment-bearing ticket must call this.</para>
     ///
     /// <para><paramref name="comment"/> may be null (no comment, or a removal); only a present value
-    /// is measured.</para>
+    /// is measured. <paramref name="subject"/> names the object, such as <c>Table 'users'</c>, and
+    /// starts the error message.</para>
+    ///
+    /// <para>Internal so the <c>COMMENT ON</c> paths that build no ticket (view, sequence) use the same
+    /// bound and the same message.</para>
     /// </summary>
-    protected static void ValidateCommentLength(string? comment, string subject)
+    internal static void ValidateCommentLength(string? comment, string subject)
     {
         if (comment is null)
             return;
