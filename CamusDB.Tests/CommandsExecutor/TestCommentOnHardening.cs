@@ -510,7 +510,8 @@ internal sealed class TestCommentOnHardening : BaseTest
     [Test]
     public async Task CommentOnLengthErrorsNameTheObject()
     {
-        (string dbname, _, CommandExecutor executor) = await CreateDatabase();
+        // A named database, so COMMENT ON DATABASE can spell its name.
+        (string dbname, CommandExecutor executor) = await CreateNamedDatabase();
         await ExecuteDdl(executor, dbname,
             "CREATE TABLE users (id oid PRIMARY KEY NOT NULL, email string NULL, KEY email_idx (email))");
         await ExecuteDdl(executor, dbname, "CREATE VIEW user_emails AS SELECT id, email FROM users");
