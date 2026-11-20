@@ -131,8 +131,8 @@ internal static class ExtensionAggregateBinder
     ///     if (args[i] is NULL) return;               // for each non-nullable parameter: skip the row
     ///     Arg0 a0 = ToArg0(args[0], calledName, 0);
     ///     try { ((T)instance).Accumulate((TState)state, a0); }
-    ///     catch (OperationCanceledException) { throw; }
-    ///     catch (Exception ex) { throw Failed(calledName, ex); }
+    ///     catch (Exception ex) when (ex is not OperationCanceledException) { failure = ex; }
+    ///     if (failure != null) throw Failed(calledName, failure);   // after the catch block, see GuardUserCall
     /// }
     /// </code>
     /// </summary>

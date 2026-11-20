@@ -87,7 +87,9 @@ internal sealed class InlineFunctionUnit(string key)
 /// <para><b>The guard around a call</b> (<see cref="Guard"/>) starts the budgets, makes the thread's
 /// culture invariant, and turns a budget exception into
 /// <see cref="CamusDBErrorCodes.InlineFunctionBudgetExceeded"/>. The culture is set only when the
-/// thread is not invariant already; the server host always is.</para>
+/// thread is not invariant already; the server host always is. The guard throws that error after
+/// its <c>catch</c> block ended, from its own frame: a call that was stopped for its stack depth
+/// has little stack left where the exception was thrown, and a <c>catch</c> block runs there.</para>
 /// </summary>
 internal sealed class InlineFunctionRuntime : IDisposable
 {
@@ -395,6 +397,12 @@ internal sealed class InlineFunctionRuntime : IDisposable
             long deadline = callTimeout > 0 ? Environment.TickCount64 + callTimeout : long.MaxValue;
             CallBudgetFrame frame = CallBudget.Enter(callTimeout, allocation, array, CancellationToken.None);
 
+            // A catch block runs on top of the stack of the frame that threw, and the runtime gives
+            // that stack back only when the block ends. Each block below keeps the cause and ends; the
+            // error is thrown after the try, from the frame of this method. A throw inside a block
+            // would be one more exception to handle on a stack that a recursion has filled.
+            Exception stopped;
+
             try
             {
                 // The frame of the body is taken before its first budget check can run. This check
@@ -406,25 +414,17 @@ internal sealed class InlineFunctionRuntime : IDisposable
             }
             catch (InsufficientExecutionStackException deep)
             {
-                throw BudgetExceeded(calledName, deep, timeout, allocation);
+                stopped = deep;
             }
             catch (CamusDBException failed) when (failed.InnerException is { } cause and not OperationCanceledException && CallBudget.IsBudgetException(cause))
-
             {
-                if (cause is CallBudgetExceededException { Kind: CallBudgetKind.Time } && statement is { IsExpired: true })
-                    throw statement.Exceeded();
-
-                throw BudgetExceeded(calledName, cause, timeout, allocation);
+                stopped = cause;
             }
             catch (CamusDBException failed) when (failed.InnerException is System.Text.RegularExpressions.RegexMatchTimeoutException && Environment.TickCount64 >= deadline)
             {
-                if (statement is { IsExpired: true })
-                    throw statement.Exceeded();
-
                 // The match had the time the call had left as its timeout, and used all of it.
-                throw BudgetExceeded(calledName, new CallBudgetExceededException(CallBudgetKind.Time, failed.Message), timeout, allocation);
+                stopped = new CallBudgetExceededException(CallBudgetKind.Time, failed.Message);
             }
-
             finally
             {
                 CallBudget.Exit(frame);
@@ -435,6 +435,11 @@ internal sealed class InlineFunctionRuntime : IDisposable
                     CultureInfo.CurrentUICulture = uiCulture;
                 }
             }
+
+            if (stopped is CallBudgetExceededException { Kind: CallBudgetKind.Time } && statement is { IsExpired: true })
+                throw statement.Exceeded();
+
+            throw BudgetExceeded(calledName, stopped, timeout, allocation);
         };
     }
 
@@ -616,24 +621,22 @@ internal sealed class InlineFunctionRuntime : IDisposable
             TriggerBudget frame = new(timeout, allocation, array, statementDeadline);
             long deadline = Math.Min(timeout > 0 ? Environment.TickCount64 + timeout : long.MaxValue, statementDeadline);
 
+            // As in Guard: a catch block keeps the cause and ends, and the error is thrown after the try.
+            Exception stopped;
+
             try
             {
                 System.Runtime.CompilerServices.RuntimeHelpers.EnsureSufficientExecutionStack();
                 await runner(context, frame, new InlineSqlSession(session, frame), functions).ConfigureAwait(false);
+                return;
             }
             catch (Exception failed) when (failed is not OperationCanceledException and not CamusDBException && CallBudget.IsBudgetException(failed))
             {
-                if (failed is CallBudgetExceededException { Kind: CallBudgetKind.Time } && statement is { IsExpired: true })
-                    throw statement.Exceeded();
-
-                throw BudgetExceeded("Trigger", triggerName, failed, timeout, allocation);
+                stopped = failed;
             }
             catch (System.Text.RegularExpressions.RegexMatchTimeoutException timedOut) when (Environment.TickCount64 >= deadline)
             {
-                if (statement is { IsExpired: true })
-                    throw statement.Exceeded();
-
-                throw BudgetExceeded("Trigger", triggerName, new CallBudgetExceededException(CallBudgetKind.Time, timedOut.Message), timeout, allocation);
+                stopped = new CallBudgetExceededException(CallBudgetKind.Time, timedOut.Message);
             }
             finally
             {
@@ -643,6 +646,11 @@ internal sealed class InlineFunctionRuntime : IDisposable
                     CultureInfo.CurrentUICulture = uiCulture;
                 }
             }
+
+            if (stopped is CallBudgetExceededException { Kind: CallBudgetKind.Time } && statement is { IsExpired: true })
+                throw statement.Exceeded();
+
+            throw BudgetExceeded("Trigger", triggerName, stopped, timeout, allocation);
         };
     }
 

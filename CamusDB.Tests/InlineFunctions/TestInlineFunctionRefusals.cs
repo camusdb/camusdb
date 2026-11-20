@@ -137,6 +137,23 @@ public sealed class TestInlineFunctionRefusals
     [TestCase("return string.Intern(s);", "string.Intern is not allowed")]
     public void AMemberWhoseCostTheInputsDoNotBound_IsRefused(string body, string reason) => Refused(body, reason);
 
+    /// <summary>
+    /// A body cannot write a comparison of its own. The sorts of the framework catch an exception of
+    /// the comparison and throw another from the catch block, which the runtime handles below the
+    /// frame that threw the first. The last two bodies are a recursion through such a comparison: each
+    /// ended the process on its way out, the second with a stack that was nearly empty.
+    /// </summary>
+    [TestCase("var xs = new List<string> { s }; xs.Sort((a, b) => a.Length.CompareTo(b.Length)); return xs[0];", "a body cannot write a comparison of its own")]
+    [TestCase("var xs = new[] { s }; Array.Sort(xs, (a, b) => a.Length.CompareTo(b.Length)); return xs[0];", "Comparison<string> is not on the list")]
+    [TestCase("var xs = new List<string> { s }; xs.Sort(string.CompareOrdinal); return xs[0];", "Comparison<string> is not on the list")]
+    [TestCase("Comparison<long> c = (a, b) => a.CompareTo(b); return c(n, 1).ToString();", "Comparison<long> is not on the list")]
+    [TestCase("var xs = new List<string> { s }; xs.Sort(Comparer<string>.Create((a, b) => a.Length.CompareTo(b.Length))); return xs[0];", "Comparer<string>.Create is not allowed")]
+    [TestCase("return new List<string> { s }.OrderBy(x => x, Comparer<string>.Create((a, b) => a.Length.CompareTo(b.Length))).First();", "Comparer<string>.Create is not allowed")]
+    [TestCase("return new SortedSet<string>(Comparer<string>.Create((a, b) => a.Length.CompareTo(b.Length))) { s }.Min!;", "Comparer<string>.Create is not allowed")]
+    [TestCase("Func<long, long> f = null!; f = k => { var xs = new List<long> { 1, 2 }; xs.Sort((a, b) => (int)f(k + 1)); return 0; }; return f(n).ToString();", "List<long>.Sort is not allowed")]
+    [TestCase("Func<long, long> f = null!; f = k => { if (k > 400) throw new InvalidOperationException(\"end\"); var xs = new List<long> { 1, 2 }; xs.Sort((a, b) => (int)f(k + 1)); return 0; }; return f(n).ToString();", "List<long>.Sort is not allowed")]
+    public void AComparisonOfTheBody_IsRefused(string body, string reason) => Refused(body, reason);
+
     [TestCase("return DateTime.Now.Ticks.ToString();", "DateTime.Now is not allowed")]
     [TestCase("return DateTime.UtcNow.Ticks.ToString();", "DateTime.UtcNow is not allowed")]
     [TestCase("return DateTime.Today.Ticks.ToString();", "DateTime.Today is not allowed")]

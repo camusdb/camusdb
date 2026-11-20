@@ -98,8 +98,8 @@ internal static class ExtensionTableFunctionBinder
     ///     Arg0 a0 = ToArg0(args[0], calledName, 0);
     ///     R result;
     ///     try { result = Method(a0); }
-    ///     catch (OperationCanceledException) { throw; }
-    ///     catch (Exception ex) { throw Failed(calledName, ex); }
+    ///     catch (Exception ex) when (ex is not OperationCanceledException) { failure = ex; }
+    ///     if (failure != null) throw Failed(calledName, failure);   // after the catch block, see GuardUserCall
     ///     return result;
     /// }
     /// </code>

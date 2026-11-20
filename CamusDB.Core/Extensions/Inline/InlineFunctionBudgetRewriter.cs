@@ -26,8 +26,27 @@ namespace CamusDB.Core.Extensions.Inline;
 /// <item><b>Every <c>catch</c> gets a filter that lets the budget exceptions through.</b> A bare
 /// <c>catch</c> becomes <c>catch (Exception e) when (!CallBudget.IsBudgetException(e))</c>, and an
 /// existing filter is joined with <c>&amp;&amp;</c> after that test. Without the filter,
-/// <c>while (true) { try { ... } catch { } }</c> would catch the exception of the tick and run on.
-/// A <c>finally</c> block needs nothing: a tick inside it throws again.</item>
+/// <c>while (true) { try { ... } catch { } }</c> would catch the exception of the tick and run on.</item>
+/// <item><b>A tick at the start of every <c>catch</c> block.</b> The runtime runs a <c>catch</c>
+/// block on top of the stack of the frame that threw, and gives that stack back only when the block
+/// ends. A recursion that catches and throws again at every level therefore goes deeper with each
+/// level on its way out, with no loop and no call in between. The tick checks the stack there.</item>
+/// <item><b>A <c>finally</c> block does nothing after a budget stopped the call.</b>
+/// <c>finally { B }</c> becomes <c>finally { if (!CallBudget.Stopped) { Tick(); B } }</c>. A
+/// <c>finally</c> block runs on that same deep stack. A tick inside it would throw again, one more
+/// exception below the last for every frame of a recursion, until the stack overflows. The tick at
+/// its start is for a block that runs for another reason and throws by itself.</item>
+/// <item><b>What the compiler concluded from a <c>finally</c> block stays true.</b> A block that can
+/// be skipped no longer assigns for certain and no longer ends for certain, and the compiler reads
+/// both from it. So, in a body that has a <c>finally</c> block: every local that is declared with no
+/// value gets <c>= default!</c>; the path that skips a block assigns the <c>out</c> parameters the
+/// block names (<see cref="InlineFunctionSymbolReport.FinallyOutParameters"/>); and a <c>try</c>
+/// statement whose <c>finally</c> block cannot end is followed by <c>throw CallBudget.StopCause();</c>
+/// (<see cref="InlineFunctionSymbolReport.EndlessFinallyBlocks"/>). None of the three changes what a
+/// body computes: the first compile proved that no local is read before the body assigns it, the
+/// second runs only in a call that already failed, and the third is reached only after a skipped
+/// block. A local that is declared in one <c>switch</c> section and that only a <c>finally</c> block
+/// of another section assigns is not covered: such a body fails its second compile.</item>
 /// <item><b><c>new T[n]</c> becomes <c>CallBudget.NewArray&lt;T&gt;(n)</c></b>, which refuses a size
 /// above the limit before it allocates.</item>
 /// <item><b>A match timeout goes through <c>CallBudget.RegexTimeout</c></b>, which limits it to the
@@ -53,21 +72,46 @@ internal sealed class InlineFunctionBudgetRewriter : CSharpSyntaxRewriter
 
     private readonly StatementSyntax tick;
 
+    /// <summary>True after a budget check of the call failed: <c>CallBudget.Stopped</c>, or the same on the frame field.</summary>
+    private readonly ExpressionSyntax stopped;
+
+    /// <summary><c>throw CallBudget.StopCause();</c>, or the same on the frame field.</summary>
+    private readonly StatementSyntax throwStopCause;
+
+    /// <summary>True when the body has a <c>finally</c> block, which is when its locals need a value at their declaration.</summary>
+    private readonly bool initializeLocals;
+
     private int caught;
 
-    private InlineFunctionBudgetRewriter(InlineFunctionSymbolReport report, InlineUnitKind kind)
+    private InlineFunctionBudgetRewriter(InlineFunctionSymbolReport report, InlineUnitKind kind, bool initializeLocals)
     {
         this.report = report;
+        this.initializeLocals = initializeLocals;
         checks = kind == InlineUnitKind.Trigger ? TriggerFrame : Budget;
         tick = SyntaxFactory.ParseStatement(checks + ".Tick();");
+        stopped = SyntaxFactory.ParseExpression(checks + ".Stopped");
+        throwStopCause = SyntaxFactory.ParseStatement("throw " + checks + ".StopCause();");
     }
 
     /// <summary>Returns <paramref name="body"/> with the budget checks. <paramref name="body"/> must be the block the report was made from.</summary>
     public static BlockSyntax Rewrite(BlockSyntax body, InlineFunctionSymbolReport report) =>
         Rewrite(body, report, InlineUnitKind.Function);
 
-    public static BlockSyntax Rewrite(BlockSyntax body, InlineFunctionSymbolReport report, InlineUnitKind kind) =>
-        (BlockSyntax)new InlineFunctionBudgetRewriter(report, kind).Visit(body)!;
+    public static BlockSyntax Rewrite(BlockSyntax body, InlineFunctionSymbolReport report, InlineUnitKind kind)
+    {
+        bool hasFinally = false;
+
+        foreach (SyntaxNode node in body.DescendantNodes())
+        {
+            if (node is FinallyClauseSyntax)
+            {
+                hasFinally = true;
+                break;
+            }
+        }
+
+        return (BlockSyntax)new InlineFunctionBudgetRewriter(report, kind, hasFinally).Visit(body)!;
+    }
 
     // ─── Loops ───────────────────────────────────────────────────────────────────────────────────
 
@@ -141,7 +185,7 @@ internal sealed class InlineFunctionBudgetRewriter : CSharpSyntaxRewriter
             .WithBody(TickedBody(null, arrow.Expression, returnsVoid));
     }
 
-    // ─── Catch clauses ───────────────────────────────────────────────────────────────────────────
+    // ─── Catch and finally clauses ───────────────────────────────────────────────────────────────
 
     public override SyntaxNode? VisitCatchClause(CatchClauseSyntax node)
     {
@@ -175,8 +219,75 @@ internal sealed class InlineFunctionBudgetRewriter : CSharpSyntaxRewriter
             test = SyntaxFactory.BinaryExpression(
                 SyntaxKind.LogicalAndExpression, test, SyntaxFactory.ParenthesizedExpression(filter.FilterExpression));
 
-        return visited.WithDeclaration(declaration).WithFilter(SyntaxFactory.CatchFilterClause(test));
+        return visited
+            .WithDeclaration(declaration)
+            .WithFilter(SyntaxFactory.CatchFilterClause(test))
+            .WithBlock(WithTick(visited.Block));
     }
+
+    public override SyntaxNode? VisitFinallyClause(FinallyClauseSyntax node)
+    {
+        FinallyClauseSyntax visited = (FinallyClauseSyntax)base.VisitFinallyClause(node)!;
+        BlockSyntax ticked = WithTick(visited.Block);
+        StatementSyntax guarded;
+
+        if (report.FinallyOutParameters.TryGetValue(node.Block.Span, out List<string>? named))
+        {
+            // if (Stopped) { a = default!; b = default!; } else { Tick(); ... }
+            List<StatementSyntax> defaults = new(named.Count);
+
+            foreach (string name in named)
+                defaults.Add(DefaultAssignment(name));
+
+            guarded = SyntaxFactory.IfStatement(stopped, SyntaxFactory.Block(defaults), SyntaxFactory.ElseClause(ticked));
+        }
+        else
+        {
+            // if (!Stopped) { Tick(); ... }
+            guarded = SyntaxFactory.IfStatement(SyntaxFactory.PrefixUnaryExpression(SyntaxKind.LogicalNotExpression, stopped), ticked);
+        }
+
+        return visited.WithBlock(SyntaxFactory.Block(guarded));
+    }
+
+    public override SyntaxNode? VisitTryStatement(TryStatementSyntax node)
+    {
+        TryStatementSyntax visited = (TryStatementSyntax)base.VisitTryStatement(node)!;
+
+        if (node.Finally is not { } clause || !report.EndlessFinallyBlocks.Contains(clause.Block.Span))
+            return visited;
+
+        // The finally block never ended, so the code after this statement could not run. Skipped, the
+        // block ends, and the only way to get here is a stop whose exception was lost on the way.
+        return SyntaxFactory.Block(visited, throwStopCause);
+    }
+
+    public override SyntaxNode? VisitVariableDeclarator(VariableDeclaratorSyntax node)
+    {
+        VariableDeclaratorSyntax visited = (VariableDeclaratorSyntax)base.VisitVariableDeclarator(node)!;
+
+        if (!initializeLocals || visited.Initializer is not null || visited.ArgumentList is not null)
+            return visited;
+
+        return visited.WithInitializer(SyntaxFactory.EqualsValueClause(DefaultValue()));
+    }
+
+    /// <summary><c>default!</c></summary>
+    private static ExpressionSyntax DefaultValue() =>
+        SyntaxFactory.PostfixUnaryExpression(
+            SyntaxKind.SuppressNullableWarningExpression,
+            SyntaxFactory.LiteralExpression(SyntaxKind.DefaultLiteralExpression));
+
+    /// <summary>
+    /// <c>name = default!;</c>. The identifier is built as a token, so a name that is also a keyword
+    /// (<c>@class</c> in the source) needs no escape.
+    /// </summary>
+    private static StatementSyntax DefaultAssignment(string name) =>
+        SyntaxFactory.ExpressionStatement(
+            SyntaxFactory.AssignmentExpression(
+                SyntaxKind.SimpleAssignmentExpression,
+                SyntaxFactory.IdentifierName(SyntaxFactory.Identifier(name)),
+                DefaultValue()));
 
     // ─── Arrays and match timeouts ───────────────────────────────────────────────────────────────
 

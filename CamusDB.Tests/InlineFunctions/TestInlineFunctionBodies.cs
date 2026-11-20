@@ -55,7 +55,9 @@ public sealed class TestInlineFunctionBodies
     [TestCase("var d = new DateTime(2024, 1, 31); var e = d + TimeSpan.FromHours(n); return e.ToString(\"o\") + \"|\" + DateOnly.FromDateTime(e).ToString(\"yyyy-MM-dd\") + \"|\" + (e - d).TotalMinutes + \"|\" + e.DayOfWeek;", "2024-01-31T07:00:00.0000000|2024-01-31|420|Wednesday")]
     [TestCase("var day = new DateTime(2024, 1, 1).DayOfWeek; return day.ToString() + (int)day + (day == DayOfWeek.Monday) + Enum.GetName(day) + ((DayOfWeek)3);", "Monday1TrueMondayWednesday")]
     [TestCase("return n switch { < 0 => \"neg\", 0 => \"zero\", > 0 and < 10 => \"small\", _ => \"big\" };", "small")]
-    [TestCase("var xs = new List<string> { \"bb\", \"a\", \"ccc\" }; xs.Sort((x, y) => y.Length.CompareTo(x.Length)); return xs[0];", "ccc")]
+    [TestCase("var xs = new List<string> { \"bb\", \"a\", \"ccc\" }; return xs.OrderByDescending(x => x.Length).First();", "ccc")]
+    [TestCase("var xs = new List<string> { \"b\", \"A\", \"a\" }; xs.Sort(StringComparer.Ordinal); return string.Join(\"\", xs) + string.Join(\"\", xs.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ThenByDescending(x => x, StringComparer.Ordinal));", "AabaAb")]
+    [TestCase("var xs = new List<long> { 3, 1, n }; xs.Sort(Comparer<long>.Default); long[] a = xs.ToArray(); return Array.BinarySearch(a, 3L, Comparer<long>.Default).ToString() + new SortedSet<long>(xs, Comparer<long>.Default).Min;", "11")]
     [TestCase("decimal d = n; return (d / 3m).ToString(\"F4\");", "2.3333")]
     public void ABodyThatReturnsText(string body, string expected) =>
         Assert.AreEqual(expected, probe.Call(InlineFunctionProbe.Text(body), Text, 7).StrValue);
@@ -102,7 +104,7 @@ public sealed class TestInlineFunctionBodies
     [TestCase("Func<long, long> f = x => x > 0 ? x : throw new ArgumentOutOfRangeException(\"x\"); Func<long, long> g = x => throw new InvalidOperationException(\"no\"); try { return g(1); } catch (InvalidOperationException e) { return f(n) + e.Message.Length; }", 9)]
     [TestCase("try { try { throw new FormatException(\"a\"); } catch (FormatException) { try { throw new ArgumentException(\"b\"); } catch { return 5; } } finally { n.ToString(); } } catch (Exception e) when (e.Message == \"zz\") { return 6; }", 5)]
     [TestCase("long t = 0; Action<long> add = x => t += x; new List<long> { 1, 2, n }.ForEach(add); Action bump = () => t++; bump(); return t;", 11)]
-    [TestCase("Func<long, long> f = delegate (long x) { return x + 1; }; Predicate<long> p = x => x > 3; Comparison<long> c = (x, y) => x.CompareTo(y); return f(n) + (p(n) ? 1 : 0) + c(1, 2);", 8)]
+    [TestCase("Func<long, long> f = delegate (long x) { return x + 1; }; Predicate<long> p = x => x > 3; Func<long, long, int> c = (x, y) => x.CompareTo(y); return f(n) + (p(n) ? 1 : 0) + c(1, 2);", 8)]
     [TestCase("long d = default; string? z = default(string); return d + nameof(n).Length + (z is null ? 1 : 0);", 2)]
     [TestCase("var q = new Queue<long>(); q.Enqueue(n); q.Enqueue(2); var st = new Stack<long>(); st.Push(q.Dequeue()); st.Push(q.Peek()); return st.Pop() * 10 + st.Peek() + q.Count;", 28)]
     [TestCase("var xs = new List<long> { 1, 2, 3, n }; return xs.Distinct().Skip(1).Take(2).Reverse().Aggregate(0L, (acc, x) => acc * 10 + x) + xs.Zip(xs, (x, y) => x * y).Max() + (xs.Any(x => x > 5) ? 1 : 0) + xs.ToDictionary(x => x, x => x * 2)[n] + xs.ToHashSet().Count + xs.First() + xs.Last() + (long)xs.Average();", 111)]

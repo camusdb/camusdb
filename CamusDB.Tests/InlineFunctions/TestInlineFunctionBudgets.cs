@@ -38,6 +38,9 @@ public sealed class TestInlineFunctionBudgets
     /// </summary>
     private const int StackTimeoutMs = 60_000;
 
+    /// <summary>The stack of a thread pool thread on Linux: the smallest stack a call of a function runs on.</summary>
+    private const int PoolStackBytes = 1_572_864;
+
     private InlineFunctionProbe probe = null!;
 
     /// <summary>
@@ -89,6 +92,49 @@ public sealed class TestInlineFunctionBudgets
         Assert.Less(watch.ElapsedMilliseconds, withinMs, "the call must end soon after its limit");
 
         return stopped;
+    }
+
+    /// <summary>
+    /// Calls <paramref name="body"/> on a thread with the stack of a pool thread. Returns the error of
+    /// the call when it is a <see cref="CamusDBException"/>, and any other exception apart.
+    /// </summary>
+    private static (CamusDBException? Stopped, Exception? Other) CallOnAPoolStack(InlineFunctionProbe target, string body)
+    {
+        CamusDBException? stopped = null;
+        Exception? other = null;
+
+        Thread thread = new(
+            () =>
+            {
+                try
+                {
+                    target.Call(InlineFunctionProbe.Number(body), "x", 5);
+                }
+                catch (CamusDBException failure)
+                {
+                    stopped = failure;
+                }
+                catch (Exception failure)
+                {
+                    other = failure;
+                }
+            },
+            maxStackSize: PoolStackBytes);
+
+        thread.Start();
+        thread.Join();
+
+        return (stopped, other);
+    }
+
+    private static void StoppedOnAPoolStack(InlineFunctionProbe target, string body, string reason)
+    {
+        (CamusDBException? stopped, Exception? other) = CallOnAPoolStack(target, body);
+
+        Assert.IsNull(other, other?.ToString());
+        Assert.IsNotNull(stopped, "the call must fail");
+        Assert.AreEqual(CamusDBErrorCodes.InlineFunctionBudgetExceeded, stopped!.Code, stopped.Message);
+        StringAssert.Contains(reason, stopped.Message);
     }
 
     [TestCase("while (true) { }")]
@@ -230,37 +276,134 @@ public sealed class TestInlineFunctionBudgets
         });
 
         foreach (string body in bodies)
-        {
-            CamusDBException? stopped = null;
-            Exception? other = null;
-
-            Thread thread = new(
-                () =>
-                {
-                    try
-                    {
-                        roomy.Call(InlineFunctionProbe.Number(body), "x", 5);
-                    }
-                    catch (CamusDBException failure)
-                    {
-                        stopped = failure;
-                    }
-                    catch (Exception failure)
-                    {
-                        other = failure;
-                    }
-                },
-                maxStackSize: 1_572_864);
-
-            thread.Start();
-            thread.Join();
-
-            Assert.IsNull(other, other?.ToString());
-            Assert.IsNotNull(stopped, "the recursion has no end, so the call must fail");
-            Assert.AreEqual(CamusDBErrorCodes.InlineFunctionBudgetExceeded, stopped!.Code, stopped.Message);
-            StringAssert.Contains("nested too deeply for the stack", stopped.Message);
-        }
+            StoppedOnAPoolStack(roomy, body, "nested too deeply for the stack");
     }
+
+    /// <summary>
+    /// The runtime runs a <c>catch</c> or a <c>finally</c> block on top of the stack of the frame that
+    /// threw, and gives that stack back only when a <c>catch</c> block ends. A body that throws from
+    /// such a block at every level of a recursion goes deeper with each level on its way out. Each of
+    /// these bodies ended the process: the first two through the budget check of a <c>finally</c>
+    /// block, the last two with no check at all on the way out.
+    /// </summary>
+    [TestCase("long Deeper(long x) { try { return Deeper(x + 1) + 1; } finally { for (long i = 0; i < 1; i++) { } } } return Deeper(n);")]
+    [TestCase("long Leaf(long x) => x; long Deeper(long x) { try { return Deeper(x + 1) + 1; } finally { Leaf(x); } } return Deeper(n);")]
+    [TestCase("long Deeper(long x) { try { if (x > 3000) throw new InvalidOperationException(\"end\"); return Deeper(x + 1) + 1; } catch { throw; } } return Deeper(n);")]
+    [TestCase("long Deeper(long x) { try { if (x > 3000) throw new InvalidOperationException(\"end\"); return Deeper(x + 1) + 1; } finally { if (x >= 0) throw new InvalidOperationException(\"again\"); } } return Deeper(n);")]
+    public void ARecursionThatThrowsAgainOnItsWayOut_FailsTheCallAndNotTheProcess(string body) =>
+        StoppedOnAPoolStack(stackProbe, body, "nested too deeply for the stack");
+
+    /// <summary>
+    /// The same growth with a stack that is nearly empty: 600 frames, each with a <c>finally</c> block
+    /// that has a budget check, and the time limit ends the call at the bottom. Every check on the
+    /// way out threw again, and 600 exceptions below each other do not fit in the stack.
+    /// </summary>
+    [Test]
+    public void ATimeStopUnderManyFinallyBlocks_FailsTheCallAndNotTheProcess() =>
+        StoppedOnAPoolStack(
+            probe,
+            "long Deeper(long x) { try { if (x > 600) { while (true) { } } return Deeper(x + 1) + 1; } finally { for (long i = 0; i < 1; i++) { } } } return Deeper(n);",
+            "inline_function_call_timeout_ms");
+
+    /// <summary>
+    /// The error of a stopped recursion is thrown from the frame of the guard, after the stack of the
+    /// recursion is given back. The filter below runs while the runtime looks for the handler of that
+    /// error, on top of the frame that threw it: thrown from inside a <c>catch</c> block, that frame
+    /// would be at the bottom of the recursion, where the stack is not sufficient.
+    /// </summary>
+    [Test]
+    public void TheErrorOfAStoppedRecursion_IsThrownAfterTheStackIsGivenBack()
+    {
+        bool? roomWhenThrown = null;
+        CamusDBException? stopped = null;
+
+        bool Observe()
+        {
+            roomWhenThrown = System.Runtime.CompilerServices.RuntimeHelpers.TryEnsureSufficientExecutionStack();
+            return true;
+        }
+
+        Thread thread = new(
+            () =>
+            {
+                try
+                {
+                    stackProbe.Call(InlineFunctionProbe.Number("long Deeper(long x) => Deeper(x + 1) + 1; return Deeper(n);"), "x", 5);
+                }
+                catch (CamusDBException failure) when (Observe())
+                {
+                    stopped = failure;
+                }
+            },
+            maxStackSize: PoolStackBytes);
+
+        thread.Start();
+        thread.Join();
+
+        Assert.IsNotNull(stopped, "the recursion has no end, so the call must fail");
+        StringAssert.Contains("nested too deeply for the stack", stopped!.Message);
+        Assert.AreEqual(true, roomWhenThrown, "the error was thrown while the stack of the recursion was still in use");
+    }
+
+    /// <summary>
+    /// The server makes a <c>finally</c> block do nothing after a budget stopped the call. A block
+    /// that can be skipped assigns nothing for certain, so these bodies would not compile after the
+    /// rewrite without its other half: each reads a variable that only its <c>finally</c> block wrote.
+    /// </summary>
+    [TestCase("long y; try { y = n; } finally { y = 7; } return y;", 7)]
+    [TestCase("long y; void Set() { y = 9; } try { } finally { Set(); } return y;", 9)]
+    [TestCase("(long A, long B) t; try { } finally { t.A = 1; t.B = n; } return t.A + t.B;", 6)]
+    [TestCase("long a; long b; try { } finally { (a, b) = (n, 2); } return a + b;", 7)]
+    [TestCase("long y; try { } finally { long.TryParse(\"12\", out y); } return y;", 12)]
+    [TestCase("string @class; try { } finally { @class = \"ab\"; } return @class.Length;", 2)]
+    [TestCase("long y; try { } finally { try { } finally { y = n + 1; } } return y;", 6)]
+    [TestCase("long Inner(long k) { long y; try { } finally { y = k; long z = 1; y += z; } return y; } return Inner(n);", 6)]
+    [TestCase("void Fill(out long y) { try { } finally { y = n + 3; } } Fill(out long v); return v;", 8)]
+    [TestCase("void Fill(out long y, out long z) { try { } finally { try { } finally { y = 1; z = n; } } } Fill(out long v, out long w); return v + w;", 6)]
+    [TestCase("for (long i, j; ; ) { try { } finally { i = n; j = 4; } return i + j; }", 9)]
+    public void AVariableThatAFinallyBlockAssigns_IsStillAssignedAfterIt(string body, long expected) =>
+        Assert.AreEqual(expected, probe.Call(InlineFunctionProbe.Number(body), "x", 5).LongValue);
+
+    /// <summary>
+    /// The end of a <c>finally</c> block that always throws cannot be reached, so the compiler asks
+    /// for no <c>return</c> after its <c>try</c> statement. That must hold after the rewrite too.
+    /// </summary>
+    [TestCase("long Fail(long k) { try { k++; } finally { throw new InvalidOperationException(\"always \" + k); } } try { return Fail(n); } catch (InvalidOperationException e) { return e.Message.Length; }", 8)]
+    [TestCase("try { n++; } finally { throw new InvalidOperationException(\"always\"); }", -1)]
+    public void AFinallyBlockThatAlwaysThrows_StillEndsItsMethod(string body, long expected)
+    {
+        if (expected >= 0)
+        {
+            Assert.AreEqual(expected, probe.Call(InlineFunctionProbe.Number(body), "x", 5).LongValue);
+            return;
+        }
+
+        CamusDBException failed = Assert.Throws<CamusDBException>(() => probe.Call(InlineFunctionProbe.Number(body), "x", 5))!;
+        Assert.AreEqual(CamusDBErrorCodes.ExtensionFunctionFailed, failed.Code, failed.Message);
+        StringAssert.Contains("always", failed.Message);
+    }
+
+    [Test]
+    public void AFinallyBlock_RunsWhenNoBudgetStoppedTheCall()
+    {
+        const string body =
+            "long c = 0; try { try { throw new InvalidOperationException(\"x\"); } finally { c += 10; } } " +
+            "catch (InvalidOperationException) { c += 1; } return c + n;";
+
+        Assert.AreEqual(16, probe.Call(InlineFunctionProbe.Number(body), "x", 5).LongValue);
+    }
+
+    /// <summary>
+    /// The runtime drops an exception that a filter throws and reads the filter as false. The budget
+    /// check that failed inside the filter is therefore lost, and the second <c>catch</c> takes the
+    /// body's own exception. The check at the start of that block throws the first failure again.
+    /// </summary>
+    [Test]
+    public void ABudgetStopInsideAFilter_StillFailsTheCall() =>
+        Stopped(
+            "bool Spin() { while (true) { } } try { throw new InvalidOperationException(\"x\"); } " +
+            "catch (Exception) when (Spin()) { return 1; } catch { return 2; }",
+            "inline_function_call_timeout_ms");
 
     [Test]
     public void AfterAStoppedCall_TheNextCallHasItsOwnBudget()

@@ -36,6 +36,21 @@ internal sealed class InlineFunctionSymbolReport
     /// value.
     /// </summary>
     public HashSet<TextSpan> VoidLambdas { get; } = [];
+
+    /// <summary>
+    /// For the block of each <c>finally</c> clause that names an <c>out</c> parameter of the lambda or
+    /// local function it is in: the span of the block and the names of those parameters. The rewrite
+    /// makes a <c>finally</c> block do nothing after a budget stopped the call, and an <c>out</c>
+    /// parameter that only the block assigns must still be assigned on the path that skips it.
+    /// </summary>
+    public Dictionary<TextSpan, List<string>> FinallyOutParameters { get; } = [];
+
+    /// <summary>
+    /// The spans of the <c>finally</c> blocks whose end cannot be reached: a block that always throws
+    /// or loops for ever. The compiler lets the code after such a <c>try</c> statement go without a
+    /// <c>return</c>, and the rewrite must keep that true for the block it makes skippable.
+    /// </summary>
+    public HashSet<TextSpan> EndlessFinallyBlocks { get; } = [];
 }
 
 /// <summary>
@@ -203,6 +218,10 @@ internal sealed class InlineFunctionSymbolChecker
         checker.WalkSyntax(block);
         checker.CheckFrames(block);
 
+        // For the rewrite only, so a refused body does not pay for it.
+        if (checker.report.Findings.Count == 0 && checker.suppressed == 0)
+            checker.CollectEndlessFinallyBlocks(block);
+
         if (checker.suppressed > 0)
             checker.report.Findings.Add(new InlineFunctionFinding(1, 1, $"and {checker.suppressed} more problems"));
 
@@ -243,6 +262,9 @@ internal sealed class InlineFunctionSymbolChecker
             cancellation.ThrowIfCancellationRequested();
             Visit(operation);
             CountValue(operation);
+
+            if (operation is IParameterReferenceOperation { Parameter.RefKind: RefKind.Out } named)
+                NoteOutParameter(named);
         }
     }
 
@@ -377,6 +399,62 @@ internal sealed class InlineFunctionSymbolChecker
                         CheckSymbol(conversion, node, write: false);
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// Fills <see cref="InlineFunctionSymbolReport.EndlessFinallyBlocks"/>. The compiler's control
+    /// flow analysis reads the whole method for one block, so it runs only for a block that holds a
+    /// <c>throw</c> or a loop: the end of any other block can be reached.
+    /// </summary>
+    private void CollectEndlessFinallyBlocks(BlockSyntax block)
+    {
+        foreach (SyntaxNode node in block.DescendantNodes())
+        {
+            if (node is not FinallyClauseSyntax { Block: { Statements.Count: > 0 } region } || !CanBeEndless(region))
+                continue;
+
+            // The time limit of the compile is checked between two analyses.
+            cancellation.ThrowIfCancellationRequested();
+
+            ControlFlowAnalysis? flow = model.AnalyzeControlFlow(region.Statements[0], region.Statements[^1]);
+
+            if (flow is { Succeeded: true, EndPointIsReachable: false })
+                report.EndlessFinallyBlocks.Add(region.Span);
+        }
+    }
+
+    private static bool CanBeEndless(BlockSyntax region)
+    {
+        foreach (SyntaxNode node in region.DescendantNodes())
+        {
+            if (node is ThrowStatementSyntax or ThrowExpressionSyntax or WhileStatementSyntax or DoStatementSyntax or ForStatementSyntax)
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Records an <c>out</c> parameter under every <c>finally</c> block that names it, up to the
+    /// lambda or local function that declares it. A nested function cannot capture an <c>out</c>
+    /// parameter, so the first function boundary is its owner.
+    /// </summary>
+    private void NoteOutParameter(IParameterReferenceOperation reference)
+    {
+        for (SyntaxNode? node = reference.Syntax; node is not null && node != bodyBlock; node = node.Parent)
+        {
+            if (node is AnonymousFunctionExpressionSyntax or LocalFunctionStatementSyntax)
+                return;
+
+            if (node is not BlockSyntax { Parent: FinallyClauseSyntax } region)
+                continue;
+
+            if (!report.FinallyOutParameters.TryGetValue(region.Span, out List<string>? names))
+                report.FinallyOutParameters[region.Span] = names = [];
+
+            if (!names.Contains(reference.Parameter.Name))
+                names.Add(reference.Parameter.Name);
         }
     }
 
@@ -985,7 +1063,7 @@ internal sealed class InlineFunctionSymbolChecker
         // The same text as the type check gives, so one use of an unlisted type is one finding.
         if (!InlineFunctionAllowList.TryGetRule(typeName, kind, out InlineFunctionAllowList.TypeRule? rule))
         {
-            Refuse(where, $"the type {Display(member.ContainingType)} is not on the list of allowed types");
+            Refuse(where, NotListed(member.ContainingType));
             return;
         }
 
@@ -1126,7 +1204,7 @@ internal sealed class InlineFunctionSymbolChecker
 
                 if (!InlineFunctionAllowList.IsListed(TypeKey(named.OriginalDefinition), kind))
                 {
-                    Refuse(where, $"the type {Display(type)} is not on the list of allowed types");
+                    Refuse(where, NotListed(type));
                     return;
                 }
 
@@ -1344,6 +1422,18 @@ internal sealed class InlineFunctionSymbolChecker
     }
 
     private static string Display(ITypeSymbol? type) => type?.ToDisplayString(DisplayFormat) ?? "this type";
+
+    /// <summary>The refusal of a type that is not listed, with what to write in its place when the list left it out on purpose.</summary>
+    private static string NotListed(ITypeSymbol? type)
+    {
+        string refusal = $"the type {Display(type)} is not on the list of allowed types";
+
+        if (type is INamedTypeSymbol named && TypeKey(named.OriginalDefinition) == "System.Comparison`1")
+            refusal += ": a body cannot write a comparison of its own. Order with OrderBy and a key, or pass a comparer of the " +
+                "framework (StringComparer.Ordinal, Comparer<T>.Default)";
+
+        return refusal;
+    }
 
     private static string DisplayName(ISymbol member) => member switch
     {

@@ -95,8 +95,8 @@ internal static class ExtensionFunctionBinder
     ///     Arg1 a1 = args.Count > 1 ? ToArg1(args[1], calledName, 1) : default1;
     ///     R result;
     ///     try { result = Method(a0, a1); }
-    ///     catch (OperationCanceledException) { throw; }
-    ///     catch (Exception ex) { throw Failed(calledName, ex); }
+    ///     catch (Exception ex) when (ex is not OperationCanceledException) { failure = ex; }
+    ///     if (failure != null) throw Failed(calledName, failure);   // after the catch block, see GuardUserCall
     ///     return FromR(result);
     /// }
     /// </code>
@@ -265,16 +265,36 @@ internal static class ExtensionAdapterParts
     }
 
     /// <summary>
-    /// <c>try { call; } catch (OperationCanceledException) { throw; } catch (Exception ex) { throw wrap(ex); }</c>
+    /// <code>
+    /// Exception failure = null;
+    /// try { call; }
+    /// catch (Exception ex) when (ex is not OperationCanceledException) { failure = ex; }
+    /// if (failure != null) throw wrap(failure);
+    /// </code>
+    /// The wrapped error is thrown after the <c>try</c>, never inside the <c>catch</c> block. The
+    /// runtime runs a <c>catch</c> block on top of the stack of the frame that threw and gives that
+    /// stack back only when the block ends. An inline function that is stopped for its stack depth
+    /// throws with little stack left, and a throw inside the block would be handled below that point.
+    /// The filter lets <see cref="OperationCanceledException"/> pass with no handler at all.
     /// </summary>
     public static Expression GuardUserCall(Expression call, Func<ParameterExpression, Expression> wrap)
     {
         ParameterExpression caught = Expression.Variable(typeof(Exception), "ex");
+        ParameterExpression failure = Expression.Variable(typeof(Exception), "failure");
+        ConstantExpression none = Expression.Constant(null, typeof(Exception));
 
-        return Expression.TryCatch(
-            Expression.Block(typeof(void), call),
-            Expression.Catch(typeof(OperationCanceledException), Expression.Rethrow(typeof(void))),
-            Expression.Catch(caught, Expression.Throw(wrap(caught), typeof(void))));
+        return Expression.Block(
+            typeof(void),
+            [failure],
+            // A block variable keeps its value when the block runs again, so it is cleared each time.
+            Expression.Assign(failure, none),
+            Expression.TryCatch(
+                Expression.Block(typeof(void), call),
+                Expression.Catch(
+                    caught,
+                    Expression.Block(typeof(void), Expression.Assign(failure, caught)),
+                    Expression.Not(Expression.TypeIs(caught, typeof(OperationCanceledException))))),
+            Expression.IfThen(Expression.ReferenceNotEqual(failure, none), Expression.Throw(wrap(failure), typeof(void))));
     }
 
     /// <summary>

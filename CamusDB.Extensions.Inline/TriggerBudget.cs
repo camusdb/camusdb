@@ -39,6 +39,10 @@ namespace CamusDB.Extensions.Inline;
 /// have a time limit of its own. The body never runs past it, whatever time its SQL took: the
 /// deadline of the body is capped by it when the fire starts and again on each
 /// <see cref="Resume"/>.</para>
+///
+/// <para><b>A failed check stops the fire for good</b>, as in <see cref="CallBudget"/>: the first
+/// failed check records its exception, every later tick throws it again, and the <c>finally</c>
+/// blocks of the body do nothing while <see cref="Stopped"/> is true.</para>
 /// </summary>
 public sealed class TriggerBudget
 {
@@ -59,6 +63,9 @@ public sealed class TriggerBudget
     private int threadId;
 
     private long suspendedAt;
+
+    /// <summary>The exception of the first budget check that failed in this fire, or null.</summary>
+    private Exception? stop;
 
     /// <param name="timeoutMilliseconds">The time the body's own work may take; 0 or less for no limit.</param>
     /// <param name="allocationLimitBytes">The managed bytes the body may allocate; 0 or less for no limit.</param>
@@ -103,17 +110,39 @@ public sealed class TriggerBudget
         }
     }
 
-    /// <summary>The check at the start of every loop pass, lambda and local function of the body.</summary>
+    /// <summary>
+    /// True after a budget check of this fire failed. The compiled body reads it at the start of every
+    /// <c>finally</c> block and does nothing there when it is true.
+    /// </summary>
+    public bool Stopped => stop is not null;
+
+    /// <summary>
+    /// The exception of the first failed check of this fire. The compiled body throws it after a
+    /// <c>try</c> statement whose <c>finally</c> block cannot end, where control arrives only when
+    /// that block was skipped.
+    /// </summary>
+    public Exception StopCause() =>
+        stop ?? new InvalidOperationException("An inline trigger body skipped a finally block with no stopped budget.");
+
+    /// <summary>
+    /// The check at the start of every loop pass, lambda, local function, <c>catch</c> block and
+    /// <c>finally</c> block of the body.
+    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Tick()
     {
+        // An exception thrown inside a filter is dropped, so the body meets the first failure again here.
+        if (stop is not null)
+            ThrowAgain(stop);
+
         if (Environment.TickCount64 > deadline)
             ThrowTime();
 
         if (Allocated > allocationLimit)
             ThrowAllocation(allocationLimit);
 
-        RuntimeHelpers.EnsureSufficientExecutionStack();
+        if (!RuntimeHelpers.TryEnsureSufficientExecutionStack())
+            ThrowStack();
     }
 
     /// <summary>Called by the server's session before it runs a statement for the body.</summary>
@@ -154,9 +183,9 @@ public sealed class TriggerBudget
             throw new OverflowException("Arithmetic operation resulted in an overflow.");
 
         if (length > arrayLimit)
-            throw new CallBudgetExceededException(
+            throw Stop(new CallBudgetExceededException(
                 CallBudgetKind.ArrayLength,
-                $"an array of {length} elements is larger than the limit of {arrayLimit} elements");
+                $"an array of {length} elements is larger than the limit of {arrayLimit} elements"));
 
         if (Allocated + (long)length * Unsafe.SizeOf<T>() > allocationLimit)
             ThrowAllocation(allocationLimit);
@@ -179,10 +208,24 @@ public sealed class TriggerBudget
         return requested < limit ? requested : limit;
     }
 
-    private static void ThrowTime() =>
-        throw new CallBudgetExceededException(CallBudgetKind.Time, "the trigger ran longer than its time limit");
+    /// <summary>
+    /// Records <paramref name="cause"/> as the reason this fire stops, unless an earlier check recorded
+    /// one, and returns it for the caller to throw.
+    /// </summary>
+    private Exception Stop(Exception cause)
+    {
+        stop ??= cause;
+        return cause;
+    }
 
-    private static void ThrowAllocation(long limit) =>
-        throw new CallBudgetExceededException(
-            CallBudgetKind.Allocation, $"the trigger allocated more than its memory limit of {limit} bytes");
+    private void ThrowStack() => throw Stop(new InsufficientExecutionStackException());
+
+    private static void ThrowAgain(Exception stop) => throw stop;
+
+    private void ThrowTime() =>
+        throw Stop(new CallBudgetExceededException(CallBudgetKind.Time, "the trigger ran longer than its time limit"));
+
+    private void ThrowAllocation(long limit) =>
+        throw Stop(new CallBudgetExceededException(
+            CallBudgetKind.Allocation, $"the trigger allocated more than its memory limit of {limit} bytes"));
 }

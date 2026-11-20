@@ -931,7 +931,7 @@ expressions, and these types:
 | Values | `bool`, the integer types, `char`, `float`, `double`, `decimal`, `string`, `Guid`, `DateTime`, `TimeSpan`, `DateOnly`, `TimeOnly`, `DayOfWeek`, `Nullable<T>`, tuples, `Math`, `MathF`, `Convert`, `BitConverter` |
 | Text | `StringBuilder`, `StringComparison`, `StringComparer.Ordinal` and `OrdinalIgnoreCase`, `CultureInfo.InvariantCulture`, `Regex` and its match types |
 | Collections | arrays, `List<T>`, `Dictionary<K,V>`, `HashSet<T>`, `SortedDictionary<K,V>`, `SortedSet<T>`, `Queue<T>`, `Stack<T>`, and LINQ (`Enumerable`) |
-| Delegates | `Func<...>`, `Action<...>`, `Predicate<T>`, `Comparison<T>` |
+| Delegates | `Func<...>`, `Action<...>`, `Predicate<T>` |
 | Exceptions | `Exception`, `ArgumentException`, `ArgumentNullException`, `ArgumentOutOfRangeException`, `InvalidOperationException`, `FormatException`, `OverflowException`, `DivideByZeroException`, `KeyNotFoundException`, `IndexOutOfRangeException`, `NullReferenceException`, `RegexMatchTimeoutException`: construction, `Message`, and `catch` |
 
 A type or a member that is not on the list is refused with `CADB0839`, and the message names each
@@ -951,6 +951,7 @@ until a server release adds it.
 | `object` as an element or a type argument (`List<object>`, `object[]`, a tuple with an `object`) | A value inside a value inside a value, to any depth, overflows the stack when the framework prints or compares it. |
 | A cast to an interface (`(IList<int>)x`, `x as IEnumerable<int>`), generic local functions, `const string`, anonymous types, ranges (`a..b`) and `^n` | Each is a way around one of the rules above, or needs a compiler helper that is not allowed. |
 | `ex.ToString()`, an exception in a string, an exception in a list | The text of an exception holds the server's stack. Read `ex.Message`. |
+| A comparison written in the body: `xs.Sort((a, b) => ...)`, `Array.Sort(xs, (a, b) => ...)`, `Comparison<T>`, `Comparer<T>.Create(...)` | A sort of .NET catches an error of the comparison and raises another one. When the comparison calls back into the body, a recursion through the sort overflows the stack on its way out, and no budget check runs there. Order with `OrderBy` and a key (`xs.OrderBy(x => x.Length).ThenBy(x => x)`), or pass a comparer of the framework: `StringComparer.Ordinal`, `Comparer<T>.Default`. |
 | A `Regex` with no match timeout | Use the constructor and the static methods that take a `matchTimeout`. The server limits the timeout to the time the call has left. The result of `Matches` can be read with `foreach` only. |
 | A type of more than 256 type names or more than 32 levels (`Dictionary<string, List<long>>` is 4 names and 3 levels), a value type larger than 1,024 bytes (a tuple of more than 128 numbers) | A value tuple lives on the stack. `var t1 = (n, n); var t2 = (t1, t1);` and thirteen more lines make a local of half a megabyte, and the method that holds it overflows the stack when it is entered, before any budget check can run. A type nested a thousand levels deep does the same inside the framework's `Equals` and `ToString`. Keep large or deep data in a list, an array or a dictionary. |
 | A method, lambda or local function that works with more than 32 KiB of values at one time | The estimate counts every local and every operation that makes a value larger than a register: 1,000 `decimal` operations, or 4,000 `long` locals, in one body. Move a part of the work to a local function, which has a frame of its own. |
@@ -989,10 +990,14 @@ The setting is off by default, as in PostgreSQL, because a limit would fail long
 work today. On a node where the users who may create a function are not trusted with its CPU, set
 it, and give `CREATE` on a database only to users who may use that much of the node for that long.
 
-The server compiles a check into the start of every loop body, lambda and local function. An
-endless loop ends at the time limit, and a recursion with no end fails with `CADB0840` before the
-stack overflows, where the same code in an extension DLL ends the server process. A `catch` in the
-body cannot catch these errors.
+The server compiles a check into the start of every loop body, lambda, local function, `catch`
+block and `finally` block. An endless loop ends at the time limit, and a recursion with no end fails
+with `CADB0840` before the stack overflows, where the same code in an extension DLL ends the server
+process. A `catch` in the body cannot catch these errors.
+
+After a budget stops a call, no `finally` block of the body runs. The call fails, so nothing reads
+what such a block would write. The same is true for a trigger body: the fire fails its statement,
+and a `finally` block that sets a column of `NEW` does not run.
 
 The checks run between two framework calls, not inside one. A single call (a sort, a `Replace`)
 finishes first, which is why the allowed members are the ones whose cost the size of their inputs
@@ -1097,6 +1102,10 @@ nodes are not affected. This can happen in a rolling upgrade, when a function us
 older build does not allow yet: upgrade every node before you create functions that need the new
 build, or replace the function. Each function record holds the revision of the rules it was
 accepted under.
+
+Rule revision 3 removed `Comparison<T>` and `Comparer<T>.Create`. A function or a trigger that was
+created under an earlier revision and that writes a comparison of its own fails with `CADB0845` on a
+node of this build, until its owner replaces the body.
 
 `SHOW CREATE FUNCTION name` returns the statement that creates the function again, with a tagged
 dollar quote when the body needs one. Use it to copy a function to another database. A logical dump

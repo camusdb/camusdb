@@ -47,9 +47,11 @@ internal static class InlineFunctionAllowList
 {
     /// <summary>
     /// The revision of this list and of the rules of the symbol checker. Revision 2: the SQL text of
-    /// a trigger's <c>Sql.ExecuteAsync</c> and <c>Sql.QueryAsync</c> must be a constant.
+    /// a trigger's <c>Sql.ExecuteAsync</c> and <c>Sql.QueryAsync</c> must be a constant. Revision 3:
+    /// <c>Comparison&lt;T&gt;</c> and <c>Comparer&lt;T&gt;.Create</c> are removed, so a body cannot
+    /// write a comparison of its own.
     /// </summary>
-    public const int Revision = 2;
+    public const int Revision = 3;
 
     /// <summary>What one listed type allows.</summary>
     internal sealed class TypeRule
@@ -281,7 +283,14 @@ internal static class InlineFunctionAllowList
         Only("System.IComparable`1", "CompareTo");
         Only("System.IEquatable`1", "Equals");
 
-        Only("System.Collections.Generic.Comparer`1", "Default Compare Create");
+        // No Create, and no Comparison<T> among the delegates below: a body cannot write a comparison
+        // of its own, so every comparer it can pass is one of the framework. The sorts and the binary
+        // searches of the framework catch an exception of the comparison and throw another from the
+        // catch block, which the runtime handles below the frame that threw the first. With the
+        // body's code in the comparison, a recursion through a sort throws once more for each level
+        // on its way out, with no budget check in between, until the stack overflows. An entry that
+        // turns a lambda into a comparer opens that again for every member that takes one.
+        Only("System.Collections.Generic.Comparer`1", "Default Compare");
         Only("System.Collections.Generic.EqualityComparer`1", "Default Equals");
 
         // The culture comparers are left out: their order depends on the host's globalization data.
@@ -309,9 +318,9 @@ internal static class InlineFunctionAllowList
         // lead to reflection.
         const string callable = ".ctor Invoke";
 
+        // Comparison<T> is left out on purpose: see Comparer<T> above.
         Only("System.Action", callable);
         Only("System.Predicate`1", callable);
-        Only("System.Comparison`1", callable);
         Only("System.Text.RegularExpressions.MatchEvaluator", callable);
 
         for (int arity = 1; arity <= 16; arity++)

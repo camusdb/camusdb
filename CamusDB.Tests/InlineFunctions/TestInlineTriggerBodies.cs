@@ -325,6 +325,40 @@ public sealed class TestInlineTriggerBodies
     [TestCase("Func<long, long> deeper = null!; deeper = x => deeper(x + 1) + 1; NEW!.price = deeper(1);")]
     public void ARecursion_IsStopped_OnASmallStack(string body) => Stopped(body, "nested too deeply");
 
+    /// <summary>
+    /// A <c>catch</c> or a <c>finally</c> block runs on top of the stack of the frame that threw. Each
+    /// of these bodies throws from such a block at every level of a recursion, and ended the process.
+    /// </summary>
+    [TestCase("long Deeper(long x) { try { return Deeper(x + 1) + 1; } finally { for (long i = 0; i < 1; i++) { } } } NEW!.price = Deeper(1);")]
+    [TestCase("long Deeper(long x) { try { if (x > 3000) throw new InvalidOperationException(\"end\"); return Deeper(x + 1) + 1; } catch { throw; } } NEW!.price = Deeper(1);")]
+    [TestCase("long Deeper(long x) { try { if (x > 3000) throw new InvalidOperationException(\"end\"); return Deeper(x + 1) + 1; } finally { if (x >= 0) throw new InvalidOperationException(\"again\"); } } NEW!.price = Deeper(1);")]
+    public void ARecursionThatThrowsAgainOnItsWayOut_IsStopped(string body) =>
+        // The stack or the time: on a slow machine the time limit of this fixture can end the fire
+        // first. That the fire fails and the next test runs is the point.
+        Stopped(body, "was stopped:");
+
+    [Test]
+    public void AFinallyBlock_DoesNothingAfterABudgetStoppedTheFire()
+    {
+        Dictionary<string, ColumnValue> row = Row(1, "a", 5);
+
+        CamusDBException stopped = Assert.Throws<CamusDBException>(() => Fire(
+            "try { while (true) { } } finally { NEW!.price = 99; }", TriggerTiming.Before, TriggerOperation.Insert, null, row))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.InlineFunctionBudgetExceeded, stopped.Code, stopped.Message);
+        Assert.AreEqual(5, row["price"].LongValue, "the finally block ran after the fire was stopped");
+    }
+
+    [Test]
+    public void AFinallyBlock_RunsWhenNoBudgetStoppedTheFire()
+    {
+        Dictionary<string, ColumnValue> row = Row(1, "a", 5);
+
+        Fire("try { NEW!.title = \"b\"; } finally { NEW!.price = 99; }", TriggerTiming.Before, TriggerOperation.Insert, null, row);
+
+        Assert.AreEqual(99, row["price"].LongValue);
+    }
+
     [Test]
     public void AnAllocationLoop_IsStopped() =>
         Stopped("var l = new List<string>(); while (true) l.Add(new string(new char[1000]));", "inline_function_allocation_limit_bytes");

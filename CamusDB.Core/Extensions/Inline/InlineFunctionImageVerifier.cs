@@ -100,6 +100,8 @@ internal static class InlineFunctionImageVerifier
     private static readonly FrozenSet<string> BudgetMembers = new[]
     {
         "CamusDB.Extensions.Inline.CallBudget.Tick",
+        "CamusDB.Extensions.Inline.CallBudget.get_Stopped",
+        "CamusDB.Extensions.Inline.CallBudget.StopCause",
         "CamusDB.Extensions.Inline.CallBudget.NewArray",
         "CamusDB.Extensions.Inline.CallBudget.IsBudgetException",
         "CamusDB.Extensions.Inline.CallBudget.RegexTimeout",

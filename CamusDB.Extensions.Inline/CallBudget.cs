@@ -28,13 +28,16 @@ public struct CallBudgetFrame
     internal int ArrayLimit;
 
     internal CancellationToken Token;
+
+    /// <summary>The exception of the first budget check that failed in this call, or null.</summary>
+    internal Exception? Stop;
 }
 
 /// <summary>
 /// The per-call budgets of an inline SQL function. The server compiles the body of the function with
-/// a call to <see cref="Tick"/> at the start of every loop body, lambda and local function, and with
-/// <see cref="NewArray{T}(int)"/> in place of every sized array creation. The server's adapter calls
-
+/// a call to <see cref="Tick"/> at the start of every loop body, lambda, local function,
+/// <c>catch</c> block and <c>finally</c> block, and with <see cref="NewArray{T}(int)"/> in place of
+/// every sized array creation. The server's adapter calls
 /// <see cref="Enter"/> before the body and <see cref="Exit"/> after it.
 ///
 /// <para><b>What a tick checks.</b> The statement's cancellation token, the wall-clock deadline, the
@@ -45,6 +48,16 @@ public struct CallBudgetFrame
 /// room to unwind. Every tick reads the clock. Reading it on some ticks only would let the call run
 /// on for several framework calls after the deadline, and one of them can be a regular expression
 /// match that takes its whole timeout.</para>
+///
+/// <para><b>A failed check stops the call for good.</b> The first failed check records its exception
+/// in the frame (<see cref="Stopped"/>), and every later tick of the call throws that exception
+/// again. The server compiles <c>if (!CallBudget.Stopped)</c> around every <c>finally</c> block of
+/// the body, so no code of the body runs while the exception unwinds. The runtime runs a
+/// <c>catch</c> or a <c>finally</c> block on top of the stack of the frame that threw, and gives
+/// that stack back only when a <c>catch</c> block ends. A <c>finally</c> block that ticked would
+/// throw from there, one more exception below the last for each frame, until the stack overflows:
+/// with a recursion of a few hundred frames that happens even when the call was stopped for its
+/// time and the stack was nearly empty.</para>
 ///
 /// <para><b>Why the state is per thread.</b> The body of an inline function runs on one thread from
 /// start to end: it cannot await, start a thread or call SQL. A thread-static slot is therefore
@@ -95,8 +108,22 @@ public static class CallBudget
     public static void Exit(CallBudgetFrame previous) => current = previous;
 
     /// <summary>
+    /// True after a budget check of the current call failed. The compiled body reads it at the start
+    /// of every <c>finally</c> block and does nothing there when it is true.
+    /// </summary>
+    public static bool Stopped => current.Stop is not null;
+
+    /// <summary>
+    /// The exception of the first failed check of the current call. The compiled body throws it after
+    /// a <c>try</c> statement whose <c>finally</c> block cannot end, where control arrives only when
+    /// that block was skipped.
+    /// </summary>
+    public static Exception StopCause() =>
+        current.Stop ?? new InvalidOperationException("An inline function body skipped a finally block with no stopped budget.");
+
+    /// <summary>
     /// Checks the budgets of the current call. The compiled body calls it at the start of every loop
-    /// body, lambda and local function.
+    /// body, lambda, local function, <c>catch</c> block and <c>finally</c> block.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void Tick()
@@ -105,6 +132,11 @@ public static class CallBudget
 
         if (!frame.Active)
             ThrowNoCall();
+
+        // The exception of the first failed check can be lost: the runtime drops an exception that
+        // is thrown inside a filter. The body then meets it again at its next check.
+        if (frame.Stop is not null)
+            ThrowAgain(frame.Stop);
 
         if (frame.Token.IsCancellationRequested)
             ThrowCancelled(frame.Token);
@@ -115,7 +147,8 @@ public static class CallBudget
         if (GC.GetAllocatedBytesForCurrentThread() - frame.AllocationBase > frame.AllocationLimit)
             ThrowAllocation(frame.AllocationLimit);
 
-        RuntimeHelpers.EnsureSufficientExecutionStack();
+        if (!RuntimeHelpers.TryEnsureSufficientExecutionStack())
+            ThrowStack();
     }
 
     /// <summary>The same as <see cref="NewArray{T}(int)"/> for a size that is a <c>long</c> or a <c>uint</c>.</summary>
@@ -149,9 +182,9 @@ public static class CallBudget
             throw new OverflowException("Arithmetic operation resulted in an overflow.");
 
         if (length > frame.ArrayLimit)
-            throw new CallBudgetExceededException(
+            throw Stop(new CallBudgetExceededException(
                 CallBudgetKind.ArrayLength,
-                $"an array of {length} elements is larger than the limit of {frame.ArrayLimit} elements");
+                $"an array of {length} elements is larger than the limit of {frame.ArrayLimit} elements"));
 
         long used = GC.GetAllocatedBytesForCurrentThread() - frame.AllocationBase;
 
@@ -197,14 +230,28 @@ public static class CallBudget
             or OutOfMemoryException
             or OperationCanceledException;
 
-    private static void ThrowCancelled(CancellationToken token) => throw new OperationCanceledException(token);
+    /// <summary>
+    /// Records <paramref name="cause"/> as the reason the current call stops, unless an earlier check
+    /// recorded one, and returns it for the caller to throw.
+    /// </summary>
+    private static Exception Stop(Exception cause)
+    {
+        current.Stop ??= cause;
+        return cause;
+    }
+
+    private static void ThrowCancelled(CancellationToken token) => throw Stop(new OperationCanceledException(token));
 
     private static void ThrowTime() =>
-        throw new CallBudgetExceededException(CallBudgetKind.Time, "the call ran longer than its time limit");
+        throw Stop(new CallBudgetExceededException(CallBudgetKind.Time, "the call ran longer than its time limit"));
 
     private static void ThrowAllocation(long limit) =>
-        throw new CallBudgetExceededException(
-            CallBudgetKind.Allocation, $"the call allocated more than its memory limit of {limit} bytes");
+        throw Stop(new CallBudgetExceededException(
+            CallBudgetKind.Allocation, $"the call allocated more than its memory limit of {limit} bytes"));
+
+    private static void ThrowStack() => throw Stop(new InsufficientExecutionStackException());
+
+    private static void ThrowAgain(Exception stop) => throw stop;
 
     private static void ThrowNoCall() =>
         throw new InvalidOperationException("An inline function body ran outside a call of the server.");
