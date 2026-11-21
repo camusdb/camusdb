@@ -7,6 +7,7 @@
 
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Controllers.DDL;
+using CamusDB.Core.CommandsExecutor.Controllers.Functions;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Predicates;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
@@ -33,7 +34,9 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// bounds of a BETWEEN, which get conjuncts of the same shape <see cref="PredicateAnalyzer"/> builds
 /// for a column BETWEEN. A scan that absorbs a comparison drops it from the filter only because every
 /// entry key equals the expression's value for its row: the write paths evaluate the same expression
-/// with the same evaluator. A comparison no scan absorbs is evaluated on the row exactly as written.</para>
+/// with the same evaluator. A comparison no scan absorbs is evaluated on the row exactly as written. A
+/// constant is an operand that gives one value for the whole statement: an operand with a call such as
+/// <c>random()</c> stays residual (<see cref="PredicateAnalyzer.TryGetConstant"/>).</para>
 ///
 /// <para>Only a single-table plan is matched. A join leaf or a query whose rows are keyed by
 /// qualified names keeps the conjunct residual, so it reads through a plain path.</para>
@@ -52,16 +55,30 @@ internal static class ExpressionIndexPredicates
         Dictionary<string, ColumnValue>? parameters,
         QueryRowNameResolver? resolver)
     {
-        IReadOnlyDictionary<string, BoundIndexExpression> keys = table.ExpressionKeys;
-        if (keys.Count == 0 || analysis.ResidualConjuncts.Count == 0)
+        // The map of every expression the table had is a quick test that it ever had one.
+        if (table.ExpressionKeys.Count == 0 || analysis.ResidualConjuncts.Count == 0)
             return analysis;
 
         if (resolver is not null && resolver.UsesQualifiedRowKeys())
             return analysis;
 
-        Dictionary<string, string> keyNameByCanonical = new(keys.Count, StringComparer.Ordinal);
-        foreach (BoundIndexExpression expression in keys.Values)
-            keyNameByCanonical.TryAdd(expression.Canonical, expression.KeyName);
+        // Matched against the indexes the table has now, read once, so a dropped index's expression
+        // gets no comparison.
+        Dictionary<string, string>? keyNameByCanonical = null;
+        foreach (TableIndexSchema index in table.Indexes.Values)
+        {
+            if (index.Expressions is not { } expressions)
+                continue;
+
+            foreach (BoundIndexExpression? expression in expressions)
+            {
+                if (expression is not null)
+                    (keyNameByCanonical ??= new(StringComparer.Ordinal)).TryAdd(expression.Canonical, expression.KeyName);
+            }
+        }
+
+        if (keyNameByCanonical is null)
+            return analysis;
 
         Matcher matcher = new(table, parameters, resolver, keyNameByCanonical);
 
@@ -283,11 +300,15 @@ internal static class ExpressionIndexPredicates
         private bool TryConstant(NodeAst node, out ColumnValue? value) =>
             PredicateAnalyzer.TryGetConstant(node, parameters, out value);
 
+        /// <summary>
+        /// The value of one IN-list item, NULL included. An item with a call that can give a new value
+        /// for each row is no constant (see <see cref="PredicateAnalyzer.TryGetConstant"/>).
+        /// </summary>
         private bool TryEvaluate(NodeAst node, out ColumnValue? value)
         {
             value = null;
 
-            if (node.nodeType == NodeType.Identifier)
+            if (node.nodeType == NodeType.Identifier || ScalarFunctionEvaluator.ContainsPerCallVolatileFunction(node))
                 return false;
 
             try

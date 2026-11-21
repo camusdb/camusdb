@@ -885,8 +885,9 @@ public static class PredicateAnalyzer
             return true;
         }
 
-        // Reject bare column references in the list.
-        if (node.nodeType == NodeType.Identifier)
+        // Reject bare column references in the list, and an item that can give a new value for each row
+        // (see TryGetConstant).
+        if (node.nodeType == NodeType.Identifier || ScalarFunctionEvaluator.ContainsPerCallVolatileFunction(node))
             return false;
 
         ColumnValue? value;
@@ -1117,8 +1118,21 @@ public static class PredicateAnalyzer
         return true;
     }
 
+    /// <summary>
+    /// Evaluates <paramref name="nodeAst"/> once, without a row, and gives its value when it is a
+    /// non-NULL constant of the statement. An operand with a call that can give a new value for each
+    /// row (<see cref="ScalarFunctionEvaluator.ContainsPerCallVolatileFunction"/>) is no constant: a
+    /// seek bound taken from one evaluation would stand for every row, and a scan that absorbs the
+    /// comparison would then drop the rows the other values match.
+    /// </summary>
     internal static bool TryGetConstant(NodeAst nodeAst, Dictionary<string, ColumnValue>? parameters, out ColumnValue? columnValue)
     {
+        if (ScalarFunctionEvaluator.ContainsPerCallVolatileFunction(nodeAst))
+        {
+            columnValue = null;
+            return false;
+        }
+
         try
         {
             columnValue = SqlExecutor.EvalExpr(nodeAst, new Dictionary<string, ColumnValue>(), parameters);

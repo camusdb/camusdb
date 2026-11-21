@@ -68,12 +68,12 @@ internal static class CorrelatedExistsSeekPlanner
 
             List<CorrelatedExistsSeekBinding> bindings = new(index.Columns.Length);
 
-            foreach (string keyColumn in index.Columns)
+            for (int position = 0; position < index.Columns.Length; position++)
             {
-                if (!equalityByColumn.TryGetValue(keyColumn, out NodeAst? bound))
+                if (!equalityByColumn.TryGetValue(index.Columns[position], out NodeAst? bound))
                     break;
 
-                bindings.Add(new CorrelatedExistsSeekBinding(bound, GetColumnType(innerTable, keyColumn)));
+                bindings.Add(new CorrelatedExistsSeekBinding(bound, innerTable.IndexKeyType(index, position) ?? ColumnType.String));
             }
 
             if (bindings.Count == 0)
@@ -252,20 +252,12 @@ internal static class CorrelatedExistsSeekPlanner
         }
     }
 
-    private static ColumnType GetColumnType(TableDescriptor table, string columnName)
-    {
-        TableColumnSchema? column = table.Schema.Columns?.Find(
-            c => string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase));
-
-        return column?.Type ?? table.ExpressionKeyType(columnName) ?? ColumnType.String;
-    }
-
     private static ColumnType[] GetIndexColumnTypes(TableDescriptor table, TableIndexSchema index)
     {
         ColumnType[] types = new ColumnType[index.Columns.Length];
 
         for (int i = 0; i < index.Columns.Length; i++)
-            types[i] = GetColumnType(table, index.Columns[i]);
+            types[i] = table.IndexKeyType(index, i) ?? ColumnType.String;
 
         return types;
     }

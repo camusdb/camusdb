@@ -116,6 +116,13 @@ internal sealed partial class SchemaDdlService
     /// </summary>
     internal Func<SchemaElementState, Task>? TestInterceptAfterAddColumnStep;
 
+    /// <summary>
+    /// Test-only hook: invoked by the cluster <c>CREATE INDEX</c> after its early checks and before it
+    /// enters the DDL gate. A test commits another schema change at that point, such as a DROP COLUMN
+    /// of a column the index reads. Null in production; a test clears it after use.
+    /// </summary>
+    internal Func<Task>? TestInterceptBeforeAddIndexGate;
+
     internal SchemaDdlService(
         ExecutorContext context,
         CamusDBOptions options,
@@ -1017,6 +1024,13 @@ internal sealed partial class SchemaDdlService
     /// (<c>Absent → DeleteOnly → WriteOnly → [backfill] → Public</c>).
     /// Only called in cluster mode.
     /// </summary>
+    /// <remarks>
+    /// <b>Checks before the gate are fast refusals only.</b> Another statement can commit between the
+    /// caller's open of the table and this statement's entry into the DDL gate. A DROP COLUMN in that
+    /// window would leave a definition built before it with the id of a column the table no longer has,
+    /// and an expression index staged with such an id makes every fresh open of the table fail. So the
+    /// definition that is staged is built again, with every check, on the table opened under the gate.
+    /// </remarks>
     internal async Task<bool> ExecuteClusterAddIndexAsync(
         DatabaseDescriptor database,
         TableDescriptor table,
@@ -1025,10 +1039,53 @@ internal sealed partial class SchemaDdlService
     {
         CamusDBOptions currentOptions = options;
 
+        if (BuildClusterIndexInfo(table, ticket, currentOptions) is null)
+            return false;
+
+        if (TestInterceptBeforeAddIndexGate is { } intercept)
+            await intercept().ConfigureAwait(false);
+
+        await database.DdlGate.EnterAsync(ticket.TableName, context.Logger).ConfigureAwait(false);
+        try
+        {
+            TableDescriptor gated = await context.TableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+
+            // The same name on another table: the table was dropped and created again after the
+            // caller opened it.
+            if (!string.Equals(gated.Id, table.Id, StringComparison.Ordinal))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.ConcurrentSchemaChange,
+                    $"Table '{ticket.TableName}' was replaced by another statement while index '{ticket.IndexName}' was being created; nothing was created");
+
+            if (BuildClusterIndexInfo(gated, ticket, currentOptions) is not { } indexInfo)
+                return false;
+
+            await StageIndexWithinGateAsync(database, gated.Id, ticket.TableName, indexInfo).ConfigureAwait(false);
+
+            database.Cache?.InvalidateByTableId(database.Id, gated.Id);
+
+            return true;
+        }
+        finally
+        {
+            database.SchemaDdlSemaphore.Release();
+            await FireDeferredStepDownIfRequestedAsync(database).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Checks a cluster <c>CREATE INDEX</c> against <paramref name="table"/> and builds the definition
+    /// to stage: the column ids, the INCLUDE ids and the stored form of each expression. Null when the
+    /// index exists and the statement says <c>IF NOT EXISTS</c>. The ids are only as current as
+    /// <paramref name="table"/>, so the definition that is staged must come from a table opened under
+    /// the DDL gate.
+    /// </summary>
+    private static IndexBuildInfo? BuildClusterIndexInfo(TableDescriptor table, AlterIndexTicket ticket, CamusDBOptions currentOptions)
+    {
         if (table.AllIndexes.ContainsKey(ticket.IndexName))
         {
             if (ticket.IfNotExists)
-                return false;
+                return null;
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Index '{ticket.IndexName}' already exists on table '{table.Name}'");
         }
 
@@ -1061,22 +1118,7 @@ internal sealed partial class SchemaDdlService
             : null;
         string[]? includeColumnNames = ticket.IncludeColumns.Length > 0 ? ticket.IncludeColumns : null;
 
-        IndexBuildInfo indexInfo = new(indexId, ticket.IndexName, columnIds, columnNames, indexType, IndexColumnOrder.Extract(ticket.Columns), IncludeColumnIds: includeColumnIds, IncludeColumnNames: includeColumnNames, KeyExpressions: key.KeyExpressions);
-
-        await database.DdlGate.EnterAsync(ticket.TableName, context.Logger).ConfigureAwait(false);
-        try
-        {
-            await StageIndexWithinGateAsync(database, table.Id, ticket.TableName, indexInfo).ConfigureAwait(false);
-
-            database.Cache?.InvalidateByTableId(database.Id, table.Id);
-
-            return true;
-        }
-        finally
-        {
-            database.SchemaDdlSemaphore.Release();
-            await FireDeferredStepDownIfRequestedAsync(database).ConfigureAwait(false);
-        }
+        return new(indexId, ticket.IndexName, columnIds, columnNames, indexType, IndexColumnOrder.Extract(ticket.Columns), IncludeColumnIds: includeColumnIds, IncludeColumnNames: includeColumnNames, KeyExpressions: key.KeyExpressions);
     }
 
     /// <summary>

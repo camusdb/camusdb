@@ -1422,6 +1422,17 @@ public sealed class CommandExecutor : IAsyncDisposable
     }
 
     /// <summary>
+    /// Test-only seam: runs inside a cluster <c>CREATE INDEX</c> after its early checks and before it
+    /// enters the DDL gate. Null in production; a test clears it after use.
+    /// </summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    internal Func<Task>? TestInterceptBeforeAddIndexGate
+    {
+        get => schemaDdl.TestInterceptBeforeAddIndexGate;
+        set => schemaDdl.TestInterceptBeforeAddIndexGate = value;
+    }
+
+    /// <summary>
     /// Test-only seam: runs inside the fill of an added column, after a batch's row ids were scanned and
     /// before the batch locks them. Null in production; a test clears it after use.
     /// </summary>

@@ -1568,7 +1568,10 @@ public sealed class RowUpdater
     /// <summary>
     /// True when any of the index's stored/payload (INCLUDE) column values differs between the old and
     /// new row (a missing/absent value compares as NULL). Drives the in-place value rewrite for an
-    /// update that leaves the key unchanged but changes covered payload.
+    /// update that leaves the key unchanged but changes covered payload. A covering read returns the
+    /// stored value as it is, so the test is <see cref="IndexKeyRows.Identical"/> and not SQL equality:
+    /// an update from <c>0.0</c> to <c>-0.0</c>, or from the jsonb <c>1</c> to <c>1.0</c>, must reach
+    /// the entry.
     /// </summary>
     private static bool IncludeColumnsChanged(TableIndexSchema index, Dictionary<string, ColumnValue> oldRow, Dictionary<string, ColumnValue> newRow)
     {
@@ -1577,7 +1580,7 @@ public sealed class RowUpdater
             ColumnValue oldValue = oldRow.TryGetValue(includeColumn, out ColumnValue? o) ? o : ColumnValue.Null;
             ColumnValue newValue = newRow.TryGetValue(includeColumn, out ColumnValue? n) ? n : ColumnValue.Null;
 
-            if (oldValue.CompareTo(newValue) != 0)
+            if (!IndexKeyRows.Identical(oldValue, newValue))
                 return true;
         }
 

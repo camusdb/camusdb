@@ -154,7 +154,7 @@ internal sealed class SemiJoinExecutor
 
         // Non-unique: equality range scan over the probe value, with the same direction-aware
         // bounds as every other single-value index seek.
-        ColumnType keyType = GetColumnType(inner, index.Columns[0]);
+        ColumnType keyType = inner.IndexKeyType(index, 0) ?? ColumnType.String;
         (CompositeColumnValue upperBound, bool toInclusive) = IndexScanSelector.EqualitySeekUpperBound(inner, index, key);
 
         // The predicate lock of the probed value under Serializable read-write: an entry another
@@ -350,14 +350,5 @@ internal sealed class SemiJoinExecutor
             ColumnType.Null => false,
             _ => a.CompareTo(b) == 0,
         };
-    }
-
-    private static ColumnType GetColumnType(TableDescriptor table, string columnName)
-    {
-        if (table.Schema.Columns is null)
-            return ColumnType.String;
-
-        TableColumnSchema? col = table.Schema.Columns.Find(c => string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase));
-        return col?.Type ?? table.ExpressionKeyType(columnName) ?? ColumnType.String;
     }
 }

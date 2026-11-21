@@ -293,6 +293,23 @@ internal static class ScalarFunctionEvaluator
     internal static bool ContainsVolatileFunction(NodeAst? ast)
         => NodeAstWalk.Any(ast, IsVolatileCall);
 
+    /// <summary>
+    /// Returns <c>true</c> if <paramref name="ast"/> or any descendant calls a function that can give a
+    /// new value on each call within one statement: a volatile function that does not read the statement
+    /// clock (<c>random()</c>, <c>gen_id()</c>, <c>nextval()</c>, <c>clock_timestamp()</c>), or a volatile
+    /// table function. Such an expression must be evaluated for each row, so a planner must not evaluate
+    /// it once and use the value as a seek bound. A statement-clock function (<c>now()</c>,
+    /// <c>current_date</c>) is volatile for the result cache but gives one value for the whole
+    /// statement, so it does not count here.
+    /// </summary>
+    internal static bool ContainsPerCallVolatileFunction(NodeAst? ast)
+        => NodeAstWalk.Any(ast, IsPerCallVolatileCall);
+
+    private static bool IsPerCallVolatileCall(NodeAst node)
+        => node.nodeType == NodeType.TableFunctionReference
+            ? node.leftAst?.yytext is { } name && TableFunctionRegistry.IsVolatileTableFunction(name)
+            : TryGetCalledDescriptor(node, out ScalarFunctionDescriptor? d) && d!.IsVolatile && !d.ReadsStatementClock;
+
     private static bool IsSessionScopedCall(NodeAst node)
         => TryGetCalledDescriptor(node, out ScalarFunctionDescriptor? d) && d!.IsSessionScoped;
 

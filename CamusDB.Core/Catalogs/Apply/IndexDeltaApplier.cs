@@ -32,6 +32,12 @@ internal static class IndexDeltaApplier
     /// Applies an AddIndex delta. Idempotent: if an entry with the same name already exists
     /// (e.g. the proposer already applied it locally before proposing), it is replaced.
     /// TableSchema.Version is intentionally NOT bumped — see TableSchema.Version doc.
+    ///
+    /// <para>Refused (<see cref="SchemaDeltaRefusedException"/>) when the index reads a column id the
+    /// table does not have: a key column, an INCLUDE column or a column an expression reads. A
+    /// definition built before a DROP COLUMN committed carries such an id. Applied, it would give a
+    /// plain index a key column with no name and make every open of a table with such an expression
+    /// index fail.</para>
     /// </summary>
     internal static TableSchema ApplyAddIndex(Schema schema, SchemaIndexPayload payload)
     {
@@ -41,10 +47,45 @@ internal static class IndexDeltaApplier
         if (payload.Index is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"AddIndex payload for '{payload.IndexName}' carries no index definition");
 
+        RequireReadColumnsExist(tableSchema, payload.Index, payload.TableName);
+
         tableSchema.Indexes ??= [];
         tableSchema.Indexes.RemoveAll(ix => string.Equals(ix.Name, payload.IndexName, StringComparison.OrdinalIgnoreCase));
         tableSchema.Indexes.Add(payload.Index);
         return tableSchema;
+    }
+
+    private static void RequireReadColumnsExist(TableSchema tableSchema, TableIndexSchema index, string tableName)
+    {
+        HashSet<string> columnIds = new(StringComparer.Ordinal);
+        foreach (TableColumnSchema column in tableSchema.Columns ?? [])
+        {
+            if (column.Id is not null)
+                columnIds.Add(column.Id);
+        }
+
+        void Require(string columnId)
+        {
+            if (!columnIds.Contains(columnId))
+                throw new SchemaDeltaRefusedException(
+                    CamusDBErrorCodes.UnknownColumn,
+                    $"Index '{index.Name}' reads column id '{columnId}', which table '{tableName}' does not have; a column it reads was dropped by another statement");
+        }
+
+        foreach (string columnId in index.ColumnIds ?? [])
+        {
+            if (columnId != IndexKeyExpression.ColumnIdMarker)
+                Require(columnId);
+        }
+
+        foreach (string columnId in index.IncludeColumnIds ?? [])
+            Require(columnId);
+
+        foreach (IndexKeyExpression expression in index.KeyExpressions ?? [])
+        {
+            foreach (string columnId in expression.ColumnIds)
+                Require(columnId);
+        }
     }
 
     /// <summary>

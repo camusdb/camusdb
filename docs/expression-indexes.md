@@ -138,6 +138,13 @@ A term that the scan absorbs leaves the residual filter: each entry key is the v
 for its row, computed by the same evaluator. A term that no scan absorbs is evaluated on each row as it
 was written.
 
+A constant gives one value for the whole statement. A literal, a parameter, a statement-clock function
+such as `now()`, and an immutable function of these are constants. An operand that calls a function
+that can give a new value on each call, such as `random()`, `gen_id()`, `nextval()` or
+`clock_timestamp()`, is no constant. Its term stays in the residual filter and is evaluated for each
+row, so it never becomes a seek bound. The same rule applies to a plain column
+(`PredicateAnalyzer.TryGetConstant`).
+
 `ORDER BY expr` reads the index order when `expr` matches the expression at that key position, and the
 plan then has no sort. An equality on a leading expression lets the next key order the rows:
 `WHERE lower(email) = 'a@x' ORDER BY score` uses an index on `((lower(email)), score)` with no sort.
@@ -153,16 +160,20 @@ index-lookup   index=users_lower_email, expressions=[lower(`email`)], key='a@x'
 
 At an expression position, the in-memory index holds a hidden key name (`#expr:` and a hash of the
 stored text and type). No SQL identifier can contain `#`, so no column, alias or parameter has that name.
-`IndexKeyRows.For` gives each write path a copy of the row with the value of each expression under its
-hidden name, and the key builders read it like a column. The copy is for key building only. It is never
-encoded, returned or given to a trigger.
+`IndexKeyRows.For` gives each write path a small map of the key positions: the column value at a column
+position, and the expression value under its hidden name at an expression position. The key builders
+read it like a row. The map is for key building only. It is never encoded, returned or given to a
+trigger. INCLUDE values come from the row itself.
 
 - `INSERT`, `INSERT ... SELECT` and the insert of `ON CONFLICT` evaluate each expression for the new
   row. A column the statement leaves out reads as NULL.
-- `UPDATE` compares the columns each expression reads between the old and the new row. When none of
-  them changed, the index is not touched and the expression is not evaluated. Otherwise the old and the
-  new key are compared, so `UPDATE users SET email = 'ANN@x'` on `'ann@x'` keeps the entry of
-  `lower(email)`.
+- `UPDATE` compares the columns each expression reads between the old and the new row. When each of
+  them holds an identical value, the index is not touched and the expression is not evaluated.
+  Otherwise the old and the new key are compared, so `UPDATE users SET email = 'ANN@x'` on `'ann@x'`
+  keeps the entry of `lower(email)`. The input test is identity of the stored value
+  (`IndexKeyRows.Identical`), not SQL equality: `0.0 = -0.0`, but `atan2(v, -1.0)` gives pi for one and
+  -pi for the other, and the jsonb documents `{"a": 1}` and `{"a": 1.0}` are equal, but `doc->>'a'`
+  gives `1` for one and `1.0` for the other. The INCLUDE values of a covering index use the same test.
 - `DELETE` and the row-level TTL sweep evaluate the expression on the old row to find its entry.
 - The backfill of `CREATE INDEX` (`IndexBackfiller`) decodes the columns the expressions read and
   evaluates them the same way. The standalone and the cluster add paths share it, with concurrent
@@ -199,8 +210,15 @@ implicit enum numbers, and a node type added in the middle of the enum would cha
 
 `TableOpener` parses the text again when it opens the table, replaces each token with the current column
 name, and builds the in-memory `BoundIndexExpression`: the expression for evaluation, the display text,
-the canonical text and the hidden key name. `TableDescriptor.ExpressionKeys` maps each hidden key name
-to its expression; the planner reads its type there.
+the canonical text and the hidden key name.
+
+A scan decodes index keys with the types of the index that its plan captured
+(`TableDescriptor.IndexKeyType`), so a `DROP INDEX` that commits after planning does not change how an
+open scan decodes the entries that its snapshot still holds. `TableDescriptor.ExpressionKeys` maps each
+hidden key name to its expression, for a planner pass that has only the name. The map is grow-only: a
+`DROP INDEX` leaves its entry, and one name always has one type, because the name is a hash of the
+stored text and the type. The planner matches WHERE terms against the indexes that the table has, not
+against this map.
 
 ## Schema changes
 
@@ -243,6 +261,12 @@ and the persisted coordinator job carry the stored expressions, so a job that a 
 builds the same keys. A follower forwards the statement to the schema leader with the expression text
 in `ColumnIndexInfoRequest.Expression`.
 
+The definition that the coordinator stages is built on the table opened under the DDL gate. A
+`DROP COLUMN` can commit after the statement first read the table and before it entered the gate. The
+index is then refused with the error for a missing column, and nothing is staged. The `AddIndex` delta
+also refuses an index that reads a column id the table does not have (`IndexDeltaApplier`), on the
+proposer and on every node that applies it, so no path can stage such an index.
+
 Every node of a cluster runs the same build. A build that does not know expression indexes reads the
 `~expr` marker as an unknown column and fails on the first write to the index, instead of writing
 entries over the wrong values.
@@ -257,6 +281,13 @@ entries over the wrong values.
   hashing, with the same result.
 - A range on a leading `DESC` key part uses no index scan, as a range on a leading `DESC` column does
   not. An equality uses the index.
+- A read through an expression index that fetches the row also decodes the columns the expression
+  reads, and evaluates the expression again, to check the entry against its row (`IndexEntryCheck`).
+  A large value stored out of line, such as a big jsonb document, is fetched for that check even when
+  the query does not return it. The cost model does not price the check. Each other plan for the same
+  query evaluates the expression on at least the same rows, so the check does not change which plan is
+  cheaper. A covering index, with an `INCLUDE` of every column the query reads, reads no row and makes no
+  check.
 - Partial indexes (`WHERE` on `CREATE INDEX`), expression GIN indexes and computed columns are separate
   features.
 

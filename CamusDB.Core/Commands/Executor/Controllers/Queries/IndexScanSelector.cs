@@ -877,12 +877,6 @@ internal static class IndexScanSelector
         return (prefixUpperBound, rangeToInclusive && prefixUpperInclusive);
     }
 
-    private static ColumnType GetColumnType(TableDescriptor table, string columnName)
-    {
-        TableColumnSchema? column = table.Schema.Columns?.Find(c => string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase));
-        return column?.Type ?? table.ExpressionKeyType(columnName) ?? ColumnType.String;
-    }
-
     /// <summary>
     /// Returns the end bound of an executor seek for one key value: <paramref name="lookupKey"/> holds
     /// the leading key columns of <paramref name="index"/>, and the scan starts inclusive at that key.
@@ -912,7 +906,7 @@ internal static class IndexScanSelector
         if (prefixLength == 0 || !IsAscending(index, prefixLength - 1))
             return (lookupKey, true);
 
-        ColumnType columnType = GetColumnType(table, index.Columns[prefixLength - 1]);
+        ColumnType columnType = table.IndexKeyType(index, prefixLength - 1) ?? ColumnType.String;
         ColumnValue? nextValue = NextSortValue(columnType, lookupKey.Values[prefixLength - 1]);
         if (nextValue is null)
             return (lookupKey, true);

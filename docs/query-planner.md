@@ -379,7 +379,12 @@ All extend `PhysicalPlanNode` (`Models/Plans/PhysicalPlanNode.cs`): a single `In
 **File:** `Controllers/Queries/PredicateAnalyzer.cs`. Classifies the WHERE predicate into:
 
 1. **Indexable comparisons** — column-vs-constant (`=`, `<`, `>`, `<=`, `>=`, `BETWEEN`). Can drive index
-   selection; once absorbed by a scan they are dropped from the execution filter.
+   selection; once absorbed by a scan they are dropped from the execution filter. A constant
+   (`PredicateAnalyzer.TryGetConstant`) is evaluated once, without a row, so it must give one value for
+   the whole statement. A literal, a parameter and a statement-clock call such as `now()` qualify. An
+   operand that calls a function that can give a new value on each call (`random()`, `gen_id()`,
+   `nextval()`, `clock_timestamp()`; `ScalarFunctionEvaluator.ContainsPerCallVolatileFunction`) does
+   not, and its term stays residual.
 2. **Column comparisons** — column-vs-column (join `ON`, cross-table WHERE). Currently always residual.
 3. **Residual conjuncts** — everything else (`OR`, `LIKE`, `ILIKE`, non-deterministic, subquery
    predicates). Always re-evaluated per row.

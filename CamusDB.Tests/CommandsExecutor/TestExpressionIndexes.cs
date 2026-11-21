@@ -550,4 +550,182 @@ internal sealed class TestExpressionIndexes : BaseTest
             ExecNonQuery(executor, dbname, "INSERT INTO users (id, email) VALUES (gen_id(), 'ann@X.IO')"));
         Assert.That(ex!.Code, Is.EqualTo(CamusDBErrorCodes.DuplicateUniqueKeyValue));
     }
+
+    private static async Task<List<long>> Ids(CommandExecutor executor, string dbname, string select)
+    {
+        List<QueryResultRow> rows = await ExecSelect(executor, dbname, select);
+        return [.. rows.Select(r => r.Row["id"].LongValue).Order()];
+    }
+
+    /// <summary>
+    /// The two documents are equal as jsonb, because only the scale of a number differs, but
+    /// <c>-&gt;&gt;</c> gives another text for each. The UPDATE must move the key.
+    /// </summary>
+    [Test]
+    public async Task Update_ThatOnlyChangesANumberScale_MovesTheExpressionKey()
+    {
+        (string dbname, _, CommandExecutor executor) = await CreateDatabase();
+        await ExecDDL(executor, dbname, "CREATE TABLE items (id int64 PRIMARY KEY, doc jsonb)");
+        await ExecDDL(executor, dbname, "CREATE INDEX items_amount ON items ((doc->>'amount'))");
+        await ExecNonQuery(executor, dbname, "INSERT INTO items (id, doc) VALUES (1, '{\"amount\": 1}')");
+
+        await ExecNonQuery(executor, dbname, "UPDATE items SET doc = '{\"amount\": 1.0}' WHERE id = 1");
+
+        List<QueryResultRow> scanned = await ExecSelect(executor, dbname, "SELECT doc->>'amount' AS amount FROM items");
+        Assert.That(scanned.Single().Row["amount"].StrValue, Is.EqualTo("1.0"));
+
+        Assert.That(await Ids(executor, dbname, "SELECT id FROM items WHERE doc->>'amount' = '1.0'"), Is.EqualTo(new long[] { 1 }));
+        Assert.That(await Ids(executor, dbname, "SELECT id FROM items WHERE doc->>'amount' = '1'"), Is.Empty);
+
+        (string node, _) = await ScanOf(executor, dbname, "SELECT id FROM items WHERE doc->>'amount' = '1.0'");
+        Assert.That(node, Is.Not.EqualTo("table-scan"));
+    }
+
+    [Test]
+    public async Task UniqueExpressionIndex_FollowsAScaleOnlyUpdate()
+    {
+        (string dbname, _, CommandExecutor executor) = await CreateDatabase();
+        await ExecDDL(executor, dbname, "CREATE TABLE items (id int64 PRIMARY KEY, doc jsonb)");
+        await ExecDDL(executor, dbname, "CREATE UNIQUE INDEX items_amount ON items ((doc->>'amount'))");
+        await ExecNonQuery(executor, dbname, "INSERT INTO items (id, doc) VALUES (1, '{\"amount\": 1}')");
+
+        await ExecNonQuery(executor, dbname, "UPDATE items SET doc = '{\"amount\": 1.0}' WHERE id = 1");
+
+        // The old key '1' is free again, and the new key '1.0' is taken.
+        await ExecNonQuery(executor, dbname, "INSERT INTO items (id, doc) VALUES (2, '{\"amount\": 1}')");
+
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(() =>
+            ExecNonQuery(executor, dbname, "INSERT INTO items (id, doc) VALUES (3, '{\"amount\": 1.0}')"));
+        Assert.That(ex!.Code, Is.EqualTo(CamusDBErrorCodes.DuplicateUniqueKeyValue));
+    }
+
+    /// <summary>
+    /// <c>0.0 = -0.0</c> in SQL, but <c>atan2(0.0, -1.0)</c> is pi and <c>atan2(-0.0, -1.0)</c> is -pi.
+    /// </summary>
+    [Test]
+    public async Task Update_FromZeroToNegativeZero_MovesTheExpressionKey()
+    {
+        (string dbname, _, CommandExecutor executor) = await CreateDatabase();
+        await ExecDDL(executor, dbname, "CREATE TABLE points (id int64 PRIMARY KEY, v float64)");
+        await ExecDDL(executor, dbname, "CREATE INDEX points_angle ON points ((atan2(v, -1.0)))");
+        await ExecNonQuery(executor, dbname, "INSERT INTO points (id, v) VALUES (1, 0.0)");
+
+        await ExecNonQuery(executor, dbname, "UPDATE points SET v = -0.0 WHERE id = 1");
+
+        Assert.That(await Ids(executor, dbname, "SELECT id FROM points WHERE atan2(v, -1.0) < 0"), Is.EqualTo(new long[] { 1 }));
+        Assert.That(await Ids(executor, dbname, "SELECT id FROM points WHERE atan2(v, -1.0) > 0"), Is.Empty);
+
+        (string node, _) = await ScanOf(executor, dbname, "SELECT id FROM points WHERE atan2(v, -1.0) < 0");
+        Assert.That(node, Is.EqualTo("index-range-scan"));
+    }
+
+    /// <summary>
+    /// A covering read answers from the entry, so an UPDATE that changes an included document only in
+    /// the scale of a number must rewrite the entry value.
+    /// </summary>
+    [Test]
+    public async Task CoveringExpressionIndex_RewritesAScaleOnlyChangeOfAnIncludedDocument()
+    {
+        (string dbname, _, CommandExecutor executor) = await CreateDatabase();
+        await ExecDDL(executor, dbname, "CREATE TABLE items (id int64 PRIMARY KEY, name string, doc jsonb)");
+        await ExecDDL(executor, dbname, "CREATE INDEX items_lower_cover ON items ((lower(name))) INCLUDE (name, doc)");
+        await ExecNonQuery(executor, dbname, "INSERT INTO items (id, name, doc) VALUES (1, 'Ann', '{\"amount\": 1}')");
+
+        await ExecNonQuery(executor, dbname, "UPDATE items SET doc = '{\"amount\": 1.0}' WHERE id = 1");
+
+        const string select = "SELECT doc->>'amount' AS amount FROM items WHERE lower(name) = 'ann'";
+        List<QueryResultRow> rows = await ExecSelect(executor, dbname, select);
+        Assert.That(rows.Single().Row["amount"].StrValue, Is.EqualTo("1.0"));
+
+        long? rowsRead = null;
+        foreach (QueryResultRow row in await ExecSelect(executor, dbname, "EXPLAIN (ANALYZE) " + select))
+        {
+            if (row.Row["node"].StrValue is "index-range-scan" or "index-lookup")
+                rowsRead = row.Row["rows_read"].LongValue;
+        }
+
+        Assert.That(rowsRead, Is.EqualTo(0L), "the read is covered, so it answers from the entry value");
+    }
+
+    /// <summary>
+    /// A volatile call can give another value for each row, so the planner must not evaluate it once
+    /// and seek the index with that value. Each row sees its own value: with 200 rows and a coin flip
+    /// for each, some rows match and some do not. An IN list holds only literals and placeholders, so
+    /// no IN case is written here.
+    /// </summary>
+    [TestCase("lower(email) = CASE WHEN random() < 0.5 THEN 'a' ELSE 'b' END")]
+    [TestCase("CASE WHEN random() < 0.5 THEN 'a' ELSE 'b' END = lower(email)")]
+    [TestCase("lower(email) BETWEEN CASE WHEN random() < 0.5 THEN 'a' ELSE 'b' END AND 'a'")]
+    [TestCase("lower(email) = CASE WHEN random() < 0.5 THEN 'a' ELSE 'b' END OR lower(email) = 'zzz'")]
+    [TestCase("email = CASE WHEN random() < 0.5 THEN 'A' ELSE 'B' END")]
+    [TestCase("email BETWEEN CASE WHEN random() < 0.5 THEN 'A' ELSE 'B' END AND 'A'")]
+    [TestCase("email = CASE WHEN random() < 0.5 THEN 'A' ELSE 'B' END OR email = 'zzz'")]
+    public async Task VolatileOperand_IsEvaluatedForEachRow(string where)
+    {
+        (string dbname, CommandExecutor executor) = await CreateUsers();
+        await ExecDDL(executor, dbname, "CREATE INDEX users_lower ON users ((lower(email)))");
+        await ExecDDL(executor, dbname, "CREATE INDEX users_email ON users (email)");
+
+        const int rows = 200;
+        string values = string.Join(", ", Enumerable.Range(0, rows).Select(i => $"(gen_id(), 'A', {i})"));
+        await ExecNonQuery(executor, dbname, "INSERT INTO users (id, email, score) VALUES " + values);
+
+        List<QueryResultRow> matched = await ExecSelect(executor, dbname, "SELECT id FROM users WHERE " + where);
+        Assert.That(matched.Count, Is.InRange(1, rows - 1));
+
+        (string node, _) = await ScanOf(executor, dbname, "SELECT id FROM users WHERE " + where);
+        Assert.That(node, Is.EqualTo("table-scan"));
+    }
+
+    /// <summary>
+    /// A clock function that reads the start of the statement gives one value for every row of the
+    /// statement, so it stays a seek bound.
+    /// </summary>
+    [Test]
+    public async Task StatementClockOperand_StillSeeksTheIndex()
+    {
+        (string dbname, CommandExecutor executor) = await CreateUsers();
+        await ExecDDL(executor, dbname, "CREATE INDEX users_next_score ON users ((score + 1))");
+        for (int i = 1; i <= 3; i++)
+            await Insert(executor, dbname, $"u{i}@x.io", "{}", i);
+
+        List<QueryResultRow> rows = await ExecSelect(executor, dbname, "SELECT email FROM users WHERE score + 1 < unix_timestamp()");
+        Assert.That(rows, Has.Count.EqualTo(3));
+
+        (string node, _) = await ScanOf(executor, dbname, "SELECT email FROM users WHERE score + 1 < unix_timestamp()");
+        Assert.That(node, Is.EqualTo("index-range-scan"));
+    }
+
+    /// <summary>
+    /// A plan keeps the index it chose. A DROP INDEX that commits before the cursor is read removes the
+    /// expression from the table's current indexes, but the reader's snapshot still holds the entries,
+    /// and they must decode with the type of the index the plan captured.
+    /// </summary>
+    [Test]
+    public async Task DropIndex_AfterPlanning_DoesNotChangeHowTheOpenScanDecodesItsKeys()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await ExecDDL(executor, dbname, "CREATE TABLE scores (id int64 PRIMARY KEY, score int64)");
+        await ExecDDL(executor, dbname, "CREATE INDEX scores_next ON scores ((score + 1))");
+        await ExecNonQuery(executor, dbname, "INSERT INTO scores (id, score) VALUES (1, 20), (2, 10)");
+
+        (string node, string detail) = await ScanOf(executor, dbname, "SELECT score FROM scores ORDER BY score + 1");
+        Assert.That(detail, Does.Contain("scores_next"), node);
+
+        KvTransaction reader = await database.Transactions.BeginAsync(CamusIsolationLevel.Serializable, CamusTransactionMode.ReadOnly);
+        try
+        {
+            (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(
+                new ExecuteSQLTicket(reader, dbname, "SELECT score FROM scores ORDER BY score + 1", null));
+
+            await ExecDDL(executor, dbname, "DROP INDEX scores_next ON scores");
+
+            List<QueryResultRow> rows = await cursor.ToListAsync();
+            Assert.That(rows.Select(r => r.Row["score"].LongValue), Is.EqualTo(new long[] { 10, 20 }));
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(reader);
+        }
+    }
 }

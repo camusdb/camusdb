@@ -13,7 +13,9 @@ using NUnit.Framework;
 
 using CamusDB.Core;
 using CamusDB.Core.Catalogs;
+using CamusDB.Core.Catalogs.Apply;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.Catalogs.Replication;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Controllers.DDL;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -196,5 +198,73 @@ internal sealed class TestExpressionIndexesCluster : SharedNodeBaseTest
         CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(() =>
             ExecNonQuery(executor, dbname, "INSERT INTO users (id, email) VALUES (gen_id(), 'ANN1@x.io')"));
         Assert.That(ex!.Code, Is.EqualTo(CamusDBErrorCodes.DuplicateUniqueKeyValue));
+    }
+
+    /// <summary>
+    /// A DROP COLUMN that commits after CREATE INDEX read the table, and before CREATE INDEX enters the
+    /// DDL gate. The index must be refused against the table as it is under the gate: staged with the
+    /// dropped column's id, it would make every fresh open of the table fail until it was removed.
+    /// </summary>
+    [TestCase("CREATE INDEX users_lower ON users ((lower(email)))", "users_lower", CamusDBErrorCodes.InvalidIndexExpression)]
+    [TestCase("CREATE INDEX users_email ON users (email)", "users_email", CamusDBErrorCodes.InvalidInput)]
+    public async Task CreateIndex_WhoseColumnIsDroppedBeforeTheGate_IsRefused(string createIndex, string indexName, string code)
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await ExecDDL(executor, dbname, "CREATE TABLE users (id oid primary key, email string, score int64)");
+        for (int i = 0; i < 3; i++)
+            await ExecNonQuery(executor, dbname, $"INSERT INTO users (id, email, score) VALUES (gen_id(), 'U{i}@x.io', {i})");
+
+        bool dropped = false;
+        executor.TestInterceptBeforeAddIndexGate = async () =>
+        {
+            executor.TestInterceptBeforeAddIndexGate = null;
+            await ExecDDL(executor, dbname, "ALTER TABLE users DROP COLUMN email");
+            dropped = true;
+        };
+
+        CamusDBException? ex;
+        try
+        {
+            ex = Assert.ThrowsAsync<CamusDBException>(() => ExecDDL(executor, dbname, createIndex));
+        }
+        finally
+        {
+            executor.TestInterceptBeforeAddIndexGate = null;
+        }
+
+        Assert.That(dropped, Is.True, "the drop must have run in the window");
+        Assert.That(ex!.Code, Is.EqualTo(code), ex.Message);
+
+        DatabaseDescriptor db = await executor.OpenDatabase(dbname);
+        Assert.That(db.Schema.Tables["users"].Indexes ?? [], Has.None.Matches<TableIndexSchema>(ix => ix.Name == indexName));
+        Assert.That(await executor.Catalogs.LoadCoordinatorJobsAsync(db), Is.Empty, "no job may be left behind");
+
+        // The table still opens after a restart and answers reads.
+        await executor.CloseDatabase(new CloseDatabaseTicket(dbname));
+        List<QueryResultRow> rows = await ExecSelect(executor, dbname, "SELECT score FROM users");
+        Assert.That(rows, Has.Count.EqualTo(3));
+    }
+
+    /// <summary>
+    /// The AddIndex delta itself refuses a key or an expression that reads a column the table does not
+    /// have, so a definition built against an older schema cannot be staged by any path.
+    /// </summary>
+    [TestCase(true)]
+    [TestCase(false)]
+    public async Task AddIndexDelta_ThatReadsAMissingColumn_IsRefused(bool expression)
+    {
+        (string dbname, _, CommandExecutor executor) = await CreateDatabase();
+        await ExecDDL(executor, dbname, "CREATE TABLE users (id oid primary key, email string)");
+        DatabaseDescriptor db = await executor.OpenDatabase(dbname);
+
+        IndexBuildInfo info = expression
+            ? new(ObjectIdGenerator.Generate().ToString(), "users_bad", [IndexKeyExpression.ColumnIdMarker], ["#expr:bad"], IndexType.Multi,
+                KeyExpressions: [new IndexKeyExpression(0, "lower(__camus_col_missing)", ColumnType.String, ["missing"])])
+            : new(ObjectIdGenerator.Generate().ToString(), "users_bad", ["missing"], ["email"], IndexType.Multi);
+
+        SchemaChangeLogEntry entry = SchemaChangeEntryFactory.AddIndexInStateEntry(db, "users", info, SchemaElementState.DeleteOnly);
+
+        CamusDBException? ex = Assert.Throws<CamusDBException>(() => SchemaDeltaApplier.ValidateSchemaDelta(db, entry));
+        Assert.That(ex!.Code, Is.EqualTo(CamusDBErrorCodes.UnknownColumn), ex.Message);
     }
 }

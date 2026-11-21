@@ -93,22 +93,55 @@ public sealed class TableDescriptor
     public IReadOnlyList<TableIndexSchema> InvertedIndexes => Volatile.Read(ref invertedIndexes);
 
     /// <summary>
-    /// The expression key parts of the ordered indexes, keyed by hidden key name
-    /// (<see cref="BoundIndexExpression.KeyName"/>): what the planner matches a WHERE term against, and
-    /// how a planner helper finds the type of a key position that is not a column. Two indexes over one
-    /// expression share an entry. Published with <see cref="Indexes"/> by <see cref="MutateIndexes"/>,
-    /// so a reader that captured one snapshot of each sees matching sets; empty for a table without
-    /// expression indexes. Never mutate it.
+    /// Every expression key part that an ordered index of this descriptor has had, keyed by hidden key
+    /// name (<see cref="BoundIndexExpression.KeyName"/>): how a planner pass that has only a name finds
+    /// the type of a comparison on a key position that is not a column. Two indexes over one expression
+    /// share an entry. Empty for a table that never had an expression index. Never mutate it.
+    ///
+    /// <para><b>Grow-only.</b> <see cref="MutateIndexes"/> adds entries and never removes one, so a
+    /// DROP INDEX leaves its expression here. A hidden key name is a hash of the stored text and the
+    /// result type, so one name has one type for the life of the descriptor. A plan that captured an
+    /// index before a DROP INDEX therefore still finds its type by name. A reader of <see cref="Indexes"/>
+    /// and of this map makes two reads, which can see two generations; with a grow-only map that
+    /// difference cannot hide a type. The planner matches WHERE terms against the expressions of the
+    /// indexes it captured, never against this map, so a dropped expression gets no new comparison.</para>
     /// </summary>
     public IReadOnlyDictionary<string, BoundIndexExpression> ExpressionKeys => Volatile.Read(ref expressionKeys);
 
     /// <summary>
     /// The result type of the expression whose hidden key name is <paramref name="keyName"/>, or null
-    /// when the name is not one. A helper that types the key positions of an index reads this before
-    /// its fallback, so an expression position never decodes with the type of a missing column.
+    /// when the name is not one. For a pass that has only a name; a pass that has the index reads
+    /// <see cref="IndexKeyType"/>.
     /// </summary>
     public ColumnType? ExpressionKeyType(string keyName) =>
         ExpressionKeys.TryGetValue(keyName, out BoundIndexExpression? expression) ? expression.Type : null;
+
+    /// <summary>
+    /// The type of key position <paramref name="position"/> of <paramref name="index"/>: the result
+    /// type of the expression at an expression position, otherwise the type of the column; null when
+    /// the table has no such column. The expression type comes from <paramref name="index"/> itself, so
+    /// a scan decodes the keys of the index its plan captured with that index's types, whatever DDL
+    /// changed the table's current indexes since.
+    /// </summary>
+    public ColumnType? IndexKeyType(TableIndexSchema index, int position)
+    {
+        if (index.ExpressionAt(position) is { } expression)
+            return expression.Type;
+
+        string name = index.Columns[position];
+        List<TableColumnSchema>? columns = Schema.Columns;
+        if (columns is not null)
+        {
+            for (int i = 0; i < columns.Count; i++)
+            {
+                if (string.Equals(columns[i].Name, name, StringComparison.OrdinalIgnoreCase))
+                    return columns[i].Type;
+            }
+        }
+
+        // A hidden key name on an index whose bound expressions are not at hand.
+        return ExpressionKeyType(name);
+    }
 
     /// <summary>
     /// The column named <paramref name="name"/>, or, for a hidden key name, the expression's
@@ -154,7 +187,10 @@ public sealed class TableDescriptor
             mutate(next);
 
             Dictionary<string, TableIndexSchema> ordered = new(next.Count, StringComparer.OrdinalIgnoreCase);
-            Dictionary<string, BoundIndexExpression> expressions = new(StringComparer.OrdinalIgnoreCase);
+
+            // Grow-only (see ExpressionKeys): it starts from the entries already published. A newer
+            // binding of a name (after a column rename) replaces the older one; both have one type.
+            Dictionary<string, BoundIndexExpression> expressions = new(expressionKeys, StringComparer.OrdinalIgnoreCase);
             List<TableIndexSchema> inverted = [];
             foreach (KeyValuePair<string, TableIndexSchema> entry in next)
             {
@@ -169,7 +205,7 @@ public sealed class TableDescriptor
                         foreach (BoundIndexExpression? expression in bound)
                         {
                             if (expression is not null)
-                                expressions.TryAdd(expression.KeyName, expression);
+                                expressions[expression.KeyName] = expression;
                         }
                     }
                 }

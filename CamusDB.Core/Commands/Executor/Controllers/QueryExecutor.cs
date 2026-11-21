@@ -1926,9 +1926,7 @@ internal sealed class QueryExecutor
 
         for (int i = 0; i < index.Columns.Length; i++)
         {
-            string colName = index.Columns[i];
-            TableColumnSchema? col = table.Schema.Columns?.Find(c => string.Equals(c.Name, colName, StringComparison.OrdinalIgnoreCase));
-            types[i] = col?.Type ?? table.ExpressionKeyType(colName) ?? ColumnType.String;
+            types[i] = table.IndexKeyType(index, i) ?? ColumnType.String;
         }
 
         return types;

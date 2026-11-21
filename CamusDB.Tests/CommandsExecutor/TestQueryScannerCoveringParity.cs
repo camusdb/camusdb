@@ -777,4 +777,32 @@ public class TestQueryScannerCoveringParity : BaseTest
         Assert.Greater(rowsRead!.Value, 0L,
             "non-covered batch scan must fetch primary rows (rows_read > 0)");
     }
+
+    /// <summary>
+    /// <c>0.0 = -0.0</c> in SQL, so an UPDATE from one to the other leaves the row equal by comparison.
+    /// A covering read answers from the entry value, so the entry must still get the new value.
+    /// </summary>
+    [Test]
+    public async Task CoveringIndex_RewritesAnIncludedValueThatOnlyChangesItsSign()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction ddl = await database.Transactions.BeginAsync();
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(ddl, dbname, "CREATE TABLE points (id int64 PRIMARY KEY, k int64, v float64)", null));
+        await database.Transactions.CommitAsync(ddl);
+
+        ddl = await database.Transactions.BeginAsync();
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(ddl, dbname, "CREATE INDEX points_k ON points (k) INCLUDE (v)", null));
+        await database.Transactions.CommitAsync(ddl);
+
+        await RunNonQuery(executor, database, dbname, "INSERT INTO points (id, k, v) VALUES (1, 7, 0.0)");
+        await RunNonQuery(executor, database, dbname, "UPDATE points SET v = -0.0 WHERE id = 1");
+
+        List<QueryResultRow> rows = await RunSql(executor, database, dbname, "SELECT v FROM points WHERE k = 7");
+        Assert.That(rows, Has.Count.EqualTo(1));
+        Assert.That(double.IsNegative(rows[0].Row["v"].FloatValue), Is.True, "the covered value keeps its sign");
+
+        Assert.That(await ExplainAnalyzeScanRowsRead(executor, database, dbname, "SELECT v FROM points WHERE k = 7"), Is.EqualTo(0L),
+            "the read is covered, so it answers from the entry value");
+    }
 }

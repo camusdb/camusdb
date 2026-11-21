@@ -273,20 +273,9 @@ internal sealed class ShowRangesReader
         ColumnType[] types = new ColumnType[index.Columns.Length];
 
         for (int i = 0; i < index.Columns.Length; i++)
-            types[i] = ColumnTypeOf(table, index.Columns[i]);
+            types[i] = table.IndexKeyType(index, i) ?? ColumnType.String;
 
         return types;
-    }
-
-    private static ColumnType ColumnTypeOf(TableDescriptor table, string columnName)
-    {
-        foreach (TableColumnSchema column in table.Schema.Columns!)
-        {
-            if (string.Equals(column.Name, columnName, StringComparison.OrdinalIgnoreCase))
-                return column.Type;
-        }
-
-        return table.ExpressionKeyType(columnName) ?? ColumnType.String;
     }
 
     // -----------------------------------------------------------------------
