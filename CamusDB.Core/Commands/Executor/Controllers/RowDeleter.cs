@@ -274,11 +274,9 @@ internal sealed class RowDeleter
     {
         HashSet<string> columns = new(StringComparer.OrdinalIgnoreCase);
 
+        // An expression position adds the columns its expression reads, not its hidden key name.
         for (int i = 0; i < writableIndexes.Count; i++)
-        {
-            foreach (string columnName in writableIndexes[i].Columns)
-                columns.Add(columnName);
-        }
+            IndexKeyRows.AddReadColumns(writableIndexes[i], columns);
 
         return columns;
     }
@@ -761,17 +759,20 @@ internal sealed class RowDeleter
 
             if (index.Type == IndexType.Unique)
             {
+                // The expression key parts under their hidden names; the row itself for a plain index.
+                Dictionary<string, ColumnValue> keyRow = IndexKeyRows.For(index, row);
+
                 // NULLs are distinct: a row with a NULL (or absent) value in any indexed column never
                 // had a unique index entry, so there is nothing to delete.
-                if (HasNullKeyColumn(row, index.Columns))
+                if (HasNullKeyColumn(keyRow, index.Columns))
                     continue;
 
-                CompositeColumnValue key = GetColumnValue(row, index.Columns);
+                CompositeColumnValue key = GetColumnValue(keyRow, index.Columns);
                 (entries ??= []).Add(new(index.KvId, key, rowId, Unique: true));
             }
             else if (index.Type == IndexType.Multi)
             {
-                CompositeColumnValue key = GetColumnValue(row, index.Columns, new(ColumnType.Id, rowId.ToString()));
+                CompositeColumnValue key = GetColumnValue(IndexKeyRows.For(index, row), index.Columns, new(ColumnType.Id, rowId.ToString()));
                 (entries ??= []).Add(new(index.KvId, key, rowId, Unique: false));
             }
             else if (index.Type == IndexType.Inverted && JsonbGinIndexKeys.EntriesOf(index, row) is { } documentEntries)

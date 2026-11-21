@@ -53,7 +53,13 @@ internal static class IndexEntryCheck
 
         HashSet<string>? extended = null;
 
-        foreach (string column in index.Columns)
+        // An expression position adds the columns its expression reads, so the check below can
+        // evaluate it; its hidden key name is no column.
+        List<string>? keyColumns = null;
+        if (index.HasExpressions)
+            IndexKeyRows.AddReadColumns(index, keyColumns = []);
+
+        foreach (string column in (IReadOnlyList<string>?)keyColumns ?? index.Columns)
         {
             if (required.Contains(column) || extended is { } ext && ext.Contains(column))
                 continue;
@@ -79,6 +85,17 @@ internal static class IndexEntryCheck
 
         for (int i = 0; i < columns; i++)
         {
+            if (index.ExpressionAt(i) is { } expression)
+            {
+                // The expression is judged only when the row decoded every column it reads.
+                if (!ReadsDecodedColumns(expression, row)
+                    || SameValue(keyValues[i], IndexKeyRows.Evaluate(index, expression, row)))
+                    continue;
+
+                RecordStaleEntry(table, index, row.RowId, logger);
+                return false;
+            }
+
             int ordinal = row.Layout.IndexOf(index.Columns[i]);
             if (ordinal < 0)
                 continue;
@@ -110,6 +127,17 @@ internal static class IndexEntryCheck
             return true;
 
         return keyValue.CompareTo(rowValue) == 0;
+    }
+
+    private static bool ReadsDecodedColumns(BoundIndexExpression expression, QueryRow row)
+    {
+        foreach (string column in expression.ReferencedColumns)
+        {
+            if (row.Layout.IndexOf(column) < 0)
+                return false;
+        }
+
+        return true;
     }
 
     private static void RecordStaleEntry(TableDescriptor table, TableIndexSchema index, ObjectIdValue rowId, ILogger logger)

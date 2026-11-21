@@ -8,6 +8,7 @@
 
 using System.Globalization;
 using System.Text;
+using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Plans;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
@@ -203,15 +204,34 @@ public static class PlanRenderer
     {
         string key = RenderCompositeKey(node.LookupKey);
         string indexOnly = plan.IndexOnly ? ", index-only=true" : "";
-        return $"index-lookup(index={node.Index.Name}, key={key}{indexOnly})";
+        return $"index-lookup(index={node.Index.Name}{RenderIndexExpressions(node.Index)}, key={key}{indexOnly})";
     }
 
     private static string RenderIndexInListScan(IndexInListScanNode node) =>
-        $"index-in-list(index={node.Index.Name}, values={node.Values.Count})";
+        $"index-in-list(index={node.Index.Name}{RenderIndexExpressions(node.Index)}, values={node.Values.Count})";
+
+    /// <summary>
+    /// <c>, expressions=[...]</c> with the key expressions of an expression index, in key order, or an
+    /// empty string for an index whose key holds only columns, so a plain index renders as before.
+    /// </summary>
+    private static string RenderIndexExpressions(TableIndexSchema index)
+    {
+        if (index.Expressions is not { } expressions)
+            return "";
+
+        List<string> rendered = new(expressions.Length);
+        foreach (BoundIndexExpression? expression in expressions)
+        {
+            if (expression is not null)
+                rendered.Add(expression.Sql);
+        }
+
+        return $", expressions=[{string.Join(", ", rendered)}]";
+    }
 
     private static string RenderIndexRangeScan(IndexRangeScanNode node, QueryPlan plan)
     {
-        var parts = new List<string> { $"index={node.Index.Name}" };
+        var parts = new List<string> { $"index={node.Index.Name}{RenderIndexExpressions(node.Index)}" };
 
         if (node.FromBound is not null)
         {

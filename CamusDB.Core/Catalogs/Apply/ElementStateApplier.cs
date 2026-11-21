@@ -137,7 +137,8 @@ internal static class ElementStateApplier
                 columnDirections: current.ColumnDirections,
                 includeColumnIds: current.IncludeColumnIds,
                 comment: current.Comment,
-                ownerConstraintId: current.OwnerConstraintId
+                ownerConstraintId: current.OwnerConstraintId,
+                keyExpressions: current.KeyExpressions
             );
         }
 
@@ -237,7 +238,8 @@ internal static class ElementStateApplier
                 columnDirections: index.ColumnDirections,
                 includeColumnIds: index.IncludeColumnIds,
                 comment: index.Comment,
-                ownerConstraintId: null
+                ownerConstraintId: null,
+                keyExpressions: index.KeyExpressions
             );
         }
     }

@@ -265,6 +265,13 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
             return;
         }
 
+        // An expression key part of an inline KEY / UNIQUE KEY, the form SHOW CREATE TABLE prints.
+        if (ast.nodeType == NodeType.IndexExpression)
+        {
+            indexColumns.Add(SQLExecutorAlterIndexCreator.ExpressionKeyPart(ast));
+            return;
+        }
+
         if (ast.nodeType == NodeType.IndexIdentifierList)
         {
             if (ast.leftAst != null)

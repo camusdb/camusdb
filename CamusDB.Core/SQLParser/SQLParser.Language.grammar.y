@@ -1076,12 +1076,12 @@ alter_table_stmt : TALTER TTABLE any_identifier TWADD any_identifier field_type 
                  | TALTER TTABLE any_identifier TWADD TCOLUMN any_identifier TIDENTIFIER create_table_field_constraint_list { $$.n = new(NodeType.AlterTableAddColumn, $3.n, $6.n, TypeFromWord($7.s), $8.n, null, null, null, null); }
 				 | TALTER TTABLE any_identifier TDROP any_identifier { $$.n = new(NodeType.AlterTableDropColumn, $3.n, $5.n, null, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TDROP TCOLUMN any_identifier { $$.n = new(NodeType.AlterTableDropColumn, $3.n, $6.n, null, null, null, null, null, null); }
-                 | TALTER TTABLE any_identifier TWADD TINDEX any_identifier LPAREN identifier_index_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddIndex, $3.n, $6.n, $8.n, $10.n, null, null, null, null); }
-                 | TALTER TTABLE any_identifier TWADD TINDEX any_identifier TON LPAREN identifier_index_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddIndex, $3.n, $6.n, $9.n, $11.n, null, null, null, null); }
-                 | TALTER TTABLE any_identifier TWADD TUNIQUE any_identifier LPAREN identifier_index_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddUniqueIndex, $3.n, $6.n, $8.n, $10.n, null, null, null, null); }
-                 | TALTER TTABLE any_identifier TWADD TUNIQUE any_identifier TON LPAREN identifier_index_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddUniqueIndex, $3.n, $6.n, $9.n, $11.n, null, null, null, null); }
-                 | TALTER TTABLE any_identifier TWADD TUNIQUE TINDEX any_identifier LPAREN identifier_index_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddUniqueIndex, $3.n, $7.n, $9.n, $11.n, null, null, null, null); }
-                 | TALTER TTABLE any_identifier TWADD TUNIQUE TINDEX any_identifier TON LPAREN identifier_index_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddUniqueIndex, $3.n, $7.n, $10.n, $12.n, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TWADD TINDEX any_identifier LPAREN index_element_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddIndex, $3.n, $6.n, $8.n, $10.n, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TWADD TINDEX any_identifier TON LPAREN index_element_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddIndex, $3.n, $6.n, $9.n, $11.n, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TWADD TUNIQUE any_identifier LPAREN index_element_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddUniqueIndex, $3.n, $6.n, $8.n, $10.n, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TWADD TUNIQUE any_identifier TON LPAREN index_element_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddUniqueIndex, $3.n, $6.n, $9.n, $11.n, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TWADD TUNIQUE TINDEX any_identifier LPAREN index_element_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddUniqueIndex, $3.n, $7.n, $9.n, $11.n, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TWADD TUNIQUE TINDEX any_identifier TON LPAREN index_element_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddUniqueIndex, $3.n, $7.n, $10.n, $12.n, null, null, null, null); }
                  | TALTER TTABLE any_identifier TDROP TINDEX any_identifier { $$.n = new(NodeType.AlterTableDropIndex, $3.n, $6.n, null, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TDROP TINDEX TIF TEXISTS any_identifier { $$.n = new(NodeType.AlterTableDropIndexIfExists, $3.n, $8.n, null, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TWADD TPRIMARY TKEY LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.AlterTableAddPrimaryKey, $3.n, $8.n, null, null, null, null, null, null); }
@@ -1149,10 +1149,10 @@ table_setting_key_list : table_setting_key_list TCOMMA any_identifier { $$.n = n
                        | any_identifier { $$.n = $1.n; $$.s = $1.s; }
                        ;
 
-create_index_stmt : TCREATE TINDEX any_identifier TON any_identifier LPAREN identifier_index_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddIndex, $5.n, $3.n, $7.n, $9.n, null, null, null, null); }
-                  | TCREATE TINDEX TIF TNOT TEXISTS any_identifier TON any_identifier LPAREN identifier_index_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddIndexIfNotExists, $8.n, $6.n, $10.n, $12.n, null, null, null, null); }
-                  | TCREATE TUNIQUE TINDEX any_identifier TON any_identifier LPAREN identifier_index_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddUniqueIndex, $6.n, $4.n, $8.n, $10.n, null, null, null, null); }
-                  | TCREATE TUNIQUE TINDEX TIF TNOT TEXISTS any_identifier TON any_identifier LPAREN identifier_index_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddUniqueIndexIfNotExists, $9.n, $7.n, $11.n, $13.n, null, null, null, null); }
+create_index_stmt : TCREATE TINDEX any_identifier TON any_identifier LPAREN index_element_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddIndex, $5.n, $3.n, $7.n, $9.n, null, null, null, null); }
+                  | TCREATE TINDEX TIF TNOT TEXISTS any_identifier TON any_identifier LPAREN index_element_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddIndexIfNotExists, $8.n, $6.n, $10.n, $12.n, null, null, null, null); }
+                  | TCREATE TUNIQUE TINDEX any_identifier TON any_identifier LPAREN index_element_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddUniqueIndex, $6.n, $4.n, $8.n, $10.n, null, null, null, null); }
+                  | TCREATE TUNIQUE TINDEX TIF TNOT TEXISTS any_identifier TON any_identifier LPAREN index_element_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddUniqueIndexIfNotExists, $9.n, $7.n, $11.n, $13.n, null, null, null, null); }
                   /* CREATE INDEX ... USING <method> (col [opclass]) and the CockroachDB CREATE INVERTED INDEX.
                      GIN, BTREE, INVERTED and the operator class are plain identifiers, so none of them
                      becomes a reserved word; the actions check the words. USING is reserved for
@@ -1601,6 +1601,25 @@ identifier_index : any_identifier { $$.n = $1.n; $$.s = $1.s; }
                  | any_identifier TDESC { $$.n = new(NodeType.IndexIdentifierDesc, $1.n, null, null, null, null, null, null, null); }
                  ;
 
+/* The key list of an ordered index that may hold expressions: CREATE INDEX, ALTER TABLE ... ADD INDEX
+   and the inline KEY / UNIQUE KEY of CREATE TABLE, which SHOW CREATE TABLE prints. An element is a
+   column, a parenthesized expression, or a function call without the extra parentheses, as in
+   PostgreSQL; each takes ASC or DESC. The primary key, INCLUDE and GIN lists keep identifier_index_list,
+   so an expression there is a syntax error. An IndexExpression node holds the expression in leftAst and
+   the direction word in its text; the ticket builder reads ((col)) as the plain column col. */
+index_element_list : index_element_list TCOMMA index_element { $$.n = new(NodeType.IndexIdentifierList, $1.n, $3.n, null, null, null, null, null, null); }
+                   | index_element { $$.n = $1.n; $$.s = $1.s; }
+                   ;
+
+index_element : identifier_index { $$.n = $1.n; $$.s = $1.s; }
+              | LPAREN condition RPAREN { $$.n = new(NodeType.IndexExpression, $2.n, null, null, null, null, null, null, null); }
+              | LPAREN condition RPAREN TASC { $$.n = new(NodeType.IndexExpression, $2.n, null, null, null, null, null, null, "ASC"); }
+              | LPAREN condition RPAREN TDESC { $$.n = new(NodeType.IndexExpression, $2.n, null, null, null, null, null, null, "DESC"); }
+              | fcall_expr { $$.n = new(NodeType.IndexExpression, $1.n, null, null, null, null, null, null, null); }
+              | fcall_expr TASC { $$.n = new(NodeType.IndexExpression, $1.n, null, null, null, null, null, null, "ASC"); }
+              | fcall_expr TDESC { $$.n = new(NodeType.IndexExpression, $1.n, null, null, null, null, null, null, "DESC"); }
+              ;
+
 select_table : from_clause { $$.n = $1.n; $$.s = $1.s; }
              ;
 
@@ -1856,11 +1875,11 @@ create_table_item_list : create_table_item_list TCOMMA create_table_item { $$.n 
 create_table_inline_constraint : TCONSTRAINT any_identifier TPRIMARY TKEY LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.CreateTableConstraintPrimaryKey, $6.n, null, null, null, null, null, null, null); }
                                | TCONSTRAINT TSTRING TPRIMARY TKEY LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.CreateTableConstraintPrimaryKey, $6.n, null, null, null, null, null, null, null); }
                                | TPRIMARY TKEY LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.CreateTableConstraintPrimaryKey, $4.n, null, null, null, null, null, null, null); }
-                               | TKEY any_identifier LPAREN identifier_index_list RPAREN index_include_clause opt_inline_comment { $$.n = new(NodeType.CreateTableConstraintMultiIndex, $2.n, $4.n, $6.n, $7.n, null, null, null, null); }
+                               | TKEY any_identifier LPAREN index_element_list RPAREN index_include_clause opt_inline_comment { $$.n = new(NodeType.CreateTableConstraintMultiIndex, $2.n, $4.n, $6.n, $7.n, null, null, null, null); }
                                /* INVERTED INDEX name (col), the CockroachDB inline form: a GIN index, which
                                   SHOW CREATE TABLE renders this way. "gin" in the text marks it. */
                                | TIDENTIFIER TINDEX any_identifier LPAREN identifier_index_list RPAREN opt_inline_comment { $$.n = new(NodeType.CreateTableConstraintMultiIndex, $3.n, $5.n, null, $7.n, null, null, null, InvertedIndexWord($1.s)); }
-                               | TUNIQUE TKEY any_identifier LPAREN identifier_index_list RPAREN index_include_clause opt_inline_comment { $$.n = new(NodeType.CreateTableConstraintUniqueIndex, $3.n, $5.n, $7.n, $8.n, null, null, null, null); }
+                               | TUNIQUE TKEY any_identifier LPAREN index_element_list RPAREN index_include_clause opt_inline_comment { $$.n = new(NodeType.CreateTableConstraintUniqueIndex, $3.n, $5.n, $7.n, $8.n, null, null, null, null); }
                                | TCONSTRAINT any_identifier TCHECK LPAREN condition RPAREN { $$.n = new(NodeType.CreateTableConstraintCheck, $5.n, null, null, null, null, null, null, $2.n.yytext); }
                                | TCHECK LPAREN condition RPAREN { $$.n = new(NodeType.CreateTableConstraintCheck, $3.n, null, null, null, null, null, null, null); }
                                | fk_table_constraint { $$.n = $1.n; }

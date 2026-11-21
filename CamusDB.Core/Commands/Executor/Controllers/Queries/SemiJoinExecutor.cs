@@ -358,6 +358,6 @@ internal sealed class SemiJoinExecutor
             return ColumnType.String;
 
         TableColumnSchema? col = table.Schema.Columns.Find(c => string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase));
-        return col?.Type ?? ColumnType.String;
+        return col?.Type ?? table.ExpressionKeyType(columnName) ?? ColumnType.String;
     }
 }

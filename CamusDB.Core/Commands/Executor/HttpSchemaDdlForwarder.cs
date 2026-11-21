@@ -121,7 +121,7 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
             DatabaseName = ticket.DatabaseName,
             TableName = ticket.TableName,
             IndexName = ticket.IndexName,
-            Columns = ticket.Columns.Select(c => new ColumnIndexInfoRequest { Name = c.Name, Order = c.Order }).ToArray(),
+            Columns = ticket.Columns.Select(c => new ColumnIndexInfoRequest { Name = c.Name, Order = c.Order, Expression = c.Expression }).ToArray(),
             Operation = ticket.Operation,
             IfNotExists = ticket.IfNotExists,
             IfExists = ticket.IfExists,
@@ -473,7 +473,7 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
             {
                 Type = c.Type,
                 Name = c.Name,
-                Columns = c.Columns.Select(col => new ColumnIndexInfoRequest { Name = col.Name, Order = col.Order }).ToArray(),
+                Columns = c.Columns.Select(col => new ColumnIndexInfoRequest { Name = col.Name, Order = col.Order, Expression = col.Expression }).ToArray(),
                 Comment = c.Comment,
             };
         }

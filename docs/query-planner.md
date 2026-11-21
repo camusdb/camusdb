@@ -418,6 +418,27 @@ the join-leaf costing, and the cardinality estimator — and `IndexScanSelector`
 constant still mismatches its column, so a caller that skips the pass loses the index shortcut and still
 returns the right rows.
 
+### 4b′. Expression index predicates
+
+**File:** `Controllers/Queries/ExpressionIndexPredicates.cs`. Runs in `QueryPlanner.GetPlan` after
+`ResolveQualifiedColumnNames` and before `CoerceConstantsForColumns`. For a table with an expression
+index ([expression-indexes.md](expression-indexes.md)), it looks at each residual conjunct of the shape
+`expr op constant`, `constant op expr`, `expr BETWEEN a AND b`, `expr IN (...)` or
+`expr = a OR expr = b`. When the canonical text of `expr` (names in lower case, no table qualifier) equals
+the canonical text of an index expression, the conjunct becomes an indexable comparison or an IN list on
+that expression's hidden key name, the name the index has at that key position. The selector, the bound
+absorption and the constant coercion then treat the name like a column:
+
+- `TableDescriptor.ExpressionKeys` maps each hidden key name to its expression;
+  `TableDescriptor.ExpressionKeyType` gives its type to the helpers that type index keys, so an
+  expression key never decodes with the String fallback of a missing column.
+- `BoundIndexExpression.KeyColumn` is a column shape for the hidden name, which `FindColumn` returns, so
+  a constant moves into the expression's type by the rules of the table above.
+- A comparison keeps its original conjunct, so a comparison no scan absorbs is evaluated on the row as
+  written.
+
+A join leaf, and a query whose rows are keyed by qualified names, is not matched.
+
 ### 4c. IndexScanSelector
 
 **File:** `Controllers/Queries/IndexScanSelector.cs`. `TrySelectScan` scores every index and picks the
@@ -461,9 +482,11 @@ equality on a `uuid`, `date`, `datetime`, `bytes` or `NUMERIC` column stayed in 
 every row.
 
 **ORDER BY scan elision:** if no predicate matches, `TrySelectOrderByScan` looks for an index whose
-leading columns equal the ORDER BY columns (ascending only) and returns an unbounded range scan;
-`ScanSatisfiesOrderBy` confirms so the planner omits `SortNode`. Descending order is not satisfiable by
-the ascending index encoding and forces a real `SortNode`.
+leading key parts equal the ORDER BY keys, each in its own direction, and returns an unbounded range scan;
+`ScanSatisfiesOrderBy` confirms so the planner omits `SortNode`. A key and an index part match when they
+name the same column, or when an ORDER BY expression has the canonical text of the index expression at
+that position and reads only columns of the table (`OrderKeyMatches`). A direction that differs from the
+index direction forces a real `SortNode`: there is no backward scan.
 
 **Unique indexes are not complete row sets.** A unique index carries **no entry** for a row with a NULL in
 *any* of its key columns (NULLs are distinct, so such rows are exempt from the constraint and never
@@ -1628,6 +1651,7 @@ broadcast probes for inner hash joins; see Part IV for their eligibility.
 | Network / distribution cost | `Commands/Executor/Controllers/Queries/PlacementReader.cs`, `RowWidthEstimator.cs`, `Models/Plans/DataDistribution.cs` |
 | Predicate classification | `Commands/Executor/Controllers/Queries/PredicateAnalyzer.cs` |
 | Index scan selection / bound absorption | `IndexScanSelector.cs`, `IndexScanBoundAnalysis.cs` |
+| Expression index predicates (WHERE and ORDER BY) | `ExpressionIndexPredicates.cs`, `IndexScanSelector.OrderKeyMatches`, `Controllers/DDL/IndexExpressionBinder.cs` |
 | Join predicate pushdown / equi-join analysis | `JoinPredicatePushdown.cs`, `JoinEquiJoinAnalyzer.cs` |
 | Semi-/anti-join rewrite (`IN`/`NOT IN`) | `SemiJoinAnalyzer.cs`, `SemiJoinExecutor.cs`, `SemiJoinSpec.cs`, `SemiJoinMode.cs`, `Models/Plans/SemiJoinNode.cs` |
 | Value-list `IN` → index seeks | `Models/Predicates/AnalyzedInList.cs`, `Models/Plans/IndexInListScanNode.cs`, `PredicateAnalyzer.cs`, `QueryPlanner.cs` (`TryBuildInListScanNode` / `TryBuildCompetingInListScanNode`), `QueryExecutor.QueryUsingInListIndex` |

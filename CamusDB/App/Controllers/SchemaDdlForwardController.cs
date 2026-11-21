@@ -227,7 +227,7 @@ public sealed class SchemaDdlForwardController : CommandsController
                 databaseName: req.DatabaseName,
                 tableName: req.TableName,
                 indexName: req.IndexName,
-                columns: req.Columns.Select(c => new ColumnIndexInfo(c.Name, c.Order)).ToArray(),
+                columns: req.Columns.Select(c => new ColumnIndexInfo(c.Name, c.Order, c.Expression)).ToArray(),
                 operation: req.Operation,
                 ifNotExists: req.IfNotExists,
                 newName: req.NewName,
@@ -881,7 +881,7 @@ public sealed class SchemaDdlForwardController : CommandsController
         constraints.Select(c => new ConstraintInfo(
             c.Type,
             c.Name,
-            c.Columns.Select(col => new ColumnIndexInfo(col.Name, col.Order)).ToArray(),
+            c.Columns.Select(col => new ColumnIndexInfo(col.Name, col.Order, col.Expression)).ToArray(),
             comment: c.Comment
         )).ToArray();
 

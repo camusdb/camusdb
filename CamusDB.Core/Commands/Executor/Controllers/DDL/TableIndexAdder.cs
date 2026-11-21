@@ -84,6 +84,10 @@ internal sealed class TableIndexAdder
 
         foreach (ColumnIndexInfo indexColumn in ticket.Columns)
         {
+            // An expression part is validated by the binder (ResolveKey), with its own error code.
+            if (indexColumn.IsExpression)
+                continue;
+
             TableColumnSchema? tableColumn = null;
 
             foreach (TableColumnSchema column in table.Schema.Columns!)
@@ -110,6 +114,50 @@ internal sealed class TableIndexAdder
 
         RejectUnorderedKeyColumns(table, ticket);
         ValidateIncludeColumns(table, ticket, options);
+    }
+
+    /// <summary>
+    /// Resolves the key of the index <paramref name="ticket"/> adds against the table: column ids,
+    /// the names the write paths read, and each expression in its stored and bound form. Refuses an
+    /// expression the index cannot hold (<see cref="CamusDBErrorCodes.InvalidIndexExpression"/>), an
+    /// expression in a GIN index, and DESC on an expression whose type has no descending encoding.
+    /// Shared by the standalone and the cluster add paths.
+    /// </summary>
+    internal static ResolvedIndexKey ResolveKey(TableDescriptor table, AlterIndexTicket ticket)
+    {
+        ResolvedIndexKey key = IndexExpressionBinder.Resolve(
+            table.Name,
+            ticket.IndexName,
+            ticket.Columns,
+            IndexExpressionBinder.ColumnsOf(table.Schema.Columns));
+
+        if (key.Expressions is { } expressions)
+        {
+            if (ticket.Operation is AlterIndexOperation.AddInvertedIndex or AlterIndexOperation.AddPrimaryKey)
+                throw IndexExpressionBinder.Refused(ticket.IndexName, "only an ordered secondary index can have an expression key");
+
+            RejectDescendingExpressions(ticket.IndexName, ticket.Columns, expressions);
+        }
+
+        return key;
+    }
+
+    /// <summary>
+    /// The DESC rule of <see cref="IndexColumnOrder.RejectDescendingOnUnsupportedType"/> for the
+    /// expression positions, whose type is the expression's result type.
+    /// </summary>
+    internal static void RejectDescendingExpressions(string indexName, ReadOnlySpan<ColumnIndexInfo> columns, BoundIndexExpression?[] expressions)
+    {
+        for (int i = 0; i < columns.Length && i < expressions.Length; i++)
+        {
+            if (columns[i].Order != OrderType.Descending || expressions[i] is not { } expression)
+                continue;
+
+            if (!IndexColumnOrder.SupportsDescending(expression.Type))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    $"Descending index columns are not supported for type {expression.Type} (expression ({expression.Sql}) in index '{indexName}')");
+        }
     }
 
     /// <summary>
@@ -215,6 +263,7 @@ internal sealed class TableIndexAdder
     )
     {
         Validate(table, ticket, database.Options);
+        ResolvedIndexKey key = ResolveKey(table, ticket);
 
         AddIndexFluxState state = new(
             catalogs: catalogs,
@@ -223,7 +272,10 @@ internal sealed class TableIndexAdder
             table: table,
             ticket: ticket,
             queryExecutor: queryExecutor
-        );
+        )
+        {
+            Key = key
+        };
 
         FluxMachine<AddIndexFluxSteps, AddIndexFluxState> machine = new(state);
 
@@ -243,7 +295,8 @@ internal sealed class TableIndexAdder
         };
 
         string indexId = ObjectIdGenerator.Generate().ToString();
-        string[] columnIds = GetColumnIds(table, ticket.Columns);
+        ResolvedIndexKey key = state.Key ?? ResolveKey(table, ticket);
+        string[] columnIds = key.Expressions is null ? GetColumnIds(table, ticket.Columns) : key.ColumnIds;
         OrderType[]? columnDirections = IndexColumnOrder.Extract(ticket.Columns);
         string[]? includeColumnIds = ticket.IncludeColumns.Length > 0
             ? GetColumnIdsByName(table, ticket.IncludeColumns)
@@ -257,7 +310,8 @@ internal sealed class TableIndexAdder
             SchemaElementState.WriteOnly,
             startOffset: null,
             columnDirections: columnDirections,
-            includeColumnIds: includeColumnIds
+            includeColumnIds: includeColumnIds,
+            keyExpressions: key.KeyExpressions
         );
 
         // Kahuna must see a key space registered before the first write to it. Once the WriteOnly index
@@ -286,7 +340,7 @@ internal sealed class TableIndexAdder
 
         table.MutateIndexes(indexes => indexes.Add(
             ticket.IndexName,
-            new TableIndexSchema(ticket.IndexName, ticket.Columns.Select(x => x.Name).ToArray(), indexType, SchemaElementState.WriteOnly, id: indexId, columnDirections: columnDirections, includeColumns: ticket.IncludeColumns.Length > 0 ? ticket.IncludeColumns : null)
+            new TableIndexSchema(ticket.IndexName, key.Expressions is null ? ticket.Columns.Select(x => x.Name).ToArray() : key.ColumnNames, indexType, SchemaElementState.WriteOnly, id: indexId, columnDirections: columnDirections, includeColumns: ticket.IncludeColumns.Length > 0 ? ticket.IncludeColumns : null, keyExpressions: key.KeyExpressions, expressions: key.Expressions)
         ));
         table.Store.RegisterIndexName(indexId, ticket.IndexName);
         table.Store.RegisterIndexDirections(indexId, columnDirections);
@@ -342,9 +396,11 @@ internal sealed class TableIndexAdder
             ? null
             : ObjectId.ToValue(schemaIndex.StartOffset!);
 
+        // At an expression position the key name is the hidden one the write paths read.
+        ResolvedIndexKey key = state.Key ?? ResolveKey(table, ticket);
         string[] keyColumns = new string[ticket.Columns.Length];
         for (int i = 0; i < ticket.Columns.Length; i++)
-            keyColumns[i] = ticket.Columns[i].Name;
+            keyColumns[i] = key.Expressions?[i] is { } expression ? expression.KeyName : ticket.Columns[i].Name;
 
         IndexBackfiller.Target target = new(
             indexId,
@@ -352,7 +408,8 @@ internal sealed class TableIndexAdder
             unique,
             keyColumns,
             ticket.IncludeColumns.Length > 0 ? ticket.IncludeColumns : null,
-            Inverted: ticket.Operation == AlterIndexOperation.AddInvertedIndex);
+            Inverted: ticket.Operation == AlterIndexOperation.AddInvertedIndex,
+            Expressions: key.Expressions);
 
         // Background priority: the backfill is bulk, deferrable work that already runs in resumable
         // batches, so on a saturated node it yields the door to user traffic. The backfill opens a
@@ -413,7 +470,8 @@ internal sealed class TableIndexAdder
                         columnDirections: old.ColumnDirections,
                         includeColumnIds: old.IncludeColumnIds,
                         comment: old.Comment,
-                        ownerConstraintId: old.OwnerConstraintId
+                        ownerConstraintId: old.OwnerConstraintId,
+                        keyExpressions: old.KeyExpressions
                     );
                     break;
                 }
@@ -428,7 +486,7 @@ internal sealed class TableIndexAdder
         table.MutateIndexes(indexes =>
         {
             TableIndexSchema current = indexes[ticket.IndexName];
-            indexes[ticket.IndexName] = new TableIndexSchema(current.Name, current.Columns ?? [], current.Type, SchemaElementState.Public, id: current.Id, columnDirections: current.ColumnDirections, includeColumns: current.IncludeColumns.Length > 0 ? current.IncludeColumns : null, comment: current.Comment, ownerConstraintId: current.OwnerConstraintId);
+            indexes[ticket.IndexName] = new TableIndexSchema(current.Name, current.Columns ?? [], current.Type, SchemaElementState.Public, id: current.Id, columnDirections: current.ColumnDirections, includeColumns: current.IncludeColumns.Length > 0 ? current.IncludeColumns : null, comment: current.Comment, ownerConstraintId: current.OwnerConstraintId, keyExpressions: current.KeyExpressions, expressions: current.Expressions);
         });
 
         return FluxAction.Continue;

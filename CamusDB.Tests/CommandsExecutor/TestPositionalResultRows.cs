@@ -324,9 +324,10 @@ public sealed class TestPositionalResultRows : SharedNodeBaseTest
         (IReadOnlyList<DerivedColumnSchema> schema, _) =
             await ExecQuery(executor, database, dbname, "SHOW INDEXES FROM t");
 
-        // Directions and Comment were appended in 2026-09; they go at the end precisely so the
-        // ordinals of the six original columns are unchanged for a client that reads positionally.
-        string[] expectedNames = ["Table", "Non_unique", "Key_name", "Columns", "Include", "Index_type", "Directions", "Comment"];
+        // Directions and Comment were appended in 2026-09, and Key (the key list of an expression
+        // index) after them; each goes at the end so the ordinals of the earlier columns are unchanged
+        // for a client that reads positionally.
+        string[] expectedNames = ["Table", "Non_unique", "Key_name", "Columns", "Include", "Index_type", "Directions", "Comment", "Key"];
         Assert.AreEqual(expectedNames.Length, schema.Count);
         for (int i = 0; i < expectedNames.Length; i++)
             Assert.AreEqual(expectedNames[i], schema[i].Name, $"schema[{i}].Name");

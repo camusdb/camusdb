@@ -1335,4 +1335,12 @@ public enum NodeType
     /// end because <see cref="NodeAstWireCodec"/> sends the member's number between nodes.
     /// </summary>
     ShowPartitions,
+
+    /// <summary>
+    /// An expression key part of an index (<c>CREATE INDEX i ON t ((lower(email)) DESC)</c>), only in
+    /// the key list of an ordered index. <c>leftAst</c> is the expression; <c>yytext</c> is
+    /// <c>"ASC"</c>, <c>"DESC"</c> or null. Appended at the end because <see cref="NodeAstWireCodec"/>
+    /// sends the member's number between nodes.
+    /// </summary>
+    IndexExpression,
 }

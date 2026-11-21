@@ -563,8 +563,9 @@ internal sealed class TableAnalyzer
         {
             if (!SchemaElementStateRules.IsReadable(kv.Value)) 
                 continue;
-            
-            if (kv.Value.Columns is { Length: > 0 })
+
+            // A leading expression has a hidden key name, not a column: no column statistics.
+            if (kv.Value.Columns is { Length: > 0 } && kv.Value.ExpressionAt(0) is null)
                 cols.Add(kv.Value.Columns[0]);
         }
         
@@ -582,8 +583,10 @@ internal sealed class TableAnalyzer
         {
             if (!SchemaElementStateRules.IsReadable(kv.Value)) 
                 continue;
-            
-            if (kv.Value.Columns is { Length: > 0 })
+
+            // An expression index has hidden key names that no decoded row holds, so its key
+            // distinct counts are not collected; the estimator uses its defaults for it.
+            if (kv.Value.Columns is { Length: > 0 } && !kv.Value.HasExpressions)
                 result.Add((kv.Key, kv.Value.Columns));
         }
         return result;

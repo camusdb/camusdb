@@ -325,7 +325,9 @@ internal sealed class RowUpserter
 
             for (int i = 0; i < count; i++)
             {
-                if (BuildKey(proposed[offset + i], arbiter.Columns) is not { } key)
+                // An expression arbiter (ON CONFLICT ON CONSTRAINT, or no target) reads its key through
+                // hidden key names. A proposed row, like an INSERT row, holds NULL in a column it omits.
+                if (BuildKey(IndexKeyRows.For(arbiter, proposed[offset + i], absentIsNull: true), arbiter.Columns) is not { } key)
                     continue;
 
                 keys.Add(key);

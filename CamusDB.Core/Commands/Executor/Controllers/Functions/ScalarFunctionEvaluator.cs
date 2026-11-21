@@ -133,6 +133,17 @@ internal static class ScalarFunctionEvaluator
     /// <see cref="CamusDBErrorCodes.ExtensionNotLoadedOnNode"/>. Resolving an inline function compiles
     /// nothing: its descriptor compiles the body at the first call.
     /// </summary>
+    /// <summary>
+    /// Resolves <paramref name="functionName"/> against the built-in functions only, never against an
+    /// installed extension or an inline function. A built-in name wins over an extension of the same
+    /// name in <see cref="TryResolve"/> too, so this answers what a call of the name runs.
+    /// </summary>
+    internal static bool TryResolveBuiltIn(string functionName, out ScalarFunctionDescriptor descriptor)
+        => Registry.TryGet(functionName, out descriptor);
+
+    /// <summary>Every built-in scalar function descriptor, for the classification test of the immutable list.</summary>
+    internal static IEnumerable<ScalarFunctionDescriptor> BuiltInDescriptors => Registry.Descriptors;
+
     private static bool TryResolve(string functionName, out ScalarFunctionDescriptor descriptor)
     {
         if (Registry.TryGet(functionName, out descriptor))

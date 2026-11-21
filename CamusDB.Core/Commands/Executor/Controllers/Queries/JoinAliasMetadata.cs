@@ -96,7 +96,7 @@ internal static class JoinAliasMetadata
         {
             string colName = index.Columns[i];
             TableColumnSchema? col = table.Schema.Columns?.Find(c => string.Equals(c.Name, colName, StringComparison.OrdinalIgnoreCase));
-            types[i] = col?.Type ?? ColumnType.String;
+            types[i] = col?.Type ?? table.ExpressionKeyType(colName) ?? ColumnType.String;
         }
 
         return types;

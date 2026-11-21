@@ -636,7 +636,11 @@ internal sealed class SchemaQuerier
             if (i > 0)
                 sb.Append(separator);
 
-            if (backquote)
+            // An expression key part prints in parentheses, as CREATE INDEX takes it; its text names
+            // the columns by their current names, so a rename shows up here.
+            if (index.ExpressionAt(i) is { } expression)
+                sb.Append('(').Append(expression.Sql).Append(')');
+            else if (backquote)
                 sb.Append('`').Append(index.Columns[i]).Append('`');
             else
                 sb.Append(index.Columns[i]);
@@ -668,6 +672,18 @@ internal sealed class SchemaQuerier
         return sb.ToString();
     }
 
+    private static string[] DisplayColumns(TableIndexSchema index)
+    {
+        if (!index.HasExpressions)
+            return index.Columns;
+
+        string[] names = new string[index.Columns.Length];
+        for (int i = 0; i < names.Length; i++)
+            names[i] = IndexKeyRows.DisplayName(index, i);
+
+        return names;
+    }
+
     internal async IAsyncEnumerable<QueryResultRow> ShowIndexes(TableDescriptor table)
     {
         await Task.CompletedTask;
@@ -682,7 +698,9 @@ internal sealed class SchemaQuerier
                 { "Table", new ColumnValue(ColumnType.String, table.Name) },
                 { "Non_unique", new ColumnValue(ColumnType.String, index.Value.Type == IndexType.Unique ? "0" : "1") },
                 { "Key_name", new ColumnValue(ColumnType.String, index.Key) },
-                { "Columns", new ColumnValue(ColumnType.String, string.Join(",", index.Value.Columns)) },
+                // An expression position is written as (expr), which may hold commas: a consumer that
+                // rebuilds an expression index reads Key instead.
+                { "Columns", new ColumnValue(ColumnType.String, string.Join(",", DisplayColumns(index.Value))) },
                 { "Include", new ColumnValue(ColumnType.String, string.Join(",", index.Value.IncludeColumns)) },
                 { "Index_type", new ColumnValue(ColumnType.String, index.Value.Type == IndexType.Inverted ? "GIN" : "ORDERED") },
                 // Directions is a parallel list to Columns, not part of it: a consumer splits Columns
@@ -692,7 +710,8 @@ internal sealed class SchemaQuerier
                 // NULL for an index with no comment, "" for COMMENT ... IS '': the two are different
                 // states, and a tool that rebuilds indexes from this listing can keep an empty one
                 // only if it can tell them apart. The primary key never carries a comment.
-                { "Comment", index.Value.Comment is null ? ColumnValue.Null : new ColumnValue(ColumnType.String, index.Value.Comment) }
+                { "Comment", index.Value.Comment is null ? ColumnValue.Null : new ColumnValue(ColumnType.String, index.Value.Comment) },
+                { "Key", new ColumnValue(ColumnType.String, RenderIndexColumns(index.Value, ", ", backquote: true)) }
             });
         }
     }

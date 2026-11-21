@@ -8,6 +8,7 @@
 
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.CommandsExecutor.Controllers;
+using DDL = CamusDB.Core.CommandsExecutor.Controllers.DDL;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Transactions;
 
@@ -34,6 +35,13 @@ internal sealed class AddIndexFluxState
     public string? IndexId { get; set; }
 
     public string? LastBackfilledRowId { get; set; }
+
+    /// <summary>
+    /// The key of the new index resolved against the table: column ids, the names the write paths
+    /// read (a hidden key name at an expression position) and the expressions. Set before the first
+    /// step, so a refused expression fails before anything is staged.
+    /// </summary>
+    public DDL.ResolvedIndexKey? Key { get; set; }
 
     public AddIndexFluxState(
         CatalogsManager catalogs,

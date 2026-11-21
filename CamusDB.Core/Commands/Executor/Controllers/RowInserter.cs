@@ -371,20 +371,25 @@ internal sealed class RowInserter
             {
                 if (index.Type == IndexType.Unique)
                 {
+                    // The expression key parts under their hidden names; the row itself for a plain
+                    // index. A column the INSERT left out holds NULL, for an expression too.
+                    Dictionary<string, ColumnValue> keyRow = IndexKeyRows.For(index, values, absentIsNull: true);
+
                     // NULLs are distinct: a row with a NULL (or absent) value in any indexed column is
                     // exempt from the unique constraint and carries no index entry, so multiple such
                     // rows can coexist (standard SQL / Postgres / MySQL semantics).
-                    if (HasNullKeyColumn(values, index.Columns))
+                    if (HasNullKeyColumn(keyRow, index.Columns))
                         continue;
 
-                    CompositeColumnValue uniqueKeyValue = GetColumnValue(values, index.Columns);
+                    CompositeColumnValue uniqueKeyValue = GetColumnValue(keyRow, index.Columns);
                     // Serialize the INCLUDE payload only now that the entry is known to be written —
                     // a NULL-key row above returns without paying the encode + byte-check cost.
                     (indexEntries ??= []).Add(new(index.KvId, uniqueKeyValue, Unique: true, IncludeTuple: BuildIncludeTuple(index, values, state.Database.Options)));
                 }
                 else if (index.Type == IndexType.Multi)
                 {
-                    CompositeColumnValue multiKeyValue = GetColumnValue(values, index.Columns, new ColumnValue(ColumnType.Id, rowId.ToString()), absentIsNull: true);
+                    Dictionary<string, ColumnValue> keyRow = IndexKeyRows.For(index, values, absentIsNull: true);
+                    CompositeColumnValue multiKeyValue = GetColumnValue(keyRow, index.Columns, new ColumnValue(ColumnType.Id, rowId.ToString()), absentIsNull: true);
                     (indexEntries ??= []).Add(new(index.KvId, multiKeyValue, Unique: false, IncludeTuple: BuildIncludeTuple(index, values, state.Database.Options)));
                 }
                 else if (index.Type == IndexType.Inverted && JsonbGinIndexKeys.EntriesOf(index, values) is { } entries)

@@ -40,6 +40,20 @@ internal sealed class AlterIndexValidator : ValidatorBase
         {
             foreach (ColumnIndexInfo column in ticket.Columns)
             {
+                // An expression key part has no column name; its text is checked against the table.
+                if (column.IsExpression)
+                {
+                    if (string.IsNullOrWhiteSpace(column.Expression))
+                        throw new CamusDBException(CamusDBErrorCodes.InvalidIndexExpression, "Index expression is empty");
+
+                    if (ticket.Operation is AlterIndexOperation.AddPrimaryKey or AlterIndexOperation.AddInvertedIndex)
+                        throw new CamusDBException(
+                            CamusDBErrorCodes.InvalidIndexExpression,
+                            "Invalid index expression: only an ordered secondary index can have an expression key");
+
+                    continue;
+                }
+
                 if (string.IsNullOrWhiteSpace(column.Name))
                     throw new CamusDBException(
                         CamusDBErrorCodes.InvalidInput,

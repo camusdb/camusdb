@@ -101,6 +101,13 @@ public sealed class PersistedCoordinatorJob
     public OrderType[]? IndexColumnDirections { get; set; }
 
     /// <summary>
+    /// The expression key parts of an expression index, in the stored form. Persisted so a
+    /// leader-change resume builds the same expression keys the interrupted run wrote. Null for column
+    /// jobs and for an index whose key holds only columns.
+    /// </summary>
+    public IndexKeyExpression[]? IndexKeyExpressions { get; set; }
+
+    /// <summary>
     /// Last row-id checkpoint written by the backfill pass. Non-null only when the
     /// backfill has committed at least one checkpoint batch. On resume the backfill
     /// starts scanning from this offset instead of the beginning of the table.

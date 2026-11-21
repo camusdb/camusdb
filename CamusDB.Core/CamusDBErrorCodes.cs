@@ -180,6 +180,19 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string JsonbValueTooLarge = "CADB0422";
 
+    /// <summary>
+    /// A CREATE INDEX names a key expression that an index cannot hold. An index stores the value of its
+    /// expression in each entry, so the expression must give the same value for the same row every time
+    /// it runs: it may call only the immutable built-in functions, may read only public columns of the
+    /// table, and may not hold a subquery, an aggregate, a window function, a parameter or DEFAULT. Its
+    /// result type must be known before a row is read, and must have an ordered key encoding (jsonb, an
+    /// array and an interval have none). The same code reports an expression whose value, when a row is
+    /// written, has another type than the one the index declared. PostgreSQL reports
+    /// <c>functions in index expression must be marked IMMUTABLE</c> (SQLSTATE 42P17). A permanent
+    /// caller mistake — maps to HTTP 400 and gRPC <c>INVALID_ARGUMENT</c>.
+    /// </summary>
+    public const string InvalidIndexExpression = "CADB0423";
+
     public const string DuplicateUniqueKeyValue = "CADB0300";
     public const string NotNullViolation = "CADB0301";
     public const string ValueTooLong = "CADB0302";

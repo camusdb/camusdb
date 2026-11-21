@@ -18,6 +18,8 @@ using System.Linq;
 using Kommander.Time;
 using Kahuna.Shared.Communication.Rest;
 
+using CamusDB.Core.CommandsExecutor.Controllers.DDL;
+
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 /// <summary>
@@ -334,9 +336,27 @@ internal sealed class TableOpener
 
         foreach (TableIndexSchema entry in indexSource)
         {
-            string[] columnNames = entry.ColumnIds is not null
-                ? MapColumnsIdsToNames(tableSchema.Columns, entry.ColumnIds)
-                : (entry.Columns ?? []);
+            string[] columnNames;
+            BoundIndexExpression?[]? expressions = null;
+
+            if (entry.KeyExpressions is { Length: > 0 } && entry.ColumnIds is not null)
+            {
+                // An expression index: each expression is bound to the current column names, and its
+                // position gets the hidden key name the write paths and the planner read.
+                Dictionary<string, string> nameById = (tableSchema.Columns ?? []).ToDictionary(c => c.Id, c => c.Name, StringComparer.Ordinal);
+                (columnNames, expressions) = IndexExpressionBinder.BindKey(
+                    entry.ColumnIds,
+                    entry.KeyExpressions,
+                    IndexExpressionBinder.ColumnsOf(tableSchema.Columns),
+                    tableSchema.Name,
+                    id => nameById.GetValueOrDefault(id));
+            }
+            else
+            {
+                columnNames = entry.ColumnIds is not null
+                    ? MapColumnsIdsToNames(tableSchema.Columns, entry.ColumnIds)
+                    : (entry.Columns ?? []);
+            }
 
             // Resolve stored/payload (INCLUDE) column ids to names the same way as key columns.
             string[] includeColumnNames = entry.IncludeColumnIds is { Length: > 0 }
@@ -358,7 +378,7 @@ internal sealed class TableOpener
                     tableDescriptor.MutateIndexes(indexes => indexes[entry.Name] =
                         // The comment rides the projection because SHOW CREATE TABLE renders from
                         // TableDescriptor.Indexes, not from the persisted TableSchema.Indexes.
-                        new TableIndexSchema(entry.Name, columnNames, entry.Type, entry.State, id: entry.Id, columnDirections: entry.ColumnDirections, includeColumns: includeColumnNames, comment: entry.Comment, ownerConstraintId: entry.OwnerConstraintId));
+                        new TableIndexSchema(entry.Name, columnNames, entry.Type, entry.State, id: entry.Id, columnDirections: entry.ColumnDirections, includeColumns: includeColumnNames, comment: entry.Comment, ownerConstraintId: entry.OwnerConstraintId, keyExpressions: entry.KeyExpressions, expressions: expressions));
 
                     // Register display name so duplicate-key errors show the human-readable
                     // name instead of the opaque immutable KvId stored in KV keys.
@@ -428,12 +448,33 @@ internal sealed class TableOpener
         if (entry.ColumnIds is not { Length: > 0 })
             return false;
 
-        foreach (string colId in entry.ColumnIds)
+        for (int i = 0; i < entry.ColumnIds.Length; i++)
         {
+            string colId = entry.ColumnIds[i];
+
+            // An expression position: its result type has an ordered key encoding (the binder refuses
+            // any other), and every such encoding is ASCII, like a column's.
+            if (colId == IndexKeyExpression.ColumnIdMarker && HasKeyExpressionAt(entry, i))
+                continue;
+
             if (!typeById.TryGetValue(colId, out _))
                 return false; // unknown column — conservative
         }
         return true;
+    }
+
+    private static bool HasKeyExpressionAt(TableIndexSchema entry, int position)
+    {
+        if (entry.KeyExpressions is not { } keyExpressions)
+            return false;
+
+        foreach (IndexKeyExpression keyExpression in keyExpressions)
+        {
+            if (keyExpression.Position == position)
+                return true;
+        }
+
+        return false;
     }
 
     private static string[] MapColumnsIdsToNames(List<TableColumnSchema>? columns, string[] columnIds)

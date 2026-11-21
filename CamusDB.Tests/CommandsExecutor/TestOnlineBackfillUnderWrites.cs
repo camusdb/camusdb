@@ -667,6 +667,85 @@ internal abstract class OnlineBackfillUnderWritesScenarios : SharedNodeBaseTest
     }
 
     /// <summary>
+    /// An expression index over one field of a jsonb document is built while writers keep changing the
+    /// documents. The build must complete, and afterwards the index finds every row by the current value
+    /// of its expression and holds exactly one entry per row: the write paths and the backfill evaluate
+    /// the same expression, so an entry a writer moved is never left behind.
+    /// </summary>
+    [Test]
+    public async Task ExpressionIndexBuild_CompletesUnderSustainedWrites_AndFindsEveryRowByItsCurrentValue()
+    {
+        const int rows = 300;
+        const int writers = 4;
+
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await ExecuteDdl(executor, dbname, "CREATE TABLE docs (id INT64 PRIMARY KEY, doc JSONB NOT NULL)");
+
+        for (int start = 1; start <= rows; start += 100)
+        {
+            int end = Math.Min(rows, start + 99);
+            string values = string.Join(", ", Enumerable.Range(start, end - start + 1).Select(i => $"({i}, '{{\"v\": {i}}}')"));
+            await ExecuteNonQuery(executor, dbname, "INSERT INTO docs (id, doc) VALUES " + values);
+        }
+
+        ConcurrentDictionary<long, int> applied = new();
+        ConcurrentDictionary<long, int> unresolved = new();
+        writerErrors.Clear();
+        lastWriterError = null;
+        using CancellationTokenSource stop = new();
+
+        static string Bump(long id) =>
+            $"UPDATE docs SET doc = jsonb_build_object('v', (doc ->> 'v')::int64 + 1) WHERE id = {id}";
+
+        Task[] writerTasks = new Task[writers];
+        for (int w = 0; w < writers; w++)
+            writerTasks[w] = Task.Run(() => WriteUntilStopped(executor, dbname, rows, applied, unresolved, stop.Token, Bump));
+
+        try
+        {
+            // Let the writers start before the build, so the first batches meet them.
+            await Task.Delay(100);
+            await ExecuteDdl(executor, dbname, "CREATE INDEX docs_v ON docs (((doc ->> 'v')::int64))");
+        }
+        finally
+        {
+            stop.Cancel();
+            await Task.WhenAll(writerTasks);
+            Progress($"writers stopped; applied {applied.Values.Sum()}, unresolved {unresolved.Values.Sum()}; writer errors {WriterErrors()}");
+        }
+
+        Assert.That(applied.Values.Sum(), Is.GreaterThan(0), "the writers must have run");
+
+        List<Dictionary<string, ColumnValue>> table = await Query(executor, dbname, "SELECT id, (doc ->> 'v')::int64 AS v FROM docs");
+        Assert.That(table, Has.Count.EqualTo(rows));
+
+        Assert.That(await UsedIndex(executor, dbname, "SELECT id FROM docs WHERE (doc ->> 'v')::int64 = 1"), Is.True,
+            "the lookups must be served by the expression index");
+
+        foreach (IGrouping<long, long> byValue in table.GroupBy(r => r["v"].LongValue, r => r["id"].LongValue))
+        {
+            List<Dictionary<string, ColumnValue>> found = await Query(executor, dbname, $"SELECT id FROM docs WHERE (doc ->> 'v')::int64 = {byValue.Key}");
+            Assert.That(found.Select(r => r["id"].LongValue).OrderBy(v => v).ToList(), Is.EqualTo(byValue.OrderBy(v => v).ToList()),
+                $"the expression index must find every row whose v = {byValue.Key}");
+        }
+
+        TableIndexSchema index = database.Schema.Tables["docs"].Indexes!.First(ix => ix.Name == "docs_v");
+        TableDescriptor descriptor = await executor.OpenTable(new OpenTableTicket(dbname, "docs"));
+        KvTransaction tx = await database.Transactions.BeginAsync();
+        try
+        {
+            int entries = 0;
+            await foreach (var _ in descriptor.Store.ScanIndex(tx, index.Id!, [ColumnType.Integer64], from: null, to: null, unique: false))
+                entries++;
+            Assert.That(entries, Is.EqualTo(rows), "one entry per row, no stale entry");
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(tx);
+        }
+    }
+
+    /// <summary>
     /// Increments <c>val</c> of random rows, one autocommit statement at a time, until stopped. A
     /// statement the engine refuses with a retryable code is run again; one whose commit outcome is
     /// unknown is counted as possibly applied.

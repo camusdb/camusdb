@@ -56,6 +56,8 @@ public sealed class TableDescriptor
 
     private TableIndexSchema[] invertedIndexes = [];
 
+    private Dictionary<string, BoundIndexExpression> expressionKeys = new(StringComparer.OrdinalIgnoreCase);
+
     private long indexSetGeneration = Interlocked.Increment(ref globalIndexSetGeneration);
 
     /// <summary>
@@ -91,6 +93,44 @@ public sealed class TableDescriptor
     public IReadOnlyList<TableIndexSchema> InvertedIndexes => Volatile.Read(ref invertedIndexes);
 
     /// <summary>
+    /// The expression key parts of the ordered indexes, keyed by hidden key name
+    /// (<see cref="BoundIndexExpression.KeyName"/>): what the planner matches a WHERE term against, and
+    /// how a planner helper finds the type of a key position that is not a column. Two indexes over one
+    /// expression share an entry. Published with <see cref="Indexes"/> by <see cref="MutateIndexes"/>,
+    /// so a reader that captured one snapshot of each sees matching sets; empty for a table without
+    /// expression indexes. Never mutate it.
+    /// </summary>
+    public IReadOnlyDictionary<string, BoundIndexExpression> ExpressionKeys => Volatile.Read(ref expressionKeys);
+
+    /// <summary>
+    /// The result type of the expression whose hidden key name is <paramref name="keyName"/>, or null
+    /// when the name is not one. A helper that types the key positions of an index reads this before
+    /// its fallback, so an expression position never decodes with the type of a missing column.
+    /// </summary>
+    public ColumnType? ExpressionKeyType(string keyName) =>
+        ExpressionKeys.TryGetValue(keyName, out BoundIndexExpression? expression) ? expression.Type : null;
+
+    /// <summary>
+    /// The column named <paramref name="name"/>, or, for a hidden key name, the expression's
+    /// <see cref="BoundIndexExpression.KeyColumn"/>; null when neither exists. For the planner passes that
+    /// type a comparison by the name it compares.
+    /// </summary>
+    public TableColumnSchema? FindColumnOrExpressionKey(string name)
+    {
+        List<TableColumnSchema>? columns = Schema.Columns;
+        if (columns is not null)
+        {
+            for (int i = 0; i < columns.Count; i++)
+            {
+                if (string.Equals(columns[i].Name, name, StringComparison.OrdinalIgnoreCase))
+                    return columns[i];
+            }
+        }
+
+        return ExpressionKeys.TryGetValue(name, out BoundIndexExpression? expression) ? expression.KeyColumn : null;
+    }
+
+    /// <summary>
     /// Monotonically increasing generation of the index set, bumped on every
     /// <see cref="MutateIndexes"/> swap. Used by the plan cache as an invalidation signal for
     /// index DDL, which deliberately does not bump <see cref="TableSchema.Version"/> (indexes
@@ -114,15 +154,28 @@ public sealed class TableDescriptor
             mutate(next);
 
             Dictionary<string, TableIndexSchema> ordered = new(next.Count, StringComparer.OrdinalIgnoreCase);
+            Dictionary<string, BoundIndexExpression> expressions = new(StringComparer.OrdinalIgnoreCase);
             List<TableIndexSchema> inverted = [];
             foreach (KeyValuePair<string, TableIndexSchema> entry in next)
             {
                 if (entry.Value.Type == IndexType.Inverted)
                     inverted.Add(entry.Value);
                 else
+                {
                     ordered[entry.Key] = entry.Value;
+
+                    if (entry.Value.Expressions is { } bound)
+                    {
+                        foreach (BoundIndexExpression? expression in bound)
+                        {
+                            if (expression is not null)
+                                expressions.TryAdd(expression.KeyName, expression);
+                        }
+                    }
+                }
             }
 
+            Volatile.Write(ref expressionKeys, expressions);
             Volatile.Write(ref invertedIndexes, inverted.ToArray());
             Volatile.Write(ref indexes, ordered);
             Volatile.Write(ref allIndexes, next);

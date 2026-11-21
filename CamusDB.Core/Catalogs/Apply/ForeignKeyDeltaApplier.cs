@@ -82,7 +82,8 @@ internal static class ForeignKeyDeltaApplier
                 columnDirections: claimed.ColumnDirections,
                 includeColumnIds: claimed.IncludeColumnIds,
                 comment: claimed.Comment,
-                ownerConstraintId: foreignKey.Id);
+                ownerConstraintId: foreignKey.Id,
+                keyExpressions: claimed.KeyExpressions);
             table.Indexes = indexes;
         }
 

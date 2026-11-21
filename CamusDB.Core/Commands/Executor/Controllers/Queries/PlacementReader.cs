@@ -58,9 +58,18 @@ internal sealed class PlacementReader
         if (!options.KeyRangeShardingEnabled)
             return DataDistribution.Gathered;
 
-        return index.Columns is { Length: > 0 }
-            ? DataDistribution.PartitionedBy(index.Columns)
-            : DataDistribution.Gathered;
+        if (index.Columns is not { Length: > 0 })
+            return DataDistribution.Gathered;
+
+        // An expression position names its expression, so EXPLAIN never shows a hidden key name.
+        if (!index.HasExpressions)
+            return DataDistribution.PartitionedBy(index.Columns);
+
+        string[] names = new string[index.Columns.Length];
+        for (int i = 0; i < names.Length; i++)
+            names[i] = IndexKeyRows.DisplayName(index, i);
+
+        return DataDistribution.PartitionedBy(names);
     }
 
     /// <summary>

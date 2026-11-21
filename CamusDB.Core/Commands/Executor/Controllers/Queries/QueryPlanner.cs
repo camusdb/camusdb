@@ -594,6 +594,10 @@ public sealed class QueryPlanner
         // selection: index columns are stored unqualified, so without this every aliased
         // single-table predicate fails to match any index and degrades to a full table scan.
         analysis = PredicateAnalyzer.ResolveQualifiedColumnNames(analysis, ticket.RowNameResolver);
+        // A term over an indexed expression (lower(email) = 'a@x') becomes a comparison on the
+        // expression's hidden key name, so the index selector below can use the expression index.
+        // Before the constant coercion, which then moves the constant into the expression's type.
+        analysis = ExpressionIndexPredicates.Match(analysis, table, ticket.Parameters, ticket.RowNameResolver);
         // Reconcile bare string literals against Uuid columns before access-path selection so the
         // index selector and the bound-absorption check both see a Uuid constant, not a String.
         analysis = PredicateAnalyzer.CoerceConstantsForColumns(analysis, table);

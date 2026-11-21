@@ -117,6 +117,10 @@ internal static class DerivedTableSchemaBuilder
         // rows, so a new field goes at the end where it cannot shift an existing ordinal.
         new("Directions", ColumnType.String),
         new("Comment",    ColumnType.String),
+        // The key list as CREATE INDEX takes it: quoted columns, expressions in parentheses, DESC
+        // written. The one field an expression index can be rebuilt from, because an expression in
+        // Columns may hold commas.
+        new("Key",        ColumnType.String),
     ];
 
     /// <summary>

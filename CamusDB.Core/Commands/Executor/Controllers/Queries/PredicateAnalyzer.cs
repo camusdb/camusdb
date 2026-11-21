@@ -339,6 +339,10 @@ public static class PredicateAnalyzer
     /// </summary>
     private static TableColumnSchema? FindColumn(string columnName, TableDescriptor table)
     {
+        // The hidden key name of a matched index expression is typed by the expression.
+        if (DDL.IndexExpressionBinder.IsKeyName(columnName))
+            return table.FindColumnOrExpressionKey(columnName);
+
         int dot = columnName.LastIndexOf('.');
         if (dot >= 0 && dot < columnName.Length - 1)
             columnName = columnName[(dot + 1)..];
@@ -693,11 +697,7 @@ public static class PredicateAnalyzer
     /// </summary>
     private static ColumnType? TargetCoercionType(string columnName, TableDescriptor table)
     {
-        int dot = columnName.LastIndexOf('.');
-        if (dot >= 0 && dot < columnName.Length - 1)
-            columnName = columnName[(dot + 1)..];
-
-        TableColumnSchema? column = table.Schema.Columns?.Find(c => string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase));
+        TableColumnSchema? column = FindColumn(columnName, table);
         return column?.Type is ColumnType.Uuid or ColumnType.Id ? column.Type : null;
     }
 

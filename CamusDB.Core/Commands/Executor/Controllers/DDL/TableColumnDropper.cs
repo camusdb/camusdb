@@ -44,6 +44,14 @@ public sealed class TableColumnDropper
                     "Column cannot be dropped because it is part of an index"
                 );
 
+            // An expression index reads the column through its expression, so dropping the column would
+            // leave a key that no row can compute. Refused, as for a key column; drop the index first.
+            if (index.Value.HasExpressions && IndexKeyRows.KeyReads(index.Value, ticket.Column.Name))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    $"Column cannot be dropped because the expression index '{index.Value.Name}' reads it"
+                );
+
             // A covering index materializes its included columns into every entry value, so dropping
             // one would orphan payload the index still encodes. Reject (drop/recreate the index first).
             if (index.Value.IncludeColumns.Contains(ticket.Column.Name))

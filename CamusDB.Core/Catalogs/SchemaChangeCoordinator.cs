@@ -1070,6 +1070,7 @@ public sealed class SchemaChangeCoordinator
         IndexType = indexBuildInfo?.IndexType,
         IndexIncludeColumnIds = indexBuildInfo?.IncludeColumnIds,
         IndexColumnDirections = indexBuildInfo?.ColumnDirections,
+        IndexKeyExpressions = indexBuildInfo?.KeyExpressions,
         Attempts = attempts,
     };
 
@@ -1336,11 +1337,20 @@ public sealed class SchemaChangeCoordinator
                 persisted.IndexColumnIds is not null &&
                 persisted.IndexType.HasValue)
             {
-                string[] columnNames = ResolveColumnNames(liveTable, persisted.IndexColumnIds);
+                // An expression position gets its hidden key name, never the marker id: the backfill reads
+                // the key by these names.
+                string[] columnNames = persisted.IndexKeyExpressions is { Length: > 0 }
+                    ? CommandsExecutor.Controllers.DDL.IndexExpressionBinder.BindKey(
+                        persisted.IndexColumnIds,
+                        persisted.IndexKeyExpressions,
+                        CommandsExecutor.Controllers.DDL.IndexExpressionBinder.ColumnsOf(liveTable.Columns),
+                        liveTable.Name,
+                        id => liveTable.Columns?.FirstOrDefault(c => c.Id == id)?.Name ?? id).Names
+                    : ResolveColumnNames(liveTable, persisted.IndexColumnIds);
                 string[]? includeColumnNames = persisted.IndexIncludeColumnIds is { Length: > 0 }
                     ? ResolveColumnNames(liveTable, persisted.IndexIncludeColumnIds)
                     : null;
-                indexBuildInfo = new(persisted.IndexId, persisted.ElementName, persisted.IndexColumnIds, columnNames, persisted.IndexType.Value, ColumnDirections: persisted.IndexColumnDirections, IncludeColumnIds: persisted.IndexIncludeColumnIds, IncludeColumnNames: includeColumnNames);
+                indexBuildInfo = new(persisted.IndexId, persisted.ElementName, persisted.IndexColumnIds, columnNames, persisted.IndexType.Value, ColumnDirections: persisted.IndexColumnDirections, IncludeColumnIds: persisted.IndexIncludeColumnIds, IncludeColumnNames: includeColumnNames, KeyExpressions: persisted.IndexKeyExpressions);
             }
 
             // The resume holds nothing when it starts; the gate is taken for the state read and for each
@@ -1587,6 +1597,12 @@ public sealed record SchemaChangeJob(
 /// all-ascending. Carried through the staged cluster add so the replicated index definition
 /// records the same directions the proposer parsed.
 /// </param>
+/// <param name="KeyExpressions">
+/// The expression key parts of an expression index, in the stored form; null for an index whose key
+/// holds only columns. At each part's position <paramref name="ColumnIds"/> holds
+/// <see cref="IndexKeyExpression.ColumnIdMarker"/> and <paramref name="ColumnNames"/> the hidden key
+/// name. Persisted with the job, so a leader-change resume builds the same keys.
+/// </param>
 public sealed record IndexBuildInfo(
     string IndexId,
     string IndexName,
@@ -1595,5 +1611,6 @@ public sealed record IndexBuildInfo(
     IndexType IndexType,
     OrderType[]? ColumnDirections = null,
     string[]? IncludeColumnIds = null,
-    string[]? IncludeColumnNames = null
+    string[]? IncludeColumnNames = null,
+    IndexKeyExpression[]? KeyExpressions = null
 );

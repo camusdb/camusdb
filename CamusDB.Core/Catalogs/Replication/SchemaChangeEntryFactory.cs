@@ -14,6 +14,8 @@ using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.ObjectIds;
 using Kommander.Time;
 
+using CamusDB.Core.CommandsExecutor.Controllers.DDL;
+
 namespace CamusDB.Core.Catalogs.Replication;
 
 /// <summary>
@@ -277,7 +279,8 @@ internal static class SchemaChangeEntryFactory
                 columnDirections: index.ColumnDirections,
                 includeColumnIds: index.IncludeColumnIds,
                 comment: index.Comment,
-                ownerConstraintId: null);
+                ownerConstraintId: null,
+                keyExpressions: index.KeyExpressions);
 
     internal static SchemaChangeLogEntry AddIndexEntry(
         DatabaseDescriptor database,
@@ -393,12 +396,34 @@ internal static class SchemaChangeEntryFactory
             string[] columnIds = new string[constraint.Columns.Length];
             for (int i = 0; i < constraint.Columns.Length; i++)
             {
+                // An expression position is resolved below, with the other expressions.
+                if (constraint.Columns[i].IsExpression)
+                    continue;
+
                 string columnName = constraint.Columns[i].Name;
                 if (!columnIdByName.TryGetValue(columnName, out string? columnId))
                     throw new CamusDBException(
                         CamusDBErrorCodes.InvalidInput,
                         $"Column '{columnName}' does not exist on table '{ticket.TableName}'");
                 columnIds[i] = columnId;
+            }
+
+            // An inline KEY / UNIQUE KEY may hold expressions, because SHOW CREATE TABLE prints an
+            // expression index that way. The table is new and empty, so nothing is backfilled.
+            IndexKeyExpression[]? keyExpressions = null;
+            if (Array.Exists(constraint.Columns, static c => c.IsExpression))
+            {
+                if (indexType is not (IndexType.Unique or IndexType.Multi) || constraint.Type == ConstraintType.PrimaryKey)
+                    throw IndexExpressionBinder.Refused(constraint.Name, "only an ordered secondary index can have an expression key");
+
+                IndexExpressionColumn[] binderColumns = new IndexExpressionColumn[columns.Length];
+                for (int i = 0; i < columns.Length; i++)
+                    binderColumns[i] = new IndexExpressionColumn(columns[i].Id!, columns[i].Name, columns[i].Type, columns[i].ArrayElementType, IsPublic: true);
+
+                ResolvedIndexKey key = IndexExpressionBinder.Resolve(ticket.TableName, constraint.Name, constraint.Columns, binderColumns);
+                TableIndexAdder.RejectDescendingExpressions(constraint.Name, constraint.Columns, key.Expressions!);
+                columnIds = key.ColumnIds;
+                keyExpressions = key.KeyExpressions;
             }
 
             string[]? includeColumnIds = ResolveInlineIncludeColumnIds(ticket, constraint, columnIdByName);
@@ -412,7 +437,8 @@ internal static class SchemaChangeEntryFactory
                 startOffset: null,
                 columnDirections: IndexColumnOrder.Extract(constraint.Columns),
                 includeColumnIds: includeColumnIds,
-                comment: constraint.Comment
+                comment: constraint.Comment,
+                keyExpressions: keyExpressions
             ));
         }
 
@@ -572,7 +598,8 @@ internal static class SchemaChangeEntryFactory
                     state: initialState,
                     startOffset: null,
                     columnDirections: indexBuildInfo.ColumnDirections,
-                    includeColumnIds: indexBuildInfo.IncludeColumnIds
+                    includeColumnIds: indexBuildInfo.IncludeColumnIds,
+                    keyExpressions: indexBuildInfo.KeyExpressions
                 )
             })
         };

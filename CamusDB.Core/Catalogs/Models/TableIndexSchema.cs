@@ -124,6 +124,41 @@ public sealed class TableIndexSchema
     public string? OwnerConstraintId { get; }
 
     /// <summary>
+    /// The expression key parts of an expression index, in the persisted form inside
+    /// <see cref="TableSchema.Indexes"/>; null for an index whose key holds only columns, which is
+    /// every index persisted before expression indexes existed. At each part's position,
+    /// <see cref="ColumnIds"/> holds <see cref="IndexKeyExpression.ColumnIdMarker"/>. Carried on both
+    /// forms, so every site that rebuilds an instance must pass it on.
+    /// </summary>
+    public IndexKeyExpression[]? KeyExpressions { get; }
+
+    /// <summary>
+    /// The bound expression key parts of the in-memory form, positionally aligned with
+    /// <see cref="Columns"/>: null at a column position, and null as a whole for an index without
+    /// expressions. Built by <c>TableOpener</c> from <see cref="KeyExpressions"/> against the current
+    /// column names. Never persisted.
+    /// </summary>
+    [JsonIgnore]
+    public BoundIndexExpression?[]? Expressions { get; }
+
+    /// <summary>True when at least one key part of this index is an expression.</summary>
+    [JsonIgnore]
+    public bool HasExpressions => Expressions is not null || KeyExpressions is { Length: > 0 };
+
+    /// <summary>
+    /// The bound expression at key position <paramref name="position"/> of the in-memory form, or
+    /// null when that position is a column.
+    /// </summary>
+    public BoundIndexExpression? ExpressionAt(int position)
+    {
+        BoundIndexExpression?[]? expressions = Expressions;
+        if (expressions is null || position < 0 || position >= expressions.Length)
+            return null;
+
+        return expressions[position];
+    }
+
+    /// <summary>
     /// Stable identifier used as the Kahuna key segment for this index's data. Returns
     /// <see cref="Id"/> when set (all indexes created after the stable-ID migration carry it);
     /// falls back to <see cref="Name"/> for legacy entries that pre-date the migration.
@@ -152,10 +187,13 @@ public sealed class TableIndexSchema
     /// The optional <paramref name="id"/> propagates the schema-assigned immutable identifier
     /// so that <see cref="KvId"/> resolves to the stable ID rather than the mutable name.
     /// <paramref name="columnDirections"/> is positionally aligned with <paramref name="columns"/>;
-    /// null means all-ascending.
+    /// null means all-ascending. <paramref name="expressions"/> is positionally aligned with
+    /// <paramref name="columns"/> and holds the bound expression at each expression position.
     /// </summary>
-    public TableIndexSchema(string name, string[] columns, IndexType type, SchemaElementState state = SchemaElementState.Public, string? id = null, OrderType[]? columnDirections = null, string[]? includeColumns = null, string? comment = null, string? ownerConstraintId = null)
+    public TableIndexSchema(string name, string[] columns, IndexType type, SchemaElementState state = SchemaElementState.Public, string? id = null, OrderType[]? columnDirections = null, string[]? includeColumns = null, string? comment = null, string? ownerConstraintId = null, IndexKeyExpression[]? keyExpressions = null, BoundIndexExpression?[]? expressions = null)
     {
+        KeyExpressions = keyExpressions is { Length: > 0 } ? keyExpressions : null;
+        Expressions = expressions;
         Id = id;
         Name = name;
         Columns = columns;
@@ -177,8 +215,9 @@ public sealed class TableIndexSchema
     /// existed) means every column is ascending.
     /// </summary>
     [JsonConstructor]
-    public TableIndexSchema(string? id, string name, string[]? columnIds, IndexType type, SchemaElementState state, string? startOffset = null, OrderType[]? columnDirections = null, string[]? includeColumnIds = null, string? comment = null, string? ownerConstraintId = null)
+    public TableIndexSchema(string? id, string name, string[]? columnIds, IndexType type, SchemaElementState state, string? startOffset = null, OrderType[]? columnDirections = null, string[]? includeColumnIds = null, string? comment = null, string? ownerConstraintId = null, IndexKeyExpression[]? keyExpressions = null)
     {
+        KeyExpressions = keyExpressions is { Length: > 0 } ? keyExpressions : null;
         Id = id;
         Name = name;
         Columns = [];

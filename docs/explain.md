@@ -297,6 +297,13 @@ not show where the subtree of the first child ends, so a client that draws the t
 | `index-lookup`           | Equality on a **unique** index | `index=<name>, key=<value>` |
 | `index-range-scan`       | Range predicate (`<`, `>`, `BETWEEN`), or equality on a **non-unique** index | `index=<name>, from>=<val>, to<<val>` |
 | `index-in-list`          | `x IN (v1, v2, …)`, or `x = v1 OR x = v2 OR …`, where `x` is the first column of an index — one index seek per distinct value, results unioned. The index can be a unique index of several columns, such as a composite primary key: each value then seeks every entry that starts with it | `index=<name>, values=<n>` (count of seek values) |
+
+An index with expression key parts ([expression-indexes.md](expression-indexes.md)) adds
+`, expressions=[<expr>, …]` after `index=<name>` on `index-lookup`, `index-range-scan` and
+`index-in-list`, for example ``index=users_lower_email, expressions=[lower(`email`)], key='a@x'``.
+
+| Node name                | When it appears | Key detail fields |
+|--------------------------|-----------------|-------------------|
 | `filter`                 | Residual predicate not satisfied by the chosen index | `<expr>` |
 | `aggregate`              | `GROUP BY` or aggregate functions | `group=[<exprs>], aggs=[<calls>]`, and `top_k=[<alias> DESC\|ASC, k: <n>]` for a top-k grouping (see [Aggregate with GROUP BY](#aggregate-with-group-by)) |
 | `having-filter`          | `HAVING` clause applied after aggregation | `<expr>` |

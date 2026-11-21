@@ -1174,7 +1174,17 @@ internal sealed class MaterializedViewRefresher
 
         foreach (TableIndexSchema index in view.Indexes ?? [])
         {
-            string[] columnNames = ResolveColumnNames(index.ColumnIds, index.Columns, nameByColumnId);
+            // An expression position carries the marker id, not a column; it travels to the staging
+            // table as its SQL text with the view's current column names, which the staging table shares.
+            BoundIndexExpression?[]? expressions = null;
+            if (index.KeyExpressions is { Length: > 0 } && index.ColumnIds is { } keyIds)
+            {
+                (_, expressions) = IndexExpressionBinder.BindKey(
+                    keyIds, index.KeyExpressions, IndexExpressionBinder.ColumnsOf(view.Columns), view.Name,
+                    id => nameByColumnId.GetValueOrDefault(id) ?? id);
+            }
+
+            string[] columnNames = ResolveColumnNames(index.ColumnIds, index.Columns, nameByColumnId, expressions);
             if (columnNames.Length == 0)
                 continue;
 
@@ -1193,13 +1203,14 @@ internal sealed class MaterializedViewRefresher
                     columnNames[i],
                     index.ColumnDirections is { Length: > 0 } directions && i < directions.Length
                         ? directions[i]
-                        : OrderType.Ascending);
+                        : OrderType.Ascending,
+                    expressions?[i]?.Sql);
 
             constraints.Add(new ConstraintInfo(
                 type,
                 index.Name,
                 indexColumns,
-                ResolveColumnNames(index.IncludeColumnIds, index.IncludeColumns, nameByColumnId),
+                ResolveColumnNames(index.IncludeColumnIds, index.IncludeColumns, nameByColumnId, expressions: null),
                 index.Comment));
         }
 
@@ -1221,7 +1232,7 @@ internal sealed class MaterializedViewRefresher
     /// the resolved names an in-memory descriptor projection carries.
     /// </summary>
     private static string[] ResolveColumnNames(
-        string[]? columnIds, string[] columnNames, Dictionary<string, string> nameByColumnId)
+        string[]? columnIds, string[] columnNames, Dictionary<string, string> nameByColumnId, BoundIndexExpression?[]? expressions)
     {
         if (columnIds is not { Length: > 0 })
             return columnNames;
@@ -1229,6 +1240,13 @@ internal sealed class MaterializedViewRefresher
         string[] resolved = new string[columnIds.Length];
         for (int i = 0; i < columnIds.Length; i++)
         {
+            // An expression position has no column name; its text goes on the key part instead.
+            if (expressions?[i] is not null)
+            {
+                resolved[i] = "";
+                continue;
+            }
+
             if (!nameByColumnId.TryGetValue(columnIds[i], out string? name))
                 throw new CamusDBException(
                     CamusDBErrorCodes.SystemSpaceCorrupt,

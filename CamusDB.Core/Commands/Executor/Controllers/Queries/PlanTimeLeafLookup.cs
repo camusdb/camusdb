@@ -137,7 +137,8 @@ internal static class PlanTimeLeafLookup
 
         foreach (TableIndexSchema index in table.Indexes.Values)
         {
-            if (index.Type != IndexType.Unique || index.Columns is not { Length: 1 } || !SchemaElementStateRules.IsReadable(index))
+            // An expression index has a hidden key name, which no join key and no decoded row holds.
+            if (index.Type != IndexType.Unique || index.Columns is not { Length: 1 } || index.HasExpressions || !SchemaElementStateRules.IsReadable(index))
                 continue;
 
             if (!columns.Contains(index.Columns[0], StringComparer.OrdinalIgnoreCase))

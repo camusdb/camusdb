@@ -257,7 +257,7 @@ internal static class CorrelatedExistsSeekPlanner
         TableColumnSchema? column = table.Schema.Columns?.Find(
             c => string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase));
 
-        return column?.Type ?? ColumnType.String;
+        return column?.Type ?? table.ExpressionKeyType(columnName) ?? ColumnType.String;
     }
 
     private static ColumnType[] GetIndexColumnTypes(TableDescriptor table, TableIndexSchema index)

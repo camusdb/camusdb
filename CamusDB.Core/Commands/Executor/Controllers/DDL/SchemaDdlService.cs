@@ -966,13 +966,29 @@ internal sealed partial class SchemaDdlService
             ? null
             : ObjectId.ToValue(startOffset!);
 
+        // The expressions are bound against the table as it is now: a rename since the job started
+        // changes the names the expression reads, never the columns.
+        string[] keyColumns = indexInfo.ColumnNames;
+        BoundIndexExpression?[]? expressions = null;
+        if (indexInfo.KeyExpressions is { Length: > 0 })
+        {
+            Dictionary<string, string> nameById = (table.Schema.Columns ?? []).ToDictionary(c => c.Id, c => c.Name, StringComparer.Ordinal);
+            (keyColumns, expressions) = IndexExpressionBinder.BindKey(
+                indexInfo.ColumnIds,
+                indexInfo.KeyExpressions,
+                IndexExpressionBinder.ColumnsOf(table.Schema.Columns),
+                table.Name,
+                id => nameById.GetValueOrDefault(id) ?? id);
+        }
+
         IndexBackfiller.Target target = new(
             indexInfo.IndexId,
             indexInfo.IndexName,
             Unique: indexInfo.IndexType == IndexType.Unique,
-            indexInfo.ColumnNames,
+            keyColumns,
             indexInfo.IncludeColumnNames is { Length: > 0 } includeColumnNames ? includeColumnNames : null,
-            Inverted: indexInfo.IndexType == IndexType.Inverted);
+            Inverted: indexInfo.IndexType == IndexType.Inverted,
+            Expressions: expressions);
 
         // After each full batch: persist the cursor (the coordinator's callback), then run the test
         // seam, so a test can pause or force a leader change between two batches.
@@ -1031,15 +1047,21 @@ internal sealed partial class SchemaDdlService
         TableIndexAdder.RejectUnorderedKeyColumns(table, ticket);
         TableIndexAdder.ValidateIncludeColumns(table, ticket, currentOptions);
 
+        // Column positions keep their own checks (GetColumnIdsForIndex); expression positions are
+        // resolved by the binder, which gives them the marker id and the hidden key name.
+        ResolvedIndexKey key = TableIndexAdder.ResolveKey(table, ticket);
+
         string indexId = ObjectIdGenerator.Generate().ToString();
-        string[] columnIds = GetColumnIdsForIndex(table, ticket.Columns);
-        string[] columnNames = ticket.Columns.Select(c => c.Name).ToArray();
+        string[] columnIds = key.Expressions is null ? GetColumnIdsForIndex(table, ticket.Columns) : key.ColumnIds;
+        string[] columnNames = key.Expressions is null ? ticket.Columns.Select(c => c.Name).ToArray() : key.ColumnNames;
+        if (key.Expressions is not null)
+            GetColumnIdsForIndex(table, [.. ticket.Columns.Where(c => !c.IsExpression)]);
         string[]? includeColumnIds = ticket.IncludeColumns.Length > 0
             ? GetColumnIdsForIndex(table, ticket.IncludeColumns.Select(n => new ColumnIndexInfo(n, OrderType.Ascending)).ToArray())
             : null;
         string[]? includeColumnNames = ticket.IncludeColumns.Length > 0 ? ticket.IncludeColumns : null;
 
-        IndexBuildInfo indexInfo = new(indexId, ticket.IndexName, columnIds, columnNames, indexType, IndexColumnOrder.Extract(ticket.Columns), IncludeColumnIds: includeColumnIds, IncludeColumnNames: includeColumnNames);
+        IndexBuildInfo indexInfo = new(indexId, ticket.IndexName, columnIds, columnNames, indexType, IndexColumnOrder.Extract(ticket.Columns), IncludeColumnIds: includeColumnIds, IncludeColumnNames: includeColumnNames, KeyExpressions: key.KeyExpressions);
 
         await database.DdlGate.EnterAsync(ticket.TableName, context.Logger).ConfigureAwait(false);
         try

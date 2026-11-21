@@ -42,25 +42,41 @@ public static class SchemaElementStateRules
             return false;
 
         // Plain loops (no LINQ): this runs inside planner and DML loops, so it must not allocate
-        // closures or enumerators per call.
-        foreach (string columnName in index.Columns)
+        // closures or enumerators per call. At an expression position the key name is hidden, so the
+        // columns the expression reads are checked instead.
+        string[] keyNames = index.Columns;
+        for (int k = 0; k < keyNames.Length; k++)
         {
-            bool readable = false;
-            for (int i = 0; i < columns.Count; i++)
+            if (index.ExpressionAt(k) is { } expression)
             {
-                TableColumnSchema column = columns[i];
-                if (string.Equals(column.Name, columnName, StringComparison.OrdinalIgnoreCase) && IsReadable(column))
+                foreach (string referenced in expression.ReferencedColumns)
                 {
-                    readable = true;
-                    break;
+                    if (!HasColumn(columns, referenced, writable: false))
+                        return false;
                 }
             }
-
-            if (!readable)
+            else if (!HasColumn(columns, keyNames[k], writable: false))
                 return false;
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// True when <paramref name="columns"/> holds a column named <paramref name="name"/> that is
+    /// readable (or, with <paramref name="writable"/>, writable).
+    /// </summary>
+    private static bool HasColumn(List<TableColumnSchema> columns, string name, bool writable)
+    {
+        for (int i = 0; i < columns.Count; i++)
+        {
+            TableColumnSchema column = columns[i];
+            if (string.Equals(column.Name, name, StringComparison.OrdinalIgnoreCase)
+                && (writable ? IsWritable(column) : IsReadable(column)))
+                return true;
+        }
+
+        return false;
     }
 
     /// <summary>True when the index and <i>every</i> column it covers are writable.</summary>
@@ -74,21 +90,20 @@ public static class SchemaElementStateRules
             return false;
 
         // Plain loops (no LINQ): this runs inside DML per-row loops, so it must not allocate
-        // closures or enumerators per call.
-        foreach (string columnName in index.Columns)
+        // closures or enumerators per call. At an expression position the columns the expression
+        // reads are checked, as in IsReadableIndex.
+        string[] keyNames = index.Columns;
+        for (int k = 0; k < keyNames.Length; k++)
         {
-            bool writable = false;
-            for (int i = 0; i < columns.Count; i++)
+            if (index.ExpressionAt(k) is { } expression)
             {
-                TableColumnSchema column = columns[i];
-                if (string.Equals(column.Name, columnName, StringComparison.OrdinalIgnoreCase) && IsWritable(column))
+                foreach (string referenced in expression.ReferencedColumns)
                 {
-                    writable = true;
-                    break;
+                    if (!HasColumn(columns, referenced, writable: true))
+                        return false;
                 }
             }
-
-            if (!writable)
+            else if (!HasColumn(columns, keyNames[k], writable: true))
                 return false;
         }
 

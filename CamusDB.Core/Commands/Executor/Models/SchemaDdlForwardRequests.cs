@@ -102,6 +102,12 @@ public sealed class ColumnIndexInfoRequest
 {
     public string Name { get; set; } = "";
     public OrderType Order { get; set; }
+
+    /// <summary>
+    /// The SQL text of an expression key part (<c>ColumnIndexInfo.Expression</c>), or null for a
+    /// column. Without it a forwarded expression index reaches the leader as a column named "".
+    /// </summary>
+    public string? Expression { get; set; }
 }
 
 public sealed class ConstraintInfoRequest

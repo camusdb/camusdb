@@ -1252,7 +1252,8 @@ public sealed class RowUpdater
 
             foreach (TableIndexSchema index in writableIndexes)
             {
-                validated.UnionWith(index.Columns);
+                // The columns an expression reads, not its hidden key name.
+                IndexKeyRows.AddReadColumns(index, validated);
                 validated.UnionWith(index.IncludeColumns);
             }
 
@@ -1457,6 +1458,21 @@ public sealed class RowUpdater
             // nothing for a covering index whose entry is skipped.
             bool includeChanged = index.HasIncludeColumns && IncludeColumnsChanged(index, oldRow, newRow);
 
+            // An expression index reads its key through hidden key names. When no column the key
+            // reads changed, the key is the same and the expressions are not evaluated; otherwise the
+            // key rows carry their values, and the comparisons below decide whether the key moved
+            // (lower(email) stays the same when only the case of email changes).
+            Dictionary<string, ColumnValue> oldKeyRow = oldRow;
+            Dictionary<string, ColumnValue> newKeyRow = newRow;
+            if (index.Expressions is not null)
+            {
+                if (!includeChanged && !IndexKeyRows.InputsChanged(index, oldRow, newRow))
+                    continue;
+
+                oldKeyRow = IndexKeyRows.For(index, oldRow);
+                newKeyRow = IndexKeyRows.For(index, newRow);
+            }
+
             if (index.Type == IndexType.Unique)
             {
                 // NULLs are distinct: a row with a NULL (or absent) value in any indexed column has no
@@ -1464,7 +1480,7 @@ public sealed class RowUpdater
                 // the new entry if the new row qualifies (value->NULL removes it, NULL->value adds it).
                 // NULL qualification and key equality come from one pass over the indexed columns, so an
                 // update that leaves this index alone builds no composite key at all.
-                CompareUniqueKeyColumns(oldRow, newRow, index.Columns, out bool oldHasKey, out bool newHasKey, out bool keyUnchanged);
+                CompareUniqueKeyColumns(oldKeyRow, newKeyRow, index.Columns, out bool oldHasKey, out bool newHasKey, out bool keyUnchanged);
 
                 // When the indexed columns are unchanged, skip the delete+insert cycle. On a root this
                 // avoids a needless round-trip; on a branch it is required for correctness: the delete
@@ -1479,22 +1495,22 @@ public sealed class RowUpdater
                     // existing entry value in place (same key, this row's rowId) — no delete, and Set
                     // rather than SetIfNotExists (which would no-op on the already-present key).
                     if (includeChanged)
-                        (newEntries ??= new()).Add(new KvTableStore.IndexWrite(index.KvId, GetColumnValue(newRow, index.Columns), Unique: true, IncludeTuple: BuildIncludeTuple(index, newRow, options), Overwrite: true));
+                        (newEntries ??= new()).Add(new KvTableStore.IndexWrite(index.KvId, GetColumnValue(newKeyRow, index.Columns), Unique: true, IncludeTuple: BuildIncludeTuple(index, newRow, options), Overwrite: true));
                     continue;
                 }
 
                 if (oldHasKey)
-                    (oldEntries ??= new()).Add(new KvTableStore.IndexDelete(index.KvId, GetColumnValue(oldRow, index.Columns), rowId, Unique: true));
+                    (oldEntries ??= new()).Add(new KvTableStore.IndexDelete(index.KvId, GetColumnValue(oldKeyRow, index.Columns), rowId, Unique: true));
 
                 if (newHasKey)
-                    (newEntries ??= new()).Add(new KvTableStore.IndexWrite(index.KvId, GetColumnValue(newRow, index.Columns), Unique: true, IncludeTuple: BuildIncludeTuple(index, newRow, options)));
+                    (newEntries ??= new()).Add(new KvTableStore.IndexWrite(index.KvId, GetColumnValue(newKeyRow, index.Columns), Unique: true, IncludeTuple: BuildIncludeTuple(index, newRow, options)));
             }
             else if (index.Type == IndexType.Multi)
             {
                 // Skip unchanged entries — same correctness requirement as the unique index case above.
                 // The comparison reads the indexed cells directly, so an untouched index builds neither
                 // composite key and does not even need the row id tie-breaker value.
-                if (MultiKeyColumnsUnchanged(oldRow, newRow, index.Columns))
+                if (MultiKeyColumnsUnchanged(oldKeyRow, newKeyRow, index.Columns))
                 {
                     // Key (incl. rowId tie-breaker) identical: overwrite the entry value in place to
                     // refresh the covered payload; no delete needed.
@@ -1502,7 +1518,7 @@ public sealed class RowUpdater
                     {
                         rowIdValue ??= new(ColumnType.Id, rowId.ToString());
 
-                        (newEntries ??= new()).Add(new KvTableStore.IndexWrite(index.KvId, GetColumnValue(newRow, index.Columns, rowIdValue), Unique: false, IncludeTuple: BuildIncludeTuple(index, newRow, options), Overwrite: true));
+                        (newEntries ??= new()).Add(new KvTableStore.IndexWrite(index.KvId, GetColumnValue(newKeyRow, index.Columns, rowIdValue), Unique: false, IncludeTuple: BuildIncludeTuple(index, newRow, options), Overwrite: true));
                     }
 
                     continue;
@@ -1510,8 +1526,8 @@ public sealed class RowUpdater
 
                 rowIdValue ??= new(ColumnType.Id, rowId.ToString());
 
-                (oldEntries ??= new()).Add(new KvTableStore.IndexDelete(index.KvId, GetColumnValue(oldRow, index.Columns, rowIdValue), rowId, Unique: false));
-                (newEntries ??= new()).Add(new KvTableStore.IndexWrite(index.KvId, GetColumnValue(newRow, index.Columns, rowIdValue), Unique: false, IncludeTuple: BuildIncludeTuple(index, newRow, options)));
+                (oldEntries ??= new()).Add(new KvTableStore.IndexDelete(index.KvId, GetColumnValue(oldKeyRow, index.Columns, rowIdValue), rowId, Unique: false));
+                (newEntries ??= new()).Add(new KvTableStore.IndexWrite(index.KvId, GetColumnValue(newKeyRow, index.Columns, rowIdValue), Unique: false, IncludeTuple: BuildIncludeTuple(index, newRow, options)));
             }
             else if (index.Type == IndexType.Inverted)
             {

@@ -93,8 +93,23 @@ internal static class IndexBackfiller
         bool Unique,
         string[] KeyColumns,
         string[]? IncludeColumns,
-        bool Inverted = false
-    );
+        bool Inverted = false,
+        BoundIndexExpression?[]? Expressions = null
+    )
+    {
+        /// <summary>
+        /// The key as the write paths see it: <see cref="KeyColumns"/> holds the hidden key name at
+        /// each expression position, and <see cref="Expressions"/> the bound expression there, so
+        /// <see cref="IndexKeyRows"/> fills a row the same way for a backfilled entry as for one an
+        /// INSERT writes.
+        /// </summary>
+        public TableIndexSchema KeyShape => new(
+            IndexName,
+            KeyColumns,
+            Unique ? IndexType.Unique : IndexType.Multi,
+            id: IndexId,
+            expressions: Expressions);
+    }
 
     /// <summary>
     /// What a backfill did: the rows it visited under their locks, and the id of the last row the
@@ -121,9 +136,10 @@ internal static class IndexBackfiller
         // The backfill reads only the key and INCLUDE columns, so the per-row decode and the
         // out-of-line fetch are narrowed to them. The rows are never re-encoded, only turned into
         // entries, and the values of those columns are the same as in a full decode.
+        // An expression position reads the columns of its expression, not its hidden key name.
+        TableIndexSchema keyShape = target.KeyShape;
         HashSet<string> requiredColumns = new(StringComparer.OrdinalIgnoreCase);
-        foreach (string columnName in target.KeyColumns)
-            requiredColumns.Add(columnName);
+        IndexKeyRows.AddReadColumns(keyShape, requiredColumns);
         if (target.IncludeColumns is { } includeColumns)
         {
             foreach (string columnName in includeColumns)
@@ -146,7 +162,7 @@ internal static class IndexBackfiller
 
             totalRows += await BackfillBatchRunner.RunAsync(
                 rowIds,
-                (ids, ct) => WriteEntriesAsync(database, table, target, requiredColumns, largeValues, ids, priority, options, ct),
+                (ids, ct) => WriteEntriesAsync(database, table, target, keyShape, requiredColumns, largeValues, ids, priority, options, ct),
                 logger,
                 element,
                 cancellationToken).ConfigureAwait(false);
@@ -177,6 +193,7 @@ internal static class IndexBackfiller
         DatabaseDescriptor database,
         TableDescriptor table,
         Target target,
+        TableIndexSchema keyShape,
         HashSet<string> requiredColumns,
         LargeValueFetch? largeValues,
         IReadOnlyList<ObjectIdValue> rowIds,
@@ -225,11 +242,15 @@ internal static class IndexBackfiller
                     visibilitySchemaVersion: table.Schema.Version,
                     decodeState: decodeState).ConfigureAwait(false);
 
+                // The values of the expression key parts, under their hidden key names. A row decoded
+                // here holds every column the index reads, so an absent one is a bug, not a NULL.
+                Dictionary<string, ColumnValue> keyRow = IndexKeyRows.For(keyShape, row);
+
                 // NULLs are distinct: a unique index holds no entry for a row with a NULL (or absent)
                 // value in any key column, so several such rows can coexist. The insert path applies the
                 // same rule, which keeps a backfilled index identical to one built row by row. A
                 // non-unique index keeps every row (the row id breaks ties).
-                if (target.Unique && HasNullKeyColumn(row, target.KeyColumns))
+                if (target.Unique && HasNullKeyColumn(keyRow, target.KeyColumns))
                     continue;
 
                 // A GIN index: one non-unique entry per distinct entry of the document, none for NULL.
@@ -256,7 +277,7 @@ internal static class IndexBackfiller
 
                 foreach (string columnName in target.KeyColumns)
                 {
-                    ColumnValue? keyValue = row.GetValueOrDefault(columnName);
+                    ColumnValue? keyValue = keyRow.GetValueOrDefault(columnName);
                     if (keyValue is null)
                         throw new CamusDBException(
                             CamusDBErrorCodes.InvalidInternalOperation,

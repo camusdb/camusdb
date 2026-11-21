@@ -147,7 +147,33 @@ internal sealed class SQLExecutorAlterIndexCreator : SQLExecutorBaseCreator
             return;
         }
 
+        if (nodeAst.nodeType == NodeType.IndexExpression)
+        {
+            indexColumns.Add(ExpressionKeyPart(nodeAst));
+            return;
+        }
+
         throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Invalid alter index operation: {nodeAst.nodeType}");
+    }
+
+    /// <summary>
+    /// The key part an <see cref="NodeType.IndexExpression"/> node asks for. <c>((col))</c> is the
+    /// plain column <c>col</c>, as in PostgreSQL; any other expression travels as SQL text that the
+    /// add-index path resolves against the table. Shared with the inline KEY of CREATE TABLE.
+    /// </summary>
+    internal static ColumnIndexInfo ExpressionKeyPart(NodeAst node)
+    {
+        NodeAst expression = node.leftAst
+            ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Index expression is empty");
+
+        OrderType order = string.Equals(node.yytext, "DESC", StringComparison.OrdinalIgnoreCase)
+            ? OrderType.Descending
+            : OrderType.Ascending;
+
+        if (expression.nodeType == NodeType.Identifier && expression.yytext is { } column)
+            return new ColumnIndexInfo(column, order);
+
+        return new ColumnIndexInfo("", order, IndexExpressionBinder.RenderForTicket(expression));
     }
 
     /// <summary>

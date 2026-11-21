@@ -286,7 +286,7 @@ internal sealed class ShowRangesReader
                 return column.Type;
         }
 
-        return ColumnType.String;
+        return table.ExpressionKeyType(columnName) ?? ColumnType.String;
     }
 
     // -----------------------------------------------------------------------

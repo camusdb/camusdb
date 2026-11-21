@@ -140,8 +140,13 @@ internal static class IndexScanSelector
         TableColumnSchema? column = table.Schema.Columns?.Find(
             c => string.Equals(c.Name, comparison.ColumnName, StringComparison.OrdinalIgnoreCase));
 
-        // An unknown column cannot match any index column below, so there is nothing to reject.
-        return column is null || column.Type == comparison.Constant.Type;
+        if (column is not null)
+            return column.Type == comparison.Constant.Type;
+
+        // A hidden key name of an expression index: the constant must have the expression's type.
+        // Any other unknown name cannot match any index column below, so there is nothing to reject.
+        return table.ExpressionKeyType(comparison.ColumnName) is not { } expressionType
+            || expressionType == comparison.Constant.Type;
     }
 
     /// <summary>
@@ -346,7 +351,7 @@ internal static class IndexScanSelector
             if (index.Type == IndexType.Unique && !AllColumnsNotNull(table, index))
                 continue;
 
-            int matchLength = MatchOrderByPrefixLength(index, orderBy);
+            int matchLength = MatchOrderByPrefixLength(table, index, orderBy);
             if (matchLength == 0)
                 continue;
 
@@ -586,9 +591,9 @@ internal static class IndexScanSelector
         {
             QueryPlanStepType.QueryFromIndex => true,
             QueryPlanStepType.RangeScanFromIndex => scanStep.Index is not null
-                && IndexOrderSatisfies(scanStep.Index, orderBy, constantColumns),
+                && IndexOrderSatisfies(table, scanStep.Index, orderBy, constantColumns),
             QueryPlanStepType.FullScanFromIndex => scanStep.Index is not null
-                && IndexOrderSatisfies(scanStep.Index, orderBy, constantColumns),
+                && IndexOrderSatisfies(table, scanStep.Index, orderBy, constantColumns),
             _ => false
         };
     }
@@ -600,40 +605,63 @@ internal static class IndexScanSelector
     /// backward scan to flip a direction.
     /// </summary>
     private static bool IndexOrderSatisfies(
+        TableDescriptor table,
         TableIndexSchema index,
         IReadOnlyList<QueryOrderBy> orderBy,
         IReadOnlySet<string>? constantColumns)
     {
         if (constantColumns is null || constantColumns.Count == 0)
-            return MatchOrderByPrefixLength(index, orderBy) >= orderBy.Count;
+            return MatchOrderByPrefixLength(table, index, orderBy) >= orderBy.Count;
 
         int position = 0;
 
         foreach (QueryOrderBy key in orderBy)
         {
-            // A computed key is never provided by an index; its label is a diagnostic, not a column.
-            if (key.IsExpression)
-                return false;
-
-            string column = BareColumnName(key.ColumnName);
-
-            if (constantColumns.Contains(column))
+            // A constant column orders nothing; a computed key is never one.
+            if (!key.IsExpression && constantColumns.Contains(BareColumnName(key.ColumnName)))
                 continue;
 
+            // An equality on an index expression fixes its hidden key name, as for a column.
             while (position < index.Columns.Length && constantColumns.Contains(index.Columns[position]))
                 position++;
 
             if (position >= index.Columns.Length)
                 return false;
 
-            if (!string.Equals(index.Columns[position], column, StringComparison.Ordinal)
-                || index.DirectionAt(position) != key.Type)
+            if (!OrderKeyMatches(table, index, position, key) || index.DirectionAt(position) != key.Type)
                 return false;
 
             position++;
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// True when ORDER BY key <paramref name="key"/> names key position <paramref name="position"/> of
+    /// <paramref name="index"/>: the same column, or, at an expression position, a computed key with the
+    /// same canonical text whose every name is a column of <paramref name="table"/>. The index holds
+    /// the value of its expression in key order, and the sort evaluates the same expression with the
+    /// same evaluator, so the two orders agree.
+    /// </summary>
+    private static bool OrderKeyMatches(TableDescriptor table, TableIndexSchema index, int position, QueryOrderBy key)
+    {
+        BoundIndexExpression? expression = index.ExpressionAt(position);
+
+        if (!key.IsExpression)
+            return expression is null
+                && string.Equals(index.Columns[position], BareColumnName(key.ColumnName), StringComparison.Ordinal);
+
+        if (expression is null)
+            return false;
+
+        string? canonical = CommandsExecutor.Controllers.DDL.IndexExpressionBinder.Canonical(key.Expression!, name =>
+        {
+            TableColumnSchema? column = table.Schema.Columns?.Find(c => string.Equals(c.Name, BareColumnName(name), StringComparison.OrdinalIgnoreCase));
+            return column?.Name;
+        });
+
+        return canonical is not null && string.Equals(canonical, expression.Canonical, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -656,7 +684,7 @@ internal static class IndexScanSelector
         return columns;
     }
 
-    private static int MatchOrderByPrefixLength(TableIndexSchema index, IReadOnlyList<QueryOrderBy> orderBy)
+    private static int MatchOrderByPrefixLength(TableDescriptor table, TableIndexSchema index, IReadOnlyList<QueryOrderBy> orderBy)
     {
         int max = Math.Min(index.Columns.Length, orderBy.Count);
         int matched = 0;
@@ -665,12 +693,8 @@ internal static class IndexScanSelector
         {
             // Index columns are bare; an ORDER BY column may be alias-qualified ("u.position").
             // Compare against the bare column name so aliased single-table ORDER BY can elide.
-            // A computed key is never provided by an index; its label is a diagnostic, not a column.
-            // Stop here rather than comparing it, so the prefix length reflects only real columns.
-            if (orderBy[i].IsExpression)
-                break;
-
-            if (!string.Equals(index.Columns[i], BareColumnName(orderBy[i].ColumnName), StringComparison.Ordinal))
+            // A computed key matches only the same expression at an expression position of the index.
+            if (!OrderKeyMatches(table, index, i, orderBy[i]))
                 break;
 
             // Direction must match exactly. A forward-only scan yields the index's own per-column
@@ -856,7 +880,7 @@ internal static class IndexScanSelector
     private static ColumnType GetColumnType(TableDescriptor table, string columnName)
     {
         TableColumnSchema? column = table.Schema.Columns?.Find(c => string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase));
-        return column?.Type ?? ColumnType.String;
+        return column?.Type ?? table.ExpressionKeyType(columnName) ?? ColumnType.String;
     }
 
     /// <summary>
