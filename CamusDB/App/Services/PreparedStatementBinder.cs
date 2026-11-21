@@ -70,6 +70,7 @@ public static class PreparedStatementBinder
         NodeType.ShowSequences or
         NodeType.ShowCreateSequence or
         NodeType.ShowEngineStats or
+        NodeType.ShowPartitions or
         NodeType.ShowSlowQueries or
         NodeType.ShowStatementStats or
         NodeType.ShowIndexUsage or

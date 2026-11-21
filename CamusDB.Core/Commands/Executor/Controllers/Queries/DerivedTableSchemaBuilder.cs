@@ -275,6 +275,38 @@ internal static class DerivedTableSchemaBuilder
         new("last",   ColumnType.Float64),
     ];
 
+    // SHOW PARTITIONS: one row per Raft partition, the system partition first. The row is the
+    // answering node's view. NULL means "this node does not know": a term or commit index of a
+    // partition the node does not host, a leader nobody reported, or follower health on a node that
+    // does not lead. An empty `voters` string means legacy full replication, not "no replicas".
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowPartitionsSchema =
+    [
+        new("node",               ColumnType.String),
+        new("partition_id",       ColumnType.Integer64),
+        new("kind",               ColumnType.String),
+        new("state",              ColumnType.String),
+        new("routing",            ColumnType.String),
+        new("hash_start",         ColumnType.Integer64),
+        new("hash_end",           ColumnType.Integer64),
+        new("generation",         ColumnType.Integer64),
+        new("leader",             ColumnType.String),
+        new("leader_source",      ColumnType.String),
+        new("leader_is_local",    ColumnType.Bool),
+        new("hosted_locally",     ColumnType.Bool),
+        new("term",               ColumnType.Integer64),
+        new("commit_index",       ColumnType.Integer64),
+        new("replication_factor", ColumnType.Integer64),
+        new("voters",             ColumnType.String),
+        new("learners",           ColumnType.String),
+        new("removing",           ColumnType.String),
+        new("awaiting_placement", ColumnType.Bool),
+        new("log_ops_per_sec",    ColumnType.Float64),
+        new("wal_queue_depth",    ColumnType.Integer64),
+        new("commit_wait_ms",     ColumnType.Float64),
+        new("max_follower_lag",   ColumnType.Integer64),
+        new("stalled_followers",  ColumnType.Integer64),
+    ];
+
     // SHOW SLOW QUERIES: one row per recorded statement, newest first. `duration_ms` is Float64
     // rather than an integer because a threshold of 0 records sub-millisecond statements, and
     // rounding those to 0 would make the column useless at exactly the setting used to debug with

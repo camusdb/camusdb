@@ -241,6 +241,25 @@ internal sealed class TestHttpAuth : BaseTest
     }
 
     /// <summary>
+    /// The same coverage for SHOW PARTITIONS: a server-level statement with the engine statistics'
+    /// superuser bar, checked at the transport boundary where a client meets it.
+    /// </summary>
+    [Test]
+    public async Task ShowPartitions_SuperuserOverRest_ReaderForbidden()
+    {
+        (_, CommandExecutor ex) = await Setup();
+
+        string root = await TokenFor(ex, "root", "root-pw");
+        JsonResult ok = await QueryRest(ex, "", "SHOW PARTITIONS", root);
+        Assert.AreEqual(200, ok.StatusCode ?? 200);
+        Assert.AreEqual("ok", ((ExecuteSQLQueryResponse)ok.Value!).Status);
+
+        string reader = await TokenFor(ex, "reader", "reader-pw");
+        JsonResult denied = await QueryRest(ex, "", "SHOW PARTITIONS", reader);
+        Assert.AreEqual(403, denied.StatusCode);
+    }
+
+    /// <summary>
     /// The same coverage for SHOW VARIABLES: the REST controller keeps its own database-less allowlist,
     /// so a statement missing from it would be routed down the normal path and fail on the empty
     /// database name no matter how correct the engine is.

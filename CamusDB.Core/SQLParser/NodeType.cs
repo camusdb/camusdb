@@ -1326,4 +1326,13 @@ public enum NodeType
     /// <c>COMMENT ON TABLE</c> also sets.
     /// </summary>
     CommentOnMaterializedView,
+
+    /// <summary>
+    /// <c>SHOW PARTITIONS</c>: one row for each Raft partition in the committed map, the system
+    /// partition first. A server-level query: it reads only this node's in-memory Raft state, so the
+    /// leader, term and commit index are this node's view. It is superuser-only and is answered before
+    /// any database is opened. <c>PARTITIONS</c> is a plain identifier, not a keyword. Appended at the
+    /// end because <see cref="NodeAstWireCodec"/> sends the member's number between nodes.
+    /// </summary>
+    ShowPartitions,
 }

@@ -12,7 +12,8 @@ SHOW ENGINE STATS LIKE 'raft.executor%';
 This statement reports engine internals. For table statistics, the optimizer's view of your data, see
 [`SHOW STATISTICS FOR <table>`](show-statistics.md), [`ANALYZE`](automatic-analyze.md) and
 [the query planner guide](query-planner.md). For placement, where a table's data
-lives across partitions, see [`SHOW RANGES`](show-ranges.md).
+lives across partitions, see [`SHOW RANGES`](show-ranges.md). For the Raft partitions themselves, with
+their leaders, replicas, commit frontiers and load, see [`SHOW PARTITIONS`](show-partitions.md).
 
 ## What it is for
 
@@ -178,4 +179,5 @@ It holds no SQL text. To find the statement, run it with [`EXPLAIN (ANALYZE)`](e
 full-scan and spill facts that explain each duration, see the
 [slow query log](slow-query-log.md). For running totals per statement shape see
 [`SHOW STATEMENT STATS`](statement-stats.md), and for which indexes statements read see
-[`SHOW INDEX USAGE`](index-usage.md).
+[`SHOW INDEX USAGE`](index-usage.md). For the state of each Raft partition on the node, see
+[`SHOW PARTITIONS`](show-partitions.md).

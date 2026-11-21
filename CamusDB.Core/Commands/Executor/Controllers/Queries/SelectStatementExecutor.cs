@@ -516,6 +516,23 @@ internal sealed class SelectStatementExecutor
                 BuildEngineCounterRows()));
         }
 
+        // SHOW PARTITIONS reports this node's view of the Raft partitions. Node-local for the same
+        // reason as the metrics above: it reads only the local Raft state and never asks a peer. It
+        // opens no database and no transaction. An executor without a shared node has no Raft to read
+        // and returns no rows.
+        if (ast.nodeType == NodeType.ShowPartitions)
+        {
+            if (schemaOut is not null)
+                schemaOut.Schema = DerivedTableSchemaBuilder.ShowPartitionsSchema;
+
+            EmbeddedKahuna? sharedNode = context.SharedNode;
+            List<ShowPartitionsRow> partitions = sharedNode is null
+                ? []
+                : await ShowPartitionsReader.ReadAsync(sharedNode).ConfigureAwait(false);
+
+            return (null!, schemaQuerier.ShowPartitions(partitions, LocalNodeLabel()));
+        }
+
         // SHOW SLOW QUERIES reports the statements this process recorded as slow. Node-local for the
         // same reason as the metrics above — the log is this process's own memory — and it opens no
         // database and no transaction.

@@ -190,6 +190,36 @@ internal sealed class TestSqlAuthEnforcement : BaseTest
     }
 
     /// <summary>
+    /// SHOW PARTITIONS has the engine statistics' bar: leaders, replica sets, commit frontiers and
+    /// write load describe the cluster topology and the whole node's workload, and no per-database
+    /// grant scopes them down. A user with grants on a database is refused; the superuser gets the
+    /// system partition row and the data partition rows.
+    /// </summary>
+    [Test]
+    public async Task ShowPartitions_RequiresSuperuser()
+    {
+        (string dbname, CommandExecutor executor, Principal root) = await SetupWithSuperuser();
+
+        await RunDdl(executor, "", "CREATE USER topology_reader IDENTIFIED BY 'topology-pw'", root);
+        await RunDdl(executor, "", $"GRANT SELECT ON {dbname}.* TO topology_reader", root);
+        Principal granted = await LoginAsync(executor, "topology_reader", "topology-pw");
+
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await RunServerQuery(executor, "SHOW PARTITIONS", granted))!;
+        Assert.AreEqual(CamusDBErrorCodes.InsufficientPrivilege, ex.Code);
+
+        (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(
+            new ExecuteSQLTicket(txnState: null!, database: "", sql: "SHOW PARTITIONS", parameters: null, principal: root));
+
+        List<long> partitionIds = [];
+        await foreach (QueryResultRow row in cursor)
+            partitionIds.Add(row.Row["partition_id"].LongValue);
+
+        Assert.GreaterOrEqual(partitionIds.Count, 2, "the system partition and at least one data partition");
+        Assert.AreEqual(0, partitionIds[0], "the system partition comes first");
+    }
+
+    /// <summary>
     /// The slow query log is held to the same bar as engine metrics, for a sharper reason: its rows
     /// carry the literal SQL text of statements other users ran, so a predicate value from a table
     /// this caller has no grant on can appear verbatim in the output.

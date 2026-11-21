@@ -3,8 +3,8 @@
 // (see accompanying GPPGcopyright.rtf)
 
 // GPPG version 1.6.0
-// DateTime: 11/19/2026 9:46:11 PM
-// Input file <SQLParser/SQLParser.Language.grammar.y - 11/19/2026 9:45:08 PM>
+// DateTime: 11/20/2026 8:54:29 PM
+// Input file <SQLParser/SQLParser.Language.grammar.y - 11/20/2026 8:51:41 PM>
 
 // options: no-lines gplex
 
@@ -8851,10 +8851,12 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
                 CurrentSemanticValue.n = new(NodeType.ShowFunctions, null, null, null, null, null, null, null, null);
             else if (string.Equals(ValueStack[ValueStack.Depth-1].s, "triggers", System.StringComparison.OrdinalIgnoreCase))
                 CurrentSemanticValue.n = new(NodeType.ShowTriggers, null, null, null, null, null, null, null, null);
+            else if (string.Equals(ValueStack[ValueStack.Depth-1].s, "partitions", System.StringComparison.OrdinalIgnoreCase))
+                CurrentSemanticValue.n = new(NodeType.ShowPartitions, null, null, null, null, null, null, null, null);
             else
                 throw new CamusDB.Core.CamusDBException(
                     CamusDB.Core.CamusDBErrorCodes.InvalidInput,
-                    "Expected: SHOW VARIABLES [LIKE '<pattern>'], SHOW USERS [LIKE '<pattern>'], SHOW QUERIES [LIKE '<pattern>'], SHOW CONNECTIONS, SHOW EXTENSIONS, SHOW FUNCTIONS or SHOW TRIGGERS [ON <table>]");
+                    "Expected: SHOW VARIABLES [LIKE '<pattern>'], SHOW USERS [LIKE '<pattern>'], SHOW QUERIES [LIKE '<pattern>'], SHOW CONNECTIONS, SHOW EXTENSIONS, SHOW FUNCTIONS, SHOW TRIGGERS [ON <table>] or SHOW PARTITIONS");
           }
   }
 

@@ -1619,6 +1619,43 @@ public class TestSQLParser
         Assert.Throws<CamusDBException>(() => SQLParserProcessor.Parse("SHOW ENGINE STATS LIKE 'x' EXTRA"));
     }
 
+    [TestCase("SHOW PARTITIONS")]
+    [TestCase("show partitions")]
+    [TestCase("Show Partitions")]
+    public void TestParseShowPartitions(string sql)
+    {
+        NodeAst ast = SQLParserProcessor.Parse(sql);
+
+        Assert.AreEqual(NodeType.ShowPartitions, ast.nodeType);
+        Assert.IsNull(ast.leftAst);
+    }
+
+    /// <summary>
+    /// PARTITIONS is a plain identifier, not a keyword: the statement matches it by text in the
+    /// single-word SHOW production. A table, a column and an alias can still have the name.
+    /// </summary>
+    [TestCase("CREATE TABLE partitions (id OID PRIMARY KEY)", NodeType.CreateTable)]
+    [TestCase("SELECT partitions FROM t", NodeType.Select)]
+    [TestCase("SELECT x AS partitions FROM t", NodeType.Select)]
+    [TestCase("SELECT * FROM partitions WHERE partitions = 1", NodeType.Select)]
+    [TestCase("INSERT INTO partitions (partitions) VALUES (1)", NodeType.Insert)]
+    public void TestPartitionsStaysUsableAsAName(string sql, NodeType expected)
+    {
+        Assert.AreEqual(expected, SQLParserProcessor.Parse(sql).nodeType);
+    }
+
+    [Test]
+    public void TestParseShowPartitionsRejectsOtherWords()
+    {
+        CamusDBException ex = Assert.Throws<CamusDBException>(() => SQLParserProcessor.Parse("SHOW PARTITIONZ"))!;
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex.Code);
+        StringAssert.Contains("SHOW PARTITIONS", ex.Message, "the error must name the statement the caller can run");
+
+        // SHOW PARTITIONS takes no argument.
+        Assert.Throws<CamusDBException>(() => SQLParserProcessor.Parse("SHOW PARTITIONS LIKE '1%'"));
+        Assert.Throws<CamusDBException>(() => SQLParserProcessor.Parse("SHOW PARTITIONS EXTRA"));
+    }
+
     [Test]
     public void TestParseShowSlowQueries()
     {

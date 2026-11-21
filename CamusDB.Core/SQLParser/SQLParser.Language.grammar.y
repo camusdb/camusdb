@@ -1340,8 +1340,8 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
                     CamusDB.Core.CamusDBErrorCodes.InvalidInput,
                     "Expected: SHOW ENGINE STATS [LIKE '<pattern>'], SHOW CLUSTER SETTINGS [LIKE '<pattern>'], SHOW SLOW QUERIES [LIKE '<pattern>'], SHOW STATEMENT STATS [LIKE '<pattern>'], SHOW CLUSTER QUERIES [LIKE '<pattern>'] or SHOW CLUSTER CONNECTIONS");
           }
-          /* VARIABLES, USERS, QUERIES and CONNECTIONS are likewise plain identifiers rather than
-             keywords, so all four words stay usable as column and table names. "users" in particular is a table name in most
+          /* VARIABLES, USERS, QUERIES, CONNECTIONS and PARTITIONS are likewise plain identifiers rather than
+             keywords, so all of these words stay usable as column and table names. "users" in particular is a table name in most
              schemas, so reserving it would be a real regression. The two statements share ONE
              production per token shape and are dispatched on the word, because a second production
              with the same token shape would be a reduce/reduce conflict — the same constraint the
@@ -1366,10 +1366,12 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
                 $$.n = new(NodeType.ShowFunctions, null, null, null, null, null, null, null, null);
             else if (string.Equals($2.s, "triggers", System.StringComparison.OrdinalIgnoreCase))
                 $$.n = new(NodeType.ShowTriggers, null, null, null, null, null, null, null, null);
+            else if (string.Equals($2.s, "partitions", System.StringComparison.OrdinalIgnoreCase))
+                $$.n = new(NodeType.ShowPartitions, null, null, null, null, null, null, null, null);
             else
                 throw new CamusDB.Core.CamusDBException(
                     CamusDB.Core.CamusDBErrorCodes.InvalidInput,
-                    "Expected: SHOW VARIABLES [LIKE '<pattern>'], SHOW USERS [LIKE '<pattern>'], SHOW QUERIES [LIKE '<pattern>'], SHOW CONNECTIONS, SHOW EXTENSIONS, SHOW FUNCTIONS or SHOW TRIGGERS [ON <table>]");
+                    "Expected: SHOW VARIABLES [LIKE '<pattern>'], SHOW USERS [LIKE '<pattern>'], SHOW QUERIES [LIKE '<pattern>'], SHOW CONNECTIONS, SHOW EXTENSIONS, SHOW FUNCTIONS, SHOW TRIGGERS [ON <table>] or SHOW PARTITIONS");
           }
           /* SHOW TRIGGERS ON <table>: TRIGGERS is a plain identifier, checked in the action. */
           | TSHOW TIDENTIFIER TON any_identifier { $$.n = ShowTriggersOnStatement($2.s, $4.n); }

@@ -179,6 +179,17 @@ internal sealed class StatementAuthorizer
             return;
         }
 
+        // The partition list is held to the engine statistics' bar, for the same reason: leaders,
+        // replica sets, commit frontiers and write load describe the cluster topology and the whole
+        // node's workload, and no per-database grant scopes them down. GET /v1/cluster/placement,
+        // which reports part of the same data, has the same bar.
+        if (ast.nodeType is NodeType.ShowPartitions)
+        {
+            if (!principal.IsSuperuser)
+                throw new CamusDBException(CamusDBErrorCodes.InsufficientPrivilege, "The partition list requires a superuser");
+            return;
+        }
+
         // The slow query log is held to a higher bar still, and for a sharper reason than the two
         // around it: its rows carry the literal SQL text of statements other users ran, so a
         // predicate value from a table this caller has no grant on can appear verbatim in the

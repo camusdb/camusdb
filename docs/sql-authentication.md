@@ -224,8 +224,8 @@ off, name the user explicitly.
 <other>` is refused with `InsufficientPrivilege`, and the refusal is the same whether or not that
 account exists — so it cannot be used to enumerate the catalog. Your own grants are always readable,
 by either spelling. The output is the full privilege layout of the account named: which databases
-and tables it reaches, and whether it is a superuser. `SHOW VARIABLES`, `SHOW ENGINE STATS` and
-`SHOW SLOW QUERIES` are held to the same bar for the same reason.
+and tables it reaches, and whether it is a superuser. `SHOW VARIABLES`, `SHOW ENGINE STATS`,
+`SHOW PARTITIONS` and `SHOW SLOW QUERIES` are held to the same bar for the same reason.
 
 Privileges: `SELECT`, `INSERT`, `UPDATE`, `DELETE` (DML); `CREATE TABLE`, `DROP`, `ALTER`, `INDEX`,
 `CREATE` (DDL); `ALL [PRIVILEGES]` (the union at grant time — it does **not** silently widen when new

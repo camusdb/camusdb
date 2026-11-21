@@ -126,6 +126,8 @@ public static class StatementScope
         NodeType.ShowUsers or
         // Per-process metrics; there is no database to read them from.
         NodeType.ShowEngineStats or
+        // This node's in-memory view of the Raft partitions; not read from any database either.
+        NodeType.ShowPartitions or
         // Per-process configuration; likewise not read from any database.
         NodeType.ShowVariables or
         // The C# extensions this process loaded at startup; per node, not read from any database.

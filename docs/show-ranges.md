@@ -23,7 +23,8 @@ It shows what no other statement does:
 
 This statement reports placement. For the cost that placement produced, see
 [`EXPLAIN`](explain.md); for Kahuna/Kommander runtime meters, see
-[`SHOW ENGINE STATS`](engine-stats.md); for the sharding mechanism itself, see
+[`SHOW ENGINE STATS`](engine-stats.md); for every Raft partition with its leader, replicas and load,
+see [`SHOW PARTITIONS`](show-partitions.md); for the sharding mechanism itself, see
 [key-range sharding](key-range-sharding.md).
 
 `RANGES`, `RANGE` and `ROW` are not reserved words. All three stay usable as table names, column
@@ -171,3 +172,7 @@ this node's `generation` is behind a peer's.
 
 `SHOW ENGINE STATS` reports what this process is doing. `SHOW RANGES` reports where the data is.
 Neither substitutes for the other.
+
+`SHOW RANGES` gives the `partition_id` of each span. [`SHOW PARTITIONS`](show-partitions.md) gives the
+state of that partition: its leader, its replica set, its commit frontier, its write load and the lag
+of its followers.

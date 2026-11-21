@@ -2259,4 +2259,57 @@ internal sealed class SchemaQuerier
 
     private static ColumnValue OptionalString(string? value) =>
         value is null ? ColumnValue.Null : new ColumnValue(ColumnType.String, value);
+
+    /// <summary>
+    /// Turns the partition rows that <see cref="Queries.ShowPartitionsReader"/> read into result rows,
+    /// in the order the reader gives (the system partition first, then ascending id).
+    ///
+    /// <para>Node-local: <paramref name="node"/> labels every row with the endpoint of the node that
+    /// answers, the same rule as <see cref="ShowEngineStats"/>. The values are that node's view.</para>
+    /// </summary>
+    internal async IAsyncEnumerable<QueryResultRow> ShowPartitions(IReadOnlyList<Queries.ShowPartitionsRow> rows, string node)
+    {
+        await Task.CompletedTask;
+
+        ColumnValue nodeValue = new(ColumnType.String, node);
+        ColumnValue systemKind = new(ColumnType.String, "system");
+        ColumnValue dataKind = new(ColumnType.String, "data");
+
+        foreach (Queries.ShowPartitionsRow partition in rows)
+        {
+            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(24, StringComparer.OrdinalIgnoreCase)
+            {
+                { "node",               nodeValue },
+                { "partition_id",       new ColumnValue(ColumnType.Integer64, (long)partition.PartitionId) },
+                { "kind",               partition.IsSystem ? systemKind : dataKind },
+                { "state",              new ColumnValue(ColumnType.String, partition.State) },
+                { "routing",            OptionalString(partition.Routing) },
+                { "hash_start",         OptionalLong(partition.HashStart) },
+                { "hash_end",           OptionalLong(partition.HashEnd) },
+                { "generation",         OptionalLong(partition.Generation) },
+                // Null leader means unknown, never "leaderless": leadership here is a local belief.
+                { "leader",             OptionalString(partition.Leader) },
+                { "leader_source",      OptionalString(partition.LeaderSource) },
+                { "leader_is_local",    new ColumnValue(ColumnType.Bool, partition.LeaderIsLocal) },
+                { "hosted_locally",     new ColumnValue(ColumnType.Bool, partition.HostedLocally) },
+                { "term",               OptionalLong(partition.Term) },
+                { "commit_index",       OptionalLong(partition.CommitIndex) },
+                { "replication_factor", OptionalLong(partition.ReplicationFactor) },
+                // Empty means legacy full replication, not "no replicas". An empty string, not NULL,
+                // as in SHOW RANGES.
+                { "voters",             new ColumnValue(ColumnType.String, partition.Voters) },
+                { "learners",           new ColumnValue(ColumnType.String, partition.Learners) },
+                { "removing",           new ColumnValue(ColumnType.String, partition.Removing) },
+                { "awaiting_placement", new ColumnValue(ColumnType.Bool, partition.AwaitingPlacement) },
+                { "log_ops_per_sec",    Float(partition.LogOpsPerSecond) },
+                { "wal_queue_depth",    OptionalLong(partition.WalQueueDepth) },
+                { "commit_wait_ms",     Float(partition.CommitWaitMs) },
+                { "max_follower_lag",   OptionalLong(partition.MaxFollowerLag) },
+                { "stalled_followers",  OptionalLong(partition.StalledFollowers) },
+            });
+        }
+    }
+
+    private static ColumnValue OptionalLong(long? value) =>
+        value is null ? ColumnValue.Null : new ColumnValue(ColumnType.Integer64, value.Value);
 }
