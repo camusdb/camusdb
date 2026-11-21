@@ -121,9 +121,9 @@ internal sealed class CreateTableAsSelectExecutor
         // leave an empty table behind. WITH NO DATA loads no rows and is DDL only, like CREATE TABLE:
         // it is refused only when the client declared the transaction read-only.
         if (withNoData)
-            ticket.TxnState?.RequireReadWriteMode("CREATE TABLE AS");
+            ticket.TxnState.RequireReadWriteMode("CREATE TABLE AS");
         else
-            ticket.TxnState?.RequireWritable("CREATE TABLE AS");
+            ticket.TxnState.RequireWritable("CREATE TABLE AS");
 
         // The source's own clause copies rows from the past; one on a query below it would be parsed and
         // never read. Checked first, so the answer does not depend on whether the table exists.
