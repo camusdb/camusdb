@@ -223,6 +223,37 @@ public sealed class TestDatePatternFunctions : SharedNodeBaseTest
         List<QueryResultRow> mysqlRows = await Query(executor, database,
             $"SELECT id FROM events WHERE str_to_date(date_format(created, '{mysqlPattern}'), '{mysqlPattern}') = created ORDER BY id");
         Assert.AreEqual(new[] { 1L, 2L, 3L }, mysqlRows.Select(r => r.Row["id"].LongValue).ToArray());
+
+        // FMOF prints the UTC offset as "+0", and reads it back.
+        const string fmOffsetPattern = "YYYY-MM-DD HH24:MI:SS.US FMOF";
+        List<QueryResultRow> fmRows = await Query(executor, database,
+            $"SELECT id FROM events WHERE to_timestamp(to_char(created, '{fmOffsetPattern}'), '{fmOffsetPattern}') = created ORDER BY id");
+        Assert.AreEqual(new[] { 1L, 2L, 3L }, fmRows.Select(r => r.Row["id"].LongValue).ToArray());
+    }
+
+    [Test]
+    public async Task ToTimestamp_FmOffset_ReadsTheShortAndTheLongUtcForm_Only()
+    {
+        (DatabaseDescriptor database, CommandExecutor executor) = await SetupEvents();
+
+        foreach (string text in new[] { "2026-03-15 12:00 +0", "2026-03-15 12:00 +00" })
+        {
+            ColumnValue value = await Scalar(executor, database, $"to_timestamp('{text}', 'YYYY-MM-DD HH24:MI FMOF')");
+            Assert.AreEqual("2026-03-15T12:00:00.0000000Z", value.IsoValue, text);
+        }
+
+        CamusDBException other = await AssertQueryThrows(executor, database,
+            "SELECT to_timestamp('2026-03-15 12:00 +05', 'YYYY-MM-DD HH24:MI FMOF')");
+        StringAssert.Contains("all values are UTC", other.Message);
+
+        // Without FM the long form is required.
+        CamusDBException shortForm = await AssertQueryThrows(executor, database,
+            "SELECT to_timestamp('2026-03-15 12:00 +0', 'YYYY-MM-DD HH24:MI OF')");
+        StringAssert.Contains("expected '+00'", shortForm.Message);
+
+        // An OF next to a number field still reads its two digits only.
+        ColumnValue adjacent = await Scalar(executor, database, "to_timestamp('2026-03-15 +0012', 'YYYY-MM-DD OFHH24')");
+        Assert.AreEqual("2026-03-15T12:00:00.0000000Z", adjacent.IsoValue);
     }
 
     [Test]
@@ -311,6 +342,6 @@ public sealed class TestDatePatternFunctions : SharedNodeBaseTest
         StringAssert.Contains("Function 'to_timestamp' expects argument 1 of type String", notText.Message);
 
         CamusDBException arity = await AssertQueryThrows(executor, database, "SELECT to_char(CAST('2026-03-15' AS date))");
-        StringAssert.Contains("Function 'to_char' expects 2 argument(s) but received 1", arity.Message);
+        StringAssert.Contains("Function 'to_char' expects 2 to 3 argument(s) but received 1", arity.Message);
     }
 }

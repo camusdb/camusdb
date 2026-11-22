@@ -64,7 +64,9 @@ list is opt-in: a function that is not on it is refused. A test fails when a new
 on neither that list nor `NotImmutableFunctionNames`, so each new function gets a decision. A function
 that reads the clock for one of its forms, such as `age` or `unix_timestamp`, is not on the list.
 `lower` and `upper` use the invariant culture, and no session time zone exists, so the date and text
-functions are immutable.
+functions are immutable. The forms of `date_trunc`, `date_part` and `to_char` that take a time zone
+argument are refused: their result depends on the time zone database that ships with the build, so a
+later build could compute another key for the same row.
 
 ## Refused expressions
 
@@ -83,6 +85,7 @@ Each of these gives `CADB0423` (`InvalidIndexExpression`; HTTP 400, gRPC `INVALI
 | `DEFAULT`, `*` | not a value |
 | `lower(missing)`, `lower(other.email)` | not a public column of the indexed table |
 | an extension or inline function | not an immutable built-in |
+| `date_trunc('day', ts, 'America/New_York')` | a time zone argument: the result depends on the build |
 | `doc->'a'`, an array, an interval | no ordered key encoding |
 | `json_value(doc, '$.a')` | the type is known only from the value |
 | `CAST(email AS string(10))` | a sized cast target |

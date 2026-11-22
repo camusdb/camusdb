@@ -33,8 +33,10 @@ internal enum DatePatternDialect
 /// and then reused for every row. The pattern is nearly always a literal, so a small cache keyed by
 /// the pattern text removes the compile from the row loop. The cache is bounded: it is cleared when it
 /// is full, and a very long pattern is never cached.</para>
-/// <para>All values are UTC. Month and day names are English only and do not depend on the server
-/// culture. The time zone fields print <c>UTC</c> and <c>+00</c>.</para>
+/// <para>All values are UTC, except that <c>to_char</c> with a zone argument formats the wall clock
+/// of that zone, and its time zone fields then print the zone abbreviation and offset. Otherwise the
+/// time zone fields print <c>UTC</c> and <c>+00</c>, and parsing accepts only those. Month and day
+/// names are English only and do not depend on the server culture.</para>
 /// <para>Parsing is strict on purpose. Text that does not match the pattern is an error that names the
 /// text and the pattern; nothing is guessed. A field that the other fields already decide (a day name,
 /// a quarter, a week number) is checked against the result, not ignored. The documented differences
@@ -325,11 +327,21 @@ internal sealed class DatePattern
     // ── Format ──────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Prints <paramref name="utc"/> with this pattern. The text is built in a per-thread buffer, so a
-    /// call allocates the result string only. The seventh fraction digit (100 ns) has no field and is
-    /// not printed.
+    /// Prints <paramref name="utc"/> with this pattern. The time zone fields print <c>UTC</c> and
+    /// <c>+00</c>.
     /// </summary>
-    public string Format(DateTime utc)
+    public string Format(DateTime utc) => Format(utc, "UTC", 0);
+
+    /// <summary>
+    /// Prints <paramref name="wallClock"/>, the reading of a clock in some zone, with this pattern.
+    /// <c>TZ</c> prints <paramref name="zoneAbbreviation"/> (<c>tz</c> in lower case), and <c>OF</c>
+    /// prints <paramref name="offsetSeconds"/> as PostgreSQL does: the sign and two hour digits, then
+    /// <c>:MM</c> only when the offset has minutes (<c>-05</c>, <c>+05:30</c>). The seconds of an old
+    /// local mean time offset are not printed. The text is built in a per-thread buffer, so a call
+    /// allocates the result string only. The seventh fraction digit (100 ns) has no field and is not
+    /// printed.
+    /// </summary>
+    public string Format(DateTime wallClock, string zoneAbbreviation, int offsetSeconds)
     {
         StringBuilder sb = formatBuffer ??= new StringBuilder(64);
         sb.Clear();
@@ -344,113 +356,113 @@ internal sealed class DatePattern
                     break;
 
                 case DatePatternField.Year:
-                    AppendNumber(sb, utc.Year, 4, token.Fill);
+                    AppendNumber(sb, wallClock.Year, 4, token.Fill);
                     break;
 
                 case DatePatternField.YearLast3:
-                    AppendNumber(sb, utc.Year % 1000, 3, token.Fill);
+                    AppendNumber(sb, wallClock.Year % 1000, 3, token.Fill);
                     break;
 
                 case DatePatternField.YearLast2:
-                    AppendNumber(sb, utc.Year % 100, 2, token.Fill);
+                    AppendNumber(sb, wallClock.Year % 100, 2, token.Fill);
                     break;
 
                 case DatePatternField.YearLast1:
-                    AppendNumber(sb, utc.Year % 10, 1, token.Fill);
+                    AppendNumber(sb, wallClock.Year % 10, 1, token.Fill);
                     break;
 
                 case DatePatternField.IsoYear:
-                    AppendNumber(sb, ISOWeek.GetYear(utc), 4, token.Fill);
+                    AppendNumber(sb, ISOWeek.GetYear(wallClock), 4, token.Fill);
                     break;
 
                 case DatePatternField.Month:
-                    AppendNumber(sb, utc.Month, 2, token.Fill);
+                    AppendNumber(sb, wallClock.Month, 2, token.Fill);
                     break;
 
                 case DatePatternField.MonthName:
-                    AppendName(sb, MonthFull[(int)token.Case][utc.Month - 1], token.Fill);
+                    AppendName(sb, MonthFull[(int)token.Case][wallClock.Month - 1], token.Fill);
                     break;
 
                 case DatePatternField.MonthAbbr:
-                    sb.Append(MonthAbbr[(int)token.Case][utc.Month - 1]);
+                    sb.Append(MonthAbbr[(int)token.Case][wallClock.Month - 1]);
                     break;
 
                 case DatePatternField.Day:
-                    AppendNumber(sb, utc.Day, 2, token.Fill);
+                    AppendNumber(sb, wallClock.Day, 2, token.Fill);
                     break;
 
                 case DatePatternField.DayOfYear:
-                    AppendNumber(sb, utc.DayOfYear, 3, token.Fill);
+                    AppendNumber(sb, wallClock.DayOfYear, 3, token.Fill);
                     break;
 
                 case DatePatternField.DayOfWeekSunday1:
-                    AppendNumber(sb, (int)utc.DayOfWeek + 1, 1, token.Fill);
+                    AppendNumber(sb, (int)wallClock.DayOfWeek + 1, 1, token.Fill);
                     break;
 
                 case DatePatternField.IsoDayOfWeek:
-                    AppendNumber(sb, IsoDayOfWeek(utc.DayOfWeek), 1, token.Fill);
+                    AppendNumber(sb, IsoDayOfWeek(wallClock.DayOfWeek), 1, token.Fill);
                     break;
 
                 case DatePatternField.DayName:
-                    AppendName(sb, DayFull[(int)token.Case][(int)utc.DayOfWeek], token.Fill);
+                    AppendName(sb, DayFull[(int)token.Case][(int)wallClock.DayOfWeek], token.Fill);
                     break;
 
                 case DatePatternField.DayAbbr:
-                    sb.Append(DayAbbr[(int)token.Case][(int)utc.DayOfWeek]);
+                    sb.Append(DayAbbr[(int)token.Case][(int)wallClock.DayOfWeek]);
                     break;
 
                 case DatePatternField.WeekFromJanuary1:
-                    AppendNumber(sb, WeekFromJanuary1(utc), 2, token.Fill);
+                    AppendNumber(sb, WeekFromJanuary1(wallClock), 2, token.Fill);
                     break;
 
                 case DatePatternField.IsoWeek:
-                    AppendNumber(sb, ISOWeek.GetWeekOfYear(utc), 2, token.Fill);
+                    AppendNumber(sb, ISOWeek.GetWeekOfYear(wallClock), 2, token.Fill);
                     break;
 
                 case DatePatternField.MondayWeek:
-                    AppendNumber(sb, MondayWeek(utc), 2, token.Fill);
+                    AppendNumber(sb, MondayWeek(wallClock), 2, token.Fill);
                     break;
 
                 case DatePatternField.Quarter:
-                    AppendNumber(sb, (utc.Month - 1) / 3 + 1, 1, token.Fill);
+                    AppendNumber(sb, (wallClock.Month - 1) / 3 + 1, 1, token.Fill);
                     break;
 
                 case DatePatternField.Hour12:
-                    AppendNumber(sb, utc.Hour % 12 == 0 ? 12 : utc.Hour % 12, 2, token.Fill);
+                    AppendNumber(sb, wallClock.Hour % 12 == 0 ? 12 : wallClock.Hour % 12, 2, token.Fill);
                     break;
 
                 case DatePatternField.Hour24:
-                    AppendNumber(sb, utc.Hour, 2, token.Fill);
+                    AppendNumber(sb, wallClock.Hour, 2, token.Fill);
                     break;
 
                 case DatePatternField.Minute:
-                    AppendNumber(sb, utc.Minute, 2, token.Fill);
+                    AppendNumber(sb, wallClock.Minute, 2, token.Fill);
                     break;
 
                 case DatePatternField.Second:
-                    AppendNumber(sb, utc.Second, 2, token.Fill);
+                    AppendNumber(sb, wallClock.Second, 2, token.Fill);
                     break;
 
                 case DatePatternField.Millisecond:
-                    AppendNumber(sb, utc.Millisecond, 3, token.Fill);
+                    AppendNumber(sb, wallClock.Millisecond, 3, token.Fill);
                     break;
 
                 case DatePatternField.Microsecond:
-                    AppendNumber(sb, (int)(utc.Ticks % TimeSpan.TicksPerSecond / TimeSpan.TicksPerMicrosecond), 6, token.Fill);
+                    AppendNumber(sb, (int)(wallClock.Ticks % TimeSpan.TicksPerSecond / TimeSpan.TicksPerMicrosecond), 6, token.Fill);
                     break;
 
                 case DatePatternField.Meridian:
-                    sb.Append(utc.Hour < 12
+                    sb.Append(wallClock.Hour < 12
                         ? token.Case == NameCase.Lower ? "am" : "AM"
                         : token.Case == NameCase.Lower ? "pm" : "PM");
                     break;
 
                 case DatePatternField.TimeZone:
-                    sb.Append(token.Case == NameCase.Lower ? "utc" : "UTC");
+                    sb.Append(token.Case == NameCase.Lower ? zoneAbbreviation.ToLowerInvariant() : zoneAbbreviation);
                     break;
 
                 case DatePatternField.Offset:
-                    sb.Append("+00");
+                    AppendOffset(sb, offsetSeconds, token.Fill);
                     break;
 
                 default:
@@ -476,6 +488,27 @@ internal sealed class DatePattern
             sb.Append('0', width - written);
 
         sb.Append(digits[..written]);
+    }
+
+    /// <summary>
+    /// Prints an offset as PostgreSQL's <c>OF</c> does: the sign, the hours, then <c>:MM</c> when the
+    /// offset has minutes. <c>FM</c> turns off the zero padding of the hours only (<c>+5:30</c>); the
+    /// minutes always have two digits.
+    /// </summary>
+    private static void AppendOffset(StringBuilder sb, int offsetSeconds, bool fill)
+    {
+        int magnitude = Math.Abs(offsetSeconds);
+        int hours = magnitude / 3600;
+        int minutes = magnitude % 3600 / 60;
+
+        sb.Append(offsetSeconds < 0 ? '-' : '+');
+        AppendNumber(sb, hours, 2, fill);
+
+        if (minutes != 0)
+        {
+            sb.Append(':');
+            AppendNumber(sb, minutes, 2, fill: true);
+        }
     }
 
     private static void AppendName(StringBuilder sb, string name, bool fill)
@@ -641,7 +674,7 @@ internal sealed class DatePattern
                     break;
 
                 case DatePatternField.Offset:
-                    ReadExact(calledName, text, input, ref pos, token, "+00");
+                    ReadUtcOffset(calledName, text, input, ref pos, token);
                     break;
 
                 default:
@@ -897,6 +930,20 @@ internal sealed class DatePattern
             throw ParseError(calledName, text, $"expected '{expected}' for '{token.Source}' at position {pos + 1}, found {Describe(input, pos)}; all values are UTC");
 
         pos += expected.Length;
+    }
+
+    /// <summary>
+    /// Reads the UTC offset, the only offset a parse accepts: <c>+00</c>, or also <c>+0</c> under
+    /// <c>FM</c>, which is how <c>FMOF</c> prints it. A digit right after the short form is a different
+    /// offset (<c>+05</c>) and an error.
+    /// </summary>
+    private void ReadUtcOffset(string calledName, string text, ReadOnlySpan<char> input, ref int pos, Token token)
+    {
+        string expected = !token.Fill && !input[pos..].StartsWith("+00", StringComparison.Ordinal) ? "+0" : "+00";
+        ReadExact(calledName, text, input, ref pos, token, expected);
+
+        if (expected.Length == 2 && pos < input.Length && char.IsAsciiDigit(input[pos]))
+            throw ParseError(calledName, text, $"expected '{expected}' for '{token.Source}' at position {pos - expected.Length + 1}, found {Describe(input, pos - expected.Length)}; all values are UTC");
     }
 
     private void Set(ref int slot, int value, string calledName, string text, Token token)

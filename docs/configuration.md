@@ -496,6 +496,50 @@ off and keeps the GC mode you chose. The startup banner states which GC the node
 An explicit `kahuna.*` budget always beats the profile, so `dev` plus one raised budget is a valid
 combination.
 
+### Transaction state and the heap limit
+
+Kahuna keeps a record of each committed write transaction, a receipt for each key it wrote, and the
+identity of each settled key for 60 to 90 seconds. This state lives in the managed heap and grows
+with the write commit rate. No cache budget covers it and no CamusDB setting shortens it. With two
+keys of about 30 characters in each transaction it is about 0.10 MiB for each write commit a second.
+
+Plan a managed heap limit of 0.25 MiB for each write commit a second at the peak rate: 1,500 MiB for
+6,000 write commits a second. The node logs a warning (`Retained transaction state is ...`) when the
+state passes 40% of the heap limit. A node that keeps running above that share can end with an
+out-of-memory exception, because Kahuna ends the process on one.
+
+Measured on a 2,048 MiB node with a heap limit of 1,229 MiB, at 64 workers and about 12,000
+transactions a second with half of them writes (Serializable): the warning appeared 70 seconds into
+the load at 41% to 43% of the limit in six of six runs, and two of the six died of an out-of-memory
+exception in the next minute. The four others ran to the end at the heap limit, with 8% to 11% of the
+time in GC pauses.
+
+### Garbage collector
+
+The server is built with server GC (one heap per core) and with the GC's dynamic adaptation mode
+off (`System.GC.DynamicAdaptationMode` = 0 in the runtime configuration the build writes). The
+runtime's own default for that mode is on.
+
+Under dynamic adaptation the GC sizes the young generation from the share of memory that survives a
+collection. A node that runs frequent Raft rounds leaves little alive at each collection, so the
+young generation shrinks and collections come more often. With the write aggregator's exact hold
+(`kahuna.key_value_write_precise_wake`) a busy leader settled into that state in some runs and stayed
+in it: 13.6% of its time in GC pauses on one node at 64 workers, and 24% with throughput at 0.80x on
+the leader of three nodes. With the mode off no measured run did, and a 2-hour fault soak passed.
+
+The mode off has a cost in one measured configuration: three nodes at 128 workers ran 0.96x to 0.97x
+of the adaptive GC. An idle node also holds 100 to 250 MiB more memory. On nodes of 4 GiB or more,
+`DOTNET_GCgen0size=3000000` (hexadecimal, 48 MiB per heap) in the environment removed that cost in
+the same measurement. The young generation is that size times the heap count, 768 MiB on 16 cores, so
+do not set it on a smaller node: it does not fit the 1,229 MiB heap limit of a 2 GiB node. The runtime
+reads this value from the environment only.
+
+`DOTNET_GCDynamicAdaptationMode=1` in the environment turns the mode back on. The node then logs a
+warning at startup when the write aggregator runs short cycles (`kahuna.key_value_write_precise_wake`
+on, or `kahuna.key_value_write_post_completion_hold_ms` 0). To run with the mode on, set
+`kahuna.key_value_write_precise_wake: false` and keep the hold at 1 ms or more. Workstation GC, which
+the `dev` profile selects, has no dynamic adaptation.
+
 ### Memory-proportional cache defaults
 
 Under `memory_profile: prod`, most unset keys keep Kahuna's own default, but the four cache-sizing
@@ -626,31 +670,49 @@ Measured 2026-09-09: the linger itself is inert at full occupancy (1, 3 and 5 ms
 batches), because a completing batch re-dispatches whatever is queued.
 
 `kahuna.key_value_write_post_completion_hold_ms` (default **1** in CamusDB; Kahuna's own default is 0)
-adds density at full occupancy: after a batch completes the aggregator holds this
-long before dispatching the next, so more items accumulate per batch; the cost is that much added write
-latency. The aggregator keeps one Raft round in flight per partition, so at full load a round carries
-only what arrived during the previous round. The timer that ends the hold fires about 1 ms late (0.95 to
-1.1 ms on the aggregator's cycle stamps), so the effective hold is the configured value plus ~1 ms. The
-default was 2 ms while the round was ~2.4 ms: it roughly doubled the items per round (110 vs 51 at 128
-workers on the bank shape) for +6% throughput and a *lower* write p50. With the round at ~1.6 ms, a
-one-variable sweep on the same shape measured 2 / 1 / 0 ms at 9,193 / 9,421 / 8,755 ops/s: 1 ms keeps
-~128 items per batch and takes 0.5 ms off the commit; 0 ms makes the commit fastest but runs 2.8× the
-Raft rounds, which slows point reads (1.97 → 2.40 ms) and updates on the shared partition executor, so
-the closed loop loses. An idle aggregator still dispatches on arrival, so low-load latency is unchanged.
-Set `0` to restore Kahuna's dispatch-at-once behaviour; an explicit value always wins over the shipped
-default.
+adds density at full occupancy: after a batch completes the aggregator holds this long before
+dispatching the next, so more items accumulate per batch. The aggregator keeps one Raft round in flight
+per partition, so at full load a round carries only what arrived during the previous round. The hold
+applies after a completion only: a write that arrives at an idle partition waits for the linger. Set
+`0` to dispatch each round as soon as the one before it completes; an explicit value always wins over
+the shipped default.
 
-`kahuna.key_value_write_precise_wake` (default **false**, Kahuna 1.11.6) fires the aggregator's hold,
-linger and queue-age wakes from one dedicated timer thread per node instead of the timer queue. The
-~1 ms lateness described above is the timer queue's granularity plus a thread-pool hop; the dedicated
-thread sleeps whole milliseconds in a kernel wait and spins only the sub-millisecond remainder, so the
-hold ends within 0.1-0.25 ms of its deadline at no extra CPU per transaction.
-`kahuna.key_value_write_fill_target_trigger` (default **false**, Kahuna 1.11.6) adds fill-or-time
-dispatch on top of the hold: a held or lingering partition buffer is dispatched as soon as it reaches
-the learned fill target, the upper median of its last 16 timer-dispatched batch sizes, instead of
-waiting out the hold. Every eighth fill-triggered dispatch waits for the timer as a probe, so the target
-keeps following the load; the learned target is exported as the `kahuna.kv.write.fill_target` histogram.
-Both are off until a soak shows the gain for your shape.
+`kahuna.key_value_write_precise_wake` (default **true**) fires the aggregator's hold, linger and
+queue-age wakes from one dedicated timer thread per node. The .NET timer queue measures a delay with a
+clock that advances once per kernel tick on Linux (4 ms on a 250 Hz kernel), so on the timer queue a
+1 ms hold ends at the next tick and a write cycle lasts a whole tick. The dedicated thread sleeps whole
+milliseconds in a kernel wait and spins the sub-millisecond remainder, so the hold ends within about
+0.1 ms of its deadline. `false` returns the wakes to the timer queue.
+
+`kahuna.key_value_write_fill_target_trigger` (default **true** in CamusDB; Kahuna's own default is
+false) adds fill-or-time dispatch on top of the hold: a held or lingering partition buffer is dispatched
+as soon as it reaches the learned fill target, the upper median of its last 16 timer-dispatched batch
+sizes. Every eighth fill-triggered dispatch waits for the timer as a probe, so the target keeps
+following the load; the learned target is exported as the `kahuna.kv.write.fill_target` histogram.
+
+Measured on the bank shape (Serializable isolation, optimistic locking, GC adaptation off with a
+48 MiB gen0 budget per heap), against the 1 ms hold on the timer queue, as throughput ratios:
+
+| Nodes, workers | Storage | Exact hold | Exact hold and fill trigger | Hold 0, linger 0 |
+|---|---|---|---|---|
+| 1, 8 | tmpfs | 1.75x | 1.89x | 2.26x |
+| 1, 64 | tmpfs | 1.14x | 1.15x | 1.18x |
+| 3, 8 | tmpfs | 1.32x | 1.38x | 1.29x |
+| 3, 64 | tmpfs | 1.02x | 1.03x | 1.01x |
+| 3, 256 | tmpfs | 0.99x | 0.99x | 0.98x |
+| 1, 64 | NVMe | 1.07x | 1.10x | 1.09x |
+| 3, 8 | NVMe | 0.98x | 1.20x | 1.29x |
+| 3, 64 | NVMe | 1.14x | 1.18x | 1.02x |
+
+The shipped pair is the exact hold with the fill trigger. Its cost is device headroom: about 20% more
+device writes per transaction than the timer-queue hold, and a drive that ran near 63% utilisation
+where the timer-queue hold ran near 35%. A hold of 0 with a linger of 0 is faster on one node and is
+not the default: on three nodes at 8 workers it used 2.2 times the CPU per transaction, it wrote 16%
+to 47% more to the device per transaction, and on a three-node NVMe cluster four runs ranged from
+6,526 to 9,850 transactions a second.
+
+A shorter write cycle runs more Raft rounds per second, and the garbage collector has to be set for
+that: see [Garbage collector](#garbage-collector).
 
 `kahuna.rocksdb_direct_reads` (default **off** in CamusDB; Kahuna's own default is on) selects how the
 RocksDB key/value backend reads SST files. With direct I/O the block cache is the only in-RAM read

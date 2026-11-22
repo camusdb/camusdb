@@ -934,10 +934,10 @@ all work with function results.
 | `DATE_ADD(temporal, n, unit)` | `datetime` | See promotion rule below |
 | `DATE_ADD(temporal, interval)`, `DATE_SUB(temporal, interval)` | `datetime` | MySQL form: `DATE_ADD(d, INTERVAL 1 DAY)`. See [Intervals](#intervals) |
 | `DATE_SUB(temporal, n, unit)` | `datetime` | `DATE_ADD` with `-n` |
-| `DATE_TRUNC(unit, temporal)` | `datetime` | Always yields datetime (Postgres-compatible) |
+| `DATE_TRUNC(unit, temporal [, zone])` | `datetime` | Always yields datetime (Postgres-compatible). With a zone, the instant the unit starts on that zone's clock. See [Time zones](#time-zones) |
 | `FROM_UNIXTIME(seconds)` | `datetime` | Unix epoch seconds → UTC datetime. A fraction rounds to the nearest microsecond |
 | `DATE_DIFF(a, b, unit)` | `int64` | Difference in `unit` units (unchanged) |
-| `DATE_PART(unit, temporal)` | `int64` | Extracts calendar component (unchanged) |
+| `DATE_PART(unit, temporal [, zone])` | `int64` | Extracts calendar component. With a zone, from that zone's clock. See [Time zones](#time-zones) |
 | `EXTRACT(unit FROM temporal)` | `int64` | SQL-standard form of `DATE_PART(unit, temporal)` |
 | `AGE(a, b)`, `AGE(a)` | `interval` | PostgreSQL. Years, months and days from `b` to `a`. See [Intervals](#intervals) |
 | `MAKE_INTERVAL(years, months, weeks, days, hours, mins, secs)` | `interval` | PostgreSQL. Every part is optional, by position |
@@ -954,7 +954,7 @@ all work with function results.
 | `WEEKDAY(temporal)` | `int64` | MySQL rule: 0 = Monday ... 6 = Sunday |
 | `WEEK(temporal [, mode])` | `int64` | Mode 0 (default): weeks start on Sunday, 0-53, the days before the first Sunday are week 0. Mode 3: ISO-8601 week, 1-53. Other modes are rejected |
 | `DAYNAME(temporal)`, `MONTHNAME(temporal)` | `string` | English names (`Sunday`, `February`), independent of server locale |
-| `TO_CHAR(temporal, pattern)`, `DATE_FORMAT(temporal, pattern)` | `string` | Format with a PostgreSQL template or MySQL `%` specifiers; see [date-patterns.md](date-patterns.md) |
+| `TO_CHAR(temporal, pattern [, zone])`, `DATE_FORMAT(temporal, pattern)` | `string` | Format with a PostgreSQL template or MySQL `%` specifiers; see [date-patterns.md](date-patterns.md). `TO_CHAR` with a zone prints that zone's clock |
 | `TO_TIMESTAMP(text, pattern)`, `STR_TO_DATE(text, pattern)` | `datetime` | Strict parse with a pattern; see [date-patterns.md](date-patterns.md) |
 | `TO_DATE(text, pattern)` | `date` | Strict parse with a PostgreSQL template, date only. `TO_DATE(x)` with one argument is still the cast to `date` |
 | `TO_TIMESTAMP(seconds)` | `datetime` | The PostgreSQL spelling of `FROM_UNIXTIME(seconds)` |
@@ -1202,14 +1202,16 @@ of one batch. A fill that a new leader resumes uses its own start time for the r
 - A query that calls any of these functions does not use the shared query result cache.
 - `WHERE col > NOW()` can use an index on `col`, also on a table of a join, as a literal bound
   can. The index range and the row filter read the same time, the start of the transaction.
-- In a distributed query, the node that runs the statement evaluates every call. A call is never
-  sent to another node.
+- In a distributed query, the node that runs the statement evaluates every clock call (`NOW()`,
+  `CURRENT_DATE()` and the others). A clock call is never sent to another node. A filter that calls
+  only functions of the row, such as `DATE_PART` with a zone, can run on the node that holds the rows.
 - With `AS OF SYSTEM TIME`, `NOW()` is still the start of the transaction, not the time of the
   snapshot.
 
 ### Date units
 
-Every unit is computed on the UTC value. The unit is a string (`'week'`), or a bare word in
+Every unit is computed on the UTC value, unless the call has a zone argument (see
+[Time zones](#time-zones)). The unit is a string (`'week'`), or a bare word in
 `EXTRACT(week FROM x)`. A unit that has no meaning in a function is rejected with the same
 `InvalidInput` error as an unknown unit.
 
@@ -1276,6 +1278,86 @@ SELECT DATE_TRUNC('week', created) AS week, count(*) FROM events GROUP BY DATE_T
 -- SQL-standard and MySQL spellings of one part
 SELECT EXTRACT(dow FROM created), DAYOFWEEK(created) FROM events
 ```
+
+### Time zones
+
+A `datetime` is an instant, stored and shown in UTC. `DATE_TRUNC`, `DATE_PART` and `TO_CHAR` take an
+optional time zone as their last argument, and then work on the clock of that zone:
+
+```sql
+-- Orders per local day in Bogota
+SELECT DATE_TRUNC('day', created, 'America/Bogota') AS day, count(*)
+FROM orders
+GROUP BY DATE_TRUNC('day', created, 'America/Bogota')
+
+-- The local hour of each event in India
+SELECT DATE_PART('hour', created, 'Asia/Kolkata') FROM events
+
+-- A local timestamp, with the zone abbreviation and offset
+SELECT TO_CHAR(created, 'YYYY-MM-DD HH24:MI TZ OF', 'America/New_York') FROM events
+-- 2026-11-01 01:30 EST -05
+```
+
+Zone names:
+
+- A zone is an IANA name or one of its aliases: `America/New_York`, `US/Eastern`, `Asia/Kolkata`,
+  `UTC`. Case does not matter. An unknown name raises `InvalidInput`, and the message quotes the name.
+  A `NULL` zone gives `NULL`.
+- A numeric offset such as `'+05:30'` raises `InvalidInput`. PostgreSQL reads a numeric zone as a
+  POSIX zone, where `+05` is five hours west of UTC, and ISO-8601 reads `+05` as east of UTC. A zone
+  name has one meaning.
+- Without a zone the functions use UTC. There is no session time zone: `SET TIME ZONE`,
+  `AT TIME ZONE`, `timezone(zone, x)` and `CONVERT_TZ` are not supported.
+
+Results:
+
+- `DATE_TRUNC` with a zone returns the UTC instant at which the unit starts on the local clock. The
+  result is still a `datetime` instant. `DATE_TRUNC('day', '2026-03-15T20:10:00Z', 'Asia/Kolkata')` is
+  `2026-03-15T18:30:00Z`, which is midnight of March 16 in India.
+- `DATE_PART` with a zone reads the part from the local clock. `epoch` counts the seconds of the
+  instant, so the zone does not change it. An interval takes no zone.
+- `TO_CHAR` with a zone prints the local clock. `TZ` and `OF` print the zone abbreviation and the
+  offset in force at that instant. See [date-patterns.md](date-patterns.md).
+- A `date` argument is midnight UTC of that day, as in every other date function. So
+  `DATE_PART('day', DATE '2026-03-15', 'America/Bogota')` is `14`: midnight UTC is 19:00 of March 14
+  in Bogota.
+- PostgreSQL 16 has the zone argument for `date_trunc` only. The zone argument of `date_part` and
+  `to_char` is a CamusDB extension.
+
+Daylight saving changes:
+
+- When the clock moves forward, the skipped local times do not exist. A unit that would start in the
+  gap starts at the instant of the change. In `America/Havana` the clock moves from 00:00 to 01:00 on
+  2026-03-08, so that day starts at 01:00 local time, which is `2026-03-08T05:00:00Z`.
+- When the clock moves back, some local times repeat. A day, week, month or longer unit starts at the
+  first occurrence of its start time, so a 25-hour day is one group. A shorter unit stays in the
+  occurrence that holds the value: on 2026-11-01 in `America/New_York`, `01:30 EDT` truncates to
+  `01:00 EDT` (`05:00Z`) and `01:30 EST` truncates to `01:00 EST` (`06:00Z`). Truncating to the minute
+  never moves a value by an hour.
+- When the clock moves back by less than the unit, the second occurrence of the unit starts at the
+  change. `Australia/Lord_Howe` moves from 02:00 back to 01:30 on 2026-04-05, at `2026-04-04T15:00:00Z`.
+  `01:45` before the change truncates to the hour `01:00` (`14:00Z`), and `01:45` after the change
+  truncates to the change (`15:00Z`), because `01:00` at the later offset never happens.
+- `DATE_TRUNC` with a zone is never later than its argument, and truncating its result again gives the
+  same result.
+
+Zone data:
+
+- The zone rules come from the IANA time zone database that is embedded in the NodaTime library
+  shipped with CamusDB, not from the operating system. Every node on the same CamusDB version uses
+  the same rules on every platform, including the [browser playground](browser-playground.md). A
+  release that updates NodaTime can update the rules.
+- A query fragment whose filter, aggregates or join predicate takes a zone argument carries the zone
+  data version of the node that coordinates the statement. A node with a different version refuses
+  that fragment, and the coordinator reads those rows and evaluates the expression itself. So one
+  statement uses one set of rules, also during a rolling upgrade to a release with new rules. A
+  fragment that takes no zone argument carries no version and runs on the other node as before.
+- A `CHECK` constraint, a view or a stored result that uses a zone argument is computed with the rules
+  of the release that runs it. When a country changes its rules, a new release can give a different
+  answer for the dates the change covers.
+- An index expression cannot take a zone argument. An index stores the computed value in its keys, so
+  new rules would leave keys that no longer match their rows. See
+  [expression-indexes.md](expression-indexes.md).
 
 ---
 

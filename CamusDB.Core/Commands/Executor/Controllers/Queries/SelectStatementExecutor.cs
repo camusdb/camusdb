@@ -1943,9 +1943,9 @@ internal sealed class SelectStatementExecutor
     /// <summary>
     /// Executes a peer coordinator's span-scan fragment on this node: verifies the request
     /// resolves to exactly the objects the coordinator planned against (database and table by
-    /// immutable id, schema by version — any mismatch fails closed so the coordinator falls
-    /// back to a local scan), then runs the bounded snapshot scan with the residual filter
-    /// evaluated here, yielding surviving rows' raw bytes. Read path only: a zero-identity
+    /// immutable id, schema by version, time zone rules by version — any mismatch fails closed
+    /// so the coordinator falls back to a local scan), then runs the bounded snapshot scan with
+    /// the residual filter evaluated here, yielding surviving rows' raw bytes. Read path only: a zero-identity
     /// snapshot transaction at the coordinator's timestamp, no locks, no session.
     /// </summary>
     public async IAsyncEnumerable<QueryFragmentRow> ExecuteQueryFragment(
@@ -1985,6 +1985,13 @@ internal sealed class SelectStatementExecutor
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,
                 $"Query fragment schema version mismatch: this node has {table.Schema.Version}, coordinator planned {request.SchemaVersion}");
+
+        // Zone arguments in the filter or aggregates must use the coordinator's zone rules.
+        if (request.TimeZoneDataVersion is { } zoneDataVersion
+            && !string.Equals(zoneDataVersion, Functions.TimeZoneRules.DataVersion, StringComparison.Ordinal))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                $"Query fragment time zone data mismatch: this node has '{Functions.TimeZoneRules.DataVersion}', coordinator has '{zoneDataVersion}'");
 
         NodeAst? filter = string.IsNullOrEmpty(request.FilterJson)
             ? null
