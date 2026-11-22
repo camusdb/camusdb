@@ -8,10 +8,17 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using CamusDB.Core;
+using CamusDB.Core.Cache;
+using CamusDB.Core.Catalogs.Meta;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.Storage.Kv;
+using Kahuna.Server.KeyValues;
+using Kahuna.Shared.KeyValue;
+using Kommander.Time;
 using CamusDB.Core.Catalogs.Transactional;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -47,16 +54,25 @@ internal sealed class TestTransactionalDdl : BaseTest
         executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(tx, dbname, sql, null));
 
     private static async Task<List<Dictionary<string, ColumnValue>>> QueryAsync(
-        CommandExecutor executor, KvTransaction tx, string dbname, string sql)
+        CommandExecutor executor, KvTransaction tx, string dbname, string sql, CacheMetadataHolder? meta = null)
     {
         (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) =
-            await executor.ExecuteSQLQuery(new ExecuteSQLTicket(tx, dbname, sql, null));
+            await executor.ExecuteSQLQuery(new ExecuteSQLTicket(tx, dbname, sql, null), meta);
 
         List<Dictionary<string, ColumnValue>> rows = [];
         await foreach (QueryResultRow row in cursor)
             rows.Add(new Dictionary<string, ColumnValue>(row.Row));
 
         return rows;
+    }
+
+    /// <summary>An autocommit snapshot read, the only kind of read the result cache serves.</summary>
+    private static async Task<(List<Dictionary<string, ColumnValue>> Rows, CacheMetadataHolder Meta)> CachedReadAsync(
+        CommandExecutor executor, string dbname, string sql)
+    {
+        CacheMetadataHolder meta = new();
+        List<Dictionary<string, ColumnValue>> rows = await QueryAsync(executor, KvTransaction.CreateReadOnly(), dbname, sql, meta);
+        return (rows, meta);
     }
 
     /// <summary>Runs <paramref name="sql"/> in an autocommit-style transaction of its own.</summary>
@@ -703,6 +719,383 @@ internal sealed class TestTransactionalDdl : BaseTest
 
         Assert.IsNull(database.Schema.PendingChangeSet, "the watcher of the pending change set ends it with no sweep running");
         Assert.IsFalse(database.Schema.Tables.ContainsKey("orphaned"));
+    }
+
+    /// <summary>
+    /// One SQL text that runs inside a DDL transaction and outside it binds to two schemas. The parse
+    /// cache gives both runs the same AST, and the bound-query cache, the plan cache and the descriptor
+    /// cache key on what the two runs share. Neither run may get the binding of the other, and a result
+    /// cached before the transaction must not survive its publish.
+    /// </summary>
+    [TestCase(true)]
+    [TestCase(false)]
+    [NonParallelizable]
+    public async Task SameStatementInsideAndOutside_SharesNoCachedBindingOrResult(bool commit)
+    {
+        CamusDBOptions options = Options;
+        QueryResultCache cache = new(options, sweepIntervalMs: -1);
+        CommandExecutor cachingExecutor = CreateCommandExecutor(
+            options, new CamusDB.Core.Config.CamusDBOptionsHolder(options), cache: cache);
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabaseWith(cachingExecutor);
+
+        await ExecuteOutsideAsync(executor, database, dbname, "CREATE TABLE base (id int64 PRIMARY KEY, name string)", ddl: true);
+        await ExecuteOutsideAsync(executor, database, dbname, "INSERT INTO base (id, name) VALUES (1, 'one')", ddl: false);
+
+        const string BoundSql = "SELECT * FROM base WHERE id = 1";
+        const string CachedSql = "SELECT * FROM base {cache=ddl}";
+
+        // Warm every cache with the shared schema, and check that the result cache serves.
+        for (int i = 0; i < 2; i++)
+            Assert.IsFalse((await QueryOutsideAsync(executor, database, dbname, BoundSql))[0].ContainsKey("w"));
+
+        await CachedReadAsync(executor, dbname, CachedSql);
+        (_, CacheMetadataHolder warmMeta) = await CachedReadAsync(executor, dbname, CachedSql);
+        Assert.AreEqual(QueryCacheStatus.Hit, warmMeta.Status,
+            $"the result cache must serve before the transaction (was {warmMeta.Status}/{warmMeta.BypassReason})");
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, "ALTER TABLE base ADD COLUMN w int64");
+        await Write(executor, tx, dbname, "INSERT INTO base (id, name, w) VALUES (2, 'two', 20)");
+
+        for (int i = 0; i < 2; i++)
+            Assert.IsTrue((await QueryAsync(executor, tx, dbname, BoundSql))[0].ContainsKey("w"),
+                "the transaction binds the warm statement to its own schema");
+
+        CacheMetadataHolder insideMeta = new();
+        List<Dictionary<string, ColumnValue>> inside = await QueryAsync(executor, tx, dbname, CachedSql, insideMeta);
+        Assert.AreEqual(2, inside.Count, "the transaction reads its own row, not the cached result");
+        Assert.AreNotEqual(QueryCacheStatus.Hit, insideMeta.Status);
+
+        for (int i = 0; i < 2; i++)
+            Assert.IsFalse((await QueryOutsideAsync(executor, database, dbname, BoundSql))[0].ContainsKey("w"),
+                "the binding of the transaction must not reach another transaction");
+
+        (List<Dictionary<string, ColumnValue>> during, _) = await CachedReadAsync(executor, dbname, CachedSql);
+        Assert.AreEqual(1, during.Count);
+        Assert.IsFalse(during[0].ContainsKey("w"), "the cached read of another transaction keeps the shared schema");
+
+        if (commit)
+            await database.Transactions.CommitAsync(tx);
+        else
+            await database.Transactions.RollbackAsync(tx);
+
+        Assert.AreEqual(commit, (await QueryOutsideAsync(executor, database, dbname, BoundSql))[0].ContainsKey("w"),
+            "after the transaction ends, the bound statement follows the shared schema");
+
+        (List<Dictionary<string, ColumnValue>> after, CacheMetadataHolder afterMeta) = await CachedReadAsync(executor, dbname, CachedSql);
+        Assert.AreEqual(commit ? 2 : 1, after.Count, $"the cached read after the transaction ended (status {afterMeta.Status})");
+        Assert.AreEqual(commit, after[0].ContainsKey("w"));
+    }
+
+    /// <summary>Counts the stored keys under <paramref name="prefix"/> in one key space, with a plain read of the latest committed keys.</summary>
+    private static async Task<int> CountKeysAsync(DatabaseDescriptor database, string keySpace, string prefix)
+    {
+        int count = 0;
+
+        await foreach ((string key, ReadOnlyKeyValueEntry entry) in database.Kahuna.Kahuna.LocateAndScanRange(
+            HLCTimestamp.Zero, keySpace, null, true, null, true, 1000,
+            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None))
+        {
+            if (key.StartsWith(prefix, StringComparison.Ordinal) && entry.Value is not null)
+                count++;
+        }
+
+        return count;
+    }
+
+    private static Task<int> CountIndexEntriesAsync(DatabaseDescriptor database, string indexSpace) =>
+        CountKeysAsync(database, indexSpace, indexSpace + "/");
+
+    private static Task<int> CountPurgeRecordsAsync(DatabaseDescriptor database) =>
+        CountKeysAsync(database, MetaKeys.MetaBucketPrefix(database.Id), MetaKeys.PurgeKeyPrefix(database.Id));
+
+    /// <summary>
+    /// Creates <c>items</c> with the index <c>val_idx</c> and three rows, and returns the key space of the
+    /// index entries.
+    /// </summary>
+    private static async Task<string> CreateIndexedTableAsync(CommandExecutor executor, DatabaseDescriptor database, string dbname)
+    {
+        await ExecuteOutsideAsync(executor, database, dbname, "CREATE TABLE items (id int64 PRIMARY KEY, val int64)", ddl: true);
+        await ExecuteOutsideAsync(executor, database, dbname, "CREATE INDEX val_idx ON items (val)", ddl: true);
+        await ExecuteOutsideAsync(executor, database, dbname, "INSERT INTO items (id, val) VALUES (1, 10), (2, 20), (3, 30)", ddl: false);
+
+        TableSchema table = database.Schema.Tables["items"];
+        TableIndexSchema index = table.Indexes!.First(i => i.Name == "val_idx");
+        string indexSpace = KvKeyBuilder.IndexSpaceOf(database.Id, table.EffectiveStorageId, index.KvId);
+
+        Assert.AreEqual(3, await CountIndexEntriesAsync(database, indexSpace), "one entry per row before the drop");
+        return indexSpace;
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task DropIndex_ThenRollback_KeepsTheIndexAndItsEntries()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(Options with { CoordinatorJobSweepIntervalMs = 0 });
+        string indexSpace = await CreateIndexedTableAsync(executor, database, dbname);
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, "DROP INDEX val_idx ON items");
+        await database.Transactions.RollbackAsync(tx);
+
+        Assert.IsTrue(database.Schema.Tables["items"].Indexes!.Exists(i => i.Name == "val_idx"));
+        Assert.AreEqual(3, await CountIndexEntriesAsync(database, indexSpace), "a rollback leaves every entry");
+        Assert.AreEqual(0, await CountPurgeRecordsAsync(database), "a rollback writes no purge record");
+        Assert.AreEqual(1, (await QueryOutsideAsync(executor, database, dbname, "SELECT id FROM items WHERE val = 20")).Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task DropIndex_ThenCommit_RemovesItsEntriesAfterThePublish()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(Options with { CoordinatorJobSweepIntervalMs = 0 });
+        string indexSpace = await CreateIndexedTableAsync(executor, database, dbname);
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, "DROP INDEX val_idx ON items");
+        Assert.AreEqual(3, await CountIndexEntriesAsync(database, indexSpace), "the entries stay while the transaction is open");
+
+        await database.Transactions.CommitAsync(tx);
+
+        Assert.IsFalse(database.Schema.Tables["items"].Indexes!.Exists(i => i.Name == "val_idx"));
+        Assert.AreEqual(0, await CountIndexEntriesAsync(database, indexSpace), "the committing node removes the entries after its publish");
+        Assert.AreEqual(0, await CountPurgeRecordsAsync(database), "and then deletes the record");
+        Assert.AreEqual(3, (await QueryOutsideAsync(executor, database, dbname, "SELECT * FROM items")).Count, "the rows stay");
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task DropIndex_RemovalStoppedByACrash_IsFinishedAfterAReopen()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(Options with { CoordinatorJobSweepIntervalMs = 0 });
+        string indexSpace = await CreateIndexedTableAsync(executor, database, dbname);
+
+        // The committing node stops right after its publish, before it removes the entries.
+        executor.DeferredPurgesForTests.TestSkipRunsAfterPublish = true;
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, "DROP INDEX val_idx ON items");
+        await database.Transactions.CommitAsync(tx);
+
+        Assert.AreEqual(3, await CountIndexEntriesAsync(database, indexSpace));
+        Assert.AreEqual(1, await CountPurgeRecordsAsync(database), "the record committed with the transaction");
+
+        executor.DeferredPurgesForTests.TestSkipRunsAfterPublish = false;
+        DatabaseDescriptor reopened = await ReopenAsync(executor, dbname);
+
+        Assert.AreEqual(1, await executor.DeferredPurgesForTests.RunDueAsync(reopened), "the first run after the reopen finds the record");
+        Assert.AreEqual(0, await CountIndexEntriesAsync(reopened, indexSpace));
+        Assert.AreEqual(0, await CountPurgeRecordsAsync(reopened));
+
+        reopened.MarkDeferredPurgesDue();
+        Assert.AreEqual(0, await executor.DeferredPurgesForTests.RunDueAsync(reopened), "a second run finds nothing to do");
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task DropIndex_RecordOfAPendingChangeSet_WaitsForThePublish()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(Options with { CoordinatorJobSweepIntervalMs = 0 });
+        string indexSpace = await CreateIndexedTableAsync(executor, database, dbname);
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, "DROP INDEX val_idx ON items");
+
+        // The rows and the record commit in KV; the driver stops before the publish.
+        TransactionSchemaOverlay overlay = (TransactionSchemaOverlay)tx.SchemaChanges!;
+        await overlay.PrepareCommitAsync(tx, CancellationToken.None);
+        await database.Kahuna.Kahuna.LocateAndCommitTransaction(tx.Handle, CancellationToken.None);
+        overlay.OutcomeUnknown = true;
+        await overlay.CloseAsync();
+
+        Assert.IsNotNull(database.Schema.PendingChangeSet);
+        Assert.AreEqual(1, await CountPurgeRecordsAsync(database));
+
+        database.MarkDeferredPurgesDue();
+        Assert.AreEqual(0, await executor.DeferredPurgesForTests.RunDueAsync(database), "no run removes data while the change set is pending");
+        Assert.AreEqual(3, await CountIndexEntriesAsync(database, indexSpace), "the shared schema still uses the index");
+
+        Assert.AreEqual(true, await executor.ResolvePendingChangeSetForTests(database));
+
+        Assert.AreEqual(1, await executor.DeferredPurgesForTests.RunDueAsync(database), "the publish makes the record due");
+        Assert.AreEqual(0, await CountIndexEntriesAsync(database, indexSpace));
+        Assert.AreEqual(0, await CountPurgeRecordsAsync(database));
+    }
+
+    private static Task<int> CountStoredRowsAsync(DatabaseDescriptor database, string storageId)
+    {
+        string rowSpace = KvKeyBuilder.RowSpaceOf(database.Id, storageId);
+        return CountKeysAsync(database, rowSpace, rowSpace + "/");
+    }
+
+    private static Task<int> CountOrphanRecordsAsync(DatabaseDescriptor database) =>
+        CountKeysAsync(database, MetaKeys.MetaBucketPrefix(database.Id), MetaKeys.OrphanKeyPrefix(database.Id));
+
+    /// <summary>The schema version each stored row of a table was written under, read from the raw row keys.</summary>
+    private static async Task<List<int>> StoredRowVersionsAsync(DatabaseDescriptor database, string storageId)
+    {
+        string rowSpace = KvKeyBuilder.RowSpaceOf(database.Id, storageId);
+        List<int> versions = [];
+
+        await foreach ((string key, ReadOnlyKeyValueEntry entry) in database.Kahuna.Kahuna.LocateAndScanRange(
+            HLCTimestamp.Zero, rowSpace, null, true, null, true, 1000,
+            HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None))
+        {
+            // The stored value starts with a one-byte envelope, then the version word of the row payload.
+            if (key.StartsWith(rowSpace + "/", StringComparison.Ordinal) && entry.Value is { Length: > 5 } value)
+                versions.Add(RowStorageForms.StoredVersion(System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(value.AsSpan(1))));
+        }
+
+        return versions;
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task DropTableForce_ThenRollback_KeepsTheTableAndItsData()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(Options with { CoordinatorJobSweepIntervalMs = 0 });
+        string indexSpace = await CreateIndexedTableAsync(executor, database, dbname);
+        string storageId = database.Schema.Tables["items"].EffectiveStorageId;
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, "DROP TABLE items FORCE");
+        await database.Transactions.RollbackAsync(tx);
+
+        Assert.IsTrue(database.Schema.Tables.ContainsKey("items"));
+        Assert.AreEqual(3, await CountStoredRowsAsync(database, storageId), "a rollback leaves every row");
+        Assert.AreEqual(3, await CountIndexEntriesAsync(database, indexSpace), "and every index entry");
+        Assert.AreEqual(0, await CountPurgeRecordsAsync(database));
+        Assert.AreEqual(3, (await QueryOutsideAsync(executor, database, dbname, "SELECT * FROM items")).Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task DropTableForce_ThenCommit_RemovesTheDataAfterThePublish()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(Options with { CoordinatorJobSweepIntervalMs = 0 });
+        string indexSpace = await CreateIndexedTableAsync(executor, database, dbname);
+        string storageId = database.Schema.Tables["items"].EffectiveStorageId;
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, "DROP TABLE items FORCE");
+        Assert.AreEqual(3, await CountStoredRowsAsync(database, storageId), "the rows stay while the transaction is open");
+
+        await database.Transactions.CommitAsync(tx);
+
+        Assert.IsFalse(database.Schema.Tables.ContainsKey("items"));
+        Assert.AreEqual(0, await CountStoredRowsAsync(database, storageId), "the committing node removes the rows after its publish");
+        Assert.AreEqual(0, await CountIndexEntriesAsync(database, indexSpace), "and every index entry");
+        Assert.AreEqual(0, await CountPurgeRecordsAsync(database), "and then deletes the record");
+        Assert.AreEqual(0, await CountOrphanRecordsAsync(database), "a drop without retention leaves nothing to relink");
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task DropTableInABranch_ThenCommit_RemovesOnlyTheRowsOfTheBranch()
+    {
+        // BRANCH FROM takes an identifier, and a generated name can start with a digit.
+        CommandExecutor executor = CreateCommandExecutor(Options with { CoordinatorJobSweepIntervalMs = 0 });
+        string rootName = "rt" + Guid.NewGuid().ToString("n");
+        DatabaseDescriptor root = await executor.CreateDatabase(new CreateDatabaseTicket(name: rootName, ifNotExists: false));
+        TrackDatabase(rootName, executor);
+
+        await ExecuteOutsideAsync(executor, root, rootName, "CREATE TABLE items (id int64 PRIMARY KEY, val int64)", ddl: true);
+        await ExecuteOutsideAsync(executor, root, rootName, "INSERT INTO items (id, val) VALUES (1, 10), (2, 20)", ddl: false);
+
+        string branchName = "br" + Guid.NewGuid().ToString("n");
+        DatabaseDescriptor branch = (await executor.ExecuteDDLSQL(new ExecuteSQLTicket(
+            txnState: null!, database: rootName, sql: $"CREATE DATABASE {branchName} BRANCH FROM {rootName}", parameters: null))).Database!;
+        TrackDatabase(branchName, executor);
+
+        await ExecuteOutsideAsync(executor, branch, branchName, "INSERT INTO items (id, val) VALUES (3, 30)", ddl: false);
+
+        string storageId = branch.Schema.Tables["items"].EffectiveStorageId;
+        Assert.AreEqual(1, await CountStoredRowsAsync(branch, storageId), "the branch stores only its own row");
+
+        KvTransaction tx = await BeginSessionAsync(branch);
+        await Ddl(executor, tx, branchName, "DROP TABLE items");
+        Assert.AreEqual(1, await CountStoredRowsAsync(branch, storageId), "the row stays while the transaction is open");
+
+        await branch.Transactions.CommitAsync(tx);
+
+        Assert.IsFalse(branch.Schema.Tables.ContainsKey("items"));
+        Assert.AreEqual(0, await CountStoredRowsAsync(branch, storageId), "the publish removes the rows of the branch");
+        Assert.AreEqual(0, await CountPurgeRecordsAsync(branch));
+        Assert.AreEqual(2, (await QueryOutsideAsync(executor, root, rootName, "SELECT * FROM items")).Count, "the root keeps its rows");
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task DropColumn_InATransaction_RewritesNoRow()
+    {
+        // A rewrite of every row would take this transaction past its write limit.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(Options with { MaxMutationsPerTransaction = 10 });
+        await ExecuteOutsideAsync(executor, database, dbname, "CREATE TABLE wide (id int64 PRIMARY KEY, a int64, gone string)", ddl: true);
+
+        for (int i = 0; i < 8; i++)
+            await ExecuteOutsideAsync(executor, database, dbname,
+                $"INSERT INTO wide (id, a, gone) VALUES ({(i * 2) + 1}, 1, 'old'), ({(i * 2) + 2}, 2, 'old')", ddl: false);
+
+        string storageId = database.Schema.Tables["wide"].EffectiveStorageId;
+        int versionBefore = database.Schema.Tables["wide"].Version;
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, "ALTER TABLE wide DROP COLUMN gone");
+        await database.Transactions.CommitAsync(tx);
+
+        Assert.Greater(database.Schema.Tables["wide"].Version, versionBefore);
+        List<int> versions = await StoredRowVersionsAsync(database, storageId);
+        Assert.AreEqual(16, versions.Count);
+        Assert.That(versions, Is.All.EqualTo(versionBefore), "every row keeps the layout it was written under");
+
+        List<Dictionary<string, ColumnValue>> rows = await QueryOutsideAsync(executor, database, dbname, "SELECT * FROM wide");
+        Assert.AreEqual(16, rows.Count);
+        Assert.IsFalse(rows.Exists(row => row.ContainsKey("gone")), "no reader sees the dropped column");
+
+        // A new column with the same name has a new id: the old rows read NULL for it, never the dropped value.
+        KvTransaction add = await BeginSessionAsync(database);
+        await Ddl(executor, add, dbname, "ALTER TABLE wide ADD COLUMN gone string");
+        Assert.IsTrue((await QueryAsync(executor, add, dbname, "SELECT id, gone FROM wide")).TrueForAll(row => row["gone"].Type == ColumnType.Null));
+        await database.Transactions.CommitAsync(add);
+
+        Assert.IsTrue((await QueryOutsideAsync(executor, database, dbname, "SELECT id, gone FROM wide")).TrueForAll(row => row["gone"].Type == ColumnType.Null));
+
+        DatabaseDescriptor reopened = await ReopenAsync(executor, dbname);
+        Assert.IsTrue((await QueryOutsideAsync(executor, reopened, dbname, "SELECT id, gone FROM wide")).TrueForAll(row => row["gone"].Type == ColumnType.Null),
+            "the same after a reopen");
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task DropColumn_InATransaction_KeepsAnOutOfLineValueUntilItsRowChanges()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(
+            Options with { LargeValueThresholdBytes = 64, LargeValueCompressionEnabled = false });
+        await ExecuteOutsideAsync(executor, database, dbname, "CREATE TABLE docs (id int64 PRIMARY KEY, title string, body string)", ddl: true);
+
+        string body = new('b', 500);
+        await ExecuteOutsideAsync(executor, database, dbname,
+            $"INSERT INTO docs (id, title, body) VALUES (1, 't1', '{body}'), (2, 't2', '{body}')", ddl: false);
+
+        string valueSpace = KvKeyBuilder.LargeValueSpaceOf(database.Id, database.Schema.Tables["docs"].EffectiveStorageId);
+        Assert.AreEqual(2, await CountKeysAsync(database, valueSpace, valueSpace + "/"), "each body is stored out of line");
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, "ALTER TABLE docs DROP COLUMN body");
+        await database.Transactions.CommitAsync(tx);
+
+        Assert.AreEqual(2, await CountKeysAsync(database, valueSpace, valueSpace + "/"), "the dropped values stay until their rows change");
+
+        await ExecuteOutsideAsync(executor, database, dbname, "UPDATE docs SET title = 'changed' WHERE id = 1", ddl: false);
+        Assert.AreEqual(1, await CountKeysAsync(database, valueSpace, valueSpace + "/"), "an update removes the value of the dropped column");
+
+        await ExecuteOutsideAsync(executor, database, dbname, "DELETE FROM docs WHERE id = 2", ddl: false);
+        Assert.AreEqual(0, await CountKeysAsync(database, valueSpace, valueSpace + "/"), "a delete removes it too");
+
+        List<Dictionary<string, ColumnValue>> rows = await QueryOutsideAsync(executor, database, dbname, "SELECT * FROM docs");
+        Assert.AreEqual(1, rows.Count);
+        Assert.AreEqual("changed", rows[0]["title"].StrValue);
+        Assert.IsFalse(rows[0].ContainsKey("body"));
     }
 
     [Test]

@@ -83,6 +83,12 @@ public sealed class TableColumnDropper
     {
         Validate(database, table, ticket);
 
+        if (!RewritesRows(database, table, ticket))
+        {
+            await catalogs.AlterTable(database, ticket, tx).ConfigureAwait(false);
+            return 0;
+        }
+
         AlterColumnFluxState state = new(
             catalogs: catalogs,
             tx: tx,
@@ -96,6 +102,31 @@ public sealed class TableColumnDropper
         FluxMachine<AlterColumnFluxSteps, AlterColumnFluxState> machine = new(state);
 
         return await AlterColumnInternal(machine, state);
+    }
+
+    /// <summary>
+    /// False for a drop inside a transaction with a private schema: there the drop changes only the schema,
+    /// as in PostgreSQL, so it neither counts every row against the transaction's write limit nor locks
+    /// every row until COMMIT. No reader sees the dropped value: each stored row decodes with the layout it
+    /// was written under, and its cells match the current columns by column id. The value leaves the disk
+    /// when the row is next updated, because an UPDATE encodes an older-layout row again and removes the
+    /// out-of-line values it does not write, or when the row is deleted.
+    ///
+    /// <para>A column with no id, from before column ids existed, matches by name, so a later column with
+    /// the same name would read the old value. Its rows are still rewritten.</para>
+    /// </summary>
+    private static bool RewritesRows(DatabaseDescriptor database, TableDescriptor table, AlterColumnTicket ticket)
+    {
+        if (CamusDB.Core.Catalogs.Transactional.TransactionSchemaScope.OverlayFor(database) is null)
+            return true;
+
+        foreach (TableColumnSchema column in table.Schema.Columns!)
+        {
+            if (string.Equals(column.Name, ticket.Column.Name, StringComparison.OrdinalIgnoreCase))
+                return string.IsNullOrEmpty(column.Id);
+        }
+
+        return true;
     }
 
     private async Task<FluxAction> AlterSchema(AlterColumnFluxState state)

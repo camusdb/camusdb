@@ -293,6 +293,11 @@ public sealed class SchemaReplicator
             if (entry.Op == SchemaOp.PendingChangeSet)
                 WatchPendingChangeSet(database);
 
+            // The change set may have made data unreachable; the next purge run on this node looks for
+            // its records, in case the committing node does not finish them.
+            if (entry.Op == SchemaOp.PublishChangeSet)
+                database.MarkDeferredPurgesDue();
+
             // Not awaited here: this callback runs inside the schema partition's commit pipeline, and
             // a commit in flight can need that same partition. The descriptor defers the
             // acknowledgement instead, and keeps later versions behind it.
@@ -696,7 +701,10 @@ public sealed class SchemaReplicator
             // A publish installs new objects for the tables it changes; descriptors built from the old
             // ones must not be served again.
             if (entry.Op == SchemaOp.PublishChangeSet)
+            {
                 database.TableDescriptors.Clear();
+                database.MarkDeferredPurgesDue();
+            }
 
             if (entry.Op == SchemaOp.PendingChangeSet)
                 WatchPendingChangeSet(database);

@@ -127,6 +127,8 @@ internal sealed class ChangeSetCommitter
             await MetaKeyWriter.WriteMetaKey(kahuna, tx, decisionKey, CommittedDecision).ConfigureAwait(false);
 
             await WriteNewLayoutsAsync(database, overlay, tx).ConfigureAwait(false);
+
+            await WriteDeferredPurgesAsync(database, overlay, tx).ConfigureAwait(false);
         }
         finally
         {
@@ -498,6 +500,22 @@ internal sealed class ChangeSetCommitter
                 byte[] bytes = MetaJsonSerializer.Serialize(layout, MetaJsonContext.Default.TableSchemaHistory);
                 await MetaKeyWriter.WriteMetaKey(kahuna, tx, MetaKeys.HistoryKey(database.Id, tableId, version), bytes).ConfigureAwait(false);
             }
+        }
+    }
+
+    /// <summary>
+    /// Writes into the transaction the record of every piece of data the change set makes unreachable, so
+    /// the records commit exactly when the transaction does. A run removes the data after the publish; see
+    /// <see cref="DeferredPurgeRecord"/>.
+    /// </summary>
+    private static async Task WriteDeferredPurgesAsync(DatabaseDescriptor database, TransactionSchemaOverlay overlay, KvTransaction tx)
+    {
+        IKahuna kahuna = database.Kahuna.Kahuna;
+
+        foreach (DeferredPurgeRecord record in overlay.DeferredPurges)
+        {
+            byte[] bytes = MetaJsonSerializer.Serialize(record, MetaJsonContext.Default.DeferredPurgeRecord);
+            await MetaKeyWriter.WriteMetaKey(kahuna, tx, MetaKeys.PurgeKey(database.Id, record.PurgeId), bytes).ConfigureAwait(false);
         }
     }
 

@@ -1488,7 +1488,8 @@ internal sealed partial class SchemaDdlService
     /// <item>An index add runs its local work in the transaction, on a table the transaction created and
     /// has not written to, so the build reads no row; then its delta joins the change set.</item>
     /// <item>An index drop only removes the index from the private schema. Its entries stay until the
-    /// change set is published, and are removed after that, so a ROLLBACK finds them intact.</item>
+    /// change set is published, so a ROLLBACK finds them intact. A durable purge record removes them after
+    /// the publish (<see cref="DeferredPurgeRecord"/>).</item>
     /// </list>
     /// </summary>
     private async Task<bool> RunIndexDdlInOwnerTransactionAsync(
@@ -1512,9 +1513,13 @@ internal sealed partial class SchemaDdlService
 
             await catalogs.ReplicateIndexChangeAsync(database, ticket, table, tx).ConfigureAwait(false);
 
-            string tableId = table.Id;
-            string indexKvId = dropped.KvId;
-            overlay.AddAfterPublish(() => PurgeDroppedIndexEntriesAsync(overlay.Database, tableId, indexKvId));
+            // The entries stay until the publish. The record commits with the transaction, and this node
+            // removes them right after its publish; the coordinator-job sweep finishes a removal that a
+            // crash interrupted. The key space is addressed by storage id and index id, which no rename
+            // changes.
+            DeferredPurgeRecord purge = overlay.AddDeferredPurge(
+                DeferredPurgeKind.IndexEntries, table.Id, table.Schema.EffectiveStorageId, [dropped.KvId]);
+            overlay.AddAfterPublish(() => context.DeferredPurges.RunAsync(overlay.Database, [purge]));
 
             return true;
         }
@@ -1527,35 +1532,6 @@ internal sealed partial class SchemaDdlService
 
         await catalogs.ReplicateIndexChangeAsync(database, ticket, table, tx).ConfigureAwait(false);
         return true;
-    }
-
-    /// <summary>
-    /// Deletes the entries of an index that a published change set dropped, in a transaction of its own.
-    /// Best effort and after the fact: the index is out of every node's schema, so nothing reads or writes
-    /// its key space any more, and entries that a failure leaves behind are only unused space. The table
-    /// is found by its immutable id, because the same change set may have renamed it. A table the change
-    /// set also dropped is skipped: the orphan collector purges every index the table ever had.
-    /// </summary>
-    private async Task PurgeDroppedIndexEntriesAsync(DatabaseDescriptor database, string tableId, string indexKvId)
-    {
-        if (!database.Schema.TryGetRelationNameById(tableId, out string? tableName))
-            return;
-
-        TableDescriptor table = await context.TableOpener.Open(database, tableName).ConfigureAwait(false);
-
-        KvTransaction tx = await database.Transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
-            mutationLimitOverride: 0
-        ).ConfigureAwait(false);
-        try
-        {
-            await table.Store.DropIndexEntries(tx, indexKvId).ConfigureAwait(false);
-            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
-        }
-        finally
-        {
-            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
-        }
     }
 
     /// <summary>
@@ -1752,14 +1728,6 @@ internal sealed partial class SchemaDdlService
         // Read before the drop: afterwards the relation is out of the schema and there is nothing
         // left to match an owned sequence against.
         bool deferred = !ticket.Force && database.Ancestors.Count == 0;
-
-        // An immediate drop deletes the rows and index entries in the statement, which a later
-        // ROLLBACK would have to bring back. A deferred drop only detaches the table.
-        if (!deferred && TransactionSchemaScope.OverlayFor(database) is not null)
-            throw new CamusDBException(
-                CamusDBErrorCodes.StatementNotAllowedInTransaction,
-                "DROP TABLE ... FORCE, and DROP TABLE in a branch database, cannot yet run inside an explicit transaction " +
-                "with transactional DDL on: they delete the rows at once. Use DROP TABLE without FORCE, or commit or roll back first");
 
         List<string> ownedSequences = deferred
             ? []

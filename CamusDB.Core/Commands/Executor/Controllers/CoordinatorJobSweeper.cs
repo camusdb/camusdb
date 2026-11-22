@@ -32,6 +32,10 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 /// a statement is driving on this node right now holds its table and is skipped; a job that failed
 /// its last attempt here waits its backoff out (<see cref="SchemaChangeCoordinator"/>). Runs in both
 /// modes: a standalone node is its own schema leader.</para>
+///
+/// <para>The same tick ends a transactional change set that its committing transaction left pending, and
+/// removes the data of published change sets that their committing node did not finish
+/// (<see cref="DeferredPurgeRunner"/>).</para>
 /// </summary>
 internal sealed class CoordinatorJobSweeper : IAsyncDisposable
 {
@@ -49,6 +53,12 @@ internal sealed class CoordinatorJobSweeper : IAsyncDisposable
     /// </summary>
     private readonly Catalogs.Transactional.PendingChangeSetResolver? changeSetResolver;
 
+    /// <summary>
+    /// Removes the data of published change sets whose committing node did not finish it; run after the
+    /// job resume. Null on an engine built without one.
+    /// </summary>
+    private readonly DeferredPurgeRunner? deferredPurges;
+
     private readonly CancellationTokenSource cts = new();
 
     private Task? loop;
@@ -58,13 +68,15 @@ internal sealed class CoordinatorJobSweeper : IAsyncDisposable
         SchemaChangeCoordinator coordinator,
         ILogger<ICamusDB> logger,
         int intervalMs,
-        Catalogs.Transactional.PendingChangeSetResolver? changeSetResolver = null)
+        Catalogs.Transactional.PendingChangeSetResolver? changeSetResolver = null,
+        DeferredPurgeRunner? deferredPurges = null)
     {
         this.databaseDescriptors = databaseDescriptors;
         this.coordinator = coordinator;
         this.logger = logger;
         this.intervalMs = intervalMs;
         this.changeSetResolver = changeSetResolver;
+        this.deferredPurges = deferredPurges;
     }
 
     /// <summary>Number of sweeps that ran to the end, for diagnostics and tests.</summary>
@@ -140,6 +152,10 @@ internal sealed class CoordinatorJobSweeper : IAsyncDisposable
                     await changeSetResolver.ResolveAsync(descriptor).ConfigureAwait(false);
 
                 await coordinator.ResumeJobsAsync(descriptor, CoordinatorResumeTrigger.Sweep).ConfigureAwait(false);
+
+                if (deferredPurges is not null)
+                    await deferredPurges.RunDueAsync(descriptor).ConfigureAwait(false);
+
                 swept++;
             }
             catch (ObjectDisposedException)

@@ -78,6 +78,12 @@ internal sealed class ExecutorContext
     /// <summary>The engine's function-scope frames, and the per-database resolution of installed extensions.</summary>
     internal CamusDB.Core.Extensions.ExtensionScopeFrames ExtensionScopes { get; }
 
+    /// <summary>
+    /// Removes the data that published change sets made unreachable, such as the entries of an index a
+    /// transaction dropped. See <see cref="Controllers.DeferredPurgeRunner"/>.
+    /// </summary>
+    internal Controllers.DeferredPurgeRunner DeferredPurges { get; }
+
     internal ExecutorContext(
         ILogger<ICamusDB> logger,
         EmbeddedKahuna? sharedNode,
@@ -88,7 +94,8 @@ internal sealed class ExecutorContext
         CommandValidator validator,
         bool isClusterMode,
         CamusDB.Core.Extensions.ExtensionRegistry extensions,
-        CamusDB.Core.Extensions.ExtensionScopeFrames extensionScopes
+        CamusDB.Core.Extensions.ExtensionScopeFrames extensionScopes,
+        Controllers.DeferredPurgeRunner deferredPurges
     )
     {
         Logger = logger;
@@ -101,5 +108,6 @@ internal sealed class ExecutorContext
         IsClusterMode = isClusterMode;
         Extensions = extensions;
         ExtensionScopes = extensionScopes;
+        DeferredPurges = deferredPurges;
     }
 }

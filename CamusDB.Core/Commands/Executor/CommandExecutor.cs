@@ -64,6 +64,8 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private readonly DatabaseDropper databaseDroper;
 
+    private readonly DeferredPurgeRunner deferredPurges;
+
     private readonly DatabaseDescriptors databaseDescriptors;
 
     // Process-level Kahuna node shared across all databases. Used to route snapshot-floor hold
@@ -594,9 +596,11 @@ public sealed class CommandExecutor : IAsyncDisposable
         // The same sweep ends a transactional change set whose committing transaction left it pending.
         changeSetResolver = new CamusDB.Core.Catalogs.Transactional.PendingChangeSetResolver(
             new CamusDB.Core.Catalogs.Transactional.ChangeSetCommitter(catalogs, logger), logger);
-        coordinatorJobSweeper = new(databaseDescriptors, databaseOpener.ResumeCoordinator, logger, options.CoordinatorJobSweepIntervalMs, changeSetResolver);
-        coordinatorJobSweeper.Start();
+        // The same sweep also removes the data of published change sets that a crash left behind.
         databaseDroper = new(databaseDescriptors, logger, options);
+        deferredPurges = new(databaseDroper, logger);
+        coordinatorJobSweeper = new(databaseDescriptors, databaseOpener.ResumeCoordinator, logger, options.CoordinatorJobSweepIntervalMs, changeSetResolver, deferredPurges);
+        coordinatorJobSweeper.Start();
         databaseCreator = new(logger);
         indexUsage = new Diagnostics.IndexUsageRegistry(options);
         tableOpener = new(catalogs, logger, indexUsage);
@@ -608,7 +612,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         Extensions.TriggerRuntime triggerRuntime = new(this);
         rowInserter = new(logger, tableOpener, triggerRuntime);
         rowUpdater = new(logger, tableOpener, statisticsManager, triggerRuntime);
-        tableDropper = new(catalogs, statisticsManager, logger);
+        tableDropper = new(catalogs, statisticsManager, logger, deferredPurges);
         rowDeleter = new(logger, tableOpener, statisticsManager, triggerRuntime);
         queryExecutor = new(logger, options, statisticsManager, sharedNode?.Kahuna, fragmentTransport);
         // The allocator is the single binding to Kahuna's sequencer; the binder reserves a
@@ -686,7 +690,8 @@ public sealed class CommandExecutor : IAsyncDisposable
             validator,
             isClusterMode,
             Extensions,
-            ExtensionScopes
+            ExtensionScopes,
+            deferredPurges
         );
 
         metadataDiscovery = new Controllers.Maintenance.MetadataDiscoveryService(executorContext, options);
@@ -980,6 +985,13 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// </summary>
     internal Task<bool?> ResolvePendingChangeSetForTests(DatabaseDescriptor database)
         => changeSetResolver.ResolveAsync(database, force: true);
+
+    /// <summary>
+    /// Test-only seam: the runner that removes the data of published change sets, so a test can stop its
+    /// run after a publish (<see cref="DeferredPurgeRunner.TestSkipRunsAfterPublish"/>) and drive a sweep
+    /// run (<see cref="DeferredPurgeRunner.RunDueAsync"/>) by hand.
+    /// </summary>
+    internal DeferredPurgeRunner DeferredPurgesForTests => deferredPurges;
 
     /// <summary>
     /// Test-only seam: attempts to release one database and reports why it was or was not released, so

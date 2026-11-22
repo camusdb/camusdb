@@ -834,6 +834,8 @@ To scale to databases with many tables, metadata is stored per object, not as on
                                           change set that is not published or aborted yet (§9.2)
 {db}/meta/ddlcommit:{id}                → the decision key of a change set: "committed" or
                                           "aborted" (§9.2)
+{db}/meta/purge:{changeSetId}~{n}       → DeferredPurgeRecord — data a published change set made
+                                          unreachable, removed after the publish (§9.2)
 {db}/meta/system                        → SystemSchema — LEGACY index storage, read-only;
                                           only migrated from on load (see §7.3)
 ```
@@ -1528,6 +1530,41 @@ transaction registered for that retry.
 **The DDL lock is freed before the work after the publish** (the purge of a dropped index's entries,
 the removal of a dropped owned sequence's counter), so that work does not hold other DDL back.
 
+#### Data removal after the publish
+
+No schema statement inside a transaction removes data, because a `ROLLBACK` must find every row and
+index entry. The data that a change set makes unreachable is removed after its publish instead:
+
+| Statement | What stays until the publish | What removes it |
+|---|---|---|
+| `DROP INDEX` | the index entries | a `DeferredPurgeRecord` of kind `IndexEntries` |
+| `DROP TABLE ... FORCE`, and `DROP TABLE` in a branch database | the rows, out-of-line values and index entries | a `DeferredPurgeRecord` of kind `TableData` |
+| `DROP TABLE` (deferred) | everything | the orphan record and the orphan collector, as outside a transaction |
+| `DROP COLUMN` | the column's values in the stored rows | nothing: as in PostgreSQL, a value leaves the disk when its row is next updated or deleted |
+
+A `DROP COLUMN` changes only the schema. Each stored row decodes with the layout it was written under,
+and its cells match the current columns by column id, so no reader sees the dropped value, and a later
+column with the same name reads NULL in the old rows. An `UPDATE` encodes an older-layout row again and
+removes the out-of-line values it does not write. A column with no id, from before column ids existed,
+matches by name, so its rows are still rewritten inside the transaction.
+
+The transaction writes each purge record, `{db}/meta/purge:{changeSetId}~{n}`, in its own KV commit,
+next to the decision key. A record therefore exists exactly when the transaction committed, and a
+committed change set always ends in a publish. A record is due on a node once that node's schema has
+no pending change set with its id and its version is at least the record's base version plus two (the
+pending entry takes the version to the base plus one, and nothing else applies while it is pending).
+`DeferredPurgeRunner` removes the data of a due record with the verified, batched key-space purge of
+`DatabaseDropper`, then deletes the record:
+
+- The committing node runs the records of its change set right after its publish, before `COMMIT`
+  returns.
+- The coordinator-job sweep on the schema leader runs every due record that is left, for example after
+  a crash of the committing node or a leader change. A database is scanned for records only after it
+  opens and after a publish applies on that node.
+
+The removal is idempotent and the record is deleted last, so two runs at once, or an interrupted run,
+are safe. In a branch database the purge reaches only the branch's own entries.
+
 The pending checkpoint writes `{db}/meta/changeset:{id}`, so a reopen restores the pending change set
 from the checkpoint. The publish checkpoint writes every object the change set touched, deletes the
 pending record and the decision key, and writes the version, in one KV transaction.
@@ -1556,9 +1593,11 @@ Lock order: the DDL lock, then the DDL gate semaphore, then the schema lock. A l
 serialization only: the base-version check of the pending entry still refuses a change set whose base
 moved, with `CADB0502`.
 
-Tests: `TestTransactionalDdl` (single node: commit, rollback, reopen, the resolver, the class table)
-and `CamusDB.Cluster.Tests/TestClusterTransactionalDdl` (three nodes, the transaction on a follower
-and on the leader).
+Tests: `TestTransactionalDdl` (single node: commit, rollback, reopen, the resolver, the class table,
+the cache isolation, the data removal after the publish) and
+`CamusDB.Cluster.Tests/TestClusterTransactionalDdl` (three nodes: the transaction on a follower and on
+the leader, the lock order, lost drivers, a leader move while a change set is pending, and a purge that
+the new schema leader finishes).
 
 ---
 

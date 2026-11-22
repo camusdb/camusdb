@@ -80,6 +80,8 @@ internal sealed class TransactionSchemaOverlay : ITransactionSchemaChanges
 
     private readonly List<Func<Task>> onRollback = [];
 
+    private readonly List<DeferredPurgeRecord> deferredPurges = [];
+
     private OverlayState state = OverlayState.Open;
 
     private int closed;
@@ -340,10 +342,43 @@ internal sealed class TransactionSchemaOverlay : ITransactionSchemaChanges
     }
 
     /// <summary>
-    /// Records work to run after a successful publish, such as the removal of the data of a dropped index.
-    /// Best effort: it runs once, on this node, and a failure is logged.
+    /// Records work to run after a successful publish. Best effort: it runs once, on this node, and a
+    /// failure is logged. Data that must be removed after the publish goes through
+    /// <see cref="AddDeferredPurge"/> instead, which is durable.
     /// </summary>
     internal void AddAfterPublish(Func<Task> action) => afterPublish.Add(action);
+
+    /// <summary>
+    /// Records data that the change set makes unreachable and that must be removed after its publish, such
+    /// as the entries of a dropped index. The commit writes the record in the transaction's own KV commit,
+    /// so it survives a crash of this node; see <see cref="DeferredPurgeRecord"/>. A rollback writes nothing
+    /// and leaves the data in place.
+    /// </summary>
+    internal DeferredPurgeRecord AddDeferredPurge(DeferredPurgeKind kind, string tableId, string storageId, IReadOnlyCollection<string> indexIds)
+    {
+        DeferredPurgeRecord record = new()
+        {
+            PurgeId = ChangeSetId + "~" + deferredPurges.Count.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            Kind = kind,
+            ChangeSetId = ChangeSetId,
+            BaseVersion = BaseVersion,
+            TableId = tableId,
+            StorageId = storageId,
+            IndexIds = [.. indexIds],
+        };
+
+        deferredPurges.Add(record);
+        return record;
+    }
+
+    /// <summary>
+    /// Takes back the newest record of <see cref="AddDeferredPurge"/> when the statement that added it
+    /// failed before its delta joined the change set.
+    /// </summary>
+    internal void RemoveDeferredPurge(DeferredPurgeRecord record) => deferredPurges.Remove(record);
+
+    /// <summary>The records <see cref="AddDeferredPurge"/> collected, in statement order.</summary>
+    internal IReadOnlyList<DeferredPurgeRecord> DeferredPurges => deferredPurges;
 
     /// <summary>
     /// Records work that undoes a side effect a DDL statement could not keep inside the transaction, such
@@ -433,7 +468,12 @@ internal sealed class TransactionSchemaOverlay : ITransactionSchemaChanges
     /// that produce such deltas before they run; this is the check that holds when a statement path
     /// produces one anyway.
     /// </summary>
-    private static void RequireTransactionalOp(SchemaChangeLogEntry entry)
+    /// <summary>True when a <see cref="DeferredPurgeKind.TableData"/> record names the table <paramref name="tableName"/>.</summary>
+    private bool PurgesTableData(string tableName) =>
+        Schema.Tables.TryGetValue(tableName, out TableSchema? table)
+        && deferredPurges.Exists(record => record.Kind == DeferredPurgeKind.TableData && string.Equals(record.TableId, table.Id, StringComparison.Ordinal));
+
+    private void RequireTransactionalOp(SchemaChangeLogEntry entry)
     {
         bool supported = entry.Op switch
         {
@@ -447,8 +487,11 @@ internal sealed class TransactionSchemaOverlay : ITransactionSchemaChanges
             // identity column, dropped with its column. The statements on sequences themselves are refused.
             SchemaOp.CreateSequence or SchemaOp.DropSequence => true,
 
-            // A deferred drop keeps the rows and index entries, so a rollback has nothing to restore.
-            SchemaOp.DropTable => entry.GetPayload<SchemaDropTablePayload>().Deferred,
+            // A drop keeps the rows and index entries until the publish, so a rollback has nothing to
+            // restore: a deferred drop leaves them to its orphan record, and a drop without retention
+            // (FORCE, or a branch database) to the purge record its statement added first.
+            SchemaOp.DropTable => entry.GetPayload<SchemaDropTablePayload>() is var drop
+                && (drop.Deferred || PurgesTableData(drop.TableName)),
 
             _ => false
         };

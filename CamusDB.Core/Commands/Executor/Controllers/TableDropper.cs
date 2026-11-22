@@ -29,6 +29,12 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 /// paths until the schema was reloaded — and a concurrent write in that window produced rows with no
 /// index entries. The index entries are now purged at the key-value level only; the delta's apply
 /// removes the whole <see cref="TableSchema"/>, indexes included, on every node.</para>
+///
+/// <para><b>Inside a transaction with a private schema</b> no drop removes data in the statement. A
+/// deferred drop leaves the data to its orphan record, as outside a transaction. A drop without retention
+/// (FORCE, or a branch database) adds a <see cref="DeferredPurgeKind.TableData"/> purge record, which
+/// commits with the transaction and removes the data after the publish, so a ROLLBACK restores the
+/// table with every row.</para>
 /// </summary>
 internal sealed class TableDropper
 {
@@ -38,11 +44,14 @@ internal sealed class TableDropper
 
     private readonly ILogger<ICamusDB> logger;
 
-    public TableDropper(CatalogsManager catalogs, StatisticsManager statistics, ILogger<ICamusDB> logger)
+    private readonly DeferredPurgeRunner deferredPurges;
+
+    public TableDropper(CatalogsManager catalogs, StatisticsManager statistics, ILogger<ICamusDB> logger, DeferredPurgeRunner deferredPurges)
     {
         this.catalogs = catalogs;
         this.statistics = statistics;
         this.logger = logger;
+        this.deferredPurges = deferredPurges;
     }
 
     /// <summary>
@@ -69,6 +78,11 @@ internal sealed class TableDropper
         // COW overlays whose recovery is out of scope.
         bool deferred = !ticket.Force && database.Ancestors.Count == 0;
 
+        CamusDB.Core.Catalogs.Transactional.TransactionSchemaOverlay? overlay =
+            CamusDB.Core.Catalogs.Transactional.TransactionSchemaScope.OverlayFor(database);
+
+        DeferredPurgeRecord? purge = null;
+
         if (deferred)
         {
             // Retention only: indexes and rows are intentionally NOT dropped so their KV data survives
@@ -76,6 +90,19 @@ internal sealed class TableDropper
             // same transaction that deletes the per-table meta key), not here — see
             // CatalogsManager.PersistDroppedTableAsync — so the detach and the recovery record commit
             // atomically even if this outer DDL transaction later fails.
+        }
+        else if (overlay is not null)
+        {
+            // Inside a transaction with a private schema nothing is removed here: a ROLLBACK must find
+            // every row and index entry. The purge record commits with the transaction and removes the data
+            // after the publish (DeferredPurgeRecord). It names every index the table has, because a branch
+            // database has no key-space catalog of its own for a table it inherited. Added before the delta,
+            // because the private schema accepts a drop without retention only with its purge record.
+            List<string> indexIds = new(table.AllIndexes.Count);
+            foreach (TableIndexSchema index in table.AllIndexes.Values)
+                indexIds.Add(index.KvId);
+
+            purge = overlay.AddDeferredPurge(DeferredPurgeKind.TableData, tableId, table.Schema.EffectiveStorageId, indexIds);
         }
         else
         {
@@ -122,15 +149,34 @@ internal sealed class TableDropper
 
         // The replicated delta. It is the last step that can refuse the drop; once it returns the
         // table is gone from every node's schema and nothing below may fail the statement.
-        TableSchema? droppedSchema = await catalogs.DropTableSchema(database, ticket.TableName, tableId, tx, deferred).ConfigureAwait(false);
+        TableSchema? droppedSchema;
+        try
+        {
+            droppedSchema = await catalogs.DropTableSchema(database, ticket.TableName, tableId, tx, deferred).ConfigureAwait(false);
+        }
+        catch
+        {
+            if (purge is not null)
+                overlay!.RemoveDeferredPurge(purge);
+
+            throw;
+        }
+
+        if (purge is not null)
+        {
+            DatabaseDescriptor shared = overlay!.Database;
+            overlay.AddAfterPublish(() => deferredPurges.RunAsync(shared, [purge]));
+        }
+
         Log.LogTableRemovedFromDatabaseSchema(logger, ticket.TableName);
 
         // Statistics cleanup. Both paths evict the in-memory entry (otherwise it leaks for the
         // process lifetime, and a pending background flush could re-create the persisted blob
         // after the drop). The deferred path intentionally keeps the persisted blob: a RELINK
         // restores the table and reloads it, and the orphan reclaimer purges it otherwise. The
-        // immediate path deletes the blob inside this DDL transaction — nothing else ever would.
-        if (deferred)
+        // immediate path deletes the blob inside this DDL transaction — nothing else ever would — except
+        // inside a transaction with a private schema, where the purge record deletes it after the publish.
+        if (deferred || purge is not null)
         {
             statistics.EvictTableStats(database, tableId);
         }

@@ -178,6 +178,14 @@ internal static class MetaKeys
     internal static string ChangeSetDecisionKey(string dbId, string changeSetId) => $"{dbId}/meta/ddlcommit:{changeSetId}";
 
     /// <summary>
+    /// The prefix of the deferred purge records: data that a published change set made unreachable and
+    /// that a run removes after the publish. See <see cref="Models.DeferredPurgeRecord"/>.
+    /// </summary>
+    internal static string PurgeKeyPrefix(string dbId) => $"{dbId}/meta/purge:";
+
+    internal static string PurgeKey(string dbId, string purgeId) => $"{PurgeKeyPrefix(dbId)}{purgeId}";
+
+    /// <summary>
     /// Returns the exclusive ordinal upper bound for every key beginning with <paramref name="prefix"/>.
     /// Incrementing the last available UTF-16 code unit keeps a prefix scan inside its logical subrange
     /// even though several key families share the one routing bucket. Returns <c>null</c> when no

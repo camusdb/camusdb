@@ -546,6 +546,23 @@ public sealed record DatabaseDescriptor : IDisposable
     }
 
     /// <summary>
+    /// 1 while a deferred purge record of this database may exist that no run on this node finished; see
+    /// <see cref="Catalogs.Models.DeferredPurgeRecord"/>. Starts at 1, so the first run after an open looks
+    /// for records a crash left, and a publish of a change set sets it again on every node. A run scans the
+    /// meta bucket only while it is 1, so a database with no pending purge costs no scan.
+    /// </summary>
+    private int deferredPurgesDue = 1;
+
+    /// <summary>Notes that a deferred purge record may exist; see <see cref="deferredPurgesDue"/>.</summary>
+    internal void MarkDeferredPurgesDue() => Volatile.Write(ref deferredPurgesDue, 1);
+
+    /// <summary>
+    /// Clears the flag and returns its value. A run that leaves a record behind marks it again, and a
+    /// publish that lands during the run sets it again, so no record is forgotten.
+    /// </summary>
+    internal bool TakeDeferredPurgesDue() => Interlocked.Exchange(ref deferredPurgesDue, 0) == 1;
+
+    /// <summary>
     /// Bound SELECT statements reusable across executions of the same cached SQL text, keyed by the
     /// parse-cache <see cref="SQLParser.NodeAst"/> instance. Lives on the descriptor so that closing,
     /// dropping, or evicting this database releases every cached binding with it — a slot must never

@@ -671,8 +671,14 @@ internal sealed class DatabaseDropper
     /// ordinary table. Purging the identity's key-space in that case would delete nothing and silently
     /// leave a full copy of the relation behind forever.
     /// </param>
+    /// <param name="knownIndexIds">
+    /// Index ids to purge in addition to the ones the key-space catalog names. A table dropped inside a
+    /// transaction passes every index it had, because in a branch database the catalog of an inherited
+    /// table is absent.
+    /// </param>
     internal async Task<bool> PurgeTableKeyspaceAsync(
-        IKahuna kahuna, string dbId, string tableId, string? storageId = null, CancellationToken ct = default)
+        IKahuna kahuna, string dbId, string tableId, string? storageId = null, CancellationToken ct = default,
+        IReadOnlyCollection<string>? knownIndexIds = null)
     {
         string dataId = string.IsNullOrEmpty(storageId) ? tableId : storageId;
 
@@ -723,6 +729,17 @@ internal sealed class DatabaseDropper
         // Purge row, large-value and index buckets, and delete the stats/catalog/meta keys — all verified. The orphan
         // record is NOT touched here; it is the recovery marker and is deleted only if everything else
         // is confirmed gone, so an incomplete purge leaves the record for a later sweep to finish.
+        // The caller may know index ids the catalog does not hold: a branch database has no catalog of
+        // its own for a table it inherited, yet keeps its own entries for that table's indexes.
+        if (knownIndexIds is not null)
+        {
+            foreach (string known in knownIndexIds)
+            {
+                if (!indexIds.Contains(known))
+                    indexIds.Add(known);
+            }
+        }
+
         bool complete = catalogRead;
         complete &= await PurgeSpaceAsync(kahuna, dbId, KvKeyBuilder.RowSpaceOf(dbId, dataId), ct).ConfigureAwait(false);
         complete &= await PurgeSpaceAsync(kahuna, dbId, KvKeyBuilder.LargeValueSpaceOf(dbId, dataId), ct).ConfigureAwait(false);
@@ -838,6 +855,18 @@ internal sealed class DatabaseDropper
     /// purge, so the two halves cannot drift apart.
     /// </summary>
     private static (string bucket, string keyPrefix) BucketOf(string keySpace) => (keySpace, keySpace + "/");
+
+    /// <summary>
+    /// Purges one row, large-value or index key space of database <paramref name="dbId"/>, and returns true
+    /// only when the key space is confirmed empty. Used by <see cref="DeferredPurgeRunner"/> to remove the
+    /// data of a published change set.
+    /// </summary>
+    internal Task<bool> PurgeKeySpaceAsync(IKahuna kahuna, string dbId, string keySpace, CancellationToken ct = default)
+        => PurgeSpaceAsync(kahuna, dbId, keySpace, ct);
+
+    /// <summary>Deletes one key and returns true only when it is confirmed gone; see <see cref="DeleteExactVerifiedAsync"/>.</summary>
+    internal Task<bool> DeleteKeyVerifiedAsync(IKahuna kahuna, string key, CancellationToken ct = default)
+        => DeleteExactVerifiedAsync(kahuna, key, ct);
 
     /// <summary>Purges one row or index key space; see <see cref="PurgeBucketAsync"/> for the contract.</summary>
     private Task<bool> PurgeSpaceAsync(IKahuna kahuna, string id, string keySpace, CancellationToken ct)

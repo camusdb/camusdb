@@ -862,8 +862,9 @@ later `ROLLBACK` does not undo it. `TRUNCATE`, `ALTER TABLE … REWRITE STORAGE`
   returns, every live node has the change.
 - `ROLLBACK`, a failed statement (§9.4) and a refused commit undo the change and the rows together.
 
-Inside a transaction, these statements run with the setting on: `CREATE TABLE`, `DROP TABLE` (not
-`FORCE`), `ALTER TABLE … RENAME TO`, `RENAME COLUMN`, `RENAME INDEX`, `DROP COLUMN`, `DROP INDEX`,
+Inside a transaction, these statements run with the setting on: `CREATE TABLE`, `DROP TABLE` (also
+with `FORCE`, and in a branch database), `ALTER TABLE … RENAME TO`, `RENAME COLUMN`, `RENAME INDEX`,
+`DROP COLUMN`, `DROP INDEX`,
 `ALTER TABLE … SET` and `RESET`, `COMMENT ON TABLE`, `COLUMN` and `INDEX`, and `CREATE`, `CREATE OR
 REPLACE`, `DROP` and `ALTER … RENAME` of a view. `ADD COLUMN`, `CREATE INDEX`, `ADD UNIQUE` and
 `ADD PRIMARY KEY` run when no existing row needs work: a nullable `ADD COLUMN` with no default runs on
@@ -889,6 +890,14 @@ What the transaction meets:
   touches (or a table that a new foreign key references) waits until the change is visible. The wait is
   normally a few milliseconds. A writer of such a table that planned before the commit is refused at its
   own commit with the retryable `CADB0502`.
+- **Dropped data leaves the disk after the commit.** A `DROP INDEX`, a `DROP TABLE … FORCE` and a
+  `DROP TABLE` in a branch database remove no data inside the transaction, so a `ROLLBACK` keeps every
+  row and index entry. After the commit, the committing node removes the data before `COMMIT` returns,
+  and a background sweep finishes the removal if that node fails. A `DROP TABLE` without `FORCE` keeps
+  the table recoverable, as outside a transaction.
+- **`DROP COLUMN` rewrites no row.** As in PostgreSQL, the column leaves the schema at once, and its
+  value leaves the disk when each row is next updated or deleted. No query returns it, and a new column
+  with the same name reads NULL in the old rows.
 - **`COMMIT` can fail with `CADB0509` after the rows committed.** This happens when the schema change
   cannot be confirmed on every live node, for example during a leader change. Retry `COMMIT` on the same
   transaction; it waits for the schema change and does not run the transaction again.
