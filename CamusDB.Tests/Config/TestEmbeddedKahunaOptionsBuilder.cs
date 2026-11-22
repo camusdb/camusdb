@@ -638,15 +638,21 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     [Test]
     public void WriteWakeSwitches_Override_FlowThrough()
     {
-        // Both switches are off in Kahuna and stay off unless the config says otherwise.
+        // Both switches are on in every baseline, and an explicit false turns each one off.
         EmbeddedKahunaOptions defaults = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/wake-unset", new KahunaOptionsConfig(), CamusDBOptions.Default);
-        Assert.That(defaults.KeyValueWritePreciseWake, Is.False);
-        Assert.That(defaults.KeyValueWriteFillTargetTrigger, Is.False);
+        Assert.That(defaults.KeyValueWritePreciseWake, Is.True);
+        Assert.That(defaults.KeyValueWriteFillTargetTrigger, Is.True);
 
-        KahunaOptionsConfig set = new() { KeyValueWritePreciseWake = true, KeyValueWriteFillTargetTrigger = true };
-        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/wake-set", set, CamusDBOptions.Default);
-        Assert.That(built.KeyValueWritePreciseWake, Is.True);
-        Assert.That(built.KeyValueWriteFillTargetTrigger, Is.True);
+        KahunaOptionsConfig off = new() { KeyValueWritePreciseWake = false, KeyValueWriteFillTargetTrigger = false };
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/wake-off", off, CamusDBOptions.Default);
+        Assert.That(built.KeyValueWritePreciseWake, Is.False);
+        Assert.That(built.KeyValueWriteFillTargetTrigger, Is.False);
+
+        // One switch set leaves the other at its baseline.
+        KahunaOptionsConfig wakeOff = new() { KeyValueWritePreciseWake = false };
+        EmbeddedKahunaOptions wakeOnly = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/wake-only", wakeOff, CamusDBOptions.Default);
+        Assert.That(wakeOnly.KeyValueWritePreciseWake, Is.False);
+        Assert.That(wakeOnly.KeyValueWriteFillTargetTrigger, Is.True);
     }
 
     // ── Post-completion hold ─────────────────────────────────────────────────
@@ -655,25 +661,47 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     public void Baselines_HoldOneMsAfterABatchCompletes_ByDefault()
     {
         // Kahuna's own default is 0 (dispatch the next batch the instant one completes); CamusDB ships
-        // 1 ms so a fully occupied aggregator packs more items per Raft round. The hold's timer fires
-        // about 1 ms late, so 1 ms configured is ~2 ms of accumulation; 2 ms was the default while the
-        // round was ~2.4 ms, and 1 ms measured +2.5% throughput with a shorter commit once the round
-        // reached ~1.6 ms, while 0 ms slowed the reads that share the partition executor. Every
-        // baseline carries it.
+        // 1 ms so a fully occupied aggregator packs more items per Raft round. Every baseline carries it.
         string dataPath = "/tmp/hold-test";
         ConfigDefinition config = new() { DataDir = dataPath };
 
         Assert.That(EmbeddedKahunaOptionsBuilder.DefaultKeyValueWritePostCompletionHoldMs, Is.EqualTo(1));
+        Assert.That(EmbeddedKahunaOptionsBuilder.StandaloneBaseline(dataPath).KeyValueWritePostCompletionHoldMs, Is.EqualTo(1));
         Assert.That(EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline(dataPath).KeyValueWritePostCompletionHoldMs, Is.EqualTo(1));
         Assert.That(EmbeddedKahunaOptionsBuilder.ClusterBaseline(config, CamusDBOptions.Default).KeyValueWritePostCompletionHoldMs, Is.EqualTo(1));
         Assert.That(new EmbeddedKahunaOptions().KeyValueWritePostCompletionHoldMs, Is.EqualTo(0), "the Kahuna default this baseline deliberately departs from");
     }
 
     [Test]
+    public void Baselines_EndTheHoldOnTheTimerThread_AndDispatchAFullBuffer_ByDefault()
+    {
+        // The hold ends at its deadline and a buffer that reaches the fill target leaves before it
+        // ends, in every baseline. The fill trigger is off in Kahuna, so a baseline that dropped the
+        // line would lose it without failing anything else.
+        string dataPath = "/tmp/hold-switches-test";
+        ConfigDefinition config = new() { DataDir = dataPath };
+
+        EmbeddedKahunaOptions[] baselines =
+        [
+            EmbeddedKahunaOptionsBuilder.StandaloneBaseline(dataPath),
+            EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline(dataPath),
+            EmbeddedKahunaOptionsBuilder.ClusterBaseline(config, CamusDBOptions.Default),
+        ];
+
+        foreach (EmbeddedKahunaOptions baseline in baselines)
+        {
+            Assert.That(baseline.KeyValueWritePreciseWake, Is.True);
+            Assert.That(baseline.KeyValueWriteFillTargetTrigger, Is.True);
+        }
+
+        Assert.That(new EmbeddedKahunaOptions().KeyValueWriteFillTargetTrigger, Is.False, "the Kahuna default this baseline departs from");
+    }
+
+    [Test]
     public void PostCompletionHold_ExplicitZero_RestoresImmediateDispatch()
     {
         // An operator who wants Kahuna's dispatch-at-once behaviour sets the key to 0 explicitly; 0 is a
-        // value, not "unset", so it must not be replaced by the shipped 2.
+        // value, so the shipped 1 must not replace it.
         KahunaOptionsConfig zero = new() { KeyValueWritePostCompletionHoldMs = 0 };
 
         Assert.That(EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/hold-zero", zero, CamusDBOptions.Default).KeyValueWritePostCompletionHoldMs, Is.EqualTo(0));

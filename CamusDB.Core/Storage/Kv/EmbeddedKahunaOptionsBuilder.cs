@@ -141,17 +141,15 @@ public static class EmbeddedKahunaOptionsBuilder
             // every key on that actor. See KahunaOptionsConfig.RocksdbDirectReads for the measurement.
             // Override with kahuna.rocksdb_direct_reads.
             RocksDbDirectReads = false,
-            // Hold 1 ms after a batch completes before dispatching the next (Kahuna's default is 0).
-            // At full occupancy the aggregator keeps one Raft round in flight and re-dispatches the
-            // instant it completes, so batches stay thin; the hold lets more items accumulate per
-            // round. The timer that ends the hold fires about 1 ms late, so the effective hold is the
-            // configured value plus ~1 ms: 1 ms configured buys ~2 ms of accumulation. Measured on the
-            // tmpfs bank shape at 128 workers with a 1.6 ms Raft round: 2 -> 1 ms gave +2.5% throughput
-            // and -0.5 ms on the commit; 0 ms made the commit fastest but ran 2.8x the rounds, which
-            // slowed reads and updates on the shared executor, and the closed loop lost 5%. Free at low
-            // load: an idle aggregator still dispatches on arrival. Override with
-            // kahuna.key_value_write_post_completion_hold_ms.
+            // Hold 1 ms after a batch completes before dispatching the next (Kahuna's default is 0),
+            // so a round carries more items. The hold ends on the aggregator's timer thread, at its
+            // deadline, and a buffer that reaches the learned fill target is dispatched before the
+            // hold ends. The measurements are on the three Default* constants. Override with
+            // kahuna.key_value_write_post_completion_hold_ms, kahuna.key_value_write_precise_wake
+            // and kahuna.key_value_write_fill_target_trigger.
             KeyValueWritePostCompletionHoldMs = DefaultKeyValueWritePostCompletionHoldMs,
+            KeyValueWritePreciseWake = DefaultKeyValueWritePreciseWake,
+            KeyValueWriteFillTargetTrigger = DefaultKeyValueWriteFillTargetTrigger,
             // Materialize on resolve: the commit's settle installs the committed values on every replica and no
             // materialization record is written. See DefaultDurableMaterializeOnResolve for the evidence and
             // the rolling-upgrade rule. Override with kahuna.durable_materialize_on_resolve.
@@ -208,17 +206,15 @@ public static class EmbeddedKahunaOptionsBuilder
             // every key on that actor. See KahunaOptionsConfig.RocksdbDirectReads for the measurement.
             // Override with kahuna.rocksdb_direct_reads.
             RocksDbDirectReads = false,
-            // Hold 1 ms after a batch completes before dispatching the next (Kahuna's default is 0).
-            // At full occupancy the aggregator keeps one Raft round in flight and re-dispatches the
-            // instant it completes, so batches stay thin; the hold lets more items accumulate per
-            // round. The timer that ends the hold fires about 1 ms late, so the effective hold is the
-            // configured value plus ~1 ms: 1 ms configured buys ~2 ms of accumulation. Measured on the
-            // tmpfs bank shape at 128 workers with a 1.6 ms Raft round: 2 -> 1 ms gave +2.5% throughput
-            // and -0.5 ms on the commit; 0 ms made the commit fastest but ran 2.8x the rounds, which
-            // slowed reads and updates on the shared executor, and the closed loop lost 5%. Free at low
-            // load: an idle aggregator still dispatches on arrival. Override with
-            // kahuna.key_value_write_post_completion_hold_ms.
+            // Hold 1 ms after a batch completes before dispatching the next (Kahuna's default is 0),
+            // so a round carries more items. The hold ends on the aggregator's timer thread, at its
+            // deadline, and a buffer that reaches the learned fill target is dispatched before the
+            // hold ends. The measurements are on the three Default* constants. Override with
+            // kahuna.key_value_write_post_completion_hold_ms, kahuna.key_value_write_precise_wake
+            // and kahuna.key_value_write_fill_target_trigger.
             KeyValueWritePostCompletionHoldMs = DefaultKeyValueWritePostCompletionHoldMs,
+            KeyValueWritePreciseWake = DefaultKeyValueWritePreciseWake,
+            KeyValueWriteFillTargetTrigger = DefaultKeyValueWriteFillTargetTrigger,
             // Materialize on resolve: the commit's settle installs the committed values on every replica and no
             // materialization record is written. See DefaultDurableMaterializeOnResolve for the evidence and
             // the rolling-upgrade rule. Override with kahuna.durable_materialize_on_resolve.
@@ -276,17 +272,15 @@ public static class EmbeddedKahunaOptionsBuilder
             // every key on that actor. See KahunaOptionsConfig.RocksdbDirectReads for the measurement.
             // Override with kahuna.rocksdb_direct_reads.
             RocksDbDirectReads = false,
-            // Hold 1 ms after a batch completes before dispatching the next (Kahuna's default is 0).
-            // At full occupancy the aggregator keeps one Raft round in flight and re-dispatches the
-            // instant it completes, so batches stay thin; the hold lets more items accumulate per
-            // round. The timer that ends the hold fires about 1 ms late, so the effective hold is the
-            // configured value plus ~1 ms: 1 ms configured buys ~2 ms of accumulation. Measured on the
-            // tmpfs bank shape at 128 workers with a 1.6 ms Raft round: 2 -> 1 ms gave +2.5% throughput
-            // and -0.5 ms on the commit; 0 ms made the commit fastest but ran 2.8x the rounds, which
-            // slowed reads and updates on the shared executor, and the closed loop lost 5%. Free at low
-            // load: an idle aggregator still dispatches on arrival. Override with
-            // kahuna.key_value_write_post_completion_hold_ms.
+            // Hold 1 ms after a batch completes before dispatching the next (Kahuna's default is 0),
+            // so a round carries more items. The hold ends on the aggregator's timer thread, at its
+            // deadline, and a buffer that reaches the learned fill target is dispatched before the
+            // hold ends. The measurements are on the three Default* constants. Override with
+            // kahuna.key_value_write_post_completion_hold_ms, kahuna.key_value_write_precise_wake
+            // and kahuna.key_value_write_fill_target_trigger.
             KeyValueWritePostCompletionHoldMs = DefaultKeyValueWritePostCompletionHoldMs,
+            KeyValueWritePreciseWake = DefaultKeyValueWritePreciseWake,
+            KeyValueWriteFillTargetTrigger = DefaultKeyValueWriteFillTargetTrigger,
             // Materialize on resolve: the commit's settle installs the committed values on every replica and no
             // materialization record is written. See DefaultDurableMaterializeOnResolve for the evidence and
             // the rolling-upgrade rule. Override with kahuna.durable_materialize_on_resolve.
@@ -863,21 +857,49 @@ public static class EmbeddedKahunaOptionsBuilder
     internal static bool RaftWalFlushUnitFloorEnabled = true;
 
     /// <summary>
-    /// CamusDB's shipped post-completion hold for Kahuna's key/value write aggregator, in
-    /// milliseconds (Kahuna's own default is 0). The aggregator keeps exactly one Raft batch in
-    /// flight per partition and re-dispatches the moment a batch completes, so at full occupancy
-    /// batches carry whatever arrived during one round; holding before the next dispatch lets more
-    /// items accumulate per round. The timer that ends the hold fires about 1 ms late, so the
-    /// effective hold is this value plus ~1 ms. The default was 2 ms while the round was ~2.4 ms
-    /// (it roughly doubled the items per round, 110 vs 51 at 128 workers on the bank shape, for
-    /// +6% throughput and a lower write p50). With the round at ~1.6 ms, a one-variable sweep on the
-    /// same shape measured 2 / 1 / 0 ms at 9,193 / 9,421 / 8,755 ops/s: 1 ms keeps ~128 items per
-    /// batch and takes 0.5 ms off the commit, while 0 ms runs 2.8x the rounds and slows the reads
-    /// and updates that share the partition executor. It costs nothing at low load because an idle
-    /// aggregator dispatches on arrival. An explicit <c>kahuna.key_value_write_post_completion_hold_ms</c>
-    /// (including 0) always wins.
+    /// CamusDB's post-completion hold for Kahuna's key/value write aggregator, in milliseconds
+    /// (Kahuna's own default is 0). The aggregator keeps one Raft batch in flight per partition and
+    /// dispatches the next when a batch completes, so at full occupancy a batch carries what arrived
+    /// during one round; the hold lets more items accumulate per round. It lasts its configured time
+    /// with <see cref="DefaultKeyValueWritePreciseWake"/>, and a buffer that fills early leaves before
+    /// it ends with <see cref="DefaultKeyValueWriteFillTargetTrigger"/>. A hold of 0 with a linger of
+    /// 0 is faster on one node (1.18x at 64 workers on the bank shape) and is not the default: on
+    /// three nodes at 8 workers it used 2.2 times the CPU per transaction for less throughput than
+    /// the exact hold, it wrote 16% to 47% more to the device per transaction, and on a three-node
+    /// NVMe cluster four runs ranged from 6,526 to 9,850 transactions a second. An explicit
+    /// <c>kahuna.key_value_write_post_completion_hold_ms</c> (including 0) always wins.
     /// </summary>
     internal const int DefaultKeyValueWritePostCompletionHoldMs = 1;
+
+    /// <summary>
+    /// CamusDB's baseline for <c>kahuna.key_value_write_precise_wake</c>: on, which is also Kahuna's
+    /// default from 1.18.3. The aggregator's hold, linger and queue-age wakes fire from one timer
+    /// thread per node. The .NET timer queue measures a delay with a clock that advances once per
+    /// kernel tick on Linux (4 ms on a 250 Hz kernel), so on it a 1 ms hold ended at the next tick and
+    /// a write cycle lasted a whole tick. Measured on the bank shape against the timer queue, with
+    /// the hold at 1 ms: 1.75x at 8 workers and 1.14x at 64 on one node, 1.32x at 8 workers on three
+    /// nodes, and level at 64 to 256 workers on three nodes.
+    /// <para>A shorter cycle runs more Raft rounds per second. Under the dynamic adaptation mode of
+    /// the server GC that can shrink the young generation of the leader until collections take a
+    /// tenth to a quarter of its time, so the server project turns the mode off and
+    /// <see cref="GcStartupChecks"/> warns when a deployment turns it back on.</para>
+    /// </summary>
+    internal const bool DefaultKeyValueWritePreciseWake = true;
+
+    /// <summary>
+    /// CamusDB's baseline for <c>kahuna.key_value_write_fill_target_trigger</c>: on (Kahuna's own
+    /// default is off). A held buffer is dispatched when it reaches the learned fill target, the
+    /// median size of the partition's recent timer-dispatched batches, so a busy partition does not
+    /// wait out the hold. On a three-node NVMe cluster at 8 workers the Raft round is two thirds of
+    /// the cycle and the exact hold alone gained nothing; with the trigger 83% of the rounds left on
+    /// a full buffer, the mean hold fell from 1.00 to 0.30 ms and throughput rose 20%. With both
+    /// switches the bank shape ran 1.89x (one node, 8 workers), 1.15x (one node, 64 workers) and
+    /// 1.38x (three nodes, 8 workers) of the timer-queue hold on tmpfs, 1.10x to 1.20x on NVMe, and
+    /// level on three nodes at 64 to 256 workers. The cost is device headroom: about 20% more device
+    /// writes per transaction, and a drive that ran near 63% utilisation where the timer-queue hold
+    /// ran near 35%.
+    /// </summary>
+    internal const bool DefaultKeyValueWriteFillTargetTrigger = true;
 
     /// <summary>
     /// CamusDB's baseline for <c>kahuna.durable_materialize_on_resolve</c>: on. The commit's settle installs

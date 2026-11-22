@@ -570,28 +570,32 @@ public sealed class KahunaOptionsConfig
 
     /// <summary>
     /// How long the write aggregator holds after a batch completes before dispatching the next one, in
-    /// milliseconds (Kahuna 1.7.2, default 0 = dispatch at once). The linger never fires at full occupancy
-    /// because completion re-dispatches whatever is queued; this hold is the knob that actually adds batch
-    /// density there, at the cost of that much write latency. Measured round cost is ~1.4 ms fixed plus
-    /// ~18 µs per item, so a 2 ms hold on a 2.35 ms round is predicted to roughly double items per batch.
+    /// milliseconds (CamusDB default 1; Kahuna's own default is 0 = dispatch at once). The linger never
+    /// fires at full occupancy because completion re-dispatches whatever is queued; this hold adds batch
+    /// density there, at the cost of that much write latency. See
+    /// <see cref="Storage.Kv.EmbeddedKahunaOptionsBuilder.DefaultKeyValueWritePostCompletionHoldMs"/>.
     /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.KeyValueWritePostCompletionHoldMs"/>.
     /// </summary>
     public int? KeyValueWritePostCompletionHoldMs { get; set; }
 
     /// <summary>
     /// Fire the write aggregator's wakes (hold, linger, queue age) from one dedicated timer thread per
-    /// node instead of the timer queue (Kahuna 1.11.6, default false). The timer queue's granularity and
-    /// thread-pool hop make a millisecond-scale hold fire 1-3 ms late on every cycle; the dedicated thread
-    /// sleeps whole milliseconds in a kernel wait and spins only the sub-millisecond remainder, so the hold
-    /// is honoured to its deadline. Maps to <see cref="Kahuna.EmbeddedKahunaOptions.KeyValueWritePreciseWake"/>.
+    /// node instead of the timer queue (default true). On Linux the timer queue measures a delay with a
+    /// clock that advances once per kernel tick, 4 ms on a 250 Hz kernel, so a millisecond hold ends at
+    /// the next tick; the dedicated thread sleeps whole milliseconds in a kernel wait and spins the
+    /// sub-millisecond remainder, so the hold ends at its deadline. False returns the wakes to the timer
+    /// queue. With the exact hold keep the GC's dynamic adaptation mode off, as the server build does:
+    /// see <see cref="GcStartupChecks"/>. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.KeyValueWritePreciseWake"/>.
     /// </summary>
     public bool? KeyValueWritePreciseWake { get; set; }
 
     /// <summary>
-    /// Fill-or-time dispatch (Kahuna 1.11.6, default false): a held or lingering partition buffer is
-    /// dispatched as soon as it reaches the learned fill target, the upper median of its recent
-    /// timer-dispatched batch sizes, instead of waiting out the hold. Probe cycles keep the target
-    /// following the load. Maps to <see cref="Kahuna.EmbeddedKahunaOptions.KeyValueWriteFillTargetTrigger"/>.
+    /// Fill-or-time dispatch (default true; Kahuna's own default is false): a held or lingering
+    /// partition buffer is dispatched as soon as it reaches the learned fill target, the upper median of
+    /// its recent timer-dispatched batch sizes, instead of waiting out the hold. Probe cycles keep the
+    /// target following the load. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.KeyValueWriteFillTargetTrigger"/>.
     /// </summary>
     public bool? KeyValueWriteFillTargetTrigger { get; set; }
 

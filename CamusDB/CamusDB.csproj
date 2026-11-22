@@ -6,6 +6,15 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <ServerGarbageCollection>true</ServerGarbageCollection>
+    <!-- The server GC's dynamic adaptation mode (on by default in the runtime) sizes the young
+         generation from the share of memory that survives a collection. A node that runs frequent
+         Raft rounds leaves little alive at each collection, and a busy leader then settled into a
+         state with many small collections: 13.6% of its time in GC pauses on one node, 24% and
+         0.80x throughput on a three-node leader. With the mode off the young generation keeps the
+         classic server GC budget, and no measured run collapsed. It costs 3% to 4% of throughput on three
+         nodes at 128 workers, and an idle node holds 100 to 250 MiB more memory.
+         DOTNET_GCDynamicAdaptationMode in the environment overrides the value written here. -->
+    <GarbageCollectionAdaptationMode>0</GarbageCollectionAdaptationMode>
     <Version>0.18.5</Version>
     <InvariantGlobalization>true</InvariantGlobalization>
     <!-- English resources only: the C# compiler that CamusDB.Core references for inline SQL functions
