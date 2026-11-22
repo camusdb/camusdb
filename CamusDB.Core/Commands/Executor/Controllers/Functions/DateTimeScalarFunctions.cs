@@ -22,7 +22,9 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Functions;
 /// </summary>
 /// <remarks>
 /// <para>Every unit is computed on the UTC value. A string argument must carry an explicit offset,
-/// so a part never depends on the server time zone.</para>
+/// so a part never depends on the server time zone. <c>date_trunc</c> and <c>date_part</c> take an
+/// optional IANA zone name as a third argument, and then compute the unit on the wall clock of that
+/// zone (<see cref="TimeZoneRules"/>). The result of <c>date_trunc</c> is still a UTC instant.</para>
 /// <para>A part is always <c>Integer64</c>, because return-type inference sees the argument types and
 /// not the unit literal. PostgreSQL returns <c>numeric</c> instead, so two of its units differ here:
 /// <c>epoch</c> is whole seconds (rounded down, also before 1970), and <c>millisecond</c> /
@@ -78,18 +80,29 @@ internal static class DateTimeScalarFunctions
         });
         RegisterTernary(registry, "date_diff", EvaluateDateDiff, _ => ColumnType.Integer64);
         // EXTRACT(field FROM x) parses to a call named "extract" whose arguments are (field, x), the
-        // same order as date_part, so one evaluator serves both spellings.
+        // same order as date_part, so one evaluator serves both spellings. The optional third
+        // argument is a time zone name.
         registry.Register(new ScalarFunctionDescriptor
         {
             Name = "date_part",
             Aliases = ["extract"],
             MinArity = 2,
-            MaxArity = 2,
+            MaxArity = 3,
+            TimeZoneArgumentIndex = 2,
             Evaluator = EvaluateDatePart,
             InferReturnType = _ => ColumnType.Integer64,
         });
 
-        RegisterBinary(registry, "date_trunc", EvaluateDateTrunc, _ => ColumnType.DateTime);
+        // date_trunc(unit, x [, zone]), the PostgreSQL form.
+        registry.Register(new ScalarFunctionDescriptor
+        {
+            Name = "date_trunc",
+            MinArity = 2,
+            MaxArity = 3,
+            TimeZoneArgumentIndex = 2,
+            Evaluator = EvaluateDateTrunc,
+            InferReturnType = _ => ColumnType.DateTime,
+        });
 
         // With no argument it reports the start of the transaction, as now() does, so it reads the
         // statement's times; with one it converts its argument.
@@ -203,22 +216,6 @@ internal static class DateTimeScalarFunctions
         });
     }
 
-    private static void RegisterBinary(
-        ScalarFunctionRegistry registry,
-        string name,
-        ScalarFunctionEvaluatorDelegate evaluator,
-        ScalarReturnTypeInferenceDelegate inferReturnType)
-    {
-        registry.Register(new ScalarFunctionDescriptor
-        {
-            Name = name,
-            MinArity = 2,
-            MaxArity = 2,
-            Evaluator = evaluator,
-            InferReturnType = inferReturnType,
-        });
-    }
-
     private static void RegisterTernary(
         ScalarFunctionRegistry registry,
         string name,
@@ -304,6 +301,12 @@ internal static class DateTimeScalarFunctions
         return new ColumnValue(ColumnType.Integer64, difference);
     }
 
+    /// <summary>
+    /// <c>date_part(unit, x [, zone])</c>. With a zone, the part is read from the wall clock of the
+    /// zone at the instant <c>x</c>. <c>epoch</c> counts the seconds of the instant, so the zone does
+    /// not change it, as for a PostgreSQL <c>timestamptz</c>. An interval has no zone, so a zone with
+    /// an interval is an error.
+    /// </summary>
     private static ColumnValue EvaluateDatePart(string calledName, IReadOnlyList<ColumnValue> arguments)
     {
         if (PropagateNull(arguments) is ColumnValue nullResult)
@@ -314,9 +317,27 @@ internal static class DateTimeScalarFunctions
         DateTimeUnit unit = ParseUnit(calledName, arguments[0].StrValue!);
 
         if (arguments[1].Type == ColumnType.Interval)
+        {
+            if (arguments.Count == 3)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    $"Function '{calledName}' takes a time zone for a date or datetime value only, not for an interval");
+
             return new ColumnValue(ColumnType.Integer64, ExtractIntervalPart(arguments[0].StrValue!, unit, arguments[1].IntervalParts));
+        }
 
         DateTimeOffset value = ReadTemporal(calledName, 1, arguments[1]);
+
+        if (arguments.Count == 3)
+        {
+            NodaTime.DateTimeZone zone = TimeZoneRules.Resolve(calledName, 2, arguments[2]);
+
+            if (unit != DateTimeUnit.Epoch)
+            {
+                WallClockReading reading = TimeZoneRules.Read(calledName, value.UtcTicks, zone);
+                return new ColumnValue(ColumnType.Integer64, ExtractPart(new DateTimeOffset(reading.WallClock, TimeSpan.Zero), unit));
+            }
+        }
 
         return new ColumnValue(ColumnType.Integer64, ExtractPart(value.ToUniversalTime(), unit));
     }
@@ -475,6 +496,13 @@ internal static class DateTimeScalarFunctions
         return utc.DayOfYear < firstSundayDayOfYear ? 0 : (utc.DayOfYear - firstSundayDayOfYear) / 7 + 1;
     }
 
+    /// <summary>
+    /// <c>date_trunc(unit, x [, zone])</c>. With a zone, the result is the UTC instant at which the
+    /// unit that holds <c>x</c> starts on the wall clock of the zone, so <c>GROUP BY
+    /// date_trunc('day', created, 'America/Bogota')</c> groups by local day. See
+    /// <see cref="TimeZoneRules.StartOfWallClock"/> for the skipped and repeated times of a daylight
+    /// saving change.
+    /// </summary>
     private static ColumnValue EvaluateDateTrunc(string calledName, IReadOnlyList<ColumnValue> arguments)
     {
         if (PropagateNull(arguments) is ColumnValue nullResult)
@@ -482,11 +510,24 @@ internal static class DateTimeScalarFunctions
 
         RequireString(calledName, 0, arguments[0]);
 
-        DateTimeUnit unit = ParseUnit(calledName, arguments[0].StrValue!);
+        string unitText = arguments[0].StrValue!;
+        DateTimeUnit unit = ParseUnit(calledName, unitText);
         DateTimeOffset value = ReadTemporal(calledName, 1, arguments[1]);
-        DateTimeOffset truncated = TruncateUtc(calledName, arguments[0].StrValue!, value, unit);
 
-        return MakeDateTime(truncated);
+        if (arguments.Count == 2)
+            return MakeDateTime(TruncateUtc(calledName, unitText, value, unit));
+
+        NodaTime.DateTimeZone zone = TimeZoneRules.Resolve(calledName, 2, arguments[2]);
+        WallClockReading reading = TimeZoneRules.Read(calledName, value.UtcTicks, zone);
+        DateTimeOffset truncatedWallClock = TruncateUtc(calledName, unitText, new DateTimeOffset(reading.WallClock, TimeSpan.Zero), unit);
+
+        bool shorterThanDay = unit is DateTimeUnit.Hour or DateTimeUnit.Minute or DateTimeUnit.Second
+            or DateTimeUnit.Millisecond or DateTimeUnit.Microsecond;
+
+        long utcTicks = TimeZoneRules.StartOfWallClock(
+            calledName, truncatedWallClock.DateTime, zone, reading.Interval, keepValueOccurrence: shorterThanDay);
+
+        return new ColumnValue(ColumnType.DateTime, utcTicks);
     }
 
     private static ColumnValue EvaluateUnixTimestamp(

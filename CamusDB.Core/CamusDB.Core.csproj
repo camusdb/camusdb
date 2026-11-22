@@ -111,6 +111,9 @@
     <PackageReference Include="Gppg.Modern" Version="1.6.0" PrivateAssets="all" />
     <PackageReference Include="YaccLexTools.Gplex" Version="1.2.3.1" PrivateAssets="all" />
     <PackageReference Include="Nito.AsyncEx" Version="5.1.2" />
+    <!-- The IANA time zone database for the zone argument of the date functions. It is embedded in
+         the assembly, so every node on the same build uses the same zone rules on every platform. -->
+    <PackageReference Include="NodaTime" Version="3.3.7" />
     <PackageReference Include="YamlDotNet" Version="18.1.0" />
   </ItemGroup>
 

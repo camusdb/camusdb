@@ -191,6 +191,16 @@ internal static class ScalarFunctionEvaluator
         => NodeAstWalk.Any(ast, IsStatementScopedCall);
 
     /// <summary>
+    /// Returns <c>true</c> if <paramref name="ast"/> or any descendant calls a function with its time
+    /// zone argument (<see cref="ScalarFunctionDescriptor.TimeZoneArgumentIndex"/>), such as
+    /// <c>date_trunc('day', ts, 'Asia/Kolkata')</c>. The coordinator of a distributed query sends its
+    /// zone data version with a fragment only when the fragment's expressions answer true, so a peer on
+    /// other zone rules refuses just those fragments and still serves every other one.
+    /// </summary>
+    internal static bool ContainsTimeZoneDependentCall(NodeAst? ast)
+        => NodeAstWalk.Any(ast, IsTimeZoneDependentCall);
+
+    /// <summary>
     /// True when <paramref name="functionName"/> reports the start of the transaction or of the
     /// statement. The insert paths use it to decide whether a function default needs those times.
     /// </summary>
@@ -315,6 +325,36 @@ internal static class ScalarFunctionEvaluator
 
     private static bool IsStatementClockCall(NodeAst node)
         => TryGetCalledDescriptor(node, out ScalarFunctionDescriptor? d) && d!.ReadsStatementClock;
+
+    /// <summary>
+    /// True when <paramref name="node"/> is a call of a function that takes a zone argument, and the call
+    /// passes it. The result of such a call depends on the time zone database built into this build, so
+    /// a query fragment that holds one carries the database version, and an index expression refuses it.
+    /// </summary>
+    internal static bool IsTimeZoneDependentCall(NodeAst node)
+        => TryGetCalledDescriptor(node, out ScalarFunctionDescriptor? d)
+            && d!.TimeZoneArgumentIndex is int zoneIndex
+            && CountArguments(node.rightAst) > zoneIndex;
+
+    /// <summary>
+    /// The number of arguments in a call's argument list: a left-deep chain of
+    /// <see cref="NodeType.ExprArgumentList"/> nodes, or one bare expression for a one-argument call.
+    /// The loop follows the left spine, so it does not recurse.
+    /// </summary>
+    private static int CountArguments(NodeAst? argumentList)
+    {
+        int count = 0;
+
+        while (argumentList is { nodeType: NodeType.ExprArgumentList })
+        {
+            if (argumentList.rightAst is not null)
+                count++;
+
+            argumentList = argumentList.leftAst;
+        }
+
+        return argumentList is null ? count : count + 1;
+    }
 
     private static bool IsStatementScopedCall(NodeAst node)
         => TryGetCalledDescriptor(node, out ScalarFunctionDescriptor? d) && (d!.IsSessionScoped || d.ReadsStatementClock);

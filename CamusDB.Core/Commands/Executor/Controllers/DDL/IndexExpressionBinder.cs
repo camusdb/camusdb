@@ -60,7 +60,8 @@ internal sealed record ResolvedIndexKey(
 /// <see cref="ScalarFunctionRegistry.ImmutableFunctionNames"/> are accepted. Everything else is
 /// <see cref="CamusDBErrorCodes.InvalidIndexExpression"/>: a subquery, an aggregate, a window call, a
 /// parameter, DEFAULT, a column of another relation, an extension or inline function, and a function
-/// that reads the clock, the session, a sequence or a random source. The result type must be known
+/// that reads the clock, the session, a sequence or a random source, and a call that passes a time zone
+/// argument. The result type must be known
 /// before a row is read and must have an ordered key encoding.</para>
 ///
 /// <para>Every walk here is iterative: the grammar is left-recursive, so a long operator chain is a
@@ -442,6 +443,10 @@ internal static class IndexExpressionBinder
 
         if (!ScalarFunctionRegistry.IsImmutable(descriptor))
             throw Refused(null, $"the function '{name}' cannot be part of an index expression: its result can change for the same arguments");
+
+        // The zone rules come with the build, so a later build can compute another key for the same row.
+        if (ScalarFunctionEvaluator.IsTimeZoneDependentCall(call))
+            throw Refused(null, $"the function '{name}' with a time zone argument cannot be part of an index expression: its result depends on the time zone rules of the build");
     }
 
     private static void RequireUnsizedCastTarget(NodeAst? target)

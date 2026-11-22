@@ -52,7 +52,10 @@ internal sealed class ScalarFunctionRegistry
     /// that includes every extension and inline function. A new built-in must go on this list or on
     /// <see cref="NotImmutableFunctionNames"/>: a test fails while it is on neither, so nobody adds a
     /// function that reads the clock, a session or a random source to an index by mistake. A function
-    /// that reads the clock only for one arity (<c>age</c>, <c>unix_timestamp</c>) is not on the list.</para>
+    /// that reads the clock only for one arity (<c>age</c>, <c>unix_timestamp</c>) is not on the list.
+    /// <c>date_trunc</c>, <c>date_part</c> and <c>to_char</c> are on it for the forms without a time zone
+    /// argument. The form with one reads the time zone database of the build, and
+    /// <c>IndexExpressionBinder</c> refuses it.</para>
     /// </summary>
     internal static readonly IReadOnlySet<string> ImmutableFunctionNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {

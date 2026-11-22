@@ -29,6 +29,7 @@ using CamusDB.App.Services;
 using CamusDB.Core;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor;
+using CamusDB.Core.CommandsExecutor.Controllers.Functions;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -271,6 +272,36 @@ internal sealed class TestQueryFragmentControllerWire : BaseTest
         Assert.That(lines.Take(3).Select(l => l.RowIdHex!).ToHashSet(StringComparer.Ordinal), Is.EquivalentTo(fx.LateRowIds));
         Assert.IsTrue(lines.Take(3).All(l => l.Data is { Length: > 0 } && l.Error is null && l.Stats is null));
         Assert.AreEqual(new QueryFragmentScanStats(6, 3), lines[3].Stats);
+    }
+
+    [Test]
+    public async Task DifferentTimeZoneData_IsRefusedBeforeTheFirstRow()
+    {
+        Fixture fx = await SetupRobots();
+        QueryFragmentRequest request = await BuildRequest(fx);
+        request.TimeZoneDataVersion = "TZDB: 1999a (mapping: 0)";
+
+        (int status, _, byte[] body) = await Invoke(fx, request, accept: null);
+
+        Assert.AreEqual(500, status);
+        StringAssert.Contains("time zone data mismatch", Encoding.UTF8.GetString(body));
+    }
+
+    [Test]
+    public async Task SameTimeZoneData_OrNone_IsServed()
+    {
+        Fixture fx = await SetupRobots();
+
+        foreach (string? version in new[] { TimeZoneRules.DataVersion, null })
+        {
+            QueryFragmentRequest request = await BuildRequest(fx);
+            request.TimeZoneDataVersion = version;
+
+            (int status, string? contentType, byte[] body) = await Invoke(fx, request, accept: null);
+
+            Assert.AreEqual(200, status, version ?? "no version");
+            AssertSurvivors(fx, await ReadThroughTransport(body, contentType, chunk: 64), expectStats: false);
+        }
     }
 
     [Test]
