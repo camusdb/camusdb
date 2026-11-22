@@ -160,6 +160,24 @@ internal static class MetaKeys
     internal static string StorageRewriteKey(string dbId, string storageId) => $"{dbId}/meta/storagerewrite:{storageId}";
 
     /// <summary>
+    /// The prefix of the pending change set records. A record holds the framed
+    /// <see cref="Models.SchemaOp.PendingChangeSet"/> entry of a change set that has no publish or
+    /// abort yet, so a reopen that loads the checkpoint finds the change set even when the schema log
+    /// no longer holds the entry.
+    /// </summary>
+    internal static string ChangeSetKeyPrefix(string dbId) => $"{dbId}/meta/changeset:";
+
+    internal static string ChangeSetKey(string dbId, string changeSetId) => $"{ChangeSetKeyPrefix(dbId)}{changeSetId}";
+
+    /// <summary>
+    /// The decision key of a change set. The committing transaction writes it in its own KV commit, and a
+    /// resolver writes <c>aborted</c> to it in a transaction of its own; both take the key's exclusive
+    /// lock first and read it under the lock, so exactly one of them writes it. A pending change set is
+    /// published when the key says committed, and aborted when it says aborted.
+    /// </summary>
+    internal static string ChangeSetDecisionKey(string dbId, string changeSetId) => $"{dbId}/meta/ddlcommit:{changeSetId}";
+
+    /// <summary>
     /// Returns the exclusive ordinal upper bound for every key beginning with <paramref name="prefix"/>.
     /// Incrementing the last available UTF-16 code unit keeps a prefix scan inside its logical subrange
     /// even though several key families share the one routing bucket. Returns <c>null</c> when no

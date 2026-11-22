@@ -51,6 +51,9 @@ internal static class MetaKeyWriter
 
     internal static async Task WriteMetaKey(IKahuna kahuna, KvTransaction tx, string key, byte[] value)
     {
+        if (SkipsCatalogWrite(tx))
+            return;
+
         await CatalogKeyLock.AcquireExclusiveAsync(kahuna, tx, key, MetaKeyMaxRetries, "meta").ConfigureAwait(false);
 
         // A stable operation id reused across the retry loop so a replayed call after a lost response
@@ -87,6 +90,9 @@ internal static class MetaKeyWriter
 
     internal static async Task DeleteMetaKey(IKahuna kahuna, KvTransaction tx, string key)
     {
+        if (SkipsCatalogWrite(tx))
+            return;
+
         await CatalogKeyLock.AcquireExclusiveAsync(kahuna, tx, key, MetaKeyMaxRetries, "meta").ConfigureAwait(false);
 
         // A stable operation id reused across the retry loop (see WriteMetaKey) so the delete folds once
@@ -117,4 +123,14 @@ internal static class MetaKeyWriter
 
         tx.TrackModified(key, KeyValueDurability.Persistent);
     }
+
+    /// <summary>
+    /// True for a catalog write a DDL statement makes inside an explicit transaction that has a private
+    /// schema. The write is skipped: the checkpoint of the change set's publish writes the catalog, and a
+    /// write here would put the private schema's version into the version key, ahead of the schema log.
+    /// The commit of the change set lifts the skip for the keys it writes itself (the decision key and the
+    /// layouts).
+    /// </summary>
+    private static bool SkipsCatalogWrite(KvTransaction tx) =>
+        tx.SchemaChanges is Transactional.TransactionSchemaOverlay { IsOpen: true, AllowsCatalogWrites: false };
 }

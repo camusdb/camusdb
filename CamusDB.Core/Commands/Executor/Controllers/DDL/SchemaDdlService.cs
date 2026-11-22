@@ -10,6 +10,7 @@ using System.Linq;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Apply;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.Catalogs.Transactional;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Results;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -200,6 +201,12 @@ internal sealed partial class SchemaDdlService
         IReadOnlyList<string>? tableNames = null
     )
     {
+        // Inside an explicit transaction with a private schema, the statement's writes go into that
+        // transaction and its delta into its change set; the transaction's COMMIT or ROLLBACK decides
+        // both. Nothing commits here, so there is nothing to compensate or to invalidate yet.
+        if (TransactionSchemaScope.OverlayFor(database) is { } overlay)
+            return await ExecuteDdlInOwnerTransactionAsync(database, overlay, action, tableNames).ConfigureAwait(false);
+
         // Acquired in BOTH modes. It used to be cluster-only, on the reasoning that a standalone node
         // has no replicated schema log to order proposals against — but the gate is also what makes
         // "resolve the target, then mutate it" atomic against a concurrent drop/recreate of the same
@@ -256,6 +263,32 @@ internal sealed partial class SchemaDdlService
         }
     }
 
+    /// <summary>
+    /// <see cref="ExecuteDdlInTransaction"/> for a statement of a transaction with a private schema: runs
+    /// <paramref name="action"/> in that transaction, under the DDL gate as every DDL statement runs, and
+    /// commits nothing. A failure fails the statement, which marks the transaction rollback-only.
+    /// </summary>
+    private async Task<T> ExecuteDdlInOwnerTransactionAsync<T>(
+        DatabaseDescriptor database,
+        TransactionSchemaOverlay overlay,
+        Func<KvTransaction, Task<T>> action,
+        IReadOnlyList<string>? tableNames)
+    {
+        if (tableNames is not null)
+            await database.DdlGate.EnterAsync(tableNames, context.Logger).ConfigureAwait(false);
+        else
+            await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
+
+        try
+        {
+            return await action(overlay.Owner).ConfigureAwait(false);
+        }
+        finally
+        {
+            database.SchemaDdlSemaphore.Release();
+        }
+    }
+
     public async Task<CreateTableResult> CreateTable(CreateTableTicket ticket)
     {
         context.Validator.Validate(ticket);
@@ -306,7 +339,10 @@ internal sealed partial class SchemaDdlService
         // In a cluster a foreign key is born WriteOnly and published only after the validation pass;
         // a standalone node has no second schema version and the new table holds no rows, so its
         // constraints are born Public.
-        bool stagedForeignKeys = context.IsClusterMode && ticket.ForeignKeys.Length > 0;
+        // Inside a transaction with a private schema, the constraints are born Public: no other
+        // transaction can see the table, or write it, before the commit publishes it on every node.
+        bool stagedForeignKeys = context.IsClusterMode && ticket.ForeignKeys.Length > 0
+            && TransactionSchemaScope.OverlayFor(database) is null;
         SchemaElementState foreignKeyState = stagedForeignKeys ? SchemaElementState.WriteOnly : SchemaElementState.Public;
         bool created = false;
 
@@ -699,6 +735,8 @@ internal sealed partial class SchemaDdlService
             tableNames: [ticket.TableName]
         ).ConfigureAwait(false);
 
+        // Inside a transaction with a private schema the sequence's catalog record leaves with the change
+        // set, and its counter only after the publish (see SequenceDdlService.DropByNameAsync).
         if (altered)
             await DropOwnedSequencesAsync(database, orphanedSequences).ConfigureAwait(false);
 
@@ -734,6 +772,9 @@ internal sealed partial class SchemaDdlService
         ColumnInfo requested = ticket.Column;
 
         RequireColumnCanBeAdded(table, requested, options);
+
+        if (TransactionSchemaScope.OverlayFor(database) is { } overlay)
+            return await AddColumnInOwnerTransactionAsync(database, overlay, table, ticket).ConfigureAwait(false);
 
         if (requested.NotNull && !TableColumnAdder.HasFillValue(requested)
             && await TableHasAnyRowAsync(database, table).ConfigureAwait(false))
@@ -784,6 +825,42 @@ internal sealed partial class SchemaDdlService
         {
             database.SchemaDdlSemaphore.Release();
             await FireDeferredStepDownIfRequestedAsync(database).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// <c>ADD COLUMN</c> inside a transaction with a private schema: one delta that adds the column as
+    /// Public, with no staged steps and no fill. Allowed when no existing row needs a value: a nullable
+    /// column with no default (an older row reads NULL for it, which is its value), or any column on a
+    /// table the transaction created and has not written to. Any other column needs the fill, which
+    /// reads every row, and is refused.
+    /// </summary>
+    private async Task<bool> AddColumnInOwnerTransactionAsync(
+        DatabaseDescriptor database, TransactionSchemaOverlay overlay, TableDescriptor table, AlterTableTicket ticket)
+    {
+        ColumnInfo requested = ticket.Column;
+
+        if ((requested.NotNull || TableColumnAdder.HasFillValue(requested)) && !TransactionalDdlRules.IsOwnEmptyTable(overlay, table))
+            TransactionalDdlRules.RequireOwnEmptyTable(overlay, table, "ALTER TABLE ... ADD COLUMN with a default value, an identity or NOT NULL");
+
+        List<string> createdSequences = [];
+
+        await database.DdlGate.EnterAsync(ticket.TableName, context.Logger).ConfigureAwait(false);
+        try
+        {
+            TableDescriptor gated = await context.TableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+            RequireColumnCanBeAdded(gated, requested, options);
+
+            ColumnInfo resolved = await ResolveSequenceColumnAsync(
+                database, gated.Name, gated.Id, requested, createdSequences, CancellationToken.None).ConfigureAwait(false);
+
+            await catalogs.ReplicateAddColumnInStateAsync(database, gated.Name, resolved, SchemaElementState.Public).ConfigureAwait(false);
+
+            return true;
+        }
+        finally
+        {
+            database.SchemaDdlSemaphore.Release();
         }
     }
 
@@ -1406,6 +1483,82 @@ internal sealed partial class SchemaDdlService
     }
 
     /// <summary>
+    /// Index DDL inside a transaction with a private schema.
+    /// <list type="bullet">
+    /// <item>An index add runs its local work in the transaction, on a table the transaction created and
+    /// has not written to, so the build reads no row; then its delta joins the change set.</item>
+    /// <item>An index drop only removes the index from the private schema. Its entries stay until the
+    /// change set is published, and are removed after that, so a ROLLBACK finds them intact.</item>
+    /// </list>
+    /// </summary>
+    private async Task<bool> RunIndexDdlInOwnerTransactionAsync(
+        DatabaseDescriptor database,
+        TransactionSchemaOverlay overlay,
+        TableDescriptor table,
+        AlterIndexTicket ticket,
+        Func<KvTransaction, Task<bool>> localWork)
+    {
+        KvTransaction tx = overlay.Owner;
+
+        if (ticket.Operation is AlterIndexOperation.DropIndex or AlterIndexOperation.DropPrimaryKey)
+        {
+            if (!table.AllIndexes.TryGetValue(ticket.IndexName, out TableIndexSchema? dropped))
+            {
+                if (ticket.IfExists)
+                    return false;
+
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Index '{ticket.IndexName}' does not exist in table '{table.Name}'");
+            }
+
+            await catalogs.ReplicateIndexChangeAsync(database, ticket, table, tx).ConfigureAwait(false);
+
+            string tableId = table.Id;
+            string indexKvId = dropped.KvId;
+            overlay.AddAfterPublish(() => PurgeDroppedIndexEntriesAsync(overlay.Database, tableId, indexKvId));
+
+            return true;
+        }
+
+        TransactionalDdlRules.RequireOwnEmptyTable(overlay, table, "CREATE INDEX");
+
+        bool result = await localWork(tx).ConfigureAwait(false);
+        if (!result)
+            return false;
+
+        await catalogs.ReplicateIndexChangeAsync(database, ticket, table, tx).ConfigureAwait(false);
+        return true;
+    }
+
+    /// <summary>
+    /// Deletes the entries of an index that a published change set dropped, in a transaction of its own.
+    /// Best effort and after the fact: the index is out of every node's schema, so nothing reads or writes
+    /// its key space any more, and entries that a failure leaves behind are only unused space. The table
+    /// is found by its immutable id, because the same change set may have renamed it. A table the change
+    /// set also dropped is skipped: the orphan collector purges every index the table ever had.
+    /// </summary>
+    private async Task PurgeDroppedIndexEntriesAsync(DatabaseDescriptor database, string tableId, string indexKvId)
+    {
+        if (!database.Schema.TryGetRelationNameById(tableId, out string? tableName))
+            return;
+
+        TableDescriptor table = await context.TableOpener.Open(database, tableName).ConfigureAwait(false);
+
+        KvTransaction tx = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
+            mutationLimitOverride: 0
+        ).ConfigureAwait(false);
+        try
+        {
+            await table.Store.DropIndexEntries(tx, indexKvId).ConfigureAwait(false);
+            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
     /// The body of <see cref="ExecuteClusteredIndexDdlAsync"/>, for a caller that already holds
     /// <c>SchemaDdlSemaphore</c>: the standalone build of a foreign key's index, and the drop of an
     /// index a removed constraint owned.
@@ -1423,6 +1576,9 @@ internal sealed partial class SchemaDdlService
         // ticket API and the SQL path reach this helper.
         if (ticket.Operation is AlterIndexOperation.DropIndex or AlterIndexOperation.DropPrimaryKey)
             ForeignKeyDependencyRules.RequireIndexNotInForeignKey(database.Schema, table.Schema, ticket.IndexName);
+
+        if (TransactionSchemaScope.OverlayFor(database) is { } overlay)
+            return await RunIndexDdlInOwnerTransactionAsync(database, overlay, table, ticket, localWork).ConfigureAwait(false);
 
         // Phase 1: run local DDL (including backfill) and commit so the index KV
         // entries are durable and visible before the schema delta is published.
@@ -1596,6 +1752,14 @@ internal sealed partial class SchemaDdlService
         // Read before the drop: afterwards the relation is out of the schema and there is nothing
         // left to match an owned sequence against.
         bool deferred = !ticket.Force && database.Ancestors.Count == 0;
+
+        // An immediate drop deletes the rows and index entries in the statement, which a later
+        // ROLLBACK would have to bring back. A deferred drop only detaches the table.
+        if (!deferred && TransactionSchemaScope.OverlayFor(database) is not null)
+            throw new CamusDBException(
+                CamusDBErrorCodes.StatementNotAllowedInTransaction,
+                "DROP TABLE ... FORCE, and DROP TABLE in a branch database, cannot yet run inside an explicit transaction " +
+                "with transactional DDL on: they delete the rows at once. Use DROP TABLE without FORCE, or commit or roll back first");
 
         List<string> ownedSequences = deferred
             ? []
@@ -2228,7 +2392,10 @@ internal sealed partial class SchemaDdlService
         {
             TableDescriptor table = await context.TableOpener.Open(database, ticket.TableName!).ConfigureAwait(false);
 
-            bool ok = await commentSetter.Set(catalogs, database, table, ticket, context.IsClusterMode).ConfigureAwait(false);
+            // Inside a transaction with a private schema the comment goes through a delta, which joins the
+            // change set. The single-node writer changes the schema in place and persists it at once.
+            bool replicated = context.IsClusterMode || TransactionSchemaScope.OverlayFor(database) is not null;
+            bool ok = await commentSetter.Set(catalogs, database, table, ticket, replicated).ConfigureAwait(false);
             return new ExecuteDDLSQLResult(database, ok);
         }
         finally

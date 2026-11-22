@@ -122,7 +122,7 @@ public sealed record DatabaseDescriptor : IDisposable
         Options = next;
         Transactions.ApplyOptions(next);
 
-        foreach (KeyValuePair<string, AsyncLazy<TableDescriptor>> table in TableDescriptors)
+        foreach (KeyValuePair<string, AsyncLazy<TableDescriptor>> table in tableDescriptors)
         {
             // IsStarted first: reading AsyncLazy.Task starts the factory, and a swap must never
             // force-open a table that nothing has asked for.
@@ -434,9 +434,33 @@ public sealed record DatabaseDescriptor : IDisposable
     /// </summary>
     public BranchSnapshotHoldGuard? SnapshotProtection { get; }
 
-    public Schema Schema { get; } = new();
+    private readonly Schema schema = new();
 
-    public SystemSchema SystemSchema { get; set; } = new();
+    /// <summary>
+    /// The schema of this database as the current flow sees it. Inside a statement of an explicit
+    /// transaction that changed the schema with transactional DDL, it is that transaction's private
+    /// schema; everywhere else it is <see cref="SharedSchema"/>. See
+    /// <see cref="Catalogs.Transactional.TransactionSchemaScope"/>.
+    /// </summary>
+    public Schema Schema => Catalogs.Transactional.TransactionSchemaScope.OverlayFor(this)?.Schema ?? schema;
+
+    /// <summary>
+    /// The replicated schema every node shares, whatever the current flow. Code that must never read a
+    /// transaction's private schema (the schema-log apply, a checkpoint) may use it directly.
+    /// </summary>
+    internal Schema SharedSchema => schema;
+
+    private SystemSchema systemSchema = new();
+
+    /// <summary>
+    /// The legacy system schema, redirected to a transaction's private copy as <see cref="Schema"/> is.
+    /// The setter always replaces the shared one; only the schema load calls it.
+    /// </summary>
+    public SystemSchema SystemSchema
+    {
+        get => Catalogs.Transactional.TransactionSchemaScope.OverlayFor(this)?.SystemSchema ?? systemSchema;
+        set => systemSchema = value;
+    }
 
     /// <summary>
     /// Per-database query result cache, or null when the cache is disabled. Set by
@@ -447,7 +471,15 @@ public sealed record DatabaseDescriptor : IDisposable
     /// each successful schema commit because schema meta keys do not match the row/index
     /// keyspace bucket pattern used by the automatic key-based invalidation.
     /// </summary>
-    public IQueryResultCache? Cache { get; internal set; }
+    public IQueryResultCache? Cache
+    {
+        // A statement that reads a transaction's private schema neither reads nor publishes a cached
+        // result: its answers depend on schema no other transaction can see.
+        get => Catalogs.Transactional.TransactionSchemaScope.OverlayFor(this) is null ? cache : null;
+        internal set => cache = value;
+    }
+
+    private IQueryResultCache? cache;
 
     /// <summary>
     /// Evicts one relation's cached statistics on this node, by relation id. Set by the engine that
@@ -461,7 +493,14 @@ public sealed record DatabaseDescriptor : IDisposable
     /// </summary>
     public Action<string>? EvictTableStatistics { get; internal set; }
 
-    public ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> TableDescriptors { get; }
+    private readonly ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> tableDescriptors;
+
+    /// <summary>
+    /// The open table descriptors, redirected to a transaction's private map as <see cref="Schema"/> is,
+    /// so a descriptor built from a private schema never reaches another transaction.
+    /// </summary>
+    public ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> TableDescriptors =>
+        Catalogs.Transactional.TransactionSchemaScope.OverlayFor(this)?.TableDescriptors ?? tableDescriptors;
 
     /// <summary>
     /// Contents generations this node's schema apply has detached from a live relation but has not yet
@@ -513,7 +552,10 @@ public sealed record DatabaseDescriptor : IDisposable
     /// outlive the descriptor whose tables it references. See <see cref="Queries.BoundQueryCache"/>
     /// for the validation contract each hit must pass.
     /// </summary>
-    internal Queries.BoundQueryCache BoundQueries { get; } = new();
+    internal Queries.BoundQueryCache BoundQueries =>
+        Catalogs.Transactional.TransactionSchemaScope.OverlayFor(this)?.BoundQueries ?? boundQueries;
+
+    private readonly Queries.BoundQueryCache boundQueries = new();
 
     // -----------------------------------------------------------------------
     // Drop-quiesce: atomic ref-count + drain
@@ -630,6 +672,24 @@ public sealed record DatabaseDescriptor : IDisposable
 
     private IDisposable? schemaReplicationSubscription;
 
+    // Cancelled when the descriptor is disposed. Background work the descriptor owns (the watcher of a
+    // pending change set) stops on it.
+    private readonly CancellationTokenSource lifetime = new();
+
+    /// <summary>Cancelled when this descriptor is disposed; background work it owns observes it.</summary>
+    internal CancellationToken Lifetime => lifetime.Token;
+
+    private int pendingChangeSetWatcher;
+
+    /// <summary>
+    /// Claims the one watcher of this database's pending change set. False when a watcher already runs;
+    /// see <see cref="Catalogs.SchemaReplicator"/>.
+    /// </summary>
+    internal bool TryStartPendingChangeSetWatcher() => Interlocked.CompareExchange(ref pendingChangeSetWatcher, 1, 0) == 0;
+
+    /// <summary>Releases the claim of <see cref="TryStartPendingChangeSetWatcher"/>.</summary>
+    internal void EndPendingChangeSetWatcher() => Volatile.Write(ref pendingChangeSetWatcher, 0);
+
     public DatabaseDescriptor(
         string id,
         string name,
@@ -647,7 +707,7 @@ public sealed record DatabaseDescriptor : IDisposable
         _name = name;
         Kahuna = kahuna;
         Transactions = transactions;
-        TableDescriptors = tableDescriptors;
+        this.tableDescriptors = tableDescriptors;
         Ancestors = ancestors ?? [];
         SnapshotProtection = snapshotProtection;
         DdlGate = new SchemaDdlGate(name);
@@ -663,6 +723,10 @@ public sealed record DatabaseDescriptor : IDisposable
 
     public void Dispose()
     {
+        // Not disposed: a background loop may still read the token after this point, and a cancelled
+        // source holds nothing that needs releasing.
+        lifetime.Cancel();
+
         IDisposable? subscription = Interlocked.Exchange(ref schemaReplicationSubscription, null);
         subscription?.Dispose();
 
@@ -670,7 +734,7 @@ public sealed record DatabaseDescriptor : IDisposable
         // transactions manager and the Kahuna node it references, leaking the whole node.
         Transactions?.Dispose();
 
-        Schema?.Dispose();
+        schema.Dispose();
         DdlGate?.Dispose();
         SystemSchemaSemaphore?.Dispose();
     }

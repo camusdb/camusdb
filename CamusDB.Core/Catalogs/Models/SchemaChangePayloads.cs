@@ -899,3 +899,38 @@ public sealed class SchemaTruncateTablePayload
     /// </summary>
     public string[] NewIndexIds { get; set; } = [];
 }
+
+/// <summary>
+/// The schema changes of one explicit transaction, carried by a <see cref="SchemaOp.PendingChangeSet"/>
+/// entry. The deltas are complete schema-log entries in their framed byte form, in the order the
+/// transaction's statements produced them. Their versions are those of the transaction's private
+/// schema; the apply gives each one the version of the entry that applies it.
+/// </summary>
+public sealed class SchemaChangeSetPayload
+{
+    /// <summary>
+    /// The id of the change set: a fresh value per transaction, never reused. It names the decision
+    /// key and the pending record, and it is how a publish or an abort finds the change set.
+    /// </summary>
+    public string ChangeSetId { get; set; } = "";
+
+    /// <summary>
+    /// The schema version the transaction's private schema was copied from at its first schema
+    /// change. The pending apply refuses the change set when the live schema is at another version,
+    /// because then some other change landed after the transaction planned against the base.
+    /// </summary>
+    public long BaseVersion { get; set; }
+
+    /// <summary>The deltas, each encoded by <c>SchemaChangeLogEntryCodec.Encode</c>.</summary>
+    public List<byte[]> Deltas { get; set; } = [];
+}
+
+/// <summary>
+/// Names the change set that a <see cref="SchemaOp.PublishChangeSet"/> or a
+/// <see cref="SchemaOp.AbortChangeSet"/> entry ends.
+/// </summary>
+public sealed class SchemaChangeSetDecisionPayload
+{
+    /// <summary>The <see cref="SchemaChangeSetPayload.ChangeSetId"/> of the pending change set.</summary>
+    public string ChangeSetId { get; set; } = "";
+}

@@ -47,4 +47,10 @@ internal sealed class SchemaSnapshot
 
     /// <summary>The legacy system blob, or null when the key is absent.</summary>
     public SystemSchema? System;
+
+    /// <summary>
+    /// The framed <see cref="SchemaOp.PendingChangeSet"/> entry of a change set that the checkpoint
+    /// recorded as pending, or null. See <see cref="MetaKeys.ChangeSetKeyPrefix"/>.
+    /// </summary>
+    public byte[]? PendingChangeSetRecord;
 }

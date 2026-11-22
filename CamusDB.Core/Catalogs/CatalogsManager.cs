@@ -326,6 +326,14 @@ public sealed class CatalogsManager
     }
 
     /// <summary>
+    /// Proposes one entry of a transactional change set (pending, publish or abort) and waits until this
+    /// node applied it. The caller holds the DDL gate semaphore and no schema lock. See
+    /// <c>Transactional.ChangeSetCommitter</c>.
+    /// </summary>
+    internal Task ProposeChangeSetEntryAsync(DatabaseDescriptor database, SchemaChangeLogEntry entry)
+        => publisher.ReplicateAndWaitLocalApplyAsync(database, entry);
+
+    /// <summary>
     /// Test-only. Commits a view creation through the schema log without taking this node's DDL gate,
     /// the way a delta proposed on another node arrives while a DDL here holds the gate. Production
     /// code creates views through <see cref="CreateViewAsync"/>, which takes the gate.

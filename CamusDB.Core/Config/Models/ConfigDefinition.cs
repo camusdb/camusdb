@@ -797,6 +797,19 @@ public class ConfigDefinition
     public int MaxSerializableTransactionLifetimeMs { get; set; } = 3_600_000;
 
     /// <summary>
+    /// Schema DDL inside an explicit transaction commits and rolls back with it. Maps to
+    /// <c>CamusDBOptions.TransactionalDdlEnabled</c> (yml <c>transactional_ddl_enabled</c>). Default off.
+    /// </summary>
+    public bool TransactionalDdlEnabled { get; set; } = false;
+
+    /// <summary>
+    /// Milliseconds a transaction's change set may stay pending before the resolver ends it. Maps to
+    /// <c>CamusDBOptions.TransactionalDdlResolveAfterMs</c> (yml <c>transactional_ddl_resolve_after_ms</c>).
+    /// Default 30 000; 0 resolves at the next run.
+    /// </summary>
+    public int TransactionalDdlResolveAfterMs { get; set; } = 30_000;
+
+    /// <summary>
     /// Total wall-clock budget in milliseconds for retrying one commit/rollback/close against the
     /// coordinator's non-terminal <c>MustRetry</c> before surfacing CADB0509. &lt;= 0 attempts the
     /// finalize once. Default 15 000 (15 s).
@@ -1488,6 +1501,9 @@ public class ConfigDefinition
             throw Invalid(
                 "'stats_flush_interval_ms' must be >= 0 (interval), 0 (immediate), or -1 " +
                 $"(disabled), got {StatsFlushIntervalMs}");
+
+        if (TransactionalDdlResolveAfterMs < 0)
+            throw Invalid($"'transactional_ddl_resolve_after_ms' must be >= 0 (0 = resolve at the next run), got {TransactionalDdlResolveAfterMs}");
 
         if (StatsAnalyzeSampleRows < 0)
             throw Invalid($"'stats_analyze_sample_rows' must be >= 0 (0 = always full scan), got {StatsAnalyzeSampleRows}");

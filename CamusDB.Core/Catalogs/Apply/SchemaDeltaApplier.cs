@@ -62,6 +62,11 @@ internal static class SchemaDeltaApplier
     /// </summary>
     public static TableSchema? ApplySchemaDelta(Schema schema, DatabaseDescriptor database, SchemaChangeLogEntry entry)
     {
+        // A pending change set reserves the schema for its publish: any other delta is refused, in log
+        // order on every node, so the publish applies onto the schema its pending entry dry-ran.
+        if (schema.PendingChangeSet is { } pending && !ChangeSetDeltaApplier.IsChangeSetOp(entry.Op))
+            throw ChangeSetDeltaApplier.RefuseWhilePending(pending, entry.Op);
+
         TableSchema? tableSchema = entry.Op switch
         {
             SchemaOp.CreateTable or SchemaOp.CreatePopulatedMaterializedView
@@ -103,6 +108,9 @@ internal static class SchemaDeltaApplier
             SchemaOp.ReplaceFunction => InlineFunctionDeltaApplier.ApplyReplaceFunction(schema, SchemaDeltaApplier.DecodePayload<SchemaFunctionPayload>(entry), entry.ToVersion),
             SchemaOp.DropFunction => InlineFunctionDeltaApplier.ApplyDropFunction(schema, SchemaDeltaApplier.DecodePayload<SchemaDropFunctionPayload>(entry), entry.ToVersion),
             SchemaOp.SetFunctionOwner => InlineFunctionDeltaApplier.ApplySetFunctionOwner(schema, SchemaDeltaApplier.DecodePayload<SchemaSetFunctionOwnerPayload>(entry), entry.ToVersion),
+            SchemaOp.PendingChangeSet => ApplyChangeSetOp(() => ChangeSetDeltaApplier.ApplyPending(schema, database, entry)),
+            SchemaOp.PublishChangeSet => ApplyChangeSetOp(() => ChangeSetDeltaApplier.ApplyPublish(schema, database, entry)),
+            SchemaOp.AbortChangeSet => ApplyChangeSetOp(() => ChangeSetDeltaApplier.ApplyAbort(schema, entry)),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown schema operation '{entry.Op}'")
         };
 
@@ -131,6 +139,16 @@ internal static class SchemaDeltaApplier
             tableSchema.MetadataGeneration++;
 
         return tableSchema;
+    }
+
+    /// <summary>
+    /// Runs a change-set op inside the switch above, which expects a relation back. A change-set op
+    /// returns none: the publish applies its deltas through this same method, one at a time.
+    /// </summary>
+    private static TableSchema? ApplyChangeSetOp(Action apply)
+    {
+        apply();
+        return null;
     }
 
     /// <summary>

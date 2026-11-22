@@ -830,6 +830,10 @@ To scale to databases with many tables, metadata is stored per object, not as on
                                         → PersistedCoordinatorJob(s) for in-flight staged
                                           changes, so a new leader can resume them (§8.2)
 {db}/meta/extension:{name}              → ExtensionDefinition — one installed C# extension
+{db}/meta/changeset:{id}                → the framed PendingChangeSet entry of a transaction's
+                                          change set that is not published or aborted yet (§9.2)
+{db}/meta/ddlcommit:{id}                → the decision key of a change set: "committed" or
+                                          "aborted" (§9.2)
 {db}/meta/system                        → SystemSchema — LEGACY index storage, read-only;
                                           only migrated from on load (see §7.3)
 ```
@@ -1420,6 +1424,141 @@ Limits of the fence:
 Tests: `TestSchemaChangeSpanningTransactions` (single node and shared node) and
 `CamusDB.Cluster.Tests/TestClusterSchemaChangeSpanningTransactions` (the transaction on a follower,
 the change on the leader).
+
+### 9.2 Schema changes inside an explicit transaction
+
+With `transactional_ddl_enabled` on, a schema statement inside an explicit transaction becomes part of
+that transaction, with the PostgreSQL rule: the statements after it in the same transaction see the
+change, other transactions see nothing of it until `COMMIT`, `COMMIT` makes the change visible
+together with the rows, and `ROLLBACK` undoes both. The setting is off by default. When it is off, a
+schema statement commits at once in a transaction of its own, as before.
+
+The same protocol runs on a single node and in a cluster, because both keep the schema in a schema
+log (a single node has a one-node Raft schema log).
+
+#### Statement classes
+
+`DdlStatementClasses` maps each schema statement to one class:
+
+| Class | Inside an explicit transaction, setting on |
+|---|---|
+| Metadata-only (CREATE/DROP/RENAME TABLE, DROP/RENAME COLUMN, DROP/RENAME INDEX, COMMENT ON TABLE/COLUMN/INDEX, ALTER TABLE SET/RESET, CREATE/REPLACE/DROP/RENAME VIEW) | Part of the transaction. |
+| Staged (ADD COLUMN, CREATE INDEX, ADD UNIQUE, ADD PRIMARY KEY) | Part of the transaction when no existing row needs work: a nullable ADD COLUMN with no default, or any of them on a table the transaction created and has not written to. Otherwise refused with `CADB0538`. |
+| Irrevocable (TRUNCATE, REWRITE STORAGE, CREATE MATERIALIZED VIEW, REFRESH) | Refused with `CADB0538`. TRUNCATE and REWRITE STORAGE are refused with the setting off too. |
+| Not yet transactional (sequences, triggers, functions, extensions, constraints other than inline ones, CTAS, RELINK, materialized-view rename and drop, the other comment targets) | Refused with `CADB0538`. |
+
+`DROP TABLE` inside a transaction uses the deferred drop, which keeps the rows and index entries, so
+a rollback has nothing to restore. Its orphan record is built from the relation as it was right before
+the drop in the change set, so a table the same transaction created or altered stays relinkable with
+the layout its rows were written with. `DROP TABLE … FORCE` is refused. A dropped index keeps its entries
+until the change set is published; a best-effort purge removes them after that, and finds the table by
+its id. A crash before the purge leaves the entries in a key space nothing reads. The owned sequence of
+a dropped identity column leaves the catalog with the change set; only its Kahuna counter is removed
+after the publish.
+
+A statement that changes nothing (for example `CREATE TABLE IF NOT EXISTS` on a table that exists)
+leaves no private schema behind: the transaction's next statements read the shared schema.
+
+Statements about the server or a database as a whole (`CREATE DATABASE`, users, grants, cluster
+settings) are dispatched before a database is opened and keep their behavior: they do not join the
+transaction.
+
+#### The private schema
+
+The first schema statement of the transaction takes the DDL lock (below), checks that the
+transaction's earlier statements still hold their schema pins, and copies the shared schema into a
+`TransactionSchemaOverlay`. While a statement of that transaction runs, `TransactionSchemaScope` makes
+`DatabaseDescriptor.Schema`, `TableDescriptors`, `SystemSchema` and `BoundQueries` answer from the
+overlay, and turns the result cache off. A query cursor re-enters the scope for each row
+(`TransactionSchemaScopedCursor`).
+
+Each DDL statement runs its normal code. It validates against the private schema and builds its delta
+with `SchemaChangeEntryFactory`. When it calls the publisher, the delta applies to the private schema
+and joins the transaction's change set instead of the schema log. The statement's own writes go into
+the transaction. Its catalog writes are skipped (`MetaKeyWriter`): the publish checkpoint writes the
+catalog, and a version key written by the transaction would move the persisted version ahead of the
+schema log. Statement-level forwarding to the schema leader is skipped too.
+
+The transaction writes its rows with the private layouts. A table layout version is counted per
+table, so the publish produces the same version numbers with the same layouts.
+
+#### Commit
+
+`KvTransactionsManager.CommitAsync` calls the `ITransactionSchemaChanges` hooks (`ChangeSetCommitter`):
+
+1. Check the schema pins against the private schema.
+2. In the transaction: take the exclusive lock on the decision key `{db}/meta/ddlcommit:{id}`, read
+   it (it must be absent), and write `committed`. Write the history key of every new table layout.
+3. Under the DDL gate semaphore, propose a `PendingChangeSet` entry. Its apply refuses the change set
+   when the schema is not at the change set's base version or when a delta does not apply to the live
+   schema, and otherwise records it as pending, with the set of **affected tables**: every live table a
+   delta changes, and every table that a foreign key of a created table references. While a change set
+   is pending, the apply refuses every other schema change of the database with the retryable `CADB0504`.
+4. The pending apply fences the affected tables on every node. It stamps their write shape, so a writer
+   that planned against the old shape is refused at its commit, and its acknowledgement waits for the
+   commits in flight that wrote one of them. A new statement that opens an affected table waits in
+   `TableOpener` until the change set is published or aborted, then resolves the name again.
+5. Drop the transaction's write-shape pins (the check before step 3 and the base-version check cover
+   them) and commit the transaction in KV. The rows, the decision key and the layouts land together.
+6. After a commit, propose `PublishChangeSet` and wait for every live node to acknowledge it. After a
+   definite abort, propose `AbortChangeSet`. After an unknown outcome, do nothing: a resumed commit or
+   the resolver decides.
+
+The fence closes the window between the KV commit and the publish, in which the rows exist and the
+shared schema does not describe them yet. Without it, a delete of a parent row could pass while the
+new foreign key is not in the shared foreign-key graph, and a read could use an index the change set
+drops. A row of the transaction that a statement which started before the fence meets decodes through
+its history key, which committed with the row. `TableOpener` gives every table a history loader, also a
+table created in this process.
+
+**The publish is one step.** The deltas apply to a copy of the schema in which only the affected tables
+are copied; the copy's table, view and sequence maps are then installed into the live schema
+(`Schema.InstallPublishedCatalog`), and the pending change set is cleared last. A reader therefore never
+sees a state between two deltas, such as the middle name of `RENAME a TO b` followed by
+`RENAME b TO c`. The affected tables get new `TableSchema` objects: the apply evicts their descriptors,
+drops their cached results on every node, and fences the writers that pinned the old objects. An
+unchanged table keeps its object.
+
+**A publish that cannot be confirmed fails the COMMIT, not silently.** When the KV commit landed and
+the publish, or its acknowledgement by every live node, cannot be confirmed, `COMMIT` fails with the
+retryable `CADB0509`. The rows are committed. A `COMMIT` retried on the same transaction completes the
+publish, or confirms that the resolver completed it; the HTTP and gRPC transports keep such a
+transaction registered for that retry.
+
+**The DDL lock is freed before the work after the publish** (the purge of a dropped index's entries,
+the removal of a dropped owned sequence's counter), so that work does not hold other DDL back.
+
+The pending checkpoint writes `{db}/meta/changeset:{id}`, so a reopen restores the pending change set
+from the checkpoint. The publish checkpoint writes every object the change set touched, deletes the
+pending record and the decision key, and writes the version, in one KV transaction.
+
+#### Resolver
+
+`PendingChangeSetResolver` ends a change set that has been pending on the schema leader for longer than
+`transactional_ddl_resolve_after_ms` (30 seconds by default). A watcher runs it on every node while a
+change set is pending: `SchemaReplicator` starts the watcher when a pending entry applies or is
+replayed, and when a database opens with a pending record. The watcher acts only while its node leads
+the schema log, so a leader change needs no event of its own, and it does not depend on the
+coordinator-job sweep, which also runs the resolver. The resolver takes the decision key's lock in a
+transaction of its own and reads it. `committed` means the transaction committed, so it publishes.
+Absent means the transaction did not commit, so it writes `aborted`, commits that, and aborts. The
+transaction writes the key under the same lock after it reads it absent, so the two never both write
+it. When the transaction still holds the lock, the resolver tries again on the next sweep.
+
+#### DDL lock
+
+The DDL lock is a Kahuna distributed lock, `{db}/meta/ddllock`, one per database, with a 30-second
+lease that a renewer extends. A DDL transaction holds it from its first schema statement until it
+ends; a schema statement outside a DDL transaction holds it for its length when the setting is on.
+A waiter gives up after 30 seconds with `CADB0504`.
+
+Lock order: the DDL lock, then the DDL gate semaphore, then the schema lock. A lost lock costs
+serialization only: the base-version check of the pending entry still refuses a change set whose base
+moved, with `CADB0502`.
+
+Tests: `TestTransactionalDdl` (single node: commit, rollback, reopen, the resolver, the class table)
+and `CamusDB.Cluster.Tests/TestClusterTransactionalDdl` (three nodes, the transaction on a follower
+and on the leader).
 
 ---
 

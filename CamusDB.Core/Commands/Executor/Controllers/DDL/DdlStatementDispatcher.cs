@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core.Catalogs;
+using CamusDB.Core.Catalogs.Transactional;
 using CamusDB.Core.CommandsExecutor.Controllers.Functions;
 using CamusDB.Core.Diagnostics;
 using CamusDB.Core.Catalogs.Models;
@@ -97,6 +98,9 @@ internal sealed class DdlStatementDispatcher
     /// </summary>
     private readonly ClusterSettingsService? clusterSettings;
 
+    /// <summary>Commits and discards the change sets of explicit transactions; see <see cref="ChangeSetCommitter"/>.</summary>
+    private readonly ChangeSetCommitter changeSetCommitter;
+
     internal DdlStatementDispatcher(
         ExecutorContext context,
         CatalogsManager catalogs,
@@ -166,6 +170,99 @@ internal sealed class DdlStatementDispatcher
         this.sequenceDdl = sequenceDdl;
         this.authService = authService;
         this.clusterSettings = clusterSettings;
+        changeSetCommitter = new ChangeSetCommitter(catalogs, context.Logger);
+    }
+
+    /// <summary>
+    /// The transactional-DDL rule for one schema statement on an open database. Returns the statement's
+    /// transaction when the statement must run against that transaction's private schema, opening it at
+    /// the first schema change; the caller then names the transaction for its flow
+    /// (<see cref="TransactionSchemaScope.Enter"/>). Returns null when the statement runs as before: no
+    /// explicit transaction, transactional DDL off and no schema change yet, or not a schema statement.
+    /// </summary>
+    /// <remarks>
+    /// <para>With transactional DDL on, a statement of class <see cref="DdlStatementClass.Irrevocable"/>
+    /// or <see cref="DdlStatementClass.NotYetTransactional"/> is refused with
+    /// <see cref="CamusDBErrorCodes.StatementNotAllowedInTransaction"/>, so it never commits apart from a
+    /// transaction whose client expects a ROLLBACK to undo it. TRUNCATE and REWRITE STORAGE keep their own
+    /// refusal, which applies with the setting off too.</para>
+    ///
+    /// <para>A transaction that already holds schema changes keeps this rule after the setting is turned
+    /// off, until it ends: half of its DDL in the change set and half committed apart would be neither
+    /// rule.</para>
+    /// </remarks>
+    internal async Task<Transactions.KvTransaction?> OpenTransactionSchemaAsync(
+        DatabaseDescriptor database, ExecuteSQLTicket ticket, NodeAst ast)
+    {
+        if (ticket.TxnState is not { IsSessionOwned: true } tx)
+            return null;
+
+        TransactionSchemaOverlay? existing = tx.SchemaChanges as TransactionSchemaOverlay;
+
+        if (existing is null && !database.Options.TransactionalDdlEnabled)
+            return null;
+
+        DdlStatementClass? statementClass = DdlStatementClasses.ClassOf(ast.nodeType);
+        if (statementClass is null)
+            return null;
+
+        switch (statementClass)
+        {
+            case DdlStatementClass.Irrevocable when ast.nodeType is NodeType.TruncateTable or NodeType.AlterTableRewriteStorage:
+                return null;
+
+            case DdlStatementClass.Irrevocable:
+                throw new CamusDBException(
+                    CamusDBErrorCodes.StatementNotAllowedInTransaction,
+                    $"{ast.nodeType} cannot run inside an explicit transaction: it commits work that a later ROLLBACK " +
+                    "cannot undo. Commit or roll back first, then run it.");
+
+            case DdlStatementClass.NotYetTransactional:
+                throw new CamusDBException(
+                    CamusDBErrorCodes.StatementNotAllowedInTransaction,
+                    $"{ast.nodeType} cannot yet run inside an explicit transaction with transactional_ddl_enabled on: its " +
+                    "change cannot yet roll back with the transaction. Commit or roll back first, then run it.");
+        }
+
+        if (existing is not null)
+        {
+            if (!string.Equals(existing.DatabaseId, database.Id, StringComparison.Ordinal))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.StatementNotAllowedInTransaction,
+                    "A transaction can change the schema of one database only; commit or roll back first");
+
+            if (!existing.IsOpen)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.TransactionAlreadyCompleted,
+                    $"Transaction {tx.UniqueId} already ended; its schema changes cannot take another statement");
+
+            return tx;
+        }
+
+        await TransactionSchemaOverlay.OpenAsync(database, tx, changeSetCommitter, context.Logger).ConfigureAwait(false);
+        return tx;
+    }
+
+    /// <summary>
+    /// Takes the DDL lock of <paramref name="database"/> for one schema statement that runs outside a DDL
+    /// transaction, when transactional DDL is on. Null when the setting is off, when the statement is not a
+    /// schema statement on the database, or when it belongs to an explicit transaction (which holds the
+    /// lock itself, or is refused). Taken before the DDL gate, as the lock order requires.
+    /// </summary>
+    internal async Task<TransactionalDdlLock?> AcquireStatementDdlLockAsync(
+        DatabaseDescriptor database, ExecuteSQLTicket ticket, NodeAst ast)
+    {
+        if (!database.Options.TransactionalDdlEnabled)
+            return null;
+
+        if (DdlStatementClasses.ClassOf(ast.nodeType) is null)
+            return null;
+
+        if (ticket.TxnState is { IsSessionOwned: true })
+            return null;
+
+        return await TransactionalDdlLock.AcquireAsync(
+            database, TransactionalDdlLock.DefaultWaitTimeout, context.Logger).ConfigureAwait(false);
     }
 
     private AuthService RequireAuthService()
@@ -271,7 +368,14 @@ internal sealed class DdlStatementDispatcher
 
         try
         {
-            return await ExecuteDDLSQLCore(executor, ticket, activity).ConfigureAwait(false);
+            ExecuteDDLSQLResult result = await ExecuteDDLSQLCore(executor, ticket, activity).ConfigureAwait(false);
+
+            // A schema statement that changed nothing (CREATE TABLE IF NOT EXISTS on a table that exists)
+            // leaves no private schema behind; see DiscardIfEmptyAsync.
+            if (tx is not null)
+                await TransactionSchemaOverlay.DiscardIfEmptyAsync(tx).ConfigureAwait(false);
+
+            return result;
         }
         catch (Exception ex)
         {
@@ -323,6 +427,18 @@ internal sealed class DdlStatementDispatcher
 
         DatabaseDescriptor database = await context.DatabaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
         using DatabaseUseHandle _ = database.Use();
+
+        // Entered in this frame, so every step of the statement below reads the transaction's private
+        // schema; see OpenTransactionSchemaAsync.
+        Transactions.KvTransaction? ddlTransaction = await OpenTransactionSchemaAsync(database, ticket, ast).ConfigureAwait(false);
+        if (ddlTransaction is not null)
+            TransactionSchemaScope.Enter(ddlTransaction);
+
+        // A schema statement outside a DDL transaction holds the same DDL lock for its length, so it waits
+        // for a DDL transaction to end instead of moving the base that transaction will commit against.
+        await using TransactionalDdlLock? statementLock = ddlTransaction is null
+            ? await AcquireStatementDdlLockAsync(database, ticket, ast).ConfigureAwait(false)
+            : null;
 
         switch (ast.nodeType)
         {
@@ -569,7 +685,9 @@ internal sealed class DdlStatementDispatcher
                         AlterIndexOperation.AddPrimaryKey or
                         AlterIndexOperation.AddInvertedIndex;
 
-                    if (context.IsClusterMode && sqlAddIndex)
+                    // Inside a transaction with a private schema an index add takes the two-phase shape,
+                    // which runs its build in the transaction; the staged coordinator commits steps of its own.
+                    if (context.IsClusterMode && sqlAddIndex && TransactionSchemaScope.OverlayFor(database) is null)
                     {
                         bool ok = await schemaDdl.ExecuteClusterAddIndexAsync(database, table, alterIndexTicket).ConfigureAwait(false);
                         return new ExecuteDDLSQLResult(database, ok);

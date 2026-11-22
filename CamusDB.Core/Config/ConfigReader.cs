@@ -108,6 +108,8 @@ public class ConfigReader
         "transaction_admission_wait_ms",
         "range_lock_expires_ms",
         "max_serializable_transaction_lifetime_ms",
+        "transactional_ddl_enabled",
+        "transactional_ddl_resolve_after_ms",
         "transaction_finalize_retry_budget_ms",
         "sequence_retry_budget_ms",
         "transaction_idle_timeout_ms",

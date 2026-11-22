@@ -262,9 +262,14 @@ internal static class SchemaMetaStore
     /// atomic commit. Idempotent on replay: if the meta key is already gone the orphan was already
     /// written and this is a no-op for that key.
     /// </summary>
+    /// <param name="capturedSchema">
+    /// The relation as it was right before the drop, when the caller knows it better than the persisted
+    /// table key does: the publish of a transaction's change set, where the relation may have been created
+    /// or altered by the same change set, so the key is absent or holds an older layout. Null reads the key.
+    /// </param>
     internal static async Task PersistDroppedTableAsync(
         DatabaseDescriptor database, string tableId, long schemaVersion, KvTransaction tx,
-        bool deferred, string formerName, HLCTimestamp droppedAt)
+        bool deferred, string formerName, HLCTimestamp droppedAt, TableSchema? capturedSchema = null)
     {
         // See PersistSchemaTableAsync above.
         System.Diagnostics.Debug.Assert(
@@ -276,7 +281,19 @@ internal static class SchemaMetaStore
         byte[] versionBytes = MetaJsonSerializer.Serialize(schemaVersion, MetaJsonContext.Default.Int64);
         await MetaKeyWriter.WriteMetaKey(kahuna, tx, MetaKeys.VersionKey(database.Id), versionBytes).ConfigureAwait(false);
 
-        if (deferred)
+        if (deferred && capturedSchema is not null)
+        {
+            byte[] capturedOrphanBytes = MetaJsonSerializer.Serialize(new OrphanTableRecord
+            {
+                TableId = tableId,
+                FormerName = formerName,
+                DroppedAt = droppedAt,
+                Schema = WithoutHistory(capturedSchema),
+            }, MetaJsonContext.Default.OrphanTableRecord);
+
+            await MetaKeyWriter.WriteMetaKey(kahuna, tx, MetaKeys.OrphanKey(database.Id, tableId), capturedOrphanBytes).ConfigureAwait(false);
+        }
+        else if (deferred)
         {
             // Capture the table's persisted schema before deleting it, and write the orphan record in the
             // same transaction so a crash can never leave the table detached without a recovery record.

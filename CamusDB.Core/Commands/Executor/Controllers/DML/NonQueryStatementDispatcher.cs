@@ -311,6 +311,10 @@ internal sealed class NonQueryStatementDispatcher
             if (tx is not null && ticket.RetryableAborts is { Abort: { } abort })
                 tx.MarkRollbackOnly(abort);
 
+            // A schema statement that changed nothing leaves no private schema behind; see DiscardIfEmptyAsync.
+            if (tx is not null)
+                await Catalogs.Transactional.TransactionSchemaOverlay.DiscardIfEmptyAsync(tx).ConfigureAwait(false);
+
             return result;
         }
         catch (Exception ex)
@@ -363,6 +367,20 @@ internal sealed class NonQueryStatementDispatcher
 
         DatabaseDescriptor database = await context.DatabaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
         using DatabaseUseHandle _ = database.Use();
+
+        // A schema statement this dispatcher runs itself (a comment, CREATE TABLE ... AS, REFRESH) meets the
+        // same transactional-DDL rule as at the DDL entry point. Entered here, in this frame, so the rest
+        // of the statement reads the transaction's private schema.
+        Transactions.KvTransaction? ddlTransaction = await ddlDispatcher.OpenTransactionSchemaAsync(database, ticket, ast).ConfigureAwait(false);
+        if (ddlTransaction is not null)
+            Catalogs.Transactional.TransactionSchemaScope.Enter(ddlTransaction);
+
+        // A schema statement this dispatcher runs itself holds the DDL lock for its length, as at the DDL
+        // entry point. One that it hands to the DDL entry point takes the lock there instead.
+        await using Catalogs.Transactional.TransactionalDdlLock? statementLock =
+            ddlTransaction is null && !StatementScope.IsSchemaDdl(ast.nodeType)
+                ? await ddlDispatcher.AcquireStatementDdlLockAsync(database, ticket, ast).ConfigureAwait(false)
+                : null;
 
         // Mark the transaction as having executed a statement for every statement type except the
         // SET TRANSACTION family — those must be the first statement per standard SQL semantics, so

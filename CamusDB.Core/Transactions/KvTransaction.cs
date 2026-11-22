@@ -330,6 +330,44 @@ public sealed class KvTransaction
     /// </summary>
     public void MarkSessionOwned() => IsSessionOwned = true;
 
+    /// <summary>
+    /// The schema changes this transaction's DDL statements made, or null. Set by the first DDL
+    /// statement of a session-owned transaction when transactional DDL is on, and never replaced; the
+    /// commit and the rollback call its hooks. See <see cref="ITransactionSchemaChanges"/>.
+    /// </summary>
+    public ITransactionSchemaChanges? SchemaChanges { get; internal set; }
+
+    /// <summary>
+    /// Removes the schema pins of one table resource: <paramref name="tableResource"/> itself and every
+    /// pin named <c>{tableResource}#…</c>, such as its contents pin. Called when this transaction's own
+    /// DDL changes a table it pinned: the pin described the layout before the change, and keeping it
+    /// would refuse the transaction's next statement on that table, and its commit, because of its own
+    /// change. A change by another transaction is caught by the base-version check of the change set
+    /// instead.
+    /// </summary>
+    internal void RemoveSchemaPins(string tableResource)
+    {
+        if (schemaPins is null)
+            return;
+
+        List<string>? stale = null;
+
+        foreach (string resource in schemaPins.Keys)
+        {
+            if (string.Equals(resource, tableResource, StringComparison.Ordinal)
+                || (resource.Length > tableResource.Length
+                    && resource[tableResource.Length] == '#'
+                    && resource.StartsWith(tableResource, StringComparison.Ordinal)))
+                (stale ??= []).Add(resource);
+        }
+
+        if (stale is null)
+            return;
+
+        foreach (string resource in stale)
+            schemaPins.Remove(resource);
+    }
+
     // The values this transaction drew from user sequences, keyed by the sequence's immutable id,
     // plus the id of the sequence drawn from most recently. This is what currval() and lastval()
     // read. It is per-transaction rather than per-connection because CamusDB has no connection: the
@@ -1746,6 +1784,57 @@ public sealed class KvTransaction
 
         changed = null;
         return true;
+    }
+
+    /// <summary>
+    /// The check of <see cref="TryEnterCommit"/> without its state change: false, with
+    /// <paramref name="changed"/> set, when a table this transaction wrote gained a write obligation after
+    /// the write was planned. Used before a transaction with schema changes announces its change set.
+    /// </summary>
+    internal bool WriteShapePinsHold(out IWriteShapeSource? changed)
+    {
+        lock (trackSync)
+        {
+            if (firstWriteShapePin.Table is not null)
+            {
+                if (firstWriteShapePin.Table.WriteShapeChangedAt > firstWriteShapePin.Epoch)
+                {
+                    changed = firstWriteShapePin.Table;
+                    return false;
+                }
+
+                if (moreWriteShapePins is not null)
+                {
+                    for (int i = 0; i < moreWriteShapePins.Count; i++)
+                    {
+                        if (moreWriteShapePins[i].Table.WriteShapeChangedAt > moreWriteShapePins[i].Epoch)
+                        {
+                            changed = moreWriteShapePins[i].Table;
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+
+        changed = null;
+        return true;
+    }
+
+    /// <summary>
+    /// Drops every write-shape pin. Called once the transaction's change set is announced in the schema
+    /// log: the pins held when it was announced, and the announcement fences the tables the change set
+    /// touches, which stamps them. Kept, the pins would refuse this transaction's own commit because of
+    /// its own change set. A change by another transaction after the announcement is refused by the
+    /// schema log while the change set is pending.
+    /// </summary>
+    internal void ClearWriteShapePins()
+    {
+        lock (trackSync)
+        {
+            firstWriteShapePin = default;
+            moreWriteShapePins = null;
+        }
     }
 
     /// <summary>

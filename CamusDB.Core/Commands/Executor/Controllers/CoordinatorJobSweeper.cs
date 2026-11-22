@@ -43,6 +43,12 @@ internal sealed class CoordinatorJobSweeper : IAsyncDisposable
 
     private readonly int intervalMs;
 
+    /// <summary>
+    /// Ends a change set that its committing transaction left pending; run before the job resume, which
+    /// a pending change set would refuse. Null on an engine built without one.
+    /// </summary>
+    private readonly Catalogs.Transactional.PendingChangeSetResolver? changeSetResolver;
+
     private readonly CancellationTokenSource cts = new();
 
     private Task? loop;
@@ -51,12 +57,14 @@ internal sealed class CoordinatorJobSweeper : IAsyncDisposable
         DatabaseDescriptors databaseDescriptors,
         SchemaChangeCoordinator coordinator,
         ILogger<ICamusDB> logger,
-        int intervalMs)
+        int intervalMs,
+        Catalogs.Transactional.PendingChangeSetResolver? changeSetResolver = null)
     {
         this.databaseDescriptors = databaseDescriptors;
         this.coordinator = coordinator;
         this.logger = logger;
         this.intervalMs = intervalMs;
+        this.changeSetResolver = changeSetResolver;
     }
 
     /// <summary>Number of sweeps that ran to the end, for diagnostics and tests.</summary>
@@ -127,6 +135,9 @@ internal sealed class CoordinatorJobSweeper : IAsyncDisposable
             {
                 if (!await descriptor.Kahuna.AmISchemaLeaderAsync(descriptor.Id).ConfigureAwait(false))
                     continue;
+
+                if (changeSetResolver is not null)
+                    await changeSetResolver.ResolveAsync(descriptor).ConfigureAwait(false);
 
                 await coordinator.ResumeJobsAsync(descriptor, CoordinatorResumeTrigger.Sweep).ConfigureAwait(false);
                 swept++;

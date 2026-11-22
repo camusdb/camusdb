@@ -561,7 +561,10 @@ public sealed class HttpTransactionCoordinator
     }
 
     private static bool IsTerminal(KvTransaction tx) =>
-        tx.Status is KvTransactionStatus.Committed or KvTransactionStatus.RolledBack;
+        tx.Status is KvTransactionStatus.Committed or KvTransactionStatus.RolledBack
+        // A transaction whose rows committed while the publish of its schema changes is not confirmed
+        // stays registered: the client's retried COMMIT completes the publish.
+        && tx.SchemaChanges is not { PublicationOutstanding: true };
 
     /// <summary>
     /// Restores or retires an entry after its finalize attempt threw. A finalize that failed while the

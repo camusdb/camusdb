@@ -66,7 +66,8 @@ internal sealed class SchemaCheckpointWriter
         SchemaChangeLogEntry entry,
         string? droppedTableId,
         string? droppedViewId,
-        string? droppedSequenceId
+        string? droppedSequenceId,
+        IReadOnlyList<ChangeSetCheckpointDelta>? changeSetDropped = null
     )
     {
         const int maxAttempts = 3;
@@ -75,7 +76,7 @@ internal sealed class SchemaCheckpointWriter
         {
             try
             {
-                await PersistSchemaCheckpointAsync(database, entry, droppedTableId, droppedViewId, droppedSequenceId).ConfigureAwait(false);
+                await PersistSchemaCheckpointAsync(database, entry, droppedTableId, droppedViewId, droppedSequenceId, changeSetDropped).ConfigureAwait(false);
                 return;
             }
             catch (Exception ex) when (attempt < maxAttempts)
@@ -114,7 +115,8 @@ internal sealed class SchemaCheckpointWriter
         SchemaChangeLogEntry entry,
         string? droppedTableId,
         string? droppedViewId,
-        string? droppedSequenceId
+        string? droppedSequenceId,
+        IReadOnlyList<ChangeSetCheckpointDelta>? changeSetDropped = null
     )
     {
         if (TestPersistCheckpointException is { } fault)
@@ -133,6 +135,43 @@ internal sealed class SchemaCheckpointWriter
         ).ConfigureAwait(false);
 
         try
+        {
+            if (Apply.ChangeSetDeltaApplier.IsChangeSetOp(entry.Op))
+                await StageChangeSetCheckpointAsync(database, entry, changeSetDropped, tx).ConfigureAwait(false);
+            else
+                await StageEntryCheckpointAsync(database, entry, droppedTableId, droppedViewId, droppedSequenceId, tx).ConfigureAwait(false);
+
+            // In the same transaction as the live table meta above, so the relation can never be
+            // durable on its new key-space without the old one being recoverable.
+            IReadOnlyList<ContentsRetirementIntent> retirements =
+                await ContentsRetirementStore.PersistContentsRetirementsAsync(database, tx).ConfigureAwait(false);
+
+            using CancellationTokenSource cts = new(CheckpointCommitTimeout);
+            await database.Transactions.CommitAsync(tx, cts.Token).ConfigureAwait(false);
+
+            database.CompleteContentsRetirements(retirements);
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Writes into <paramref name="tx"/> what one applied delta changed: the meta key of the object it
+    /// created, altered or renamed, or the deletion of the object it dropped, plus the version key. Reads
+    /// the object from the schema after the apply, by the name it has then.
+    /// </summary>
+    private async Task StageEntryCheckpointAsync(
+        DatabaseDescriptor database,
+        SchemaChangeLogEntry entry,
+        string? droppedTableId,
+        string? droppedViewId,
+        string? droppedSequenceId,
+        KvTransaction tx,
+        TableSchema? droppedTable = null,
+        HashSet<string>? persistedTables = null)
+    {
         {
             // View ops write the view meta key family, not a table blob. They are checked first
             // because GetEntryTableName below has no answer for them — a view is not a table, and
@@ -221,13 +260,18 @@ internal sealed class SchemaCheckpointWriter
                         database, droppedTableId, entry.ToVersion, tx,
                         deferred: dropPayload.Deferred,
                         formerName: dropPayload.TableName,
-                        droppedAt: entry.Ts).ConfigureAwait(false);
+                        droppedAt: entry.Ts,
+                        capturedSchema: droppedTable).ConfigureAwait(false);
                 }
             }
             else
             {
                 string tableName = GetEntryTableName(entry);
-                if (database.Schema.Tables.TryGetValue(tableName, out TableSchema? tableSchema))
+
+                // The publish of a change set stages every delta, and several deltas can name one table;
+                // its final state is written once.
+                if (database.Schema.Tables.TryGetValue(tableName, out TableSchema? tableSchema)
+                    && (persistedTables is null || tableSchema.Id is null || persistedTables.Add(tableSchema.Id)))
                     await SchemaMetaStore.PersistSchemaTableAsync(database, tableSchema, entry.ToVersion, tx).ConfigureAwait(false);
 
                 // A materialized view created WITH DATA adopted its staging relation in this entry. The
@@ -242,21 +286,69 @@ internal sealed class SchemaCheckpointWriter
                 // same half-applied state the single delta removes from memory.
                 await PersistRenameDependentViewsAsync(database, entry, tx).ConfigureAwait(false);
             }
-
-            // In the same transaction as the live table meta above, so the relation can never be
-            // durable on its new key-space without the old one being recoverable.
-            IReadOnlyList<ContentsRetirementIntent> retirements =
-                await ContentsRetirementStore.PersistContentsRetirementsAsync(database, tx).ConfigureAwait(false);
-
-            using CancellationTokenSource cts = new(CheckpointCommitTimeout);
-            await database.Transactions.CommitAsync(tx, cts.Token).ConfigureAwait(false);
-
-            database.CompleteContentsRetirements(retirements);
         }
-        finally
+    }
+
+    /// <summary>
+    /// Writes into <paramref name="tx"/> what a change-set entry changed.
+    /// <list type="bullet">
+    /// <item>A pending entry writes its pending record, so a reopen restores the change set even when the
+    /// schema log no longer holds the entry, and the version key.</item>
+    /// <item>A publish stages every delta of its change set as <see cref="StageEntryCheckpointAsync"/> stages
+    /// a single entry, with the dropped ids the publisher captured before the apply, then deletes the
+    /// pending record and the decision key. All of it commits in this one transaction.</item>
+    /// <item>An abort deletes the pending record and the decision key.</item>
+    /// </list>
+    /// A decision for a change set that was not pending stages only the version key: the publish or the
+    /// abort that ended it already wrote its checkpoint.
+    /// </summary>
+    private async Task StageChangeSetCheckpointAsync(
+        DatabaseDescriptor database,
+        SchemaChangeLogEntry entry,
+        IReadOnlyList<ChangeSetCheckpointDelta>? changeSetDropped,
+        KvTransaction tx)
+    {
+        IKahuna kahuna = database.Kahuna.Kahuna;
+
+        if (entry.Op == SchemaOp.PendingChangeSet)
         {
-            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+            SchemaChangeSetPayload pending = SchemaDeltaApplier.DecodePayload<SchemaChangeSetPayload>(entry);
+
+            // Only when the entry recorded the change set: a refused pending entry left nothing pending.
+            if (database.Schema.PendingChangeSet is { } recorded
+                && string.Equals(recorded.ChangeSetId, pending.ChangeSetId, StringComparison.Ordinal))
+                await MetaKeyWriter.WriteMetaKey(
+                    kahuna, tx, MetaKeys.ChangeSetKey(database.Id, pending.ChangeSetId),
+                    Replication.SchemaChangeLogEntryCodec.Encode(recorded.PendingEntry)).ConfigureAwait(false);
+
+            await WriteVersionKeyAsync(kahuna, tx, database.Id, entry.ToVersion).ConfigureAwait(false);
+            return;
         }
+
+        SchemaChangeSetDecisionPayload decision = SchemaDeltaApplier.DecodePayload<SchemaChangeSetDecisionPayload>(entry);
+
+        if (entry.Op == SchemaOp.PublishChangeSet && changeSetDropped is not null)
+        {
+            HashSet<string> persistedTables = new(StringComparer.Ordinal);
+
+            for (int i = 0; i < changeSetDropped.Count; i++)
+            {
+                ChangeSetCheckpointDelta dropped = changeSetDropped[i];
+                await StageEntryCheckpointAsync(
+                    database, dropped.Delta, dropped.TableId, dropped.ViewId, dropped.SequenceId, tx,
+                    dropped.DroppedTable, persistedTables).ConfigureAwait(false);
+            }
+        }
+
+        await MetaKeyWriter.DeleteMetaKey(kahuna, tx, MetaKeys.ChangeSetKey(database.Id, decision.ChangeSetId)).ConfigureAwait(false);
+        await MetaKeyWriter.DeleteMetaKey(kahuna, tx, MetaKeys.ChangeSetDecisionKey(database.Id, decision.ChangeSetId)).ConfigureAwait(false);
+        await WriteVersionKeyAsync(kahuna, tx, database.Id, entry.ToVersion).ConfigureAwait(false);
+    }
+
+    private static async Task WriteVersionKeyAsync(IKahuna kahuna, KvTransaction tx, string databaseId, long version)
+    {
+        byte[] versionBytes = MetaJsonSerializer.Serialize(version, MetaJsonContext.Default.Int64);
+        await MetaKeyWriter.WriteMetaKey(kahuna, tx, MetaKeys.VersionKey(databaseId), versionBytes).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -431,6 +523,13 @@ internal sealed class SchemaCheckpointWriter
             string extensionKeyPrefix = MetaKeys.ExtensionKeyPrefix(database.Id);
             string functionKeyPrefix = MetaKeys.FunctionKeyPrefix(database.Id);
 
+            // The pending change set of a committing transaction is replicated state too: a reopen that
+            // loads this checkpoint must keep refusing other changes until it is published or aborted.
+            // A record of a change set that memory no longer holds pending is deleted, for the same reason
+            // a stale extension record is.
+            PendingSchemaChangeSet? pendingChangeSet = database.Schema.PendingChangeSet;
+            string changeSetKeyPrefix = MetaKeys.ChangeSetKeyPrefix(database.Id);
+
             // A plain read of the latest committed keys, outside the write transaction (no transaction
             // id), so the scan adds nothing to what that transaction reads or locks.
             await foreach ((string key, ReadOnlyKeyValueEntry stored) in kahuna.LocateAndScanRange(
@@ -444,7 +543,16 @@ internal sealed class SchemaCheckpointWriter
                 if (stored.Value is not null && key.StartsWith(functionKeyPrefix, StringComparison.Ordinal) &&
                     !functions.ContainsKey(key[functionKeyPrefix.Length..]))
                     staleExtensionKeys.Add(key);
+
+                if (stored.Value is not null && key.StartsWith(changeSetKeyPrefix, StringComparison.Ordinal) &&
+                    !string.Equals(pendingChangeSet?.ChangeSetId, key[changeSetKeyPrefix.Length..], StringComparison.Ordinal))
+                    staleExtensionKeys.Add(key);
             }
+
+            if (pendingChangeSet is not null)
+                await MetaKeyWriter.WriteMetaKey(
+                    kahuna, tx, MetaKeys.ChangeSetKey(database.Id, pendingChangeSet.ChangeSetId),
+                    Replication.SchemaChangeLogEntryCodec.Encode(pendingChangeSet.PendingEntry)).ConfigureAwait(false);
 
             foreach (string staleKey in staleExtensionKeys)
                 await MetaKeyWriter.DeleteMetaKey(kahuna, tx, staleKey).ConfigureAwait(false);
@@ -480,3 +588,18 @@ internal sealed class SchemaCheckpointWriter
         }
     }
 }
+
+/// <summary>
+/// One delta of a published change set, with the versions of the publish entry, and the ids of the
+/// relation, view or sequence it drops. The publisher reads them from a copy of the schema advanced delta
+/// by delta, before the publish applies, because the apply removes the objects and the checkpoint still
+/// has to delete their meta keys by id. <see cref="DroppedTable"/> is the dropped relation as it was right
+/// before its drop: the orphan record of a deferred drop is built from it, because the persisted table key
+/// is absent for a relation the same change set created, and holds an older layout for one it altered.
+/// </summary>
+internal readonly record struct ChangeSetCheckpointDelta(
+    SchemaChangeLogEntry Delta,
+    string? TableId,
+    string? ViewId,
+    string? SequenceId,
+    TableSchema? DroppedTable = null);

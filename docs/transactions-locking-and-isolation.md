@@ -844,6 +844,61 @@ affected: every transport runs them with no transaction, so no access mode appli
   `SET TRANSACTION ISOLATION LEVEL SERIALIZABLE READ WRITE` makes it a Serializable read-write
   transaction. PostgreSQL also allows a read-only transaction to become read-write there.
 
+### 9.7 Schema statements inside an explicit transaction
+
+The setting `transactional_ddl_enabled` (off by default) decides what a schema statement does inside an
+explicit transaction.
+
+**Setting off.** The statement commits at once, in a transaction of its own, before it returns. A
+later `ROLLBACK` does not undo it. `TRUNCATE`, `ALTER TABLE … REWRITE STORAGE` and
+`ALTER SEQUENCE … RESTART` are refused with `CADB0538`.
+
+**Setting on.** The statement becomes part of the transaction, as in PostgreSQL:
+
+- The statements after it in the same transaction see the change: a new table, a new column, a
+  dropped index.
+- Other transactions, on every node, see nothing of the change until `COMMIT`.
+- `COMMIT` makes the change visible together with the rows the transaction wrote. When `COMMIT`
+  returns, every live node has the change.
+- `ROLLBACK`, a failed statement (§9.4) and a refused commit undo the change and the rows together.
+
+Inside a transaction, these statements run with the setting on: `CREATE TABLE`, `DROP TABLE` (not
+`FORCE`), `ALTER TABLE … RENAME TO`, `RENAME COLUMN`, `RENAME INDEX`, `DROP COLUMN`, `DROP INDEX`,
+`ALTER TABLE … SET` and `RESET`, `COMMENT ON TABLE`, `COLUMN` and `INDEX`, and `CREATE`, `CREATE OR
+REPLACE`, `DROP` and `ALTER … RENAME` of a view. `ADD COLUMN`, `CREATE INDEX`, `ADD UNIQUE` and
+`ADD PRIMARY KEY` run when no existing row needs work: a nullable `ADD COLUMN` with no default runs on
+any table, and every one of them runs on a table the transaction created and has not written to yet.
+Every other schema statement is refused with `CADB0538` inside a transaction. Commit or roll back
+first, then run it.
+
+What the transaction meets:
+
+- **One DDL transaction at a time in each database.** The first schema statement of a transaction
+  takes the database's DDL lock and holds it until the transaction ends. Another transaction's first
+  schema statement, and a schema statement outside a transaction, waits for it. After 30 seconds the
+  waiter gets the retryable `CADB0504`.
+- **A schema change that landed meanwhile refuses the commit.** If the schema of the database moved
+  after the transaction's first schema statement, `COMMIT` fails with the retryable `CADB0502` and
+  rolls the transaction back. Replay it from `BEGIN`.
+- **A transaction changes the schema of one database.** A schema statement on a second database is
+  refused with `CADB0538`.
+- **A transaction that writes a table and then alters it commits.** Its own earlier statements do not
+  refuse the commit.
+- **Statements on the changed tables wait for the commit to finish.** Between the KV commit of the rows
+  and the publish of the schema change, a statement of another transaction that opens a table the change
+  touches (or a table that a new foreign key references) waits until the change is visible. The wait is
+  normally a few milliseconds. A writer of such a table that planned before the commit is refused at its
+  own commit with the retryable `CADB0502`.
+- **`COMMIT` can fail with `CADB0509` after the rows committed.** This happens when the schema change
+  cannot be confirmed on every live node, for example during a leader change. Retry `COMMIT` on the same
+  transaction; it waits for the schema change and does not run the transaction again.
+
+Database-scoped statements (`CREATE DATABASE`, users, grants, `SET CLUSTER SETTING`) do not join the
+transaction, with the setting on or off.
+
+The commit protocol, the recovery of a commit whose node fails, and the DDL lock are described in
+[distributed-schema-architecture.md](distributed-schema-architecture.md) §9.2.
+
 ---
 
 ## 10. Where this lives in the code

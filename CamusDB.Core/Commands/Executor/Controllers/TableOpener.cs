@@ -84,6 +84,16 @@ internal sealed class TableOpener
 
         TableSchema tableSchema = await GetTableSchemaWithFreshnessRetry(database, tableName).ConfigureAwait(false);
 
+        // A committing transaction's change set touches this table: its rows may already be committed
+        // while the shared schema does not describe them yet. The statement waits for the publish or the
+        // abort, then resolves the name again, since the publish may have renamed or dropped the table.
+        // The transaction's own statements read its private schema, which has no pending change set.
+        if (database.Schema.PendingChangeSet is { } pending && pending.Affects(tableSchema.Id))
+        {
+            await WaitForChangeSetToEndAsync(database, pending, tableName).ConfigureAwait(false);
+            return await Open(database, tableName).ConfigureAwait(false);
+        }
+
         // Per-table privilege enforcement. This is the universal chokepoint for a table access — every
         // top-level, join, subquery, semi-join, DML, DDL, and EXPLAIN path resolves its descriptor here
         // — so the check must live in Open (which runs on every access), not LoadTable (cache miss only).
@@ -129,6 +139,31 @@ internal sealed class TableOpener
 
     public ValueTask<TableDescriptor> Open(DatabaseDescriptor database, TableSource tableSource) =>
         Open(database, tableSource.TableName);
+
+    /// <summary>
+    /// Waits until the pending change set <paramref name="pending"/> of <paramref name="database"/> is
+    /// published or aborted. The wait is normally one KV commit and one schema-log round trip; after a
+    /// crash of the committing node it lasts until the resolver ends the change set. Gives up with the
+    /// retryable <see cref="CamusDBErrorCodes.TransactionMustRetry"/> a little after the resolver delay.
+    /// </summary>
+    private static async Task WaitForChangeSetToEndAsync(DatabaseDescriptor database, Catalogs.Models.PendingSchemaChangeSet pending, string tableName)
+    {
+        long deadline = Environment.TickCount64 + database.Options.TransactionalDdlResolveAfterMs + 15_000;
+        int delayMs = 2;
+
+        while (database.SharedSchema.PendingChangeSet is { } current
+               && string.Equals(current.ChangeSetId, pending.ChangeSetId, StringComparison.Ordinal))
+        {
+            if (Environment.TickCount64 >= deadline)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.TransactionMustRetry,
+                    $"Table '{tableName}' of database '{database.Name}' is part of the schema changes of a committing " +
+                    $"transaction (change set {pending.ChangeSetId}) that are not published yet; retry the statement");
+
+            await Task.Delay(delayMs).ConfigureAwait(false);
+            delayMs = Math.Min(delayMs * 2, 100);
+        }
+    }
 
     /// <summary>
     /// Resolves a table's schema, treating a miss as a possible symptom of a stale in-memory
@@ -240,6 +275,14 @@ internal sealed class TableOpener
 
     private async Task<TableDescriptor> LoadTable(DatabaseDescriptor database, TableSchema tableSchema)
     {
+        // A table loaded from disk reads its older layouts from the history keys; a table created in
+        // this process has only the layouts it went through here. A row can carry a layout this node
+        // has not applied yet: one written by a committed transaction whose schema change set is not
+        // published here yet, which committed the layout's history key with the row. Every table gets
+        // the loader, so such a row decodes instead of failing as corrupt.
+        if (tableSchema.SchemaHistoryLoader is null && !string.IsNullOrEmpty(tableSchema.Id))
+            Catalogs.Meta.SchemaHistoryStore.ConfigureSchemaHistoryLoader(database, tableSchema);
+
         // Rows and index entries are addressed by the STORAGE id, which is the relation's own id for
         // everything except a materialized view that has been refreshed — a refresh replaces the
         // key-space while deliberately keeping the identity that grants and dependencies are hung on.

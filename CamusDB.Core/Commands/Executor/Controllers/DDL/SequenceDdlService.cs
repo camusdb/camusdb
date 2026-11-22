@@ -126,6 +126,12 @@ internal sealed class SequenceDdlService
         // why this order, and what repairs a crash between the two.
         await allocator.CreateAsync(database.Kahuna.Kahuna, database.Id, sequence, cancellationToken).ConfigureAwait(false);
 
+        // Inside a transaction with a private schema the record is only in the transaction's change set,
+        // but the counter exists at once. A rollback removes it again; ids are never reused, so a counter
+        // a failed removal leaves behind is never read.
+        if (Catalogs.Transactional.TransactionSchemaScope.OverlayFor(database) is { } overlay)
+            overlay.AddOnRollback(() => allocator.DeleteAsync(overlay.Database.Kahuna.Kahuna, overlay.Database.Id, sequenceId, CancellationToken.None));
+
         return sequence;
     }
 
@@ -160,6 +166,15 @@ internal sealed class SequenceDdlService
         DatabaseDescriptor database, string sequenceName, CancellationToken cancellationToken)
     {
         string sequenceId = await catalogs.DropSequenceAsync(database, sequenceName).ConfigureAwait(false);
+
+        // Inside a transaction with a private schema the record leaves only with the change set's publish,
+        // and a counter deleted now could not come back after a ROLLBACK. It goes after the publish; ids are
+        // never reused, so a counter that a crash leaves behind is never read.
+        if (Catalogs.Transactional.TransactionSchemaScope.OverlayFor(database) is { } overlay)
+        {
+            overlay.AddAfterPublish(() => allocator.DeleteAsync(overlay.Database.Kahuna.Kahuna, overlay.Database.Id, sequenceId, CancellationToken.None));
+            return;
+        }
 
         await allocator.DeleteAsync(database.Kahuna.Kahuna, database.Id, sequenceId, cancellationToken).ConfigureAwait(false);
     }

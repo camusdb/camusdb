@@ -1075,6 +1075,36 @@ public sealed record CamusDBOptions
     public int MaxSerializableTransactionLifetimeMs { get; init; } = 3_600_000;
 
     /// <summary>
+    /// Makes schema DDL inside an explicit transaction part of that transaction, with the PostgreSQL
+    /// rule: <c>COMMIT</c> makes the data and the schema change visible together, <c>ROLLBACK</c> undoes
+    /// both, and later statements of the same transaction see the change. When false, each DDL statement
+    /// commits at once in a transaction of its own, as before this setting existed.
+    ///
+    /// <para>Runtime: the DDL dispatcher reads it from the current options snapshot at each statement. A
+    /// transaction that already holds a schema change keeps it until it ends, also after the setting is
+    /// turned off. Cluster scope: nodes that disagree give a client different transaction semantics for
+    /// the same statement.</para>
+    ///
+    /// <para>Off by default until the concurrency and fault gate of the feature passes.</para>
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
+    public bool TransactionalDdlEnabled { get; init; } = false;
+
+    /// <summary>
+    /// How long, in milliseconds, the change set of a committing transaction may stay pending on the schema
+    /// leader before the resolver ends it from its decision key. A pending change set refuses every other
+    /// schema change of its database, so a crashed committer must not leave it pending; the delay keeps
+    /// the resolver out of the way of a live commit, which normally ends it within one KV commit and one
+    /// schema-log round trip. Default 30 000.
+    ///
+    /// <para>Runtime: the resolver reads it from the database's current options at each run. Node scope:
+    /// only the schema leader acts on it, and a different value on another node changes only when that
+    /// node would act after it leads.</para>
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
+    public int TransactionalDdlResolveAfterMs { get; init; } = 30_000;
+
+    /// <summary>
     /// Total wall-clock budget, in milliseconds, for retrying a single <c>COMMIT</c>, <c>ROLLBACK</c>,
     /// or working-set close against the coordinator's non-terminal <c>MustRetry</c> — "the outcome is
     /// not known yet; retry the same handle". Once the budget is exhausted the finalize surfaces

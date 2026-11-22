@@ -8,6 +8,7 @@
 
 using CamusDB.Core.Catalogs.Apply;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.Catalogs.Replication;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Transactions;
 using Kahuna;
@@ -63,6 +64,7 @@ internal static class SchemaLoader
                 database.Schema.Sequences = snapshot.Sequences;
                 database.Schema.ExtensionCatalog.Publish(snapshot.Extensions, snapshot.SchemaVersion);
                 database.Schema.FunctionCatalog.Publish(snapshot.Functions, snapshot.SchemaVersion);
+                InstallPendingChangeSet(database.Schema, snapshot);
             }
 
             // Both maps were replaced wholesale above, so the id index has to be built from them
@@ -100,6 +102,23 @@ internal static class SchemaLoader
         {
             database.TableDescriptors.Clear();
         }
+    }
+
+    /// <summary>
+    /// Restores the pending change set that the checkpoint recorded, or clears it when there is none, so a
+    /// reopen keeps refusing other schema changes until the change set is published or aborted. A replay of
+    /// the pending entry after this finds the same change set and does nothing.
+    /// </summary>
+    internal static void InstallPendingChangeSet(Schema schema, SchemaSnapshot snapshot)
+    {
+        if (snapshot.PendingChangeSetRecord is not { Length: > 0 } record)
+        {
+            schema.PendingChangeSet = null;
+            return;
+        }
+
+        SchemaChangeLogEntry pending = SchemaChangeLogEntryCodec.Decode(record);
+        ChangeSetDeltaApplier.RecordPending(schema, pending);
     }
 
     /// <summary>
@@ -176,7 +195,7 @@ internal static class SchemaLoader
                 // nothing decodes against it, so it needs no ordering of its own — and a third
                 // pass over the bucket would add a scan to every database open for a family most
                 // databases do not have.
-                (snapshot.Views, snapshot.Sequences, snapshot.Extensions, snapshot.Functions) = await LoadViewsAndSequencesAsync(database, tx).ConfigureAwait(false);
+                (snapshot.Views, snapshot.Sequences, snapshot.Extensions, snapshot.Functions, snapshot.PendingChangeSetRecord) = await LoadViewsAndSequencesAsync(database, tx).ConfigureAwait(false);
             }
 
             (KeyValueResponseType systemType, ReadOnlyKeyValueEntry? systemEntry) =
@@ -296,7 +315,8 @@ internal static class SchemaLoader
         Dictionary<string, ViewSchema> Views,
         Dictionary<string, SequenceSchema> Sequences,
         Dictionary<string, ExtensionDefinition> Extensions,
-        Dictionary<string, InlineFunctionDefinition> Functions)>
+        Dictionary<string, InlineFunctionDefinition> Functions,
+        byte[]? PendingChangeSetRecord)>
         LoadViewsAndSequencesAsync(DatabaseDescriptor database, KvTransaction tx)
     {
         Dictionary<string, ViewSchema> views = new(StringComparer.OrdinalIgnoreCase);
@@ -309,6 +329,8 @@ internal static class SchemaLoader
         string sequenceKeyPrefix = MetaKeys.SequenceKeyPrefix(database.Id);
         string extensionKeyPrefix = MetaKeys.ExtensionKeyPrefix(database.Id);
         string functionKeyPrefix = MetaKeys.FunctionKeyPrefix(database.Id);
+        string changeSetKeyPrefix = MetaKeys.ChangeSetKeyPrefix(database.Id);
+        byte[]? pendingChangeSetRecord = null;
 
         string versionKey = MetaKeys.VersionKey(database.Id);
         bool sawVersionKey = false;
@@ -374,6 +396,15 @@ internal static class SchemaLoader
                 continue;
             }
 
+            // The pending change set of a committing transaction. At most one exists, because the
+            // schema apply refuses a second while one is pending; the checkpoint of its publish or abort
+            // deletes it.
+            if (key.StartsWith(changeSetKeyPrefix, StringComparison.Ordinal))
+            {
+                pendingChangeSetRecord = entry.Value;
+                continue;
+            }
+
             if (!key.StartsWith(sequenceKeyPrefix, StringComparison.Ordinal))
                 continue;
 
@@ -394,7 +425,7 @@ internal static class SchemaLoader
 
         RequireCompleteMetaScan(database, sawVersionKey, "views, sequences, extensions and functions");
 
-        return (views, sequences, extensions, functions);
+        return (views, sequences, extensions, functions, pendingChangeSetRecord);
 
     }
 

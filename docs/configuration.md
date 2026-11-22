@@ -72,6 +72,8 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 | `transaction_admission_wait_ms` | — | `0` (node default) |
 | `range_lock_expires_ms` | — | `150000` |
 | `max_serializable_transaction_lifetime_ms` | — | `3600000` |
+| `transactional_ddl_enabled` | — | `false`; makes schema DDL inside an explicit transaction commit and roll back with it, with the PostgreSQL rule. Runtime and cluster-wide. See [schema statements inside an explicit transaction](transactions-locking-and-isolation.md#97-schema-statements-inside-an-explicit-transaction) |
+| `transactional_ddl_resolve_after_ms` | — | `30000`; how long the schema changes of a committing transaction may stay pending on the schema leader before the resolver ends them from their decision key (after a crash of the committing node). Runtime, per node. `0` resolves at the next run |
 | `lock_escalation_threshold` | — | `1000`; shared point locks one Serializable read-write transaction holds on one table (or one index) before it takes one lock on the whole table (or index) instead |
 | `lock_wait_deadline_ms` | — | `500` |
 | `optimistic_intent_wait_ms` | — | `100`; how long a row read of an optimistic read-write transaction waits for a write another transaction has staged on the row and not committed, so that it reads the committed result instead of a value its own later `UPDATE` would conflict on; `0` turns the wait off (see [optimistic conflicts](transactions-locking-and-isolation.md)) |

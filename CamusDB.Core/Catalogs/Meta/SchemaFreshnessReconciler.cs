@@ -55,6 +55,10 @@ internal static class SchemaFreshnessReconciler
     internal static async Task<bool> TryReconcileAsync(
         DatabaseDescriptor database, long cooldownMs, ILogger<ICamusDB> logger)
     {
+        // The reload replaces the shared schema. A statement of a transaction with a private schema can
+        // reach this after a name miss, and the reload must not land on that private copy.
+        Transactional.TransactionSchemaScope.Suppress();
+
         if (!database.TryEnterSchemaFreshnessCheck(cooldownMs))
             return false;
 
@@ -101,6 +105,7 @@ internal static class SchemaFreshnessReconciler
                 database.Schema.Sequences = snapshot.Sequences;
                 database.Schema.ExtensionCatalog.Publish(snapshot.Extensions, snapshot.SchemaVersion);
                 database.Schema.FunctionCatalog.Publish(snapshot.Functions, snapshot.SchemaVersion);
+                SchemaLoader.InstallPendingChangeSet(database.Schema, snapshot);
 
                 if (snapshot.System is not null)
                     database.SystemSchema = snapshot.System;

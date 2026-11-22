@@ -878,6 +878,18 @@ public sealed class KvTransactionsManager : IDisposable
             return mintLocalT?.Invoke(null) ?? Kommander.Time.HLCTimestamp.Zero;
         }
 
+        // A COMMIT retried after the rows committed and the publish of the transaction's schema changes
+        // was not confirmed: it completes the publish, never the transaction again.
+        if (tx.Status == KvTransactionStatus.Committed && tx.SchemaChanges is { PublicationOutstanding: true } outstanding)
+        {
+            await outstanding.ResumePublicationAsync(tx, cancellationToken).ConfigureAwait(false);
+
+            if (mintLocalT is not null)
+                return mintLocalT(tx.CommitTimestamp.IsNull() ? null : tx.CommitTimestamp);
+
+            return tx.CommitTimestamp;
+        }
+
         // A transaction that already reached a terminal outcome cannot be finalized again. A
         // Finalizing transaction is NOT terminal: it is the resume path for a commit that returned
         // the non-terminal MustRetry, so it must fall through and retry the same handle.
@@ -920,7 +932,14 @@ public sealed class KvTransactionsManager : IDisposable
             // statement was planned. Nothing staged has left the node, so the refusal is a definite
             // non-commit with the retryable code, and the transaction is rolled back here so a client
             // that replays from BeginAsync leaves no lock behind.
-            if (!tx.TryValidateSchemaPins(out string? schemaRefusal))
+            // A transaction whose DDL changed the schema checks its pins against its own view of the
+            // schema, where the tables it created or changed exist.
+            string? schemaRefusal;
+            bool pinsHold = tx.SchemaChanges is { } pinChanges
+                ? pinChanges.TryValidateSchemaPins(tx, out schemaRefusal)
+                : tx.TryValidateSchemaPins(out schemaRefusal);
+
+            if (!pinsHold)
             {
                 await AbandonRefusedCommitAsync(tx, cancellationToken).ConfigureAwait(false);
 
@@ -928,6 +947,38 @@ public sealed class KvTransactionsManager : IDisposable
                     CamusDBErrorCodes.TransactionConflict,
                     $"Transaction {tx.UniqueId} cannot commit: {schemaRefusal}; a schema change landed after the " +
                     "transaction planned its statements, so the transaction was rolled back, retry it from BeginAsync");
+            }
+
+            // The schema changes of the transaction: announced in the schema log, and the decision key and
+            // the new layouts staged in this transaction, while it can still write. A refusal is a
+            // definite non-commit.
+            if (tx.SchemaChanges is { } preparing)
+            {
+                // The write-shape check of the gate below, made before the announcement: the announcement
+                // stamps the tables the change set touches, and the pins are dropped after it.
+                if (!tx.WriteShapePinsHold(out IWriteShapeSource? stampedTable))
+                {
+                    await AbandonRefusedCommitAsync(tx, cancellationToken).ConfigureAwait(false);
+
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.TransactionConflict,
+                        $"Transaction {tx.UniqueId} cannot commit: table '{stampedTable!.WriteShapeName}' gained an index or a " +
+                        "constraint after the transaction wrote to it, so the staged writes do not maintain it; " +
+                        "the transaction was rolled back, retry it from BeginAsync");
+                }
+
+                try
+                {
+                    await preparing.PrepareCommitAsync(tx, cancellationToken).ConfigureAwait(false);
+                }
+                catch
+                {
+                    await AbandonRefusedCommitAsync(tx, cancellationToken).ConfigureAwait(false);
+                    throw;
+                }
+
+                if (preparing.HasChanges)
+                    tx.ClearWriteShapePins();
             }
 
             // The write-shape fence. A table this transaction wrote gained an index or a constraint
@@ -1097,6 +1148,9 @@ public sealed class KvTransactionsManager : IDisposable
                 // unresolved, the transaction stays Finalizing and tracked, and the caller must retry
                 // the SAME commit on the SAME handle (never replay the operation). The finally block
                 // fences and evicts the cache exactly as for any unknown outcome.
+                if (tx.SchemaChanges is { } faultedChanges)
+                    await faultedChanges.OnCommitOutcomeAsync(tx, SchemaChangesCommitOutcome.Unknown).ConfigureAwait(false);
+
                 throw new CamusDBException(
                     CamusDBErrorCodes.TransactionFinalizeUnresolved,
                     $"Transaction {tx.UniqueId} commit outcome is unknown after {commitAttempts} attempt(s) " +
@@ -1136,6 +1190,11 @@ public sealed class KvTransactionsManager : IDisposable
 
                 Untrack(tx);
 
+                // Publishes the schema changes. After the KV commit, so the change becomes visible together
+                // with the data and never before it.
+                if (tx.SchemaChanges is { } committedChanges)
+                    await committedChanges.OnCommitOutcomeAsync(tx, SchemaChangesCommitOutcome.Committed).ConfigureAwait(false);
+
                 // The coordinator can run on another node with a faster clock. Fold the commit
                 // timestamp into the local clock first, so the causal token is above it, and a read at
                 // the token sees this commit.
@@ -1162,6 +1221,10 @@ public sealed class KvTransactionsManager : IDisposable
                     _cache!.PublishGate.FenceAndInvalidate(keyspaces!, _ => _cache.InvalidateByModifiedKeys(modKeys!));
                     markedInFlight = false;
                 }
+
+                if (tx.SchemaChanges is { } unresolvedChanges)
+                    await unresolvedChanges.OnCommitOutcomeAsync(tx, SchemaChangesCommitOutcome.Unknown).ConfigureAwait(false);
+
                 throw new CamusDBException(
                     CamusDBErrorCodes.TransactionFinalizeUnresolved,
                     $"Transaction {tx.UniqueId} commit outcome is not yet resolved after {commitAttempts} attempts " +
@@ -1190,6 +1253,14 @@ public sealed class KvTransactionsManager : IDisposable
             }
 
             Untrack(tx);
+
+            // Aborted is a definite non-commit, so the change set is aborted. Errored leaves the outcome
+            // unknown, and the decision key settles it through the resolver.
+            if (tx.SchemaChanges is { } endedChanges)
+                await endedChanges.OnCommitOutcomeAsync(
+                    tx,
+                    result == KeyValueResponseType.Aborted ? SchemaChangesCommitOutcome.Aborted : SchemaChangesCommitOutcome.Unknown
+                ).ConfigureAwait(false);
 
             // Aborted = definite non-commit (conflict/deadline). Nothing was committed, so replaying
             // the whole operation from a fresh BeginAsync is safe → CADB0502 (retried by
@@ -1269,6 +1340,9 @@ public sealed class KvTransactionsManager : IDisposable
         tx.Status = KvTransactionStatus.RolledBack;
 
         Untrack(tx);
+
+        if (tx.SchemaChanges is { } refusedChanges)
+            await refusedChanges.DiscardAsync(tx).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1511,6 +1585,11 @@ public sealed class KvTransactionsManager : IDisposable
         }
 
         Untrack(tx);
+
+        // Drops the private schema and frees the DDL lock. A change set already announced as pending is
+        // aborted, unless an earlier commit attempt left the KV outcome unknown.
+        if (tx.SchemaChanges is { } rolledBackChanges)
+            await rolledBackChanges.DiscardAsync(tx).ConfigureAwait(false);
     }
 
     /// <summary>

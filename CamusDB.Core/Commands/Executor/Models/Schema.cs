@@ -23,6 +23,20 @@ public sealed class Schema : IDisposable
     public long SchemaVersion { get; set; }
 
     /// <summary>
+    /// The change set of an explicit transaction that the schema log announced and did not yet publish
+    /// or abort, or null. Written only by the schema apply, under <see cref="Semaphore"/>, and by the
+    /// schema load. While it is set, the apply refuses every other schema change of the database. See
+    /// <see cref="Catalogs.Models.PendingSchemaChangeSet"/>.
+    /// </summary>
+    public Catalogs.Models.PendingSchemaChangeSet? PendingChangeSet
+    {
+        get => Volatile.Read(ref pendingChangeSet);
+        set => Volatile.Write(ref pendingChangeSet, value);
+    }
+
+    private Catalogs.Models.PendingSchemaChangeSet? pendingChangeSet;
+
+    /// <summary>
     /// The committed deltas this node applied as refusals (see
     /// <see cref="Catalogs.Apply.SchemaDeltaRefusedException"/>), keyed by the version each consumed.
     /// In memory only and bounded: the one reader is the proposer of the refused entry, right after its
@@ -296,6 +310,31 @@ public sealed class Schema : IDisposable
 
         Interlocked.Decrement(ref _lockDepth);
         Semaphore.Release();
+    }
+
+    /// <summary>
+    /// Installs the maps of <paramref name="published"/> (tables, views, sequences) into this schema, as the
+    /// publish of a transaction's change set: the change set applies to a copy, and the copy replaces the
+    /// live maps here, each with one reference store. Called under <see cref="Semaphore"/>.
+    ///
+    /// <para>The lookup indexes are rebuilt from the installed maps, and the pending change set is cleared
+    /// last: a statement that waits for the change set (<c>TableOpener</c>) resumes only after every
+    /// index, the foreign-key graph included, describes the published catalog. A reader that does not
+    /// wait can read the new table map beside the old view map for the few instructions between the two
+    /// stores; every other state between two deltas of the change set is never visible.</para>
+    /// </summary>
+    internal void InstallPublishedCatalog(Schema published)
+    {
+        tables = published.tables;
+        views = published.views;
+        Sequences = published.Sequences;
+        Volatile.Write(ref viewDependencies, published.ViewDependencies);
+
+        RebuildRelationNameIndex();
+        RebuildSequenceIdIndex();
+        RebuildForeignKeyGraph();
+
+        PendingChangeSet = null;
     }
 
     /// <summary>

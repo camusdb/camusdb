@@ -52,10 +52,70 @@ public sealed class SchemaReplicator
 
     private readonly ILogger<ICamusDB> logger;
 
+    /// <summary>Ends a pending change set whose committing transaction is gone; driven by the watcher below.</summary>
+    private readonly Transactional.PendingChangeSetResolver changeSetResolver;
+
     public SchemaReplicator(CatalogsManager catalogs, ILogger<ICamusDB> logger)
     {
         this.catalogs = catalogs;
         this.logger = logger;
+        changeSetResolver = new Transactional.PendingChangeSetResolver(new Transactional.ChangeSetCommitter(catalogs, logger), logger);
+    }
+
+    /// <summary>
+    /// Starts the watcher of <paramref name="database"/>'s pending change set, unless none is pending or one
+    /// already runs. Called when a pending entry applies or is replayed, and when a database opens with a
+    /// pending record. The watcher runs on every node and resolves only while this node leads the schema
+    /// log, so a leader change needs no event of its own; it ends when nothing is pending, and when the
+    /// descriptor is disposed.
+    /// </summary>
+    internal void WatchPendingChangeSet(DatabaseDescriptor database)
+    {
+        if (database.SharedSchema.PendingChangeSet is null || database.Lifetime.IsCancellationRequested)
+            return;
+
+        if (!database.TryStartPendingChangeSetWatcher())
+            return;
+
+        _ = WatchPendingChangeSetAsync(database);
+    }
+
+    private async Task WatchPendingChangeSetAsync(DatabaseDescriptor database)
+    {
+        CancellationToken lifetime = database.Lifetime;
+
+        try
+        {
+            while (!lifetime.IsCancellationRequested && database.SharedSchema.PendingChangeSet is not null)
+            {
+                await Task.Delay(Transactional.PendingChangeSetResolver.PollInterval(database), lifetime).ConfigureAwait(false);
+
+                try
+                {
+                    if (!await database.Kahuna.AmISchemaLeaderAsync(database.Id, lifetime).ConfigureAwait(false))
+                        continue;
+
+                    await changeSetResolver.ResolveAsync(database).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException and not ObjectDisposedException)
+                {
+                    logger.LogWarning(ex, "Resolving the pending change set of database {Database} failed; retrying", database.Name);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+        finally
+        {
+            database.EndPendingChangeSetWatcher();
+
+            // A change set announced while this loop was ending found the watcher still claimed.
+            WatchPendingChangeSet(database);
+        }
     }
 
     public void Register(DatabaseDescriptor database, SchemaChangeCoordinator? coordinator = null)
@@ -110,12 +170,19 @@ public sealed class SchemaReplicator
             : applySubscription;
 
         database.SetSchemaReplicationSubscription(composite);
+
+        // A database that opened with a pending change set (restored from its checkpoint record).
+        WatchPendingChangeSet(database);
     }
 
     public async Task<bool> ApplyAsync(DatabaseDescriptor database, int partitionId, byte[] bytes)
     {
         ArgumentNullException.ThrowIfNull(database);
         ArgumentNullException.ThrowIfNull(bytes);
+
+        // The apply changes the shared schema. When the schema log delivers an entry inline in the flow
+        // of a transaction's statement, that flow's private schema must not be the one it changes.
+        Transactional.TransactionSchemaScope.Suppress();
 
         // All of this database's schema traffic rides its single schema-log partition, so an
         // entry on any other partition cannot belong to it — skip before paying the entry
@@ -207,23 +274,11 @@ public sealed class SchemaReplicator
             // proposer persists the checkpoint after the replication round-trip returns —
             // see SchemaChangePublisher.ReplicateAndWaitLocalApplyAsync. The committed schema log
             // remains the source of truth; the KV checkpoint is a load-time optimization.
-            // Before the mutation, never after: the retired generation's column layout, index list
-            // and schema version only exist in the pre-swap schema. Persisting is forbidden from
-            // here (this runs inside the schema partition's commit pipeline), so the intent is
-            // recorded in memory and written by the checkpoint that follows.
-            CatalogsManager.CaptureContentsRetirementIntent(database, entry);
-
-            // Resolved before the apply: the answer depends on the state the delta replaces.
-            WriteShapeTargets writeShapeTargets = WriteShapeDeltaRules.Resolve(database.Schema, entry);
-
-            TableSchema? appliedTableSchema = SchemaDeltaApplier.ApplyOrRefuse(database.Schema, database, entry);
-            InvalidateAppliedTableDescriptor(database, entry, appliedTableSchema);
-
-            // After the mutation, the published foreign-key graph and the descriptor eviction, never
-            // before: a write statement that reads the new write-shape epoch must be certain to plan
-            // with the new index or constraint. The returned task is the commits in flight that
-            // passed their gate before the stamp; the acknowledgement below waits for them.
-            Task? writersSettled = FenceEarlierWriters(database, writeShapeTargets, appliedTableSchema);
+            // A publish runs every delta of its change set through the same steps a single entry takes
+            // here, inside this one entry, under this one hold of the lock.
+            Task? writersSettled = entry.Op == SchemaOp.PublishChangeSet
+                ? ApplyPublishedChangeSet(database, entry)
+                : ApplyLiveDelta(database, entry);
 
             Log.LogSchemaChangeApplied(logger, entry.Op, database.Name, entry.FromVersion, entry.ToVersion);
 
@@ -234,6 +289,9 @@ public sealed class SchemaReplicator
             // Remember what was applied so the proposer's second delivery of these same bytes is
             // recognized from the frame and never deserialized again.
             database.RecordAppliedSchemaEntry(entry.ToVersion, SchemaChangeLogEntryCodec.Fingerprint(bytes));
+
+            if (entry.Op == SchemaOp.PendingChangeSet)
+                WatchPendingChangeSet(database);
 
             // Not awaited here: this callback runs inside the schema partition's commit pipeline, and
             // a commit in flight can need that same partition. The descriptor defers the
@@ -246,6 +304,111 @@ public sealed class SchemaReplicator
         {
             database.Schema.ReleaseLock();
         }
+    }
+
+    /// <summary>
+    /// The live apply of one delta, under the schema lock: record a contents retirement, apply, evict the
+    /// descriptors the delta changed, and fence the writers that planned without a new write obligation.
+    /// Returns the task of those writers, or null.
+    /// </summary>
+    private static Task? ApplyLiveDelta(DatabaseDescriptor database, SchemaChangeLogEntry entry)
+    {
+        // Before the mutation, never after: the retired generation's column layout, index list and
+        // schema version only exist in the pre-swap schema. Persisting is forbidden from here (this runs
+        // inside the schema partition's commit pipeline), so the intent is recorded in memory and
+        // written by the checkpoint that follows.
+        CatalogsManager.CaptureContentsRetirementIntent(database, entry);
+
+        // Resolved before the apply: the answer depends on the state the delta replaces.
+        WriteShapeTargets writeShapeTargets = WriteShapeDeltaRules.Resolve(database.Schema, entry);
+
+        TableSchema? appliedTableSchema = SchemaDeltaApplier.ApplyOrRefuse(database.Schema, database, entry);
+        InvalidateAppliedTableDescriptor(database, entry, appliedTableSchema);
+
+        if (entry.Op == SchemaOp.PendingChangeSet)
+            return FenceChangeSetTables(database, entry);
+
+        // After the mutation, the published foreign-key graph and the descriptor eviction, never
+        // before: a write statement that reads the new write-shape epoch must be certain to plan
+        // with the new index or constraint. The returned task is the commits in flight that
+        // passed their gate before the stamp; the acknowledgement below waits for them.
+        return FenceEarlierWriters(database, writeShapeTargets, appliedTableSchema);
+    }
+
+    /// <summary>
+    /// For a pending entry that recorded its change set: stamps the write shape of every live table the
+    /// change set touches and returns the task of the commits in flight that wrote one of them, or null.
+    /// The acknowledgement of the entry waits for that task, and the committing transaction commits in KV
+    /// only after the acknowledgements, so no commit planned against the old shape of those tables lands
+    /// after the transaction's rows. A writer that has not reached its commit yet is refused there by the
+    /// stamp. New statements on the tables wait in <c>TableOpener</c> until the change set ends.
+    /// </summary>
+    private static Task? FenceChangeSetTables(DatabaseDescriptor database, SchemaChangeLogEntry entry)
+    {
+        SchemaChangeSetPayload payload = entry.GetPayload<SchemaChangeSetPayload>();
+
+        if (database.Schema.PendingChangeSet is not { } pending
+            || !string.Equals(pending.ChangeSetId, payload.ChangeSetId, StringComparison.Ordinal)
+            || pending.AffectedTableIds.Count == 0)
+            return null;
+
+        List<TableSchema> tables = [];
+        foreach (TableSchema table in database.Schema.Tables.Values)
+        {
+            if (pending.Affects(table.Id))
+                tables.Add(table);
+        }
+
+        return tables.Count == 0 ? null : database.FenceWritersPlannedBefore(tables);
+    }
+
+    /// <summary>
+    /// The live apply of a <see cref="SchemaOp.PublishChangeSet"/> entry. The change set applies to a copy
+    /// and the copy is installed in one step (<see cref="ChangeSetDeltaApplier.ApplyPublish"/>). The tables
+    /// it changes get new objects, so their cached descriptors are evicted under the old and the new names,
+    /// their cached results are dropped on this node, and the writers that pinned the old objects are
+    /// fenced. Returns the task of the commits in flight that wrote one of those tables, or null. A publish
+    /// for a change set that is no longer pending only consumes its version.
+    /// </summary>
+    private static Task? ApplyPublishedChangeSet(DatabaseDescriptor database, SchemaChangeLogEntry entry)
+    {
+        Schema live = database.Schema;
+
+        if (ChangeSetDeltaApplier.FindDecided(live, entry) is not { } pending)
+        {
+            live.SchemaVersion = entry.ToVersion;
+            return null;
+        }
+
+        List<TableSchema> replaced = [];
+        foreach (TableSchema table in live.Tables.Values)
+        {
+            if (pending.Affects(table.Id))
+                replaced.Add(table);
+        }
+
+        HashSet<string> namesBefore = new(live.Tables.Keys, StringComparer.OrdinalIgnoreCase);
+
+        SchemaDeltaApplier.ApplyOrRefuse(live, database, entry);
+
+        foreach (TableSchema old in replaced)
+        {
+            if (old.Name is { } oldName)
+                database.TableDescriptors.TryRemove(oldName, out _);
+
+            if (old.Id is { Length: > 0 } oldId)
+                database.Cache?.InvalidateByTableId(database.Id, oldId);
+        }
+
+        // New names: a renamed table, and a table the change set created under a name a stale descriptor
+        // may still be cached under.
+        foreach ((string name, TableSchema table) in live.Tables)
+        {
+            if (pending.Affects(table.Id) || !namesBefore.Contains(name))
+                database.TableDescriptors.TryRemove(name, out _);
+        }
+
+        return replaced.Count == 0 ? null : database.FenceWritersPlannedBefore(replaced);
     }
 
     /// <summary>
@@ -470,6 +633,8 @@ public sealed class SchemaReplicator
         ArgumentNullException.ThrowIfNull(database);
         ArgumentNullException.ThrowIfNull(bytes);
 
+        Transactional.TransactionSchemaScope.Suppress();
+
         // Same frame read as the live apply path: replay delivers every committed entry on this
         // partition, including the ones belonging to other databases that share it and the ones
         // this node's checkpoint already contains.
@@ -527,6 +692,14 @@ public sealed class SchemaReplicator
             CatalogsManager.CaptureContentsRetirementIntent(database, entry);
 
             SchemaDeltaApplier.ApplyOrRefuse(database.Schema, database, entry);
+
+            // A publish installs new objects for the tables it changes; descriptors built from the old
+            // ones must not be served again.
+            if (entry.Op == SchemaOp.PublishChangeSet)
+                database.TableDescriptors.Clear();
+
+            if (entry.Op == SchemaOp.PendingChangeSet)
+                WatchPendingChangeSet(database);
 
             Log.LogSchemaChangeRestored(logger, entry.Op, database.Name, entry.FromVersion, entry.ToVersion);
 
@@ -666,18 +839,25 @@ public sealed class SchemaReplicator
     private static T DecodePayload<T>(SchemaChangeLogEntry entry) where T : new()
         => entry.GetPayload<T>();
 
-    internal static Schema CloneSchema(Schema schema)
+    /// <param name="cloneTable">
+    /// Which tables to copy; the others are the live objects, shared. Null copies every table. The publish
+    /// of a change set copies only the tables the change set changes.
+    /// </param>
+    internal static Schema CloneSchema(Schema schema, Func<TableSchema, bool>? cloneTable = null)
     {
         Schema clone = new()
         {
             SchemaVersion = schema.SchemaVersion,
+            // Copied so a dry run of any delta on the clone meets the same pending-change-set rule the
+            // live apply meets. The record is immutable, so sharing it is a copy.
+            PendingChangeSet = schema.PendingChangeSet,
             Tables = new Dictionary<string, TableSchema>(schema.Tables.Count, schema.Tables.Comparer),
             Views = new Dictionary<string, ViewSchema>(schema.Views.Count, schema.Views.Comparer),
             Sequences = new Dictionary<string, SequenceSchema>(schema.Sequences.Count, schema.Sequences.Comparer)
         };
 
         foreach ((string tableName, TableSchema table) in schema.Tables)
-            clone.Tables[tableName] = CloneTable(table);
+            clone.Tables[tableName] = cloneTable is null || cloneTable(table) ? CloneTable(table) : table;
 
         // Views must be cloned, not skipped. This clone is what ValidateSchemaDelta dry-runs against,
         // so an empty view map would make every view delta validate against a database that appears

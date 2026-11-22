@@ -335,6 +335,8 @@ public static class ConfigResolver
         TransactionAdmissionWaitMs = config.TransactionAdmissionWaitMs,
         RangeLockExpiresMs = config.RangeLockExpiresMs,
         MaxSerializableTransactionLifetimeMs = config.MaxSerializableTransactionLifetimeMs,
+        TransactionalDdlEnabled = config.TransactionalDdlEnabled,
+        TransactionalDdlResolveAfterMs = config.TransactionalDdlResolveAfterMs,
         TransactionFinalizeRetryBudgetMs = config.TransactionFinalizeRetryBudgetMs,
         SequenceRetryBudgetMs = config.SequenceRetryBudgetMs,
         TransactionIdleTimeoutMs = config.TransactionIdleTimeoutMs,

@@ -313,6 +313,34 @@ public enum SchemaOp
     /// contents. An entry written by a build that sent this as <see cref="CreateTable"/> still applies
     /// the same way.</para>
     /// </summary>
-    CreatePopulatedMaterializedView = 38
+    CreatePopulatedMaterializedView = 38,
+
+    /// <summary>
+    /// Announces the schema changes of one explicit transaction before that transaction commits in KV
+    /// (payload: <c>SchemaChangeSetPayload</c>). The apply makes nothing visible. It checks that the
+    /// schema did not move since the transaction made its first schema change, dry-runs every delta of
+    /// the change set, and records the change set as pending. While a change set is pending, the apply
+    /// refuses every other schema change of the database, so the publish that follows applies onto the
+    /// exact schema the dry run used.
+    ///
+    /// <para>A pending change set ends with exactly one <see cref="PublishChangeSet"/> or
+    /// <see cref="AbortChangeSet"/>. The decision key <c>{dbId}/meta/ddlcommit:{id}</c>, which the
+    /// transaction writes in its own KV commit, decides which one.</para>
+    /// </summary>
+    PendingChangeSet = 39,
+
+    /// <summary>
+    /// Makes a pending change set visible (payload: <c>SchemaChangeSetDecisionPayload</c>). The apply
+    /// runs every delta of the change set in order, inside this one schema version. A publish for a
+    /// change set that is no longer pending is a no-op, so a resolver and the committing node can both
+    /// propose it.
+    /// </summary>
+    PublishChangeSet = 40,
+
+    /// <summary>
+    /// Removes a pending change set without applying it (payload:
+    /// <c>SchemaChangeSetDecisionPayload</c>). A no-op for a change set that is no longer pending.
+    /// </summary>
+    AbortChangeSet = 41
 }
 

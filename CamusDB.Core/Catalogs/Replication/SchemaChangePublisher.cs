@@ -89,6 +89,15 @@ internal sealed class SchemaChangePublisher
 
     internal async Task ReplicateAndWaitLocalApplyAsync(DatabaseDescriptor database, SchemaChangeLogEntry entry)
     {
+        // A DDL statement of an explicit transaction with transactional DDL built this delta against the
+        // transaction's private schema. It applies there and joins the transaction's change set; the
+        // schema log sees it only when the transaction commits.
+        if (Transactional.TransactionSchemaScope.OverlayFor(database) is { } overlay)
+        {
+            await overlay.ApplyStatementDeltaAsync(entry).ConfigureAwait(false);
+            return;
+        }
+
         // Replicating the schema-log delta (and the checkpoint persist below) re-enters the
         // schema partition's serial, inline apply pipeline — which yields on the schema lock. Doing
         // it while the lock is held deadlocks that pipeline (the root cause). DDL proposers must
@@ -133,6 +142,12 @@ internal sealed class SchemaChangePublisher
                 ? sequenceBeingDropped.Id
                 : null;
 
+        // Same reason again: the publish of a change set removes the objects its deltas drop, and its
+        // checkpoint deletes their meta keys by id.
+        IReadOnlyList<ChangeSetCheckpointDelta>? changeSetDeltas = entry.Op == SchemaOp.PublishChangeSet
+            ? await CaptureChangeSetDeltasAsync(database, entry).ConfigureAwait(false)
+            : null;
+
         byte[] bytes = SchemaChangeLogEntryCodec.Encode(entry);
         SchemaReplicationResult result = await database.Kahuna.ReplicateSchemaChangeAsync(database.Id, bytes, CancellationToken.None).ConfigureAwait(false);
 
@@ -171,7 +186,8 @@ internal sealed class SchemaChangePublisher
         // deadlock when its KV writes re-enter the same partition. The committed schema log is
         // already the source of truth; the checkpoint is a load-time optimization, so on a
         // persist failure we retry and then surface a typed error.
-        await checkpoints.PersistSchemaCheckpointWithRetryAsync(database, entry, droppedTableId, droppedViewId, droppedSequenceId).ConfigureAwait(false);
+        await checkpoints.PersistSchemaCheckpointWithRetryAsync(
+            database, entry, droppedTableId, droppedViewId, droppedSequenceId, changeSetDeltas).ConfigureAwait(false);
 
         bool acked = await database.Kahuna.WaitForSchemaAcksAsync(
             database.Id,
@@ -224,6 +240,70 @@ internal sealed class SchemaChangePublisher
             CamusDBErrorCodes.InvalidInternalOperation,
             $"Timed out waiting for live schema apply acknowledgements before proposing schema change '{entry.Op}' for database '{database.Name}' from version {entry.FromVersion}"
         );
+    }
+
+    /// <summary>
+    /// The deltas of the pending change set that <paramref name="entry"/> publishes, with the versions of
+    /// the publish entry and the ids of what each one drops. The ids are read from a copy of the schema,
+    /// advanced delta by delta, so a delta that drops a table an earlier delta created or renamed still
+    /// finds its id. Null when the change set is no longer pending, in which case the publish changes
+    /// nothing and its checkpoint writes only the version.
+    /// </summary>
+    private static async Task<IReadOnlyList<ChangeSetCheckpointDelta>?> CaptureChangeSetDeltasAsync(
+        DatabaseDescriptor database, SchemaChangeLogEntry entry)
+    {
+        Schema copy;
+        List<SchemaChangeLogEntry> deltas;
+
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+        try
+        {
+            if (ChangeSetDeltaApplier.FindDecided(database.Schema, entry) is not { } pending)
+                return null;
+
+            deltas = ChangeSetDeltaApplier.DecodeDeltas(pending.Payload, entry);
+            copy = deltas.Exists(static delta => delta.Op is SchemaOp.DropTable or SchemaOp.DropView or SchemaOp.DropSequence)
+                ? SchemaReplicator.CloneSchema(database.Schema)
+                : database.Schema;
+        }
+        finally
+        {
+            database.Schema.ReleaseLock();
+        }
+
+        // Only a drop needs the ids read before the apply; a change set without one skips the walk.
+        if (!deltas.Exists(static delta => delta.Op is SchemaOp.DropTable or SchemaOp.DropView or SchemaOp.DropSequence))
+            return deltas.ConvertAll(static delta => new ChangeSetCheckpointDelta(delta, null, null, null));
+
+        copy.PendingChangeSet = null;
+
+        List<ChangeSetCheckpointDelta> captured = new(deltas.Count);
+
+        foreach (SchemaChangeLogEntry delta in deltas)
+        {
+            TableSchema? droppedTable = delta.Op == SchemaOp.DropTable
+                && copy.Tables.TryGetValue(SchemaDeltaApplier.DecodePayload<SchemaDropTablePayload>(delta).TableName, out TableSchema? table)
+                    ? SchemaReplicator.CloneTable(table)
+                    : null;
+
+            string? tableId = droppedTable?.Id;
+
+            string? viewId = delta.Op == SchemaOp.DropView
+                && copy.Views.TryGetValue(SchemaDeltaApplier.DecodePayload<SchemaDropViewPayload>(delta).ViewName, out ViewSchema? view)
+                    ? view.Id
+                    : null;
+
+            string? sequenceId = delta.Op == SchemaOp.DropSequence
+                && copy.Sequences.TryGetValue(SchemaDeltaApplier.DecodePayload<SchemaDropSequencePayload>(delta).SequenceName, out SequenceSchema? sequence)
+                    ? sequence.Id
+                    : null;
+
+            captured.Add(new ChangeSetCheckpointDelta(delta, tableId, viewId, sequenceId, droppedTable));
+
+            SchemaDeltaApplier.ApplyOrRefuse(copy, database, delta);
+        }
+
+        return captured;
     }
 
     private static string FormatLaggards(IReadOnlyList<string> laggards)

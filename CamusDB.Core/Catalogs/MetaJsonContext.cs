@@ -64,6 +64,9 @@ namespace CamusDB.Core.Catalogs;
 [JsonSerializable(typeof(SchemaFunctionPayload))]
 [JsonSerializable(typeof(SchemaDropFunctionPayload))]
 [JsonSerializable(typeof(SchemaSetFunctionOwnerPayload))]
+[JsonSerializable(typeof(SchemaChangeSetPayload))]
+[JsonSerializable(typeof(List<byte[]>))]
+[JsonSerializable(typeof(SchemaChangeSetDecisionPayload))]
 
 [JsonSerializable(typeof(ForeignKeyAction))]
 [JsonSerializable(typeof(ForeignKeyMatch))]

@@ -189,6 +189,11 @@ internal sealed class DdlForwardingCoordinator
         if (!isClusterMode)
             return null;
 
+        // A statement of a transaction with a private schema runs here, against that schema: its change
+        // reaches the schema leader only as part of the transaction's change set, at COMMIT.
+        if (Catalogs.Transactional.TransactionSchemaScope.OverlayFor(database) is not null)
+            return null;
+
         // Degraded nodes must not propose or forward DDL — reject immediately so the
         // caller gets a typed "degraded" error rather than a generic "not leader" error.
         if (database.SchemaSubsystemDegraded)

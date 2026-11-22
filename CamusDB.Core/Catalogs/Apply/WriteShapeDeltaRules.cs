@@ -185,6 +185,11 @@ internal static class WriteShapeDeltaRules
             case SchemaOp.DropSequence:
             case SchemaOp.RenameSequence:
             case SchemaOp.AlterSequence:
+            // A pending or aborted change set changes no table. A publish is resolved delta by delta,
+            // by the replicator, never as one entry.
+            case SchemaOp.PendingChangeSet:
+            case SchemaOp.PublishChangeSet:
+            case SchemaOp.AbortChangeSet:
                 return WriteShapeTargets.None;
 
             default:

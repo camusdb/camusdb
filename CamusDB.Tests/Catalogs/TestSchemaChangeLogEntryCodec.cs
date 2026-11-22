@@ -215,6 +215,14 @@ public sealed class TestSchemaChangeLogEntryCodec
             OwnerId = "u-7",
             UpdatedAt = new HLCTimestamp(4, 5, 6),
         });
+        yield return (SchemaOp.PendingChangeSet, new SchemaChangeSetPayload
+        {
+            ChangeSetId = "c1",
+            BaseVersion = 7,
+            Deltas = [SchemaChangeLogEntryCodec.Encode(Entry(SchemaOp.CreateTable, EncodePayload(CreateTablePayload())))],
+        });
+        yield return (SchemaOp.PublishChangeSet, new SchemaChangeSetDecisionPayload { ChangeSetId = "c1" });
+        yield return (SchemaOp.AbortChangeSet, new SchemaChangeSetDecisionPayload { ChangeSetId = "c1" });
         yield return (SchemaOp.AlterSequence, new SchemaAlterSequencePayload
         {
             SequenceId = "A2",

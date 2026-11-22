@@ -59,6 +59,9 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private readonly CoordinatorJobSweeper coordinatorJobSweeper;
 
+    /// <summary>Ends a pending change set left by a transaction that is gone; also driven by tests.</summary>
+    private readonly CamusDB.Core.Catalogs.Transactional.PendingChangeSetResolver changeSetResolver;
+
     private readonly DatabaseDropper databaseDroper;
 
     private readonly DatabaseDescriptors databaseDescriptors;
@@ -588,7 +591,10 @@ public sealed class CommandExecutor : IAsyncDisposable
         // not reach: the election fired before this node opened the database, or before the record
         // was visible here, or the resume failed on a transient. Runs in both modes; a standalone
         // node is its own schema leader.
-        coordinatorJobSweeper = new(databaseDescriptors, databaseOpener.ResumeCoordinator, logger, options.CoordinatorJobSweepIntervalMs);
+        // The same sweep ends a transactional change set whose committing transaction left it pending.
+        changeSetResolver = new CamusDB.Core.Catalogs.Transactional.PendingChangeSetResolver(
+            new CamusDB.Core.Catalogs.Transactional.ChangeSetCommitter(catalogs, logger), logger);
+        coordinatorJobSweeper = new(databaseDescriptors, databaseOpener.ResumeCoordinator, logger, options.CoordinatorJobSweepIntervalMs, changeSetResolver);
         coordinatorJobSweeper.Start();
         databaseDroper = new(databaseDescriptors, logger, options);
         databaseCreator = new(logger);
@@ -969,6 +975,13 @@ public sealed class CommandExecutor : IAsyncDisposable
     internal Task<int> SweepCoordinatorJobsForTests() => coordinatorJobSweeper.SweepOnceAsync();
 
     /// <summary>
+    /// Test-only seam: resolves the pending change set of <paramref name="database"/> at once, without the
+    /// resolver's wait. Returns true for a publish, false for an abort, null when nothing was decided.
+    /// </summary>
+    internal Task<bool?> ResolvePendingChangeSetForTests(DatabaseDescriptor database)
+        => changeSetResolver.ResolveAsync(database, force: true);
+
+    /// <summary>
     /// Test-only seam: attempts to release one database and reports why it was or was not released, so
     /// a test can assert on the reason a busy database was spared rather than only on the count.
     /// </summary>
@@ -1157,6 +1170,9 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         EnterExtensionScope(ticket.DatabaseName);
 
+        // For the length of this statement, a transaction with schema changes reads its private schema.
+        CamusDB.Core.Catalogs.Transactional.TransactionSchemaScope.EnterStatement(ticket.TxnState);
+
         // The time limit of the statement, which the DDL dispatcher takes off again for every schema
         // statement except CREATE TABLE … AS (see StatementDeadline.Suspend).
         StatementDeadline? deadline = StatementDeadline.Begin(options.StatementTimeoutMs, out bool ownsDeadline);
@@ -1245,6 +1261,9 @@ public sealed class CommandExecutor : IAsyncDisposable
     public async Task<ExecuteNonSQLResult> ExecuteNonSQLQuery(ExecuteSQLTicket ticket)
     {
         EnterExtensionScope(ticket.DatabaseName);
+
+        // For the length of this statement, a transaction with schema changes reads its private schema.
+        CamusDB.Core.Catalogs.Transactional.TransactionSchemaScope.EnterStatement(ticket.TxnState);
 
         // The time limit of the statement. A write ignores the read token, so the deadline never fires
         // it: the write checks the deadline at each row and in each inline call it makes, and fails
@@ -1880,6 +1899,10 @@ public sealed class CommandExecutor : IAsyncDisposable
     public Task<InsertResult> Insert(InsertTicket ticket)
     {
         EnterExtensionScope(ticket.DatabaseName);
+
+        if (NeedsTransactionSchema(ticket.TxnState))
+            return InTransactionSchemaAsync(ticket.TxnState, () => rowCommands.Insert(ticket));
+
         return rowCommands.Insert(ticket);
     }
 
@@ -1887,6 +1910,10 @@ public sealed class CommandExecutor : IAsyncDisposable
     public Task<UpdateResult> Update(UpdateTicket ticket)
     {
         EnterExtensionScope(ticket.DatabaseName);
+
+        if (NeedsTransactionSchema(ticket.TxnState))
+            return InTransactionSchemaAsync(ticket.TxnState, () => rowCommands.Update(ticket));
+
         return rowCommands.Update(ticket);
     }
 
@@ -1894,6 +1921,10 @@ public sealed class CommandExecutor : IAsyncDisposable
     public Task<DeleteResult> Delete(DeleteTicket ticket)
     {
         EnterExtensionScope(ticket.DatabaseName);
+
+        if (NeedsTransactionSchema(ticket.TxnState))
+            return InTransactionSchemaAsync(ticket.TxnState, () => rowCommands.Delete(ticket));
+
         return rowCommands.Delete(ticket);
     }
 
@@ -1901,6 +1932,9 @@ public sealed class CommandExecutor : IAsyncDisposable
     public Task<(DatabaseDescriptor, IAsyncEnumerable<QueryResultRow>)> Query(QueryTicket ticket)
     {
         CamusDB.Core.Extensions.ExtensionScopeFrame frame = EnterExtensionScope(ticket.DatabaseName);
+
+        if (NeedsTransactionSchema(ticket.TxnState))
+            return QueryInTransactionSchemaAsync();
 
         if (!CamusDB.Core.Extensions.ExtensionRegistry.AnyLoaded)
             return rowCommands.Query(ticket);
@@ -1912,12 +1946,25 @@ public sealed class CommandExecutor : IAsyncDisposable
             (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await query.ConfigureAwait(false);
             return (database, CamusDB.Core.Extensions.ExtensionScopedCursor.Bind(cursor, frame));
         }
+
+        async Task<(DatabaseDescriptor, IAsyncEnumerable<QueryResultRow>)> QueryInTransactionSchemaAsync()
+        {
+            CamusDB.Core.Catalogs.Transactional.TransactionSchemaScope.EnterStatement(ticket.TxnState);
+
+            (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await rowCommands.Query(ticket).ConfigureAwait(false);
+            cursor = CamusDB.Core.Catalogs.Transactional.TransactionSchemaScopedCursor.Bind(cursor, ticket.TxnState);
+
+            return (database, CamusDB.Core.Extensions.ExtensionScopedCursor.Bind(cursor, frame));
+        }
     }
 
     /// <summary>Queries a table by the row's id.</summary>
     public Task<IAsyncEnumerable<Dictionary<string, ColumnValue>>> QueryById(QueryByIdTicket ticket)
     {
         CamusDB.Core.Extensions.ExtensionScopeFrame frame = EnterExtensionScope(ticket.DatabaseName);
+
+        if (NeedsTransactionSchema(ticket.TxnState))
+            return QueryByIdInTransactionSchemaAsync();
 
         if (!CamusDB.Core.Extensions.ExtensionRegistry.AnyLoaded)
             return rowCommands.QueryById(ticket);
@@ -1926,6 +1973,34 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         async Task<IAsyncEnumerable<Dictionary<string, ColumnValue>>> BindAsync(Task<IAsyncEnumerable<Dictionary<string, ColumnValue>>> query) =>
             CamusDB.Core.Extensions.ExtensionScopedCursor.Bind(await query.ConfigureAwait(false), frame);
+
+        async Task<IAsyncEnumerable<Dictionary<string, ColumnValue>>> QueryByIdInTransactionSchemaAsync()
+        {
+            CamusDB.Core.Catalogs.Transactional.TransactionSchemaScope.EnterStatement(ticket.TxnState);
+
+            IAsyncEnumerable<Dictionary<string, ColumnValue>> rows = await rowCommands.QueryById(ticket).ConfigureAwait(false);
+            rows = CamusDB.Core.Catalogs.Transactional.TransactionSchemaScopedCursor.Bind(rows, ticket.TxnState);
+
+            return CamusDB.Core.Extensions.ExtensionScopedCursor.Bind(rows, frame);
+        }
+    }
+
+    /// <summary>
+    /// True when a typed row request must name its transaction for the flow: the transaction has schema
+    /// changes, or the flow still names a transaction from an earlier statement. The SQL entry points
+    /// make the same choice.
+    /// </summary>
+    private static bool NeedsTransactionSchema(KvTransaction? tx) =>
+        tx?.SchemaChanges is not null || CamusDB.Core.Catalogs.Transactional.TransactionSchemaScope.CurrentTransaction is not null;
+
+    /// <summary>
+    /// Runs a typed row request with its transaction named for the flow, so the request reads the
+    /// transaction's private schema. Set inside this async frame, so the caller's flow keeps its own value.
+    /// </summary>
+    private static async Task<T> InTransactionSchemaAsync<T>(KvTransaction? tx, Func<Task<T>> run)
+    {
+        CamusDB.Core.Catalogs.Transactional.TransactionSchemaScope.EnterStatement(tx);
+        return await run().ConfigureAwait(false);
     }
 
     /// <summary>Mints an HLC timestamp through the shared node's clock.</summary>
@@ -1967,6 +2042,11 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         CamusDB.Core.Extensions.ExtensionScopeFrame frame = EnterExtensionScope(ticket.DatabaseName);
 
+        // A statement of a transaction with schema changes reads its private schema, while it plans
+        // and while its cursor is pulled. Bound in an async frame, so the caller's flow keeps its own.
+        if (ticket.TxnState?.SchemaChanges is not null || CamusDB.Core.Catalogs.Transactional.TransactionSchemaScope.CurrentTransaction is not null)
+            return ExecuteWithTransactionSchemaAsync(ticket, metaOut, schemaOut, frame);
+
         // The returned cursor is pulled later, possibly in a flow that never saw this scope; once any
         // extension is loaded in the process, the cursor re-enters this statement's frame on every row.
         if (!CamusDB.Core.Extensions.ExtensionRegistry.AnyLoaded)
@@ -1980,6 +2060,25 @@ public sealed class CommandExecutor : IAsyncDisposable
             (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await query.ConfigureAwait(false);
             return (database, CamusDB.Core.Extensions.ExtensionScopedCursor.Bind(cursor, frame));
         }
+    }
+
+    /// <summary>
+    /// <see cref="ExecuteSQLQuery"/> for a statement whose flow may name a transaction with schema
+    /// changes: names the statement's own transaction (or none) for the planning, and binds the cursor
+    /// to it, so each row is read with the same schema the plan used.
+    /// </summary>
+    private async Task<(DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)> ExecuteWithTransactionSchemaAsync(
+        ExecuteSQLTicket ticket, CacheMetadataHolder? metaOut, QuerySchemaHolder? schemaOut,
+        CamusDB.Core.Extensions.ExtensionScopeFrame frame)
+    {
+        CamusDB.Core.Catalogs.Transactional.TransactionSchemaScope.EnterStatement(ticket.TxnState);
+
+        (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) =
+            await selectExecutor.ExecuteSQLQuery(ticket, metaOut, schemaOut).ConfigureAwait(false);
+
+        cursor = CamusDB.Core.Catalogs.Transactional.TransactionSchemaScopedCursor.Bind(cursor, ticket.TxnState);
+
+        return (database, CamusDB.Core.Extensions.ExtensionScopedCursor.Bind(cursor, frame));
     }
 
     /// <summary>
