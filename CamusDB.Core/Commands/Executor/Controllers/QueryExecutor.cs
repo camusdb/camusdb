@@ -968,6 +968,8 @@ internal sealed class QueryExecutor
             ? new QueryFragmentTopK { OutputName = topK.OutputName, Descending = topK.Descending, K = topK.K }
             : null;
         string[]? groupByJson = partialPlan.ShipGroupBy?.Select(NodeAstWireCodec.Serialize).ToArray();
+        string? zoneDataVersion = Functions.TimeZoneRules.DataVersionIfUsedBy(
+            [filter, .. partialPlan.ShipProjections, .. partialPlan.ShipGroupBy ?? []]);
 
         IReadOnlyList<PlacementSpan> spans = gather.Placement.Spans;
         var partialTasks = new Task<List<Dictionary<string, ColumnValue>>>[spans.Count];
@@ -1079,6 +1081,7 @@ internal sealed class QueryExecutor
                     TopK = spanTopK,
                     RequiredColumns = plan.ScanRequiredColumns?.ToArray(),
                     StatementTimeoutRemainingMs = StatementDeadline.Current?.RemainingMs,
+                    TimeZoneDataVersion = zoneDataVersion,
                 };
 
                 List<Dictionary<string, ColumnValue>> partials = [];

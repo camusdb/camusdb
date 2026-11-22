@@ -327,6 +327,7 @@ internal sealed class BroadcastHashProbeExecutor
                     Join = broadcast.Spec,
                     WantStats = spanExecution is not null,
                     StatementTimeoutRemainingMs = StatementDeadline.Current?.RemainingMs,
+                    TimeZoneDataVersion = broadcast.TimeZoneDataVersion,
                 };
 
                 RowEncoder.RowDecodeState decodeState = new();

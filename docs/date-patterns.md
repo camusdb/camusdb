@@ -10,7 +10,7 @@ Both languages compile to the same fields, so a field formats and parses the sam
 
 | Function | Result | Pattern language |
 |----------|--------|------------------|
-| `to_char(temporal, pattern)` | `string` | PostgreSQL |
+| `to_char(temporal, pattern [, zone])` | `string` | PostgreSQL |
 | `to_timestamp(text, pattern)` | `datetime` | PostgreSQL |
 | `to_date(text, pattern)` | `date` | PostgreSQL |
 | `date_format(temporal, pattern)` | `string` | MySQL |
@@ -38,7 +38,14 @@ SELECT * FROM events WHERE created >= str_to_date('June 17, 2024', '%M %e, %Y');
 
 ## Rules for all patterns
 
-- **All values are UTC.** The time zone fields print `UTC` and `+00`.
+- **All values are UTC**, except for `to_char` with a zone argument. Without a zone, the time zone
+  fields print `UTC` and `+00`.
+- **`to_char` takes an optional time zone.** `to_char(x, pattern, zone)` prints the clock of that
+  zone at the instant `x`. `TZ` prints the zone abbreviation in force then, as the IANA database spells
+  it (`EST`, `EDT`, `IST`, or `-05` for a zone that has no letter abbreviation). `OF` prints the offset
+  as PostgreSQL does: the sign and two hour digits, then `:MM` when the offset has minutes (`-05`,
+  `+05:30`). `FMOF` drops the zero padding of the hours only (`-5`, `+5:30`, and `+0` for UTC). The zone names and the rules are those of the other date functions; see
+  [Time zones](data-types.md#time-zones). `date_format` takes no zone.
 - **Names are English only.** Month and day names do not change with the server culture, and there
   is no locale setting.
 - **The functions are deterministic.** They are not volatile, so a `CHECK` constraint, a column
@@ -79,8 +86,8 @@ the printed name.
 | `MS` | fraction of the second in milliseconds, `000`-`999` | |
 | `US` | fraction of the second in microseconds, `000000`-`999999` | |
 | `AM`, `PM`, `am`, `pm` | `AM` or `PM` from the hour; the case follows the pattern | `AM` and `PM` are the same field |
-| `TZ`, `tz` | `UTC`, `utc` | |
-| `OF` | `+00` | |
+| `TZ`, `tz` | `UTC`, `utc`; with a zone, the zone abbreviation | Parse: `UTC` only |
+| `OF` | `+00`; with a zone, the offset (`-05`, `+05:30`) | Parse: `+00` only |
 | `FM` prefix | turns off the zero and blank padding of the next field only | `FMMM` prints `3`; `FMMonth` prints `March` |
 | `"text"` | the text as written | Use `\"` for a double quote |
 
@@ -163,7 +170,7 @@ The clock fields follow these rules:
 - When a pattern has both a 12-hour and a 24-hour field, they must give the same hour.
 - When a pattern has both `MS` and `US`, they must agree. `to_char` prints `020` and `020000` for
   20 ms, and that text reads back as 20 ms.
-- `TZ` reads `UTC` and `OF` reads `+00`. Any other time zone is an error.
+- `TZ` reads `UTC` and `OF` reads `+00`; `FMOF` also reads `+0`. Any other time zone is an error.
 
 `to_date` reads and checks the time fields, then keeps the date only.
 

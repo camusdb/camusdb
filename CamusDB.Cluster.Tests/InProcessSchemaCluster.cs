@@ -368,6 +368,14 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         /// </summary>
         internal bool IgnoreTopK { get; set; }
 
+        /// <summary>
+        /// When set, replaces the time zone data version of each fragment request that carries one
+        /// before the peer sees it, as on a peer whose build has other zone rules. The peer then refuses
+        /// that fragment, and the coordinator must scan the span itself. A request without a version
+        /// uses no zone argument and is left alone, as such a peer would serve it.
+        /// </summary>
+        internal string? TimeZoneDataVersionOverride { get; set; }
+
         public async IAsyncEnumerable<CamusDB.Core.CommandsExecutor.Models.Queries.QueryFragmentRow> ExecuteFragmentAsync(
             string targetRaftEndpoint,
             CamusDB.Core.CommandsExecutor.Models.Queries.QueryFragmentRequest request,
@@ -384,6 +392,9 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
 
             if (IgnoreTopK)
                 request.TopK = null;
+
+            if (TimeZoneDataVersionOverride is not null && request.TimeZoneDataVersion is not null)
+                request.TimeZoneDataVersion = TimeZoneDataVersionOverride;
 
             await foreach (CamusDB.Core.CommandsExecutor.Models.Queries.QueryFragmentRow row in
                 inner.ExecuteFragmentAsync(targetRaftEndpoint, request, cancellationToken).ConfigureAwait(false))

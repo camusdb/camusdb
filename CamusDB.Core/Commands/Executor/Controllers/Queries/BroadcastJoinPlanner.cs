@@ -175,6 +175,7 @@ internal sealed class BroadcastJoinPlanner
             ProbeFilter = probeFilter,
             Placement = placement,
             FlatBuildRows = flat,
+            TimeZoneDataVersion = Functions.TimeZoneRules.DataVersionIfUsedBy([joinNode.OnPredicate, probeFilter]),
             Spec = new QueryFragmentJoinSpec
             {
                 BuildIsLeft = buildSide == HashJoinBuildSide.Left,
@@ -213,4 +214,10 @@ internal sealed class BroadcastJoinPlan
     public required IReadOnlyList<IReadOnlyDictionary<string, ColumnValue>> FlatBuildRows { get; init; }
 
     public required QueryFragmentJoinSpec Spec { get; init; }
+
+    /// <summary>
+    /// The coordinator's zone data version when the ON predicate or the probe filter takes a zone
+    /// argument, otherwise null. Each probe fragment request carries it.
+    /// </summary>
+    public string? TimeZoneDataVersion { get; init; }
 }

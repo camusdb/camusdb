@@ -138,6 +138,14 @@ internal sealed class ScalarFunctionDescriptor
     /// </summary>
     public bool IsSessionScoped { get; init; }
 
+    /// <summary>
+    /// The position of the function's optional time zone argument, or null when it takes none. A call
+    /// that passes it depends on the zone rules of the build that evaluates it, so a query fragment that
+    /// ships such a call carries the coordinator's zone data version
+    /// (<see cref="ScalarFunctionEvaluator.ContainsTimeZoneDependentCall"/>, <see cref="TimeZoneRules"/>).
+    /// </summary>
+    public int? TimeZoneArgumentIndex { get; init; }
+
     public IEnumerable<string> AllNames
     {
         get

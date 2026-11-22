@@ -788,11 +788,15 @@ internal sealed class QueryScanner
         // filtering would drop the deps of filtered-out rows — an update to one of them would
         // then fail to invalidate the cached result.
         string? shippableFilterJson = null;
+        string? shippedZoneDataVersion = null;
         if (fragmentTransport is not null
             && plan.DepCollector is null
             && plan.ExecutionFilter is { } filterAst
             && FragmentFilterShippability.IsShippable(filterAst))
+        {
             shippableFilterJson = NodeAstWireCodec.Serialize(filterAst);
+            shippedZoneDataVersion = Functions.TimeZoneRules.DataVersionIfUsedBy([filterAst]);
+        }
 
         // The session must exist before workers read tx.TransactionId concurrently; a no-op
         // for eager, read-only, and already-started transactions.
@@ -934,6 +938,7 @@ internal sealed class QueryScanner
                     RequiredColumns = requiredColumns?.ToArray(),
                     WantStats = spanExecution is not null,
                     StatementTimeoutRemainingMs = StatementDeadline.Current?.RemainingMs,
+                    TimeZoneDataVersion = shippedZoneDataVersion,
                 };
 
                 RowEncoder.RowDecodeState decodeState = new()

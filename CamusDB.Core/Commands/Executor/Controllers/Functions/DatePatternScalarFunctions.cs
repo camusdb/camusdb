@@ -29,11 +29,13 @@ internal static class DatePatternScalarFunctions
 {
     public static void Register(ScalarFunctionRegistry registry)
     {
+        // to_char(x, pattern [, zone]): with a zone, the fields print the wall clock of that zone.
         registry.Register(new ScalarFunctionDescriptor
         {
             Name = "to_char",
             MinArity = 2,
-            MaxArity = 2,
+            MaxArity = 3,
+            TimeZoneArgumentIndex = 2,
             Evaluator = (calledName, arguments) => EvaluateFormat(calledName, arguments, DatePatternDialect.PostgreSql),
             InferReturnType = _ => ColumnType.String,
         });
@@ -86,7 +88,13 @@ internal static class DatePatternScalarFunctions
         DateTime utc = DateTimeScalarFunctions.ReadTemporal(calledName, 0, arguments[0]).UtcDateTime;
         DatePattern pattern = DatePattern.Get(calledName, arguments[1].StrValue!, dialect);
 
-        return new ColumnValue(ColumnType.String, pattern.Format(utc));
+        if (arguments.Count == 2)
+            return new ColumnValue(ColumnType.String, pattern.Format(utc));
+
+        NodaTime.DateTimeZone zone = TimeZoneRules.Resolve(calledName, 2, arguments[2]);
+        WallClockReading reading = TimeZoneRules.Read(calledName, utc.Ticks, zone);
+
+        return new ColumnValue(ColumnType.String, pattern.Format(reading.WallClock, reading.Abbreviation, reading.Offset.Seconds));
     }
 
     private static ColumnValue EvaluateParse(

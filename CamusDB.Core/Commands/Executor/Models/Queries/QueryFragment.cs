@@ -137,6 +137,22 @@ public sealed class QueryFragmentRequest
     /// no format-version bump.</para>
     /// </summary>
     public long? StatementTimeoutRemainingMs { get; set; }
+
+    /// <summary>
+    /// The version of the time zone database the coordinator runs with
+    /// (<c>TimeZoneRules.DataVersion</c>), set only when an expression the peer evaluates (the
+    /// filter, the aggregates and group keys, or a join's ON predicate and probe filter) takes a zone
+    /// argument; null otherwise. A peer whose version differs refuses the fragment, and the
+    /// coordinator then scans the span itself, so such an expression uses one set of zone rules for
+    /// every row of the statement. The versions differ only during a rolling upgrade to a build with
+    /// newer zone rules, and a fragment that uses no zone argument still runs remotely then.
+    ///
+    /// <para>A coordinator on an older build sends no version, and the peer skips the check: that
+    /// coordinator cannot plan a zone argument at all. A peer on an older build ignores the field and
+    /// fails on a zone argument it does not know, which also sends the coordinator to its local scan,
+    /// so the field needs no format-version bump.</para>
+    /// </summary>
+    public string? TimeZoneDataVersion { get; set; }
 }
 
 /// <summary>
