@@ -9,11 +9,13 @@ using CamusDB.Workload.Metrics;
 
 namespace CamusDB.Workload.Results;
 
-/// <summary>Latency percentiles for one measured distribution, in milliseconds.</summary>
-public sealed record LatencySummary(double P50, double P90, double P95, double P99, double P999, double Max)
+/// <summary>Latency percentiles and the mean for one measured distribution, in milliseconds. A summary
+/// written before the mean existed reads back with a mean of 0.</summary>
+public sealed record LatencySummary(double P50, double P90, double P95, double P99, double P999, double Max, double Mean = 0)
 {
     public static LatencySummary From(LatencyHistogram h) => new(
-        h.Percentile(50), h.Percentile(90), h.Percentile(95), h.Percentile(99), h.Percentile(99.9), h.MaxMilliseconds);
+        h.Percentile(50), h.Percentile(90), h.Percentile(95), h.Percentile(99), h.Percentile(99.9), h.MaxMilliseconds,
+        h.MeanMilliseconds);
 }
 
 /// <summary>

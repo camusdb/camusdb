@@ -10,8 +10,14 @@
         <InvariantGlobalization>true</InvariantGlobalization>
     </PropertyGroup>
 
+    <PropertyGroup>
+        <!-- The driver the workload runs on. A property or an environment variable of this name
+             overrides it, to run against a driver build that is not published yet. -->
+        <CamusClientVersion Condition="'$(CamusClientVersion)' == ''">0.18.1</CamusClientVersion>
+    </PropertyGroup>
+
     <ItemGroup>
-        <PackageReference Include="CamusDB.Client" Version="0.18.1" />
+        <PackageReference Include="CamusDB.Client" Version="$(CamusClientVersion)" />
         <PackageReference Include="CommandLineParser" Version="2.9.1" />
     </ItemGroup>
 

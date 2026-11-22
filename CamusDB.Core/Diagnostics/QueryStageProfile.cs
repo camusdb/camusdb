@@ -15,6 +15,12 @@ namespace CamusDB.Core.Diagnostics;
 /// <c>prepare</c> stage contains <c>parse</c>, <c>authorize</c> and <c>db_open</c>, and <c>fetch</c>
 /// contains <c>index_lookup</c>, <c>row_get</c> and <c>decode</c>. The report is a set of totals per
 /// stage, and a reader subtracts the inner stages from the outer one to get the remainder.
+///
+/// <para>The stages of a batched op on a stream cover it from the moment the read loop received its
+/// message to the moment its last response message was flushed: <c>frame_wait</c>, <c>admit</c>,
+/// <c>chain_wait</c>, <c>slot_wait</c>, <c>request</c>, then <c>writer_queue</c>,
+/// <c>writer_write</c> and <c>writer_flush</c>. <c>stream</c> is that whole span, measured on its
+/// own.</para>
 /// </summary>
 public enum QueryStage
 {
@@ -49,6 +55,21 @@ public enum QueryStage
     Commit,
     /// <summary>Building the terminator (routing advice, causal token) and writing it.</summary>
     Complete,
+    /// <summary>From the read loop receiving the op's stream message to the start of the op's
+    /// admission. An item of a request frame waits here for the admission of the items before it.</summary>
+    FrameWait,
+    /// <summary>From handing a response entry to the stream's writer to the start of the transport
+    /// write that carries its last message.</summary>
+    WriterQueue,
+    /// <summary>The transport write that carries the last message of a response entry: serialization,
+    /// and the flush when the write flushes.</summary>
+    WriterWrite,
+    /// <summary>For an entry written without a flush: from the end of its write to the end of the
+    /// later write that flushed it.</summary>
+    WriterFlush,
+    /// <summary>The op's whole span on the stream: from the read loop receiving its message to the
+    /// flush of its last response message.</summary>
+    Stream,
 }
 
 /// <summary>The kind of Kahuna call a <see cref="QueryStageProfile.MeasureKahuna"/> interval timed.</summary>
@@ -111,6 +132,7 @@ public static class QueryStageProfile
     {
         "admit", "chain_wait", "slot_wait", "request", "resolve", "begin", "prepare", "parse", "authorize",
         "db_open", "fetch", "index_lookup", "row_get", "decode", "write", "commit", "complete",
+        "frame_wait", "writer_queue", "writer_write", "writer_flush", "stream",
     };
 
     public static IReadOnlyList<string> AllStageNames => StageNames;
@@ -153,10 +175,16 @@ public static class QueryStageProfile
     public static KahunaScope MeasureKahuna(KahunaCallKind kind) => new(Live(), kind);
 
     /// <summary>
-    /// The current clock while its op is still running. Work that an op started and that outlives it
-    /// (a background task that inherited the async flow) finds the clock published and records nothing.
+    /// The clock of the op in progress while the op is still running, or null. A response writer
+    /// reads it when an op hands it a message, to charge the message's wait and write to the op.
     /// </summary>
-    private static QueryStageClock? Live() => Current is { Published: false } clock ? clock : null;
+    public static QueryStageClock? CurrentRunning => Live();
+
+    /// <summary>
+    /// The current clock while its op is still running. Work that an op started and that outlives it
+    /// (a background task that inherited the async flow) finds the clock ended and records nothing.
+    /// </summary>
+    private static QueryStageClock? Live() => Current is { Ended: false } clock ? clock : null;
 
     public readonly struct StageScope : IDisposable
     {
@@ -239,7 +267,17 @@ public static class QueryStageProfile
 }
 
 /// <summary>
-/// One op's stage totals, in <see cref="Stopwatch"/> ticks. Owned by one async flow at a time.
+/// One op's stage totals, in <see cref="Stopwatch"/> ticks.
+///
+/// <para><b>Two writers.</b> The op's async flow records every stage up to <see cref="CompleteOp"/>.
+/// The stream's response writer records the three <c>writer_*</c> stages for each entry the op
+/// handed it, from its own loop, and may do so before or after the op ends. The two never write the
+/// same stage, so the totals need no lock. The clock is published by whichever of them finishes
+/// last, which <see cref="outstanding"/> decides: it counts the op itself and every entry still with
+/// the writer.</para>
+///
+/// <para>An entry the writer never writes (the stream ended first) leaves the count above zero, and
+/// the clock is then not published. Nobody received that answer.</para>
 /// </summary>
 public sealed class QueryStageClock
 {
@@ -278,15 +316,80 @@ public sealed class QueryStageClock
     /// <summary>Adds an interval measured by the caller, for a stage that has no single scope to wrap.</summary>
     public void AddElapsed(QueryStage stage, long startTimestamp) => Add(stage, Stopwatch.GetTimestamp() - startTimestamp);
 
-    internal bool Published { get; private set; }
+    // The op itself, plus every response entry handed to the writer and not yet written.
+    private int outstanding = 1;
 
-    /// <summary>Publishes the totals when the op was a profiled query. Call once, when the op ends.</summary>
-    public void Publish()
+    private int ended;
+
+    // When the read loop received the op's stream message; 0 for an op that did not arrive on a stream.
+    private long receivedAt;
+
+    // The end of the latest flushed write of this op's entries. Written by the writer loop only.
+    private long flushedAt;
+
+    /// <summary>True once the op's own flow is over. The response writer may still be recording.</summary>
+    internal bool Ended => Volatile.Read(ref ended) != 0;
+
+    /// <summary>
+    /// Records when the read loop received the op's stream message, and charges the time since then
+    /// to <see cref="QueryStage.FrameWait"/>. Call it once, when the op's admission starts.
+    /// </summary>
+    public void MarkReceived(long receivedTimestamp)
     {
-        if (Published)
+        if (receivedTimestamp == 0)
             return;
 
-        Published = true;
+        receivedAt = receivedTimestamp;
+        Add(QueryStage.FrameWait, Stopwatch.GetTimestamp() - receivedTimestamp);
+    }
+
+    /// <summary>
+    /// Counts one response entry handed to the stream's writer. Call it from the op's flow before
+    /// the entry is queued. Each call is paired with one <see cref="EntryWritten"/> or one
+    /// <see cref="EntryNotQueued"/>.
+    /// </summary>
+    public void EntryQueued() => Interlocked.Increment(ref outstanding);
+
+    /// <summary>Takes back an <see cref="EntryQueued"/> whose entry the writer did not accept.</summary>
+    public void EntryNotQueued() => Interlocked.Decrement(ref outstanding);
+
+    /// <summary>
+    /// Records one written entry. Called by the writer loop, after the write that flushed the entry
+    /// returned. <paramref name="writeEnd"/> and <paramref name="flushEnd"/> are the same timestamp
+    /// for an entry whose own write flushed.
+    /// </summary>
+    public void EntryWritten(long queuedAt, long writeStart, long writeEnd, long flushEnd)
+    {
+        Add(QueryStage.WriterQueue, writeStart - queuedAt);
+        Add(QueryStage.WriterWrite, writeEnd - writeStart);
+        if (flushEnd > writeEnd)
+            Add(QueryStage.WriterFlush, flushEnd - writeEnd);
+
+        if (flushEnd > flushedAt)
+            flushedAt = flushEnd;
+
+        if (Interlocked.Decrement(ref outstanding) == 0)
+            PublishTotals();
+    }
+
+    /// <summary>
+    /// Ends the op's own flow. Call once, when the op ends. The totals are published now when the
+    /// writer has written every entry of the op, and by the writer otherwise.
+    /// </summary>
+    public void CompleteOp()
+    {
+        if (Interlocked.Exchange(ref ended, 1) != 0)
+            return;
+
+        if (Interlocked.Decrement(ref outstanding) == 0)
+            PublishTotals();
+    }
+
+    private void PublishTotals()
+    {
+        if (receivedAt != 0 && flushedAt != 0)
+            Add(QueryStage.Stream, flushedAt - receivedAt);
+
         if (Path is { } path)
             QueryStageProfile.Publish(this, path);
     }

@@ -68,7 +68,7 @@ public sealed class QueryStageProfileTests
         Assert.That(clock, Is.Not.Null);
         clock!.Path = path;
         await body();
-        clock.Publish();
+        clock.CompleteOp();
     }
 
     [Test]
@@ -188,7 +188,7 @@ public sealed class QueryStageProfileTests
 
         (MeterListener listener, List<Measurement> captured) = StartListener();
         using (listener)
-            clock.Publish();
+            clock.CompleteOp();
 
         Assert.That(captured, Is.Empty, "a clock publishes once");
     }

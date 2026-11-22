@@ -68,6 +68,31 @@ public sealed class LatencyHistogram
 
     public double MaxMilliseconds => Interlocked.Read(ref _maxUs) / 1000.0;
 
+    /// <summary>
+    /// The mean in milliseconds, or 0 when empty. It is computed from the buckets, so it carries the
+    /// same relative error as a percentile (about 2%). A stage profile reports means, and a mean of
+    /// the whole operation is what its stages add up to; a median is not.
+    /// </summary>
+    public double MeanMilliseconds
+    {
+        get
+        {
+            long total = 0;
+            double sumUs = 0;
+            for (int i = 0; i < _buckets.Length; i++)
+            {
+                long n = Interlocked.Read(ref _buckets[i]);
+                if (n == 0)
+                    continue;
+
+                total += n;
+                sumUs += n * BucketValueUs(i);
+            }
+
+            return total == 0 ? 0 : sumUs / total / 1000.0;
+        }
+    }
+
     /// <summary>Adds another histogram's counts into this one (both must use identical bucketing).</summary>
     public void Merge(LatencyHistogram other)
     {

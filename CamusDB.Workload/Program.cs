@@ -829,6 +829,15 @@ public static class Program
         ClientResourceSampler clientResources = new();
         clientResources.Start();
 
+        ClientRoundTripSampler? roundTrip = null;
+        if (o.ClientRoundTripProfile)
+        {
+            Directory.CreateDirectory(o.Output);
+            roundTrip = new ClientRoundTripSampler(o.Output, metricsInterval);
+            roundTrip.Start();
+            Console.WriteLine($"Collecting the driver's round-trip profile into {ClientRoundTripSampler.FileName}");
+        }
+
         Reporting.MetricsSampler? sampler = null;
         Reporting.MetricsSamplerResult? samplerResult = null;
         if (metricsTargets.Count > 0)
@@ -860,6 +869,8 @@ public static class Program
         finally
         {
             await clientResources.StopAsync().ConfigureAwait(false);
+            if (roundTrip is not null)
+                await roundTrip.StopAsync().ConfigureAwait(false);
             if (sampler is not null)
                 samplerResult = await sampler.StopAsync().ConfigureAwait(false);
             if (scanProbe is not null)
