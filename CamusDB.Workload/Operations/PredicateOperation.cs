@@ -428,12 +428,24 @@ public sealed class PredicateOperation : IWriteOperation, IReadOperation
     private const int ScannedGroupsInFinalCheck = 200;
 
     /// <summary>
+    /// Scanned groups read at one time in the final check. One node runs every scan of the table, so
+    /// each scan in flight slows the others. The weekly volume run of 2026-11-22 read sixteen at one
+    /// time over tables of 530,000 keys and more, and in six cells a group failed all 30 attempts on
+    /// the ten-second load deadline.
+    /// </summary>
+    private const int ScanParallelismInFinalCheck = 4;
+
+    /// <summary>
     /// Reads every group the run used by the primary-key range and by the index, and the first groups
     /// by the unindexed scan too, and compares the three. Then counts the rows in the run's key range.
     /// The register judge sees one final per key with the index (and scan) reads as alternates, so a
     /// row the index lost or kept after its row changed is a path mismatch.
+    ///
+    /// <para>The reads use <paramref name="connections"/>, which the caller opens on the
+    /// reconciliation deadline. The scanned groups go first, a few at a time; the other groups are
+    /// index and key-range reads and keep the full parallelism.</para>
     /// </summary>
-    public async Task<QuiescentResult> ReadFinalAsync(TimeSpan budget, CancellationToken ct)
+    public async Task<QuiescentResult> ReadFinalAsync(ConnectionSet connections, TimeSpan budget, CancellationToken ct)
     {
         long groupsUsed = _keys.GroupsUsed;
         long[] groups = new long[groupsUsed];
@@ -444,8 +456,8 @@ public sealed class PredicateOperation : IWriteOperation, IReadOperation
         {
             List<string> extra = [];
             long countMismatches = 0;
-            IReadOnlyList<List<FinalRegister>> perGroup = await FinalReader.ReadAllAsync(
-                _connections, groups, async (conn, group, token) =>
+            Func<CamusConnection, long, CancellationToken, Task<List<FinalRegister>>> readGroup =
+                async (conn, group, token) =>
                 {
                     Dictionary<long, long> byRange = await ReadGroupAsync(conn, PredicateRead.Range, group, token).ConfigureAwait(false);
                     Dictionary<long, long> byIndex = await ReadGroupAsync(conn, PredicateRead.Index, group, token).ConfigureAwait(false);
@@ -477,10 +489,16 @@ public sealed class PredicateOperation : IWriteOperation, IReadOperation
                         finals.Add(new FinalRegister(key, value, value is null ? 0 : 1, alternates));
                     }
                     return finals;
-                }, budget, ct).ConfigureAwait(false);
+                };
 
-            List<FinalRegister> all = perGroup.SelectMany(g => g).ToList();
-            long rowsInRange = await FinalReader.ScalarAsync(_connections, async (conn, token) =>
+            int scanned = (int)Math.Min(groupsUsed, ScannedGroupsInFinalCheck);
+            IReadOnlyList<List<FinalRegister>> scannedGroups = await FinalReader.ReadAllAsync(
+                connections, groups[..scanned], readGroup, budget, ct, ScanParallelismInFinalCheck).ConfigureAwait(false);
+            IReadOnlyList<List<FinalRegister>> otherGroups = await FinalReader.ReadAllAsync(
+                connections, groups[scanned..], readGroup, budget, ct).ConfigureAwait(false);
+
+            List<FinalRegister> all = scannedGroups.Concat(otherGroups).SelectMany(g => g).ToList();
+            long rowsInRange = await FinalReader.ScalarAsync(connections, async (conn, token) =>
             {
                 using CamusCommand count = conn.CreateSelectCommand($"SELECT COUNT(*) FROM {TableName} WHERE k >= @lo AND k < @hi");
                 count.Parameters.Add("@lo", ColumnType.Integer64, _keyBase);

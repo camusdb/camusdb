@@ -496,8 +496,11 @@ public sealed class RegisterOperation : IWriteOperation, IReadOperation
     /// <para>The indexed copy is read for every key on every arm, because every table has that index.
     /// The join path is read on the join arm, where every write also wrote the reference row. The
     /// unindexed copy is a table scan per key, so it is read only when the run touched few keys.</para>
+    ///
+    /// <para>The reads use <paramref name="connections"/>, which the caller opens on the
+    /// reconciliation deadline: the closing count reads the whole key range of the run.</para>
     /// </summary>
-    public async Task<QuiescentResult> ReadFinalAsync(TimeSpan budget, CancellationToken ct)
+    public async Task<QuiescentResult> ReadFinalAsync(ConnectionSet connections, TimeSpan budget, CancellationToken ct)
     {
         long[] keys = _ledger.TouchedKeys();
         Array.Sort(keys);
@@ -506,7 +509,7 @@ public sealed class RegisterOperation : IWriteOperation, IReadOperation
         try
         {
             IReadOnlyList<FinalRegister> finals = await FinalReader.ReadAllAsync(
-                _connections, keys, async (conn, key, token) =>
+                connections, keys, async (conn, key, token) =>
                 {
                     (long? value, int rows) = await Point(conn, RegisterAccess.Pk, key, token).ConfigureAwait(false);
                     List<FinalAlternate> alternates = [];
@@ -525,7 +528,7 @@ public sealed class RegisterOperation : IWriteOperation, IReadOperation
                     return new FinalRegister(key, value, rows, alternates);
                 }, budget, ct).ConfigureAwait(false);
 
-            long rowsInRange = await FinalReader.ScalarAsync(_connections, CountRunRowsAsync, budget, ct).ConfigureAwait(false);
+            long rowsInRange = await FinalReader.ScalarAsync(connections, CountRunRowsAsync, budget, ct).ConfigureAwait(false);
             long present = finals.Count(f => f.Rows > 0);
             List<string> extra = [];
             if (rowsInRange != present)

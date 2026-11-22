@@ -175,10 +175,15 @@ public sealed class Dataset
     /// Creates the database (if missing), every table, and its index. Safe to call repeatedly — an
     /// already-existing table is treated as success so <c>init</c> and <c>--init-if-missing</c> are
     /// idempotent.
+    ///
+    /// <para>The database statement has the same retry as the table statements. It is the first
+    /// request a new cluster gets, and it had no retry: the weekly volume run of 2026-11-22 lost a
+    /// cell when the runner disk did not answer for 15 seconds and the request hit its deadline.</para>
     /// </summary>
     public async Task EnsureSchemaAsync(CamusConnection conn, CancellationToken ct)
     {
-        await conn.CreateDatabaseAsync(ifNotExists: true, cancellationToken: ct).ConfigureAwait(false);
+        await EnsureSetupAsync(
+            () => conn.CreateDatabaseAsync(ifNotExists: true, cancellationToken: ct), "the database", ct).ConfigureAwait(false);
         foreach (string table in _tableNames)
         {
             await EnsureDdlAsync(conn, CreateTableSqlFor(table), $"table {table}", ct).ConfigureAwait(false);
@@ -447,15 +452,27 @@ public sealed class Dataset
     /// holding <c>CREATE TABLE elle_append</c>, and a code-respecting check gave up on the first
     /// attempt.</para>
     /// </summary>
-    internal static async Task EnsureDdlAsync(CamusConnection conn, string sql, string what, CancellationToken ct)
+    internal static Task EnsureDdlAsync(CamusConnection conn, string sql, string what, CancellationToken ct)
+        => EnsureSetupAsync(
+            async () =>
+            {
+                using CamusCommand cmd = conn.CreateCamusCommand(sql);
+                await cmd.ExecuteDDLAsync(ct).ConfigureAwait(false);
+            }, what, ct);
+
+    /// <summary>
+    /// Runs one idempotent setup statement with the retry rule that <see cref="EnsureDdlAsync"/>
+    /// describes. <paramref name="statement"/> must be safe to send again after an attempt whose
+    /// answer was lost.
+    /// </summary>
+    private static async Task EnsureSetupAsync(Func<Task> statement, string what, CancellationToken ct)
     {
         int attempt = 0;
         while (true)
         {
             try
             {
-                using CamusCommand cmd = conn.CreateCamusCommand(sql);
-                await cmd.ExecuteDDLAsync(ct).ConfigureAwait(false);
+                await statement().ConfigureAwait(false);
                 return;
             }
             catch (Exception ex)

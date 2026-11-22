@@ -366,3 +366,33 @@ public sealed class ConnectionCutClassificationTests
             Is.False);
     }
 }
+
+/// <summary>
+/// The two answers a setup statement gets while a disk under the cluster does not answer. The weekly
+/// volume run of 2026-11-22 lost a cell to them: the runner disk stalled for 15 seconds at cluster
+/// start, <c>CREATE DATABASE</c> hit the client deadline, and the leaders stepped down, so the server
+/// answered CADB0535 for the sequence that gives the database its id.
+/// </summary>
+[TestFixture]
+public sealed class StalledDiskSetupRetryTests
+{
+    private const string WeeklyDeadlineMessage = "Endpoint https://camus1:5096: Status(StatusCode=\"DeadlineExceeded\", Detail=\"\")";
+
+    private const string SequenceMessage = "Failed to allocate database id: MustRetry";
+
+    [Test]
+    public void RetriesTheDeadlineOfTheWeeklyRunOnSetup()
+    {
+        Assert.That(ErrorClassifier.IsRetryableForIdempotentSetup(new CamusException("", WeeklyDeadlineMessage)), Is.True);
+        Assert.That(ErrorClassifier.IsRetryableForIdempotentSetup(new CamusException("CADB0000", WeeklyDeadlineMessage)), Is.True);
+    }
+
+    [Test]
+    public void RetriesAnUnavailableSequenceOnSetupWithOrWithoutItsCode()
+    {
+        // The retry that follows the deadline can arrive before the new leader. The client reads the
+        // MustRetry marker of this answer as a conflict, and setup retries a conflict.
+        Assert.That(ErrorClassifier.IsRetryableForIdempotentSetup(new CamusException("CADB0535", SequenceMessage)), Is.True);
+        Assert.That(ErrorClassifier.IsRetryableForIdempotentSetup(new CamusException("", SequenceMessage)), Is.True);
+    }
+}

@@ -14,7 +14,9 @@ namespace CamusDB.Workload.Elle;
 
 /// <summary>
 /// Reads the final state of many keys after the writers stopped, a bounded number at a time over the
-/// run's read connections, retrying the transient failures a settling cluster still produces.
+/// read connections the caller passes, retrying the transient failures a settling cluster still
+/// produces. The caller opens those connections on the reconciliation deadline, not the load
+/// deadline: a final read can be a table scan, and the load deadline is sized for point operations.
 ///
 /// <para>Post-run, so never measured, and never allowed to throw for one key's transient error: a key
 /// that cannot be read inside the budget fails the whole read, and the caller reports the final
@@ -28,13 +30,18 @@ public static class FinalReader
 
     private const int MaxAttemptsPerKey = 30;
 
+    /// <summary>
+    /// Reads every key, <paramref name="parallelism"/> at a time. The default suits point reads. A
+    /// caller whose read scans a table passes a small number: one node runs every scan of a table, so
+    /// each scan in flight slows the others.
+    /// </summary>
     public static async Task<IReadOnlyList<T>> ReadAllAsync<T>(
         ConnectionSet connections, IReadOnlyList<long> keys, Func<CamusConnection, long, CancellationToken, Task<T>> read,
-        TimeSpan budget, CancellationToken ct)
+        TimeSpan budget, CancellationToken ct, int parallelism = Parallelism)
     {
         T[] results = new T[keys.Count];
         Stopwatch elapsed = Stopwatch.StartNew();
-        using SemaphoreSlim gate = new(Parallelism);
+        using SemaphoreSlim gate = new(Math.Max(1, parallelism));
 
         async Task ReadOne(int index)
         {

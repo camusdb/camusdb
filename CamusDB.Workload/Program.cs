@@ -1157,11 +1157,34 @@ public static class Program
         if (elleLedger is not null)
         {
             TimeSpan finalBudget = TimeSpan.FromSeconds(Math.Max(1, o.ReconcileTimeout));
-            Elle.QuiescentResult quiescent = appendOperation is not null
-                ? await appendOperation.ReadFinalAsync(finalBudget, ct).ConfigureAwait(false)
-                : registerOperation is not null
-                    ? await registerOperation.ReadFinalAsync(finalBudget, ct).ConfigureAwait(false)
-                    : await predicateOperation!.ReadFinalAsync(finalBudget, ct).ConfigureAwait(false);
+            Elle.QuiescentResult? finalState = null;
+            try
+            {
+                // The final read has connections of its own, on the reconciliation deadline. The
+                // predicate shape scans its table for the first groups and every shape counts a key
+                // range. On the load connections the scans hit the point-operation deadline, and the
+                // weekly volume run of 2026-11-22 reported six final states as unavailable.
+                ConnectionSettings finalSettings = settings with
+                {
+                    RequestTimeoutSeconds = Math.Max(o.ReconcileRequestTimeout, o.RequestTimeout ?? 0),
+                };
+                await using ConnectionSet finalConnections = await ConnectionSet
+                    .OpenAsync(o.Endpoint, o.Database, o.Protocol, o.Connections, finalSettings, ct).ConfigureAwait(false);
+                finalState = appendOperation is not null
+                    ? await appendOperation.ReadFinalAsync(finalConnections, finalBudget, ct).ConfigureAwait(false)
+                    : registerOperation is not null
+                        ? await registerOperation.ReadFinalAsync(finalConnections, finalBudget, ct).ConfigureAwait(false)
+                        : await predicateOperation!.ReadFinalAsync(finalConnections, finalBudget, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                // The read itself never throws, so this is the open or the close of the connections.
+                // A failed close after a completed read keeps the result of that read.
+                finalState ??= Elle.QuiescentResult.Unavailable(
+                    $"the final-read connections could not be opened — {ex.GetType().Name}: {ex.Message}",
+                    appendOperation is not null ? ElleModel.ListAppend : ElleModel.RwRegister, elleLedger);
+            }
+            Elle.QuiescentResult quiescent = finalState;
 
             reconciliation = reconciliation with
             {

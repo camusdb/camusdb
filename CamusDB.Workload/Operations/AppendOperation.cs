@@ -470,9 +470,10 @@ public sealed class AppendOperation : IWriteOperation, IReadOperation
 
     /// <summary>
     /// Reads every list the ledger knows and judges it: every acknowledged append present once, no
-    /// refused value, no element this run did not append.
+    /// refused value, no element this run did not append. The reads use
+    /// <paramref name="connections"/>, which the caller opens on the reconciliation deadline.
     /// </summary>
-    public async Task<QuiescentResult> ReadFinalAsync(TimeSpan budget, CancellationToken ct)
+    public async Task<QuiescentResult> ReadFinalAsync(ConnectionSet connections, TimeSpan budget, CancellationToken ct)
     {
         if (_ledger is null)
             throw new InvalidOperationException("the append operation has no ledger to judge the final lists against");
@@ -482,7 +483,7 @@ public sealed class AppendOperation : IWriteOperation, IReadOperation
         try
         {
             IReadOnlyList<FinalList> finals = await FinalReader.ReadAllAsync(
-                _connections, keys, async (conn, key, token) =>
+                connections, keys, async (conn, key, token) =>
                 {
                     using CamusCommand read = ReadCommand(conn, null, key);
                     using CamusDataReader reader = await read.ExecuteReaderAsync(token).ConfigureAwait(false);
