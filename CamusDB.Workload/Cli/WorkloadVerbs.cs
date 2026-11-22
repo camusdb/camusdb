@@ -176,6 +176,9 @@ public sealed class RunOptions : CommonOptions
         return clone;
     }
 
+    [Option("client-round-trip-profile", Default = false, HelpText = "Collect the driver's round-trip profile for the whole run into client-round-trip.csv: for each operation kind, the time in the driver's queue, in the exchange with the server and before the caller resumes, as totals sampled at --metrics-interval. It needs a driver that publishes the profile; an older one leaves the file empty. Off by default, because it adds a few measurements to every operation.")]
+    public bool ClientRoundTripProfile { get; set; }
+
     [Option("pipeline", Default = false, HelpText = "Send each write transaction as pipelined frames instead of one round trip per statement: [BEGIN, reads] then [updates, conditional COMMIT] — two exchanges per transaction instead of six on the bank shape. Applies to the accounts, bank and fanout shapes over gRPC against a server that reads the pipeline contract; elsewhere the client falls back to one exchange per step and summary.json's exchangesPerWriteTxn shows it. Recorded in manifest.json; runs that differ here are different clients.")]
     public bool Pipeline { get; set; }
 

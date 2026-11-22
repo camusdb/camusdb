@@ -111,4 +111,18 @@ public sealed class HistogramAndIdTests
         Assert.That(DurationParser.Parse("1h"), Is.EqualTo(TimeSpan.FromHours(1)));
         Assert.That(DurationParser.Parse("10"), Is.EqualTo(TimeSpan.FromSeconds(10)));
     }
+
+    [Test]
+    public void MeanFollowsTheSamplesWithinTheBucketError()
+    {
+        LatencyHistogram h = new();
+        Assert.That(h.MeanMilliseconds, Is.Zero, "an empty histogram has no mean");
+
+        // 900 fast operations and 100 slow ones: the mean (1.09 ms) is far from the median (0.1 ms).
+        for (int i = 0; i < 900; i++) h.Record(0.1);
+        for (int i = 0; i < 100; i++) h.Record(10.0);
+
+        Assert.That(h.MeanMilliseconds, Is.EqualTo(1.09).Within(0.03));
+        Assert.That(h.Percentile(50), Is.EqualTo(0.1).Within(0.003));
+    }
 }

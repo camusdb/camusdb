@@ -857,13 +857,17 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         {
             await foreach (BatchExecuteRequest req in requestStream.ReadAllAsync(ct).ConfigureAwait(false))
             {
+                // When the read loop received the message. A profiled query measures its span on
+                // the stream from here, so the admission of the frame items before it is counted.
+                long receivedAt = QueryStageProfile.Enabled ? Stopwatch.GetTimestamp() : 0;
+
                 if (req.Kind == BatchStatementKind.Frame)
-                    await AdmitBatchFrameAsync(state, req).ConfigureAwait(false);
+                    await AdmitBatchFrameAsync(state, req, receivedAt).ConfigureAwait(false);
                 else if (req.TxnStartRef != 0)
                     await RefuseBatchOpAsync(state, req, CamusDBErrorCodes.InvalidInput,
                         "txn_start_ref is only valid on an item of a frame").ConfigureAwait(false);
                 else
-                    await AdmitBatchOpAsync(state, req).ConfigureAwait(false);
+                    await AdmitBatchOpAsync(state, req, receivedAt: receivedAt).ConfigureAwait(false);
             }
 
             await tracker.DrainAsync().ConfigureAwait(false);
@@ -1050,7 +1054,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     /// <see cref="CamusDBErrorCodes.InvalidInput"/> by its own <c>request_id</c> so that no caller
     /// waits for an answer; the nested frame itself has no <c>request_id</c> and gets no answer.</para>
     /// </summary>
-    private async Task AdmitBatchFrameAsync(BatchStreamState state, BatchExecuteRequest frame)
+    private async Task AdmitBatchFrameAsync(BatchStreamState state, BatchExecuteRequest frame, long receivedAt)
     {
         // A request frame proves that this peer reads response frames. An empty frame proves it as well.
         state.Writer.MarkPeerReadsFrames();
@@ -1117,7 +1121,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                     continue;
                 }
 
-                await AdmitBatchOpAsync(state, item, startRef: start).ConfigureAwait(false);
+                await AdmitBatchOpAsync(state, item, startRef: start, receivedAt: receivedAt).ConfigureAwait(false);
                 continue;
             }
 
@@ -1125,11 +1129,11 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             {
                 FrameStart start = new(state.NewAliasKey());
                 (starts ??= new Dictionary<int, FrameStart>())[item.RequestId] = start;
-                await AdmitBatchOpAsync(state, item, frameStart: start).ConfigureAwait(false);
+                await AdmitBatchOpAsync(state, item, frameStart: start, receivedAt: receivedAt).ConfigureAwait(false);
                 continue;
             }
 
-            await AdmitBatchOpAsync(state, item).ConfigureAwait(false);
+            await AdmitBatchOpAsync(state, item, receivedAt: receivedAt).ConfigureAwait(false);
         }
     }
 
@@ -1153,15 +1157,21 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     /// (<see cref="BatchStreamState.HandleAliases"/>) and the handle's own key otherwise. A START
     /// that its frame-mates name (<paramref name="frameStart"/>) is chained as the head of its alias
     /// chain, so that they run after it; every other START, and every autocommit op, is unchained.</para>
+    ///
+    /// <para><paramref name="receivedAt"/> is when the read loop received the stream message that
+    /// carries the op, or 0 when the stage profile is off.</para>
     /// </summary>
     private async Task AdmitBatchOpAsync(
-        BatchStreamState state, BatchExecuteRequest req, FrameStart? startRef = null, FrameStart? frameStart = null)
+        BatchStreamState state, BatchExecuteRequest req, FrameStart? startRef = null, FrameStart? frameStart = null,
+        long receivedAt = 0)
     {
         CancellationToken ct = state.Ct;
 
         // A query's stage clock opens here, so the op's admission is part of its profile. It flows to
-        // the op through the async context and is published when the op ends (RunBatchOpAsync).
+        // the op through the async context. It is published when the op has ended (RunBatchOpAsync)
+        // and the stream's writer has written what the op handed it.
         QueryStageClock? stageClock = req.Kind == BatchStatementKind.Query ? QueryStageProfile.Begin() : null;
+        stageClock?.MarkReceived(receivedAt);
         long admitStart = stageClock is null ? 0 : Stopwatch.GetTimestamp();
 
         // Re-resolve before the op is admitted, so an authorization change reaches this stream
@@ -1528,7 +1538,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             if (QueryStageProfile.Current is { } stageClock)
             {
                 stageClock.AddElapsed(QueryStage.Request, requestStart);
-                stageClock.Publish();
+                stageClock.CompleteOp();
             }
             requestSpan?.SetTag("outcome", outcome);
             if (outcome != ServerDiagnostics.Tags.Outcome.Ok)

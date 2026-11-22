@@ -6,9 +6,11 @@
  * file that was distributed with this source code.
  */
 
+using System.Diagnostics;
 using System.Threading.Channels;
 using Google.Protobuf.Collections;
 using Grpc.Core;
+using CamusDB.Core.Diagnostics;
 using CamusDB.Grpc;
 
 namespace CamusDB.App.Grpc;
@@ -60,6 +62,12 @@ namespace CamusDB.App.Grpc;
 /// stream's token fires, the loop stops, drops what is left (nobody can read it) and cancels
 /// <see cref="WriteAsync"/> for every producer, so a query whose client left aborts and rolls back as
 /// it did when it wrote to the transport itself.</para>
+///
+/// <para><b>Stage profile.</b> While <see cref="QueryStageProfile"/> is on, an entry handed over by
+/// a profiled query carries that query's clock. The loop charges the entry's wait in the queue, the
+/// write that carried its last message and the wait for the flush to the clock
+/// (<see cref="QueryStageClock.EntryWritten"/>). With the profile off no entry carries a clock and
+/// the loop reads no timestamp.</para>
 /// </summary>
 internal sealed class BatchResponseWriter
 {
@@ -115,6 +123,12 @@ internal sealed class BatchResponseWriter
 
     private int unflushedBytes;
 
+    // Profiled entries whose last message the write in progress carries. Loop-only state.
+    private readonly List<ProfiledEntry> writing = [];
+
+    // Profiled entries written with the buffer hint, which a later write flushes. Loop-only state.
+    private readonly List<ProfiledEntry> unflushed = [];
+
     /// <summary>
     /// Starts the writer loop. <paramref name="streamToken"/> is the token of the call (client gone,
     /// server stopping, authority ended); it ends the loop and every producer wait.
@@ -159,7 +173,7 @@ internal sealed class BatchResponseWriter
     {
         int cost = BatchFrames.ItemCost(message.CalculateSize());
 
-        return WritePendingAsync(new Pending(message, null, cost, cost >= LargeMessageBytes), ct);
+        return WritePendingAsync(new Pending(message, null, cost, cost >= LargeMessageBytes, null, 0), ct);
     }
 
     /// <summary>
@@ -171,10 +185,19 @@ internal sealed class BatchResponseWriter
     public ValueTask WriteGroupAsync(BatchResponseGroup group, CancellationToken ct)
         => group.Count == 0
             ? ValueTask.CompletedTask
-            : WritePendingAsync(new Pending(null, group, group.Bytes, group.Bytes >= LargeMessageBytes), ct);
+            : WritePendingAsync(new Pending(null, group, group.Bytes, group.Bytes >= LargeMessageBytes, null, 0), ct);
 
     private ValueTask WritePendingAsync(Pending pending, CancellationToken ct)
     {
+        // The caller is the op's own flow, so the clock read here is the clock of the op that
+        // produced the entry. It is counted before the entry is queued: the loop can write the
+        // entry before this method returns.
+        if (QueryStageProfile.CurrentRunning is { } clock)
+        {
+            clock.EntryQueued();
+            pending = pending with { Clock = clock, QueuedAt = Stopwatch.GetTimestamp() };
+        }
+
         if (!pending.Large && !lifetimeToken.IsCancellationRequested && queue.Writer.TryWrite(pending))
             return ValueTask.CompletedTask;
 
@@ -239,7 +262,13 @@ internal sealed class BatchResponseWriter
         }
         catch (ChannelClosedException)
         {
+            pending.Clock?.EntryNotQueued();
             throw new OperationCanceledException("The batch response stream is closed");
+        }
+        catch
+        {
+            pending.Clock?.EntryNotQueued();
+            throw;
         }
         finally
         {
@@ -324,6 +353,9 @@ internal sealed class BatchResponseWriter
         if (head.Group is { } group && headIndex < group.Count)
             return false;
 
+        if (head.Clock is { } clock)
+            writing.Add(new ProfiledEntry(clock, head.QueuedAt, 0));
+
         bool releasesLargeSlot = head.Large;
         head = default;
         hasHead = false;
@@ -338,11 +370,17 @@ internal sealed class BatchResponseWriter
 
         try
         {
-            SetFlush(reader, cost);
+            bool flushes = SetFlush(reader, cost);
+            long writeStart = writing.Count > 0 ? Stopwatch.GetTimestamp() : 0;
+
             await stream.WriteAsync(message, lifetimeToken).ConfigureAwait(false);
+
+            RecordWrite(writeStart, flushes);
         }
         finally
         {
+            writing.Clear();
+
             if (releasesLargeSlot)
                 largeGate.Release();
         }
@@ -375,14 +413,18 @@ internal sealed class BatchResponseWriter
             if (items.Count == 0)
                 return;
 
-            SetFlush(reader, bytes);
+            bool flushes = SetFlush(reader, bytes);
+            long writeStart = writing.Count > 0 ? Stopwatch.GetTimestamp() : 0;
 
             // A frame of one is the plain message: a quiet stream stays byte-identical.
             await stream.WriteAsync(items.Count == 1 ? items[0] : frameEnvelope, lifetimeToken).ConfigureAwait(false);
+
+            RecordWrite(writeStart, flushes);
         }
         finally
         {
             items.Clear();
+            writing.Clear();
 
             if (largeSlots > 0)
                 largeGate.Release(largeSlots);
@@ -392,19 +434,55 @@ internal sealed class BatchResponseWriter
     /// <summary>
     /// Chooses whether the next write flushes. It buffers only while another message already waits —
     /// that message is then certain to be written in this pass and to carry the flush, or a later one
-    /// is — and only up to <see cref="MaxUnflushedBytes"/>.
+    /// is — and only up to <see cref="MaxUnflushedBytes"/>. Returns true when the write flushes.
     /// </summary>
-    private void SetFlush(ChannelReader<Pending> reader, int bytes)
+    private bool SetFlush(ChannelReader<Pending> reader, int bytes)
     {
         bool buffer = MoreWaits(reader) && unflushedBytes + bytes < MaxUnflushedBytes;
 
         unflushedBytes = buffer ? unflushedBytes + bytes : 0;
         stream.WriteOptions = buffer ? BufferedWrite : FlushingWrite;
+        return !buffer;
+    }
+
+    /// <summary>
+    /// Charges the write that just returned to the profiled entries it completed. An entry written
+    /// with the buffer hint is kept until a later write flushes, because its bytes leave only then.
+    /// Does nothing, and reads no timestamp, when no profiled entry is involved.
+    /// </summary>
+    private void RecordWrite(long writeStart, bool flushes)
+    {
+        if (writing.Count == 0 && (unflushed.Count == 0 || !flushes))
+            return;
+
+        long writeEnd = Stopwatch.GetTimestamp();
+
+        if (!flushes)
+        {
+            foreach (ProfiledEntry entry in writing)
+                unflushed.Add(entry with { WriteStart = writeStart, WriteEnd = writeEnd });
+
+            return;
+        }
+
+        foreach (ProfiledEntry entry in unflushed)
+            entry.Clock.EntryWritten(entry.QueuedAt, entry.WriteStart, entry.WriteEnd, writeEnd);
+
+        unflushed.Clear();
+
+        foreach (ProfiledEntry entry in writing)
+            entry.Clock.EntryWritten(entry.QueuedAt, writeStart, writeEnd, writeEnd);
     }
 
     /// <summary>One queue entry: a single message or a group, with its frame cost measured once by the
-    /// producer. <c>Large</c> entries hold a slot of the large-message bound until they are written.</summary>
-    private readonly record struct Pending(BatchExecuteResponse? Single, BatchResponseGroup? Group, int Cost, bool Large);
+    /// producer. <c>Large</c> entries hold a slot of the large-message bound until they are written.
+    /// <c>Clock</c> and <c>QueuedAt</c> are set only for an entry of a profiled query.</summary>
+    private readonly record struct Pending(
+        BatchExecuteResponse? Single, BatchResponseGroup? Group, int Cost, bool Large, QueryStageClock? Clock, long QueuedAt);
+
+    /// <summary>A profiled entry on its way through a write: its clock, when it was queued, and the
+    /// bounds of the write that carried its last message (0 until that write returned).</summary>
+    private readonly record struct ProfiledEntry(QueryStageClock Clock, long QueuedAt, long WriteStart, long WriteEnd = 0);
 }
 
 /// <summary>
