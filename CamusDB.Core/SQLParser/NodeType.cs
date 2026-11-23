@@ -289,6 +289,13 @@ public enum NodeType
     IndexIdentifierDesc,
     TypeObjectId,
     TypeString,
+
+    /// <summary>
+    /// <c>string(N)</c> (also <c>varchar(N)</c> and <c>char(N)</c>), carrying <c>N</c> in <c>yytext</c>.
+    /// The <c>ColumnType</c> is String, as for <see cref="TypeString"/>. In a column declaration the
+    /// size is the column's maximum length in code points, and a longer write is refused. As a CAST
+    /// target the size cuts the value to its first N code points.
+    /// </summary>
     TypeStringSized,
     TypeInteger64,
     TypeFloat64,
@@ -606,9 +613,9 @@ public enum NodeType
     ShowStatistics,
 
     /// <summary>
-    /// <c>bytes(N)</c> in a column declaration, carrying <c>N</c> in <c>yytext</c>. Distinct from
-    /// <see cref="TypeBytes"/> only in that the size becomes the column's maximum length; the
-    /// resulting <c>ColumnType</c> is Bytes either way, so a CAST target ignores the size.
+    /// <c>bytes(N)</c>, carrying <c>N</c> in <c>yytext</c>. The <c>ColumnType</c> is Bytes, as for
+    /// <see cref="TypeBytes"/>. In a column declaration the size is the column's maximum length, and
+    /// a longer write is refused. As a CAST target the size cuts the value to its first N bytes.
     ///
     /// <para>Declared here instead of beside <see cref="TypeStringSized"/> on purpose. Member
     /// ordinals cross the wire: <c>NodeAstWireCodec</c> serializes a shipped filter AST as

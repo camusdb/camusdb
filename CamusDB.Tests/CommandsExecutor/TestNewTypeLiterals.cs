@@ -305,8 +305,8 @@ internal sealed class TestNewTypeLiterals : SharedNodeBaseTest
     [NonParallelizable]
     public async Task Cast_BytesSized_FromHexString()
     {
-        // The size in a CAST target constrains nothing: it declares a column ceiling, so the
-        // cast resolves to plain Bytes and the two-byte result is not padded or rejected.
+        // A sized CAST target keeps the first N bytes, so a two-byte value under bytes(3072) comes
+        // back unchanged: it is not padded and not rejected. TestSizedCast covers the cut.
         (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupTable(
             "CREATE TABLE t (id OID NOT NULL, v string, PRIMARY KEY (id))");
         await ExecInsert(executor, db, $"INSERT INTO t (id, v) VALUES (\"{OID}\", '0x0102')");

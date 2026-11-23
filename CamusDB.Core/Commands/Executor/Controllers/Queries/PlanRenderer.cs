@@ -796,7 +796,7 @@ public static class PlanRenderer
             NodeType.ExprFuncCall =>
                 $"{expr.leftAst?.yytext?.ToLowerInvariant() ?? "?"}({(expr.rightAst is null || expr.rightAst.nodeType == NodeType.ExprAllFields ? "*" : RenderExpr(expr.rightAst))})",
 
-            NodeType.ExprCast => $"CAST({RenderExpr(expr.leftAst!)} AS {expr.rightAst?.yytext ?? "?"})",
+            NodeType.ExprCast => $"CAST({RenderExpr(expr.leftAst!)} AS {(expr.rightAst is null ? null : SqlAstRenderer.CastTypeText(expr.rightAst)) ?? "?"})",
 
             // Argument lists and ARRAY/IN element lists are left-deep chains; render them flat.
             NodeType.ExprArgumentList or NodeType.ExprList =>
