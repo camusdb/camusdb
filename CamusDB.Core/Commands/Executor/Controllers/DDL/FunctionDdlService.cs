@@ -8,6 +8,7 @@
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Apply;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.Catalogs.Transactional;
 using CamusDB.Core.CommandsExecutor.Controllers.Functions;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -52,7 +53,8 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// see the new body at their next evaluation.</para>
 ///
 /// <para><b>Runs on the schema leader</b>, under the database's DDL semaphore, like extension, view
-/// and sequence DDL.</para>
+/// and sequence DDL. Inside a transaction with a private schema it runs on any node, and only that
+/// transaction calls the function before the commit.</para>
 ///
 /// <para><b>Rate.</b> <c>CREATE [OR REPLACE] FUNCTION</c> counts against the caller's limit of
 /// statements that compile inline C# (<see cref="InlineDefinitionRateLimiter"/>), right before the
@@ -369,9 +371,14 @@ internal sealed class FunctionDdlService
         }
     }
 
+    /// <summary>
+    /// Refuses the statement on a node that does not lead the database's schema log. Inside a transaction
+    /// with a private schema it runs on any node: its delta joins the change set, which reaches the schema
+    /// leader at the commit, and the commit refuses a change set whose base schema moved.
+    /// </summary>
     private async Task RequireSchemaLeaderAsync(DatabaseDescriptor database, string statement)
     {
-        if (!context.IsClusterMode)
+        if (!context.IsClusterMode || TransactionSchemaScope.OverlayFor(database) is not null)
             return;
 
         if (await database.Kahuna.AmISchemaLeaderAsync(database.Id, CancellationToken.None).ConfigureAwait(false))

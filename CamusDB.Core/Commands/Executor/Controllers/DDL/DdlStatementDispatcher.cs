@@ -182,10 +182,9 @@ internal sealed class DdlStatementDispatcher
     /// </summary>
     /// <remarks>
     /// <para>With transactional DDL on, a statement of class <see cref="DdlStatementClass.Irrevocable"/>
-    /// or <see cref="DdlStatementClass.NotYetTransactional"/> is refused with
-    /// <see cref="CamusDBErrorCodes.StatementNotAllowedInTransaction"/>, so it never commits apart from a
-    /// transaction whose client expects a ROLLBACK to undo it. TRUNCATE and REWRITE STORAGE keep their own
-    /// refusal, which applies with the setting off too.</para>
+    /// is refused with <see cref="CamusDBErrorCodes.StatementNotAllowedInTransaction"/>, so it never commits
+    /// apart from a transaction whose client expects a ROLLBACK to undo it. TRUNCATE and REWRITE STORAGE
+    /// keep their own refusal, which applies with the setting off too.</para>
     ///
     /// <para>A transaction that already holds schema changes keeps this rule after the setting is turned
     /// off, until it ends: half of its DDL in the change set and half committed apart would be neither
@@ -216,12 +215,6 @@ internal sealed class DdlStatementDispatcher
                     CamusDBErrorCodes.StatementNotAllowedInTransaction,
                     $"{ast.nodeType} cannot run inside an explicit transaction: it commits work that a later ROLLBACK " +
                     "cannot undo. Commit or roll back first, then run it.");
-
-            case DdlStatementClass.NotYetTransactional:
-                throw new CamusDBException(
-                    CamusDBErrorCodes.StatementNotAllowedInTransaction,
-                    $"{ast.nodeType} cannot yet run inside an explicit transaction with transactional_ddl_enabled on: its " +
-                    "change cannot yet roll back with the transaction. Commit or roll back first, then run it.");
         }
 
         if (existing is not null)

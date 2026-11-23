@@ -113,3 +113,14 @@ A node always boots on its file configuration and swaps to the merged cluster vi
 its store is readable — before the query engine starts serving. Components built before that point
 either react to the swap or hold only `restart`-class settings, so an ordinary restart cannot
 produce a node that permanently disagrees with the cluster.
+
+## Transactional DDL
+
+`transactional_ddl_enabled` (runtime, cluster) decides what a schema statement does inside an explicit
+transaction; see [transactions-locking-and-isolation.md](transactions-locking-and-isolation.md) §9.7. It is
+read at each schema statement. A transaction that already changed the schema keeps its rule until it
+ends, also when the setting is turned off meanwhile.
+
+While the new value is on its way to the nodes, two nodes can answer differently for a moment. A node
+with the setting off does not take the DDL lock for its schema statements. A transaction on another node
+whose base schema moved that way is refused at its commit with the retryable `CADB0502`, so nothing is lost.

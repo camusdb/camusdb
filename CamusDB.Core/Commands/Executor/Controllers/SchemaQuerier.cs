@@ -149,7 +149,7 @@ internal sealed class SchemaQuerier
 
         foreach (KeyValuePair<string, SequenceSchema> entry in database.Schema.Sequences)
         {
-            if (pattern is null || LikeMatch(entry.Key, pattern))
+            if ((pattern is null || LikeMatch(entry.Key, pattern)) && !IsOwnedByAnUnfinishedColumn(database, entry.Value))
                 listed.Add(entry.Value);
         }
 
@@ -318,6 +318,22 @@ internal sealed class SchemaQuerier
         }
 
         return new ColumnValue(ColumnType.String, ownerTableId);
+    }
+
+    /// <summary>
+    /// True for the sequence of an identity column that a schema change still adds or removes. The column is
+    /// not part of the table yet, and <c>SHOW CREATE TABLE</c> leaves it out, so a dump that listed its
+    /// sequence would name a sequence that the restored table does not have.
+    /// </summary>
+    private static bool IsOwnedByAnUnfinishedColumn(DatabaseDescriptor database, SequenceSchema sequence)
+    {
+        if (sequence.OwnedByTableId is not { Length: > 0 } ownerTableId
+            || !database.Schema.TryGetRelationNameById(ownerTableId, out string? ownerName)
+            || !database.Schema.Tables.TryGetValue(ownerName, out TableSchema? owner))
+            return false;
+
+        TableColumnSchema? column = owner.Columns?.Find(c => string.Equals(c.DefaultSequenceId, sequence.Id, StringComparison.Ordinal));
+        return column is not null && !SchemaElementStateRules.IsReadable(column);
     }
 
     /// <summary>

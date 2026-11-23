@@ -490,7 +490,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     internal CamusDB.Core.Extensions.ExtensionScopeFrame EnterExtensionScope(DatabaseDescriptor database)
     {
         CamusDB.Core.Extensions.ExtensionScopeFrame frame = ExtensionScopes.For(database.Name);
-        frame.Attach(database.Name, database.Schema.ExtensionCatalog, database.Schema.FunctionCatalog);
+        frame.Attach(database.Name, database);
         CamusDB.Core.Extensions.ExtensionFunctionScope.Enter(frame);
         return frame;
     }
@@ -596,9 +596,12 @@ public sealed class CommandExecutor : IAsyncDisposable
         // The same sweep ends a transactional change set whose committing transaction left it pending.
         changeSetResolver = new CamusDB.Core.Catalogs.Transactional.PendingChangeSetResolver(
             new CamusDB.Core.Catalogs.Transactional.ChangeSetCommitter(catalogs, logger), logger);
-        // The same sweep also removes the data of published change sets that a crash left behind.
+        // The allocator is the single binding to Kahuna's sequencer. Built here, ahead of every component
+        // that captures it.
+        sequenceAllocator = new Storage.Kv.SequenceAllocator(options);
+        // The same sweep also does the work of published change sets that a crash left behind.
         databaseDroper = new(databaseDescriptors, logger, options);
-        deferredPurges = new(databaseDroper, logger);
+        deferredPurges = new(databaseDroper, sequenceAllocator, logger);
         coordinatorJobSweeper = new(databaseDescriptors, databaseOpener.ResumeCoordinator, logger, options.CoordinatorJobSweepIntervalMs, changeSetResolver, deferredPurges);
         coordinatorJobSweeper.Start();
         databaseCreator = new(logger);
@@ -615,10 +618,8 @@ public sealed class CommandExecutor : IAsyncDisposable
         tableDropper = new(catalogs, statisticsManager, logger, deferredPurges);
         rowDeleter = new(logger, tableOpener, statisticsManager, triggerRuntime);
         queryExecutor = new(logger, options, statisticsManager, sharedNode?.Kahuna, fragmentTransport);
-        // The allocator is the single binding to Kahuna's sequencer; the binder reserves a
-        // statement's values through it before the statement runs. Both are built here, ahead of
-        // every component that captures them.
-        sequenceAllocator = new Storage.Kv.SequenceAllocator(options);
+        // Reserves a statement's sequence values through the allocator before the statement runs. Built
+        // here, ahead of every component that captures it.
         sequenceBinder = new Controllers.Functions.SequenceStatementBinder(sequenceAllocator);
         // Built after the binder: an added column's sequence default draws one value per existing row.
         tableColumnAlterer = new(catalogs, logger, sequenceBinder);
@@ -739,7 +740,7 @@ public sealed class CommandExecutor : IAsyncDisposable
             Controllers.DDL.DdlForwardingCoordinator forwarding = ddlForwarding;
             catalogs.SetSchemaChangeForwarder((database, entry) => forwarding.TryForwardSchemaEntryAsync(database, entry));
         }
-        sequenceDdl = new Controllers.DDL.SequenceDdlService(executorContext, catalogs, sequenceAllocator);
+        sequenceDdl = new Controllers.DDL.SequenceDdlService(executorContext, catalogs, sequenceAllocator, deferredPurges);
         schemaDdl = new Controllers.DDL.SchemaDdlService(
             executorContext,
             options,
@@ -998,6 +999,9 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// can deliver a job that was read earlier, as a sweep that was slow between its scan and its work does.
     /// </summary>
     internal SchemaChangeCoordinator ResumeCoordinatorForTests => databaseOpener.ResumeCoordinator;
+
+    /// <summary>The engine's catalogs; tests look at the records they keep.</summary>
+    internal CatalogsManager CatalogsForTests => catalogs;
 
     /// <summary>
     /// Test-only seam: attempts to release one database and reports why it was or was not released, so

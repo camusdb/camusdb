@@ -310,22 +310,6 @@ internal sealed class TestTransactionalDdl : BaseTest
 
     [Test]
     [NonParallelizable]
-    public async Task StatementThatCannotRollBack_IsRefusedInsideTheTransaction()
-    {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
-
-        KvTransaction tx = await BeginSessionAsync(database);
-
-        CamusDBException? refused = Assert.ThrowsAsync<CamusDBException>(async () =>
-            await Ddl(executor, tx, dbname, "CREATE SEQUENCE s"));
-        Assert.AreEqual(CamusDBErrorCodes.StatementNotAllowedInTransaction, refused!.Code);
-
-        await database.Transactions.RollbackAsync(tx);
-        Assert.IsFalse(database.Schema.Sequences.ContainsKey("s"));
-    }
-
-    [Test]
-    [NonParallelizable]
     public async Task SharedTable_CreateIndexAfterTheTransactionWroteTheTable_IsRefused()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();

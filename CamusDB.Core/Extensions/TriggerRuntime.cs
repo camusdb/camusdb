@@ -6,6 +6,7 @@
  */
 
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.Catalogs.Transactional;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Controllers.Functions;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -37,7 +38,9 @@ namespace CamusDB.Core.Extensions;
 /// cached on the record and keyed by the column list and the function snapshot it was compiled
 /// against, so <c>ADD COLUMN</c> or <c>CREATE OR REPLACE FUNCTION</c> makes the next fire compile again.
 /// A binding holds one reference on its unit; it gives it back when it is replaced, when the trigger
-/// or its table is dropped, and when the database closes (<see cref="Retire"/>).</para>
+/// or its table is dropped, and when the database closes (<see cref="Retire"/>). A transaction with a
+/// private schema keeps the bindings of its own statements until it ends
+/// (<see cref="TransactionSchemaOverlay.TriggerBindingOf"/>).</para>
 ///
 /// <para><b>Where triggers fire.</b> On the node that runs the statement, inside its transaction,
 /// once per affected row. No SQL-layer DML is forwarded between nodes, so a statement's triggers run
@@ -125,12 +128,20 @@ internal sealed class TriggerRuntime
         // column list it was checked against, so a schema change binds the trigger again.
         IReadOnlyList<TableColumnSchema> columns = table.Schema.Columns ?? [];
 
-        if (definition.Binding is TriggerBinding cached && ReferenceEquals(cached.Registry, registry) && ReferenceEquals(cached.Record, record)
+        // A transaction with a private schema keeps its bindings apart; see TransactionSchemaOverlay.
+        TransactionSchemaOverlay? overlay = TransactionSchemaScope.OverlayFor(database);
+        object? current = overlay is null ? definition.Binding : overlay.TriggerBindingOf(definition);
+
+        if (current is TriggerBinding cached && ReferenceEquals(cached.Registry, registry) && ReferenceEquals(cached.Record, record)
             && (cached.Bound?.Type?.Typed is null || ReferenceEquals(cached.Columns, columns)))
             return cached.Bound ?? throw cached.Error!;
 
         TriggerBinding binding = Resolve(executor.ExtensionScopes, database, definition, record, registry, columns);
-        definition.Binding = binding;
+
+        if (overlay is null)
+            definition.Binding = binding;
+        else
+            overlay.KeepTriggerBinding(definition, binding);
 
         return binding.Bound ?? throw binding.Error!;
     }
@@ -197,12 +208,24 @@ internal sealed class TriggerRuntime
         IReadOnlyList<TableColumnSchema> columns = table.Schema.Columns ?? [];
         IReadOnlyDictionary<string, InlineFunctionDefinition> functions = database.Schema.Functions;
 
-        object? current = definition.Binding;
+        // A transaction with a private schema keeps its bindings apart: compiled against its own columns
+        // and functions, one of them would replace the binding that every other transaction fires, and
+        // each side would make the other compile again.
+        TransactionSchemaOverlay? overlay = TransactionSchemaScope.OverlayFor(database);
+        object? current = overlay is null ? definition.Binding : overlay.TriggerBindingOf(definition);
 
         if (current is InlineTriggerBinding cached && cached.Matches(runtime, columns, functions))
             return cached.Bound ?? throw cached.Error!;
 
         InlineTriggerBinding next = ResolveInline(runtime, database, table, definition, columns, functions);
+
+        if (overlay is not null)
+        {
+            if (!overlay.KeepTriggerBinding(definition, next))
+                next.Retire();
+
+            return next.Bound ?? throw next.Error!;
+        }
 
         // A statement that read the trigger list before a DROP TRIGGER or DROP TABLE applied can still
         // fire the dropped record. It fires with code it does not cache: a binding published now would
@@ -321,7 +344,7 @@ internal sealed class TriggerRuntime
     /// holds a reference on, or the error. Keyed by reference identity of the column list and of the
     /// function snapshot: both are replaced, never edited, when they change.
     /// </summary>
-    private sealed class InlineTriggerBinding
+    private sealed class InlineTriggerBinding : IDisposable
     {
         private InlineFunctionUnit? unit;
 
@@ -360,6 +383,8 @@ internal sealed class TriggerRuntime
 
             unit = null;
         }
+
+        public void Dispose() => Retire();
 
         public static InlineTriggerBinding Succeeded(
             InlineFunctionRuntime runtime, IReadOnlyList<TableColumnSchema> columns, IReadOnlyDictionary<string, InlineFunctionDefinition> functions,

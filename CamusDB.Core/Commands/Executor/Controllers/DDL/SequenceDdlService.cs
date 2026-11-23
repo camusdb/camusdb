@@ -37,6 +37,13 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// parameters describing what the counter actually is.</description></item>
 /// </list>
 ///
+/// <para><b>Inside a transaction with a private schema the record is part of the change set, and the
+/// counter follows the transaction's outcome.</b> A create makes the counter at once, because the
+/// transaction draws from it, and a rollback removes it. A drop and an alter touch the counter after the
+/// publish: before it, every other transaction draws from the counter, and a rollback could not put it
+/// back. The alter is recorded in the transaction's own commit
+/// (<see cref="DeferredPurgeKind.SequenceCounter"/>), so a crash after the commit does not lose it.</para>
+///
 /// <para><b>A restart waits about five seconds.</b> Kahuna withholds a sequence update until no
 /// stale block from the replaced incarnation can still be served. That is what makes moving a live
 /// counter safe instead of a hole in the uniqueness guarantee, and it is why restarting is a
@@ -50,15 +57,19 @@ internal sealed class SequenceDdlService
 
     private readonly SequenceAllocator allocator;
 
-    internal SequenceDdlService(ExecutorContext context, CatalogsManager catalogs, SequenceAllocator allocator)
+    private readonly DeferredPurgeRunner deferredWork;
+
+    internal SequenceDdlService(ExecutorContext context, CatalogsManager catalogs, SequenceAllocator allocator, DeferredPurgeRunner deferredWork)
     {
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(catalogs);
         ArgumentNullException.ThrowIfNull(allocator);
+        ArgumentNullException.ThrowIfNull(deferredWork);
 
         this.context = context;
         this.catalogs = catalogs;
         this.allocator = allocator;
+        this.deferredWork = deferredWork;
     }
 
     /// <summary>
@@ -130,7 +141,10 @@ internal sealed class SequenceDdlService
         // but the counter exists at once. A rollback removes it again; ids are never reused, so a counter
         // a failed removal leaves behind is never read.
         if (Catalogs.Transactional.TransactionSchemaScope.OverlayFor(database) is { } overlay)
+        {
+            overlay.AddCreatedCounter(sequence);
             overlay.AddOnRollback(() => allocator.DeleteAsync(overlay.Database.Kahuna.Kahuna, overlay.Database.Id, sequenceId, CancellationToken.None));
+        }
 
         return sequence;
     }
@@ -243,6 +257,25 @@ internal sealed class SequenceDdlService
                     $"INCREMENT ({increment})");
         }
 
+        SchemaAlterSequencePayload change = new()
+        {
+            SequenceId = sequence.Id!,
+            StartValue = ticket.StartValue,
+            Increment = ticket.Increment,
+            MinValue = ticket.RemoveMinValue ? long.MinValue + increment : ticket.MinValue,
+            MaxValue = ticket.RemoveMaxValue ? null : ticket.MaxValue,
+            RemoveMaxValue = ticket.RemoveMaxValue,
+            CacheSize = ticket.RemoveCacheSize ? null : ticket.CacheSize,
+            RemoveCacheSize = ticket.RemoveCacheSize,
+            SetOwner = false,
+        };
+
+        if (Catalogs.Transactional.TransactionSchemaScope.OverlayFor(database) is { } overlay)
+        {
+            await AlterInOwnerTransactionAsync(database, overlay, sequence, ticket, change, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         // The counter first: it is the side that can be refused or can take a lease period to
         // answer, so a failure here leaves the record still describing what the counter is.
         await allocator.UpdateAsync(
@@ -260,18 +293,66 @@ internal sealed class SequenceDdlService
             removeBlockSize: ticket.RemoveCacheSize,
             cancellationToken).ConfigureAwait(false);
 
-        await catalogs.AlterSequenceAsync(database, new SchemaAlterSequencePayload
+        await catalogs.AlterSequenceAsync(database, change).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// <c>ALTER SEQUENCE</c> inside a transaction with a private schema: the record changes in the private
+    /// schema, and the counter after the publish. Until then every draw, the transaction's own included,
+    /// follows the old definition. A maximum below what the counter already issued is refused here, as the
+    /// sequencer refuses it outside a transaction. <c>RESTART</c> never reaches this method: the dispatcher
+    /// refuses it in an explicit transaction.
+    /// </summary>
+    private async Task AlterInOwnerTransactionAsync(
+        DatabaseDescriptor database,
+        Catalogs.Transactional.TransactionSchemaOverlay overlay,
+        SequenceSchema sequence,
+        AlterSequenceTicket ticket,
+        SchemaAlterSequencePayload change,
+        CancellationToken cancellationToken)
+    {
+        if (ticket.Restart)
+            throw new CamusDBException(
+                CamusDBErrorCodes.StatementNotAllowedInTransaction,
+                "ALTER SEQUENCE ... RESTART cannot run inside an explicit transaction: moving a counter is irrevocable");
+
+        // MINVALUE is in the catalog record only.
+        bool changesCounter = ticket.StartValue is not null
+            || ticket.Increment is not null
+            || ticket.MaxValue is not null || ticket.RemoveMaxValue
+            || ticket.CacheSize is not null || ticket.RemoveCacheSize;
+
+        if (!changesCounter)
         {
-            SequenceId = sequence.Id!,
-            StartValue = ticket.StartValue,
-            Increment = ticket.Increment,
-            MinValue = ticket.RemoveMinValue ? long.MinValue + increment : ticket.MinValue,
-            MaxValue = ticket.RemoveMaxValue ? null : ticket.MaxValue,
-            RemoveMaxValue = ticket.RemoveMaxValue,
-            CacheSize = ticket.RemoveCacheSize ? null : ticket.CacheSize,
-            RemoveCacheSize = ticket.RemoveCacheSize,
-            SetOwner = false,
-        }).ConfigureAwait(false);
+            await catalogs.AlterSequenceAsync(database, change).ConfigureAwait(false);
+            return;
+        }
+
+        if (change.MaxValue is { } maxValue)
+        {
+            long? ceiling = await allocator.ReadReservedCeilingAsync(
+                database.Kahuna.Kahuna, database.Id, sequence.Id!, cancellationToken).ConfigureAwait(false);
+
+            if (ceiling > maxValue)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidSequenceDefinition,
+                    $"MAXVALUE ({maxValue}) is below what sequence '{sequence.Name}' already reserved ({ceiling})");
+        }
+
+        DeferredPurgeRecord record = overlay.AddDeferredSequenceCounter(sequence.Id!, setsStartValue: ticket.StartValue is not null);
+
+        try
+        {
+            await catalogs.AlterSequenceAsync(database, change).ConfigureAwait(false);
+        }
+        catch
+        {
+            overlay.RemoveDeferredPurge(record);
+            throw;
+        }
+
+        DatabaseDescriptor shared = overlay.Database;
+        overlay.AddAfterPublish(() => deferredWork.RunNowAsync(shared, record));
     }
 
     /// <summary>

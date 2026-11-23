@@ -393,8 +393,14 @@ public sealed class SchemaReplicator
         }
 
         HashSet<string> namesBefore = new(live.Tables.Keys, StringComparer.OrdinalIgnoreCase);
+        long callableStampBefore = live.CallableStamp;
 
         SchemaDeltaApplier.ApplyOrRefuse(live, database, entry);
+
+        // A changed extension or function changes what a call means in any statement, as for a single
+        // entry (InvalidateAppliedTableDescriptor).
+        if (live.CallableStamp != callableStampBefore)
+            database.Cache?.InvalidateDatabase(database.Id);
 
         foreach (TableSchema old in replaced)
         {

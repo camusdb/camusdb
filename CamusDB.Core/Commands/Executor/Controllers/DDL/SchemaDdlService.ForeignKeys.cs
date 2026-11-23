@@ -595,8 +595,11 @@ internal sealed partial class SchemaDdlService
             ).ConfigureAwait(false);
 
             // A constraint dropped during its rollout leaves a job behind. A resume would find the
-            // constraint Absent and delete it anyway; this only saves it the work.
-            await DeleteForeignKeyJobAsync(database, table.Id, foreignKey.Name).ConfigureAwait(false);
+            // constraint Absent and delete it anyway; this only saves it the work. Never inside a transaction
+            // with a private schema: the drop is not decided yet, and the record of a constraint that the
+            // transaction itself staged is what removes it after a rollback. The commit deletes that one.
+            if (TransactionSchemaScope.OverlayFor(database) is null)
+                await DeleteForeignKeyJobAsync(database, table.Id, foreignKey.Name).ConfigureAwait(false);
 
             if (ownedIndexName is not null)
                 await DropIndexAfterFailureAsync(database, tableName, ownedIndexName).ConfigureAwait(false);

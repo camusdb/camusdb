@@ -894,4 +894,78 @@ public sealed class TestClusterTransactionalDdl
         Assert.AreEqual(0, await CountKeysAsync(leader.Database!, MetaKeys.MetaBucketPrefix(leader.Database!.Id), MetaKeys.CoordinatorKeyPrefix(leader.Database!.Id)),
             "no job record is left");
     }
+
+    /// <summary>
+    /// Functions, triggers and extensions have no statement forward: outside a transaction a follower refuses
+    /// them. Inside one, every object kind runs on the node that holds the transaction, and the commit
+    /// publishes it on every node.
+    /// </summary>
+    [TestCase(true)]
+    [TestCase(false)]
+    public async Task OtherObjects_FromAFollower_EndWithTheTransactionOnEveryNode(bool commit)
+    {
+        const string db = "txddlobjects";
+
+        await using InProcessSchemaCluster cluster = await StartClusterAsync(
+            CamusDBOptions.Default with { TransactionalDdlEnabled = true, InlineFunctionsEnabled = true, InlineTriggersEnabled = true });
+        (InProcessSchemaCluster.Node leader, InProcessSchemaCluster.Node follower) = await PrepareAsync(cluster, db);
+
+        await AutocommitAsync(leader, db, "ALTER TABLE base ADD CONSTRAINT named CHECK (name <> 'nobody')", ddl: true);
+        await AutocommitAsync(leader, db, "CREATE SEQUENCE old_s CACHE 1", ddl: true);
+        await AutocommitAsync(leader, db, "CREATE VIEW v AS SELECT id FROM base", ddl: true);
+        Assert.AreEqual(1, (await QueryAsync(follower, db, "SELECT nextval('old_s') AS v"))[0]["v"].LongValue);
+        await cluster.WaitForSchemaConvergenceAsync(db, leader.Database!.Schema.SchemaVersion);
+
+        KvTransaction tx = await BeginSessionAsync(follower);
+        await Ddl(follower, tx, db, "CREATE FUNCTION twice(x INT64) RETURNS INT64 LANGUAGE csharp AS $$ return x * 2; $$");
+        await Ddl(follower, tx, db, "CREATE TRIGGER upper_name ON base BEFORE INSERT LANGUAGE csharp AS $$ if (NEW!.name is { } name) NEW.name = name.ToUpperInvariant() + twice(4); $$");
+        await Ddl(follower, tx, db, "ALTER TABLE base DROP CONSTRAINT named");
+        await Ddl(follower, tx, db, "CREATE SEQUENCE new_s START WITH 7 CACHE 1");
+        await Ddl(follower, tx, db, "ALTER SEQUENCE old_s INCREMENT BY 10");
+        await Ddl(follower, tx, db, "COMMENT ON VIEW v IS 'ids'");
+        await Ddl(follower, tx, db, "CREATE TABLE copy AS SELECT id, name FROM base");
+        await Write(follower, tx, db, "INSERT INTO base (id, name) VALUES (2, 'nobody')");
+
+        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+        {
+            Schema schema = node.Database!.Schema;
+            Assert.IsEmpty(schema.Functions, "no node sees the change set before the commit");
+            Assert.IsFalse(schema.Sequences.ContainsKey("new_s"));
+            Assert.IsFalse(schema.Tables.ContainsKey("copy"));
+        }
+
+        if (commit)
+            await follower.Database!.Transactions.CommitAsync(tx);
+        else
+            await follower.Database!.Transactions.RollbackAsync(tx);
+
+        if (commit)
+            await cluster.WaitForSchemaConvergenceAsync(db, follower.Database!.Schema.SchemaVersion);
+
+        long expectedDraw = commit ? 11 : 2;
+        long row = 10;
+
+        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+        {
+            Schema schema = node.Database!.Schema;
+
+            Assert.AreEqual(commit, schema.Functions.ContainsKey("twice"));
+            Assert.AreEqual(commit ? 1 : 0, schema.Tables["base"].Triggers?.Count ?? 0);
+            Assert.AreEqual(commit ? 0 : 1, schema.Tables["base"].CheckConstraints?.Count ?? 0);
+            Assert.AreEqual(commit ? "ids" : null, schema.Views["v"].Comment);
+            Assert.AreEqual(commit, schema.Tables.ContainsKey("copy"));
+            Assert.AreEqual(commit, schema.Sequences.ContainsKey("new_s"));
+
+            Assert.AreEqual(expectedDraw, (await QueryAsync(node, db, "SELECT nextval('old_s') AS v"))[0]["v"].LongValue);
+            expectedDraw += commit ? 10 : 1;
+
+            await AutocommitAsync(node, db, $"INSERT INTO base (id, name) VALUES ({++row}, 'x')", ddl: false);
+            Assert.AreEqual(commit ? "X8" : "x", (await QueryAsync(node, db, $"SELECT name FROM base WHERE id = {row}"))[0]["name"].StrValue);
+
+            if (commit)
+                Assert.AreEqual(1, (await QueryAsync(node, db, "SELECT id FROM copy")).Count);
+        }
+
+        Assert.AreEqual(commit ? 1 : 0, (await QueryAsync(leader, db, "SELECT id FROM base WHERE id = 2")).Count);
+    }
 }

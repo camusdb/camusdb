@@ -1448,10 +1448,9 @@ log (a single node has a one-node Raft schema log).
 
 | Class | Inside an explicit transaction, setting on |
 |---|---|
-| Metadata-only (CREATE/DROP/RENAME TABLE, DROP/RENAME COLUMN, DROP/RENAME INDEX, COMMENT ON TABLE/COLUMN/INDEX, ALTER TABLE SET/RESET, CREATE/REPLACE/DROP/RENAME VIEW) | Part of the transaction. |
+| Metadata-only (CREATE/DROP/RENAME TABLE, CREATE TABLE … AS, DROP/RENAME COLUMN, DROP/RENAME INDEX, DROP CONSTRAINT, DROP NOT NULL, SET STORAGE, ALTER TABLE SET/RESET, COMMENT ON, views, materialized-view rename and drop, sequences, triggers, functions, extensions) | Part of the transaction. |
 | Staged (ADD COLUMN, CREATE INDEX, ADD UNIQUE, ADD PRIMARY KEY, ADD CHECK, SET NOT NULL, ADD FOREIGN KEY) | Part of the transaction; see "Staged changes" below. |
-| Irrevocable (TRUNCATE, REWRITE STORAGE, CREATE MATERIALIZED VIEW, REFRESH) | Refused with `CADB0538`. TRUNCATE and REWRITE STORAGE are refused with the setting off too. |
-| Not yet transactional (sequences, triggers, functions, extensions, DROP CONSTRAINT, DROP NOT NULL, CTAS, RELINK, materialized-view rename and drop, the other comment targets) | Refused with `CADB0538`. |
+| Irrevocable (TRUNCATE, REWRITE STORAGE, CREATE MATERIALIZED VIEW, REFRESH, RELINK) | Refused with `CADB0538`. TRUNCATE, REWRITE STORAGE and ALTER SEQUENCE … RESTART are refused with the setting off too. |
 
 `DROP TABLE` inside a transaction uses the deferred drop, which keeps the rows and index entries, so
 a rollback has nothing to restore. Its orphan record is built from the relation as it was right before
@@ -1489,6 +1488,42 @@ schema log. Statement-level forwarding to the schema leader is skipped too.
 
 The transaction writes its rows with the private layouts. A table layout version is counted per
 table, so the publish produces the same version numbers with the same layouts.
+
+#### Functions, triggers, extensions and sequences
+
+A function and an extension are records of the schema, so the private schema has catalogs of its own for
+them (`InlineFunctionCatalog`, `InstalledExtensionCatalog`). The function scope of a statement
+(`ExtensionScopeFrame`) is shared by all statements of a database and always holds the shared catalogs. A
+lookup in the flow of the transaction answers from the private schema instead, decided at the lookup. A
+publish installs the two catalogs before the tables, because a column default or a view of the change set
+can call a function that the change set created.
+
+Compiled code is held through bindings, and the private schema keeps its own: the bindings of its function
+catalog, and one per trigger that the transaction fired (`TransactionSchemaOverlay.TriggerBindingOf`). An
+unchanged table of the private schema has the same trigger records as the shared one, so a binding kept on
+the record would replace the one that every other transaction fires. The end of the transaction gives the
+references on the compiled units back. A unit is found by its source, so the transaction shares the code
+that is loaded already.
+
+Function, trigger and extension statements have no statement forward, and outside a transaction they run
+on the schema leader only. Inside one they run on any node: the delta joins the change set, and the pending
+entry refuses the commit when the base schema moved.
+
+The counter of a sequence is a Kahuna sequencer record and cannot join a transaction:
+
+| Statement | Counter |
+|---|---|
+| `CREATE SEQUENCE`, an identity column | created at the statement, because the transaction draws from it; a rollback removes it |
+| `DROP SEQUENCE`, a dropped identity column | removed after the publish; ids are never used again, so one that a crash leaves behind is never read |
+| `ALTER SEQUENCE` | changed after the publish, from a durable record of kind `SequenceCounter` (below) |
+
+Until the publish of an `ALTER SEQUENCE`, the private record and the counter differ for the transaction
+itself. A drawn value comes from the counter's answer. Code that computes a counter value (`setval`, the
+creation of a missing counter) uses the definition the counter has (`CounterDefinitionOf`).
+
+A drop of a constraint that the transaction itself staged on a shared table keeps the job record of the
+constraint until the outcome: the commit deletes the record and publishes the drop, and a rollback finds
+the record and removes the constraint.
 
 #### Staged changes
 
@@ -1649,7 +1684,7 @@ index entry. The data that a change set makes unreachable is removed after its p
 |---|---|---|
 | `DROP INDEX` | the index entries | a `DeferredPurgeRecord` of kind `IndexEntries` |
 | `DROP TABLE ... FORCE`, and `DROP TABLE` in a branch database | the rows, out-of-line values and index entries | a `DeferredPurgeRecord` of kind `TableData` |
-| `DROP TABLE` (deferred) | everything | the orphan record and the orphan collector, as outside a transaction |
+| `DROP TABLE` and `DROP MATERIALIZED VIEW` (deferred) | everything | the orphan record and the orphan collector, as outside a transaction |
 | `DROP COLUMN` | the column's values in the stored rows | nothing: as in PostgreSQL, a value leaves the disk when its row is next updated or deleted |
 
 A `DROP COLUMN` changes only the schema. Each stored row decodes with the layout it was written under,
@@ -1672,6 +1707,11 @@ pending entry takes the version to the base plus one, and nothing else applies w
 - The coordinator-job sweep on the schema leader runs every due record that is left, for example after
   a crash of the committing node or a leader change. A database is scanned for records only after it
   opens and after a publish applies on that node.
+
+A record of kind `SequenceCounter` is work of the same form: the counter of an altered sequence must get
+its new definition after the publish. It carries the id of the sequence and no definition. A run gives the
+counter the definition that the schema holds then, so a run that a later `ALTER SEQUENCE` overtook changes
+nothing. The committing node runs it before `COMMIT` returns, and the sweep finishes one that is left.
 
 The removal is idempotent and the record is deleted last, so runs on two nodes at once, or an interrupted
 run, are safe. In a branch database the purge reaches only the branch's own entries.
@@ -1709,12 +1749,15 @@ the cache isolation, the data removal after the publish, staged changes and cons
 on shared tables, a unique violation in a staged backfill, a migration whose last statement fails, and the
 removal of an owned element whose transaction vanished), `TestTransactionalDdlRaces` (single node: a sweep
 that works on a job it read before the owner's commit, a branch during a commit, a finalize that is cut
-off, a removal slower than the commit, and the sharing of unchanged tables) and
+off, a removal slower than the commit, and the sharing of unchanged tables), `TestTransactionalDdlObjects`
+(single node: each kind of object with commit and rollback, the isolation of functions and compiled code,
+the counters of sequences, the recovery of pending objects, what a dump reads, and the refusals of
+autocommit inside a transaction) and
 `CamusDB.Cluster.Tests/TestClusterTransactionalDdl` (three nodes: the transaction on a follower and on
 the leader, the lock order, lost drivers, a leader move while a change set is pending, a purge that
 the new schema leader finishes, a staged index on a shared table from a follower, a leader move
-during a staged backfill on the leader and on a follower, staged constraints on shared tables, and a slow
-follower that holds back the commit and the publish).
+during a staged backfill on the leader and on a follower, staged constraints on shared tables, the other
+objects from a follower, and a slow follower that holds back the commit and the publish).
 
 ---
 

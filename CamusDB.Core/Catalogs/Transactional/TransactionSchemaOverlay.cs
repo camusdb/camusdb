@@ -91,6 +91,14 @@ internal sealed class TransactionSchemaOverlay : ITransactionSchemaChanges
 
     private readonly List<DeferredPurgeRecord> deferredPurges = [];
 
+    /// <summary>The bindings of <see cref="TriggerBindingOf"/>. Guards itself; null once the overlay closed.</summary>
+    private Dictionary<TriggerDefinition, object>? triggerBindings = new(ReferenceEqualityComparer.Instance);
+
+    private readonly object triggerBindingsGate = new();
+
+    /// <summary>The definition each counter was created with, by sequence id; see <see cref="CounterDefinitionOf"/>.</summary>
+    private readonly Dictionary<string, SequenceSchema> createdCounters = new(StringComparer.Ordinal);
+
     private OverlayState state = OverlayState.Open;
 
     private int closed;
@@ -525,15 +533,35 @@ internal sealed class TransactionSchemaOverlay : ITransactionSchemaChanges
     /// </summary>
     internal DeferredPurgeRecord AddDeferredPurge(DeferredPurgeKind kind, string tableId, string storageId, IReadOnlyCollection<string> indexIds)
     {
+        DeferredPurgeRecord record = NewDeferredRecord(kind);
+        record.TableId = tableId;
+        record.StorageId = storageId;
+        record.IndexIds = [.. indexIds];
+
+        return record;
+    }
+
+    /// <summary>
+    /// Records that the counter of a sequence must follow the new definition in the change set after its
+    /// publish. Durable, as <see cref="AddDeferredPurge"/> is; see <see cref="DeferredPurgeKind.SequenceCounter"/>.
+    /// </summary>
+    internal DeferredPurgeRecord AddDeferredSequenceCounter(string sequenceId, bool setsStartValue)
+    {
+        DeferredPurgeRecord record = NewDeferredRecord(DeferredPurgeKind.SequenceCounter);
+        record.SequenceId = sequenceId;
+        record.SetsStartValue = setsStartValue;
+
+        return record;
+    }
+
+    private DeferredPurgeRecord NewDeferredRecord(DeferredPurgeKind kind)
+    {
         DeferredPurgeRecord record = new()
         {
             PurgeId = ChangeSetId + "~" + deferredPurges.Count.ToString(System.Globalization.CultureInfo.InvariantCulture),
             Kind = kind,
             ChangeSetId = ChangeSetId,
             BaseVersion = BaseVersion,
-            TableId = tableId,
-            StorageId = storageId,
-            IndexIds = [.. indexIds],
         };
 
         deferredPurges.Add(record);
@@ -541,12 +569,12 @@ internal sealed class TransactionSchemaOverlay : ITransactionSchemaChanges
     }
 
     /// <summary>
-    /// Takes back the newest record of <see cref="AddDeferredPurge"/> when the statement that added it
-    /// failed before its delta joined the change set.
+    /// Takes back the newest deferred record when the statement that added it failed before its delta joined
+    /// the change set.
     /// </summary>
     internal void RemoveDeferredPurge(DeferredPurgeRecord record) => deferredPurges.Remove(record);
 
-    /// <summary>The records <see cref="AddDeferredPurge"/> collected, in statement order.</summary>
+    /// <summary>The deferred records of the statements, in statement order.</summary>
     internal IReadOnlyList<DeferredPurgeRecord> DeferredPurges => deferredPurges;
 
     /// <summary>
@@ -555,6 +583,76 @@ internal sealed class TransactionSchemaOverlay : ITransactionSchemaChanges
     /// published. Best effort.
     /// </summary>
     internal void AddOnRollback(Func<Task> action) => onRollback.Add(action);
+
+    /// <summary>
+    /// The binding a statement of the owner fired <paramref name="trigger"/> with before, or null. Kept here
+    /// and not on the trigger record: an unchanged table of the private schema holds the same records as the
+    /// shared one, and a binding compiled against the private schema (its columns, its functions) must not
+    /// replace the one that every other transaction fires.
+    /// </summary>
+    internal object? TriggerBindingOf(TriggerDefinition trigger)
+    {
+        lock (triggerBindingsGate)
+            return triggerBindings?.GetValueOrDefault(trigger);
+    }
+
+    /// <summary>
+    /// Keeps <paramref name="binding"/> for the next statement of the owner that fires
+    /// <paramref name="trigger"/>, and releases the one it replaces. False when the overlay closed: the
+    /// caller then releases the binding itself.
+    /// </summary>
+    internal bool KeepTriggerBinding(TriggerDefinition trigger, object binding)
+    {
+        object? replaced;
+
+        lock (triggerBindingsGate)
+        {
+            if (triggerBindings is null)
+                return false;
+
+            replaced = triggerBindings.GetValueOrDefault(trigger);
+            triggerBindings[trigger] = binding;
+        }
+
+        if (!ReferenceEquals(replaced, binding))
+            (replaced as IDisposable)?.Dispose();
+
+        return true;
+    }
+
+    private void ReleaseTriggerBindings()
+    {
+        Dictionary<TriggerDefinition, object>? released;
+
+        lock (triggerBindingsGate)
+        {
+            released = triggerBindings;
+            triggerBindings = null;
+        }
+
+        if (released is null)
+            return;
+
+        foreach (object binding in released.Values)
+            (binding as IDisposable)?.Dispose();
+    }
+
+    /// <summary>Records the definition that the counter of a sequence the owner created was created with.</summary>
+    internal void AddCreatedCounter(SequenceSchema sequence) => createdCounters[sequence.Id!] = sequence.Clone();
+
+    /// <summary>
+    /// The definition that the Kahuna counter of <paramref name="sequence"/> has now. An
+    /// <c>ALTER SEQUENCE</c> of the owner changes the record in the private schema at once and the counter
+    /// after the publish, so until then the counter keeps the shared definition, or the one it was created
+    /// with. Code that computes a counter value must use this one.
+    /// </summary>
+    internal SequenceSchema CounterDefinitionOf(SequenceSchema sequence)
+    {
+        if (createdCounters.TryGetValue(sequence.Id!, out SequenceSchema? created))
+            return created;
+
+        return Database.SharedSchema.FindSequenceById(sequence.Id!) ?? sequence;
+    }
 
     /// <summary>Set by <see cref="PrepareCommitAsync"/>; it stays set after the overlay closes.</summary>
     public bool IsCommitPrepared { get; private set; }
@@ -596,8 +694,8 @@ internal sealed class TransactionSchemaOverlay : ITransactionSchemaChanges
     }
 
     /// <summary>
-    /// Ends the overlay: lookups fall back to the shared schema, and the DDL lock is freed. Safe to call
-    /// twice.
+    /// Ends the overlay: lookups fall back to the shared schema, the compiled code that the owner's
+    /// functions and triggers hold goes back to the engine, and the DDL lock is freed. Safe to call twice.
     /// </summary>
     internal async Task CloseAsync()
     {
@@ -606,6 +704,10 @@ internal sealed class TransactionSchemaOverlay : ITransactionSchemaChanges
 
         state = OverlayState.Closed;
         TransactionSchemaScope.OverlayClosed();
+
+        // Only the catalog of functions: the tables and their triggers are shared with the live schema.
+        Schema.FunctionCatalog.Dispose();
+        ReleaseTriggerBindings();
 
         await ddlLock.ReleaseAsync().ConfigureAwait(false);
     }
@@ -643,16 +745,16 @@ internal sealed class TransactionSchemaOverlay : ITransactionSchemaChanges
     public Task ResumePublicationAsync(KvTransaction tx, CancellationToken cancellationToken) =>
         committer.ResumePublicationAsync(this);
 
-    /// <summary>
-    /// Refuses a delta whose op has no transactional form yet. The DDL dispatcher refuses the statements
-    /// that produce such deltas before they run; this is the check that holds when a statement path
-    /// produces one anyway.
-    /// </summary>
     /// <summary>True when a <see cref="DeferredPurgeKind.TableData"/> record names the table <paramref name="tableName"/>.</summary>
     private bool PurgesTableData(string tableName) =>
         Schema.Tables.TryGetValue(tableName, out TableSchema? table)
         && deferredPurges.Exists(record => record.Kind == DeferredPurgeKind.TableData && string.Equals(record.TableId, table.Id, StringComparison.Ordinal));
 
+    /// <summary>
+    /// Refuses a delta whose op has no transactional form. The DDL dispatcher refuses the statements that
+    /// produce such deltas before they run; this is the check that holds when a statement path produces one
+    /// anyway.
+    /// </summary>
     private void RequireTransactionalOp(SchemaChangeLogEntry entry)
     {
         bool supported = entry.Op switch
@@ -663,18 +765,27 @@ internal sealed class TransactionSchemaOverlay : ITransactionSchemaChanges
             SchemaOp.AddIndex or SchemaOp.DropIndex or
             SchemaOp.SetTableSettings or SchemaOp.SetComment or
             SchemaOp.CreateView or SchemaOp.ReplaceView or SchemaOp.DropView or SchemaOp.RenameView or SchemaOp.SetViewDefinition or
-            // A sequence enters a change set only as the owned sequence of a column: created with an
-            // identity column, dropped with its column. The statements on sequences themselves are refused.
-            SchemaOp.CreateSequence or SchemaOp.DropSequence => true,
+            // The catalog record of a sequence. Its counter is not transactional: the statement creates it
+            // and a rollback removes it, and a change or a drop of it waits for the publish.
+            SchemaOp.CreateSequence or SchemaOp.DropSequence or SchemaOp.RenameSequence or SchemaOp.AlterSequence or
+            // An extension, a function and a trigger are records; the code they name is compiled and called
+            // through the catalog that holds the record.
+            SchemaOp.CreateExtension or SchemaOp.UpdateExtension or SchemaOp.DropExtension or
+            SchemaOp.CreateFunction or SchemaOp.ReplaceFunction or SchemaOp.DropFunction or SchemaOp.SetFunctionOwner or
+            SchemaOp.CreateTrigger or SchemaOp.DropTrigger or
+            // Read no row and change none: a check that ends, and how later writes store a value.
+            SchemaOp.DropCheckConstraint or SchemaOp.SetColumnStorage => true,
 
             // A constraint added inside the transaction: its statement checks the rows the transaction can
             // see before the change set is published.
             SchemaOp.AddCheckConstraint or SchemaOp.SetColumnNotNull or SchemaOp.AddForeignKey => true,
 
-            // A state step joins a change set only to finish an element: a foreign key goes WriteOnly then
-            // Public in one statement, so the publish makes it visible enforced and checked. A step back
-            // (a removal) has no transactional form.
-            SchemaOp.SetElementState => entry.GetPayload<SchemaElementStatePayload>().State == SchemaElementState.Public,
+            // A state step joins a change set to finish an element: a foreign key goes WriteOnly then Public
+            // in one statement, so the publish makes it visible enforced and checked. It also drops a foreign
+            // key, which goes to Absent in one step. Any other step back has no transactional form.
+            SchemaOp.SetElementState => entry.GetPayload<SchemaElementStatePayload>() is var step
+                && (step.State == SchemaElementState.Public
+                    || step is { State: SchemaElementState.Absent, ElementKind: SchemaElementKind.ForeignKey }),
 
             // A drop keeps the rows and index entries until the publish, so a rollback has nothing to
             // restore: a deferred drop leaves them to its orphan record, and a drop without retention
@@ -688,7 +799,7 @@ internal sealed class TransactionSchemaOverlay : ITransactionSchemaChanges
         if (!supported)
             throw new CamusDBException(
                 CamusDBErrorCodes.StatementNotAllowedInTransaction,
-                $"Schema change '{entry.Op}' cannot yet run inside an explicit transaction with transactional DDL on; " +
+                $"Schema change '{entry.Op}' cannot run inside an explicit transaction with transactional DDL on; " +
                 "commit or roll back first, then run it");
     }
 }

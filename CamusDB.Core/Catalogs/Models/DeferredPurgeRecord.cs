@@ -9,8 +9,10 @@
 namespace CamusDB.Core.Catalogs.Models;
 
 /// <summary>
-/// Data that a schema change in an explicit transaction made unreachable, to be removed after the change
-/// set of that transaction is published. Stored under <c>{dbId}/meta/purge:{PurgeId}</c>.
+/// Work outside the schema that a schema change in an explicit transaction needs after the change set of
+/// that transaction is published: data to remove that the change made unreachable, or the counter of a
+/// sequence to bring to its new definition (<see cref="DeferredPurgeKind.SequenceCounter"/>). Stored under
+/// <c>{dbId}/meta/purge:{PurgeId}</c>.
 ///
 /// <para><b>Written in the transaction's own KV commit</b>, next to its decision key, so a record exists
 /// exactly when the transaction committed. A committed transaction always ends in a publish, so a record
@@ -54,9 +56,18 @@ public sealed class DeferredPurgeRecord
     /// <see cref="DeferredPurgeKind.TableData"/>.
     /// </summary>
     public List<string> IndexIds { get; set; } = [];
+
+    /// <summary>For <see cref="DeferredPurgeKind.SequenceCounter"/>, the immutable id of the sequence.</summary>
+    public string SequenceId { get; set; } = "";
+
+    /// <summary>
+    /// For <see cref="DeferredPurgeKind.SequenceCounter"/>, true when the statement changed the start value,
+    /// which the counter also keeps.
+    /// </summary>
+    public bool SetsStartValue { get; set; }
 }
 
-/// <summary>The kinds of data a <see cref="DeferredPurgeRecord"/> removes.</summary>
+/// <summary>The kinds of work a <see cref="DeferredPurgeRecord"/> stands for.</summary>
 public enum DeferredPurgeKind
 {
     /// <summary>Every entry of one dropped index: the key space <c>{dbId}:{storageId}|i:{indexId}</c>.</summary>
@@ -69,4 +80,12 @@ public enum DeferredPurgeKind
     /// live under the ancestors, and nothing reads them once the branch schema no longer names the table.
     /// </summary>
     TableData = 1,
+
+    /// <summary>
+    /// The Kahuna counter of a sequence whose definition the change set altered. The record carries no
+    /// definition: a run brings the counter to the definition the schema holds then, so a run that a later
+    /// <c>ALTER SEQUENCE</c> overtook changes nothing, and running twice has the same result. A sequence
+    /// that was dropped since has its counter removed.
+    /// </summary>
+    SequenceCounter = 2,
 }

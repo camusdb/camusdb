@@ -204,8 +204,11 @@ internal sealed class MaterializedViewCreator
         // Reclaim any staging relation an unfinished refresh of this view left behind, before the
         // view itself goes. Once it is gone nothing would look for that storage again — the record
         // is keyed by the view's id, and no later refresh of a dropped view will ever run.
-        await MaterializedViewRefresher.ReclaimAbandonedRefreshAsync(
-            executor, catalogs, database, viewId, logger).ConfigureAwait(false);
+        if (Catalogs.Transactional.TransactionSchemaScope.OverlayFor(database) is null)
+            await MaterializedViewRefresher.ReclaimAbandonedRefreshAsync(
+                executor, catalogs, database, viewId, logger).ConfigureAwait(false);
+        else
+            await MaterializedViewRefresher.RequireNoAbandonedRefreshAsync(catalogs, database, name, viewId).ConfigureAwait(false);
 
         if (BeforeRelationDropForTesting is { } beforeDrop)
             await beforeDrop(name).ConfigureAwait(false);

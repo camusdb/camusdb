@@ -22,13 +22,14 @@ using Microsoft.Extensions.Logging;
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 /// <summary>
-/// Removes the data that published change sets made unreachable, from their
-/// <see cref="DeferredPurgeRecord"/>s. Two paths call it:
+/// Does the work that published change sets left in their <see cref="DeferredPurgeRecord"/>s: the removal of
+/// data they made unreachable, and the change of a sequence's counter. Two paths call it:
 /// <list type="bullet">
-/// <item>The committing node, right after its publish, for the records of its own change set
-/// (<see cref="Schedule"/>). This is the normal path. It runs behind the commit: the removal takes time in
-/// proportion to the data, the record is durable already, and nobody can reach the data any more, so the
-/// client does not wait for it.</item>
+/// <item>The committing node, right after its publish, for the records of its own change set. This is the
+/// normal path. A removal runs behind the commit (<see cref="Schedule"/>): it takes time in proportion to
+/// the data, the record is durable already, and nobody can reach the data any more, so the client does not
+/// wait for it. A change of a counter runs before <c>COMMIT</c> returns (<see cref="RunNowAsync"/>), so the
+/// client's next draw follows the new definition.</item>
 /// <item>The coordinator-job sweep on the schema leader (<see cref="RunDueAsync"/>), for records that a
 /// crash, a lost connection or a failed run left behind. It survives a restart and a leader change,
 /// because the records are in KV and any node can finish them.</item>
@@ -48,6 +49,8 @@ internal sealed class DeferredPurgeRunner : IAsyncDisposable
 
     private readonly DatabaseDropper dropper;
 
+    private readonly SequenceAllocator sequences;
+
     private readonly ILogger<ICamusDB> logger;
 
     private readonly SemaphoreSlim scheduledRuns = new(MaxScheduledRuns, MaxScheduledRuns);
@@ -60,15 +63,17 @@ internal sealed class DeferredPurgeRunner : IAsyncDisposable
 
     private readonly CancellationTokenSource stopping = new();
 
-    internal DeferredPurgeRunner(DatabaseDropper dropper, ILogger<ICamusDB> logger)
+    internal DeferredPurgeRunner(DatabaseDropper dropper, SequenceAllocator sequences, ILogger<ICamusDB> logger)
     {
         this.dropper = dropper;
+        this.sequences = sequences;
         this.logger = logger;
     }
 
     /// <summary>
-    /// Test-only. When set, <see cref="Schedule"/> does nothing, as if the committing node stopped right
-    /// after its publish, so a test can check that <see cref="RunDueAsync"/> finishes the records.
+    /// Test-only. When set, <see cref="Schedule"/> and <see cref="RunNowAsync"/> do nothing, as if the
+    /// committing node stopped right after its publish, so a test can check that <see cref="RunDueAsync"/>
+    /// finishes the records.
     /// </summary>
     internal bool TestSkipRunsAfterPublish { get; set; }
 
@@ -114,6 +119,34 @@ internal sealed class DeferredPurgeRunner : IAsyncDisposable
         _ = run.ContinueWith(
             static (ended, state) => ((ConcurrentDictionary<Task, byte>)state!).TryRemove(ended, out _),
             scheduled, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+    }
+
+    /// <summary>
+    /// Does the work of one record on the node that published its change set, and returns when it is done or
+    /// failed. Never throws: the transaction committed, and a record that is not done is left for the sweep.
+    /// </summary>
+    internal async Task RunNowAsync(DatabaseDescriptor database, DeferredPurgeRecord record)
+    {
+        if (TestSkipRunsAfterPublish)
+            return;
+
+        bool done = false;
+
+        try
+        {
+            using CancellationTokenSource ends = CancellationTokenSource.CreateLinkedTokenSource(stopping.Token, database.Lifetime);
+            using DatabaseUseHandle _ = database.Use();
+            done = await TryRunAsync(database, record, ends.Token).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException)
+        {
+            // The database closed or the engine stops; the record is durable and a sweep finishes it.
+        }
+        finally
+        {
+            if (!done)
+                database.MarkDeferredPurgesDue();
+        }
     }
 
     private async Task RunScheduledAsync(DatabaseDescriptor database, DeferredPurgeRecord record)
@@ -217,8 +250,8 @@ internal sealed class DeferredPurgeRunner : IAsyncDisposable
     }
 
     /// <summary>
-    /// Removes the data of one due record, then the record. False when it is not due or not done, or when
-    /// another run of this node is removing it.
+    /// Does the work of one due record, then removes the record. False when it is not due or not done, or
+    /// when another run of this node is at it.
     /// </summary>
     private async Task<bool> TryRunAsync(DatabaseDescriptor database, DeferredPurgeRecord record, CancellationToken ct)
     {
@@ -232,7 +265,7 @@ internal sealed class DeferredPurgeRunner : IAsyncDisposable
 
             IKahuna kahuna = database.Kahuna.Kahuna;
 
-            bool removed = record.Kind switch
+            bool done = record.Kind switch
             {
                 DeferredPurgeKind.IndexEntries => await PurgeIndexesAsync(kahuna, database, record, ct).ConfigureAwait(false),
 
@@ -243,14 +276,16 @@ internal sealed class DeferredPurgeRunner : IAsyncDisposable
                 DeferredPurgeKind.TableData => await dropper.PurgeTableKeyspaceAsync(
                     kahuna, database.Id, record.TableId, record.StorageId, ct, record.IndexIds).ConfigureAwait(false),
 
+                DeferredPurgeKind.SequenceCounter => await AlignCounterAsync(kahuna, database, record, ct).ConfigureAwait(false),
+
                 _ => false,
             };
 
-            if (!removed)
+            if (!done)
             {
                 logger.LogWarning(
-                    "Deferred purge {PurgeId} ({Kind}) of table {TableId} in database {Database} is not complete; a later run retries it",
-                    record.PurgeId, record.Kind, record.TableId, database.Name);
+                    "Deferred purge {PurgeId} ({Kind}) of {Object} in database {Database} is not complete; a later run retries it",
+                    record.PurgeId, record.Kind, ObjectOf(record), database.Name);
                 return false;
             }
 
@@ -259,14 +294,31 @@ internal sealed class DeferredPurgeRunner : IAsyncDisposable
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogWarning(ex,
-                "Deferred purge {PurgeId} ({Kind}) of table {TableId} in database {Database} failed; a later run retries it",
-                record.PurgeId, record.Kind, record.TableId, database.Name);
+                "Deferred purge {PurgeId} ({Kind}) of {Object} in database {Database} failed; a later run retries it",
+                record.PurgeId, record.Kind, ObjectOf(record), database.Name);
             return false;
         }
         finally
         {
             inProgress.TryRemove(record.PurgeId, out _);
         }
+    }
+
+    private static string ObjectOf(DeferredPurgeRecord record) =>
+        record.Kind == DeferredPurgeKind.SequenceCounter ? "sequence " + record.SequenceId : "table " + record.TableId;
+
+    /// <summary>
+    /// Brings the counter of the record's sequence to the definition the shared schema holds now, or removes
+    /// it when the sequence is gone; see <see cref="DeferredPurgeKind.SequenceCounter"/>.
+    /// </summary>
+    private async Task<bool> AlignCounterAsync(IKahuna kahuna, DatabaseDescriptor database, DeferredPurgeRecord record, CancellationToken ct)
+    {
+        if (database.SharedSchema.FindSequenceById(record.SequenceId) is { } sequence)
+            await sequences.AlignAsync(kahuna, database.Id, sequence, record.SetsStartValue, ct).ConfigureAwait(false);
+        else
+            await sequences.DeleteAsync(kahuna, database.Id, record.SequenceId, ct).ConfigureAwait(false);
+
+        return true;
     }
 
     /// <summary>

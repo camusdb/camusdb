@@ -862,11 +862,18 @@ later `ROLLBACK` does not undo it. `TRUNCATE`, `ALTER TABLE … REWRITE STORAGE`
   returns, every live node has the change.
 - `ROLLBACK`, a failed statement (§9.4) and a refused commit undo the change and the rows together.
 
-Inside a transaction, these statements run with the setting on: `CREATE TABLE`, `DROP TABLE` (also
-with `FORCE`, and in a branch database), `ALTER TABLE … RENAME TO`, `RENAME COLUMN`, `RENAME INDEX`,
-`DROP COLUMN`, `DROP INDEX`,
-`ALTER TABLE … SET` and `RESET`, `COMMENT ON TABLE`, `COLUMN` and `INDEX`, and `CREATE`, `CREATE OR
-REPLACE`, `DROP` and `ALTER … RENAME` of a view.
+Inside a transaction, these statements run with the setting on:
+
+- **Tables:** `CREATE TABLE`, `CREATE TABLE … AS`, `DROP TABLE` (also with `FORCE`, and in a branch
+  database), `ALTER TABLE … RENAME TO`, `RENAME COLUMN`, `RENAME INDEX`, `DROP COLUMN`, `DROP INDEX`,
+  `DROP CONSTRAINT`, `ALTER COLUMN … DROP NOT NULL`, `ALTER COLUMN … SET STORAGE`, `ALTER TABLE … SET` and
+  `RESET`.
+- **Views:** `CREATE`, `CREATE OR REPLACE`, `DROP`, `ALTER … RENAME` and `ALTER … OWNER TO` of a view.
+  `ALTER … RENAME` and `DROP` of a materialized view.
+- **Sequences:** `CREATE`, `DROP`, `ALTER … RENAME` and `ALTER SEQUENCE` without `RESTART`.
+- **Code:** `CREATE` and `DROP` of a trigger, `CREATE`, `CREATE OR REPLACE`, `DROP` and `ALTER … OWNER TO`
+  of a function, `CREATE`, `ALTER … UPDATE` and `DROP` of an extension.
+- **Comments:** every `COMMENT ON` except `COMMENT ON DATABASE`.
 
 The statements that read every row of their table run too:
 
@@ -885,8 +892,9 @@ The statements that read every row of their table run too:
   on. `COMMIT` keeps it. `ROLLBACK` removes it. A row that breaks the constraint fails the statement.
 - A nullable `ADD COLUMN` with no default runs on any table and needs no fill.
 
-Every other schema statement is refused with `CADB0538` inside a transaction. Commit or roll back first,
-then run it.
+These statements are refused with `CADB0538` inside a transaction, because a `ROLLBACK` cannot undo them:
+`TRUNCATE`, `ALTER TABLE … REWRITE STORAGE`, `ALTER SEQUENCE … RESTART`, `CREATE MATERIALIZED VIEW`,
+`REFRESH MATERIALIZED VIEW` and `CREATE TABLE … RELINK`. Commit or roll back first, then run them.
 
 What the transaction meets:
 
@@ -929,6 +937,21 @@ What the transaction meets:
   transaction to the table and, for a foreign key, for a parent table that the transaction created,
   changed or wrote. A foreign key with no index to use builds one, so the locks of the transaction on the
   child rows refuse it too.
+- **The counter of a sequence is not transactional.** `nextval` and `setval` move it at once, and a
+  `ROLLBACK` gives no value back. `CREATE SEQUENCE` makes the counter at once, and a `ROLLBACK` removes it.
+  `DROP SEQUENCE` and `ALTER SEQUENCE` reach the counter after the commit: until then every transaction,
+  also the one that runs the statement, draws with the old definition. `COMMIT` returns after the counter
+  has the new one, which takes about five seconds, as `ALTER SEQUENCE` does outside a transaction. A
+  background sweep finishes it if the committing node fails. When other transactions drew past a new
+  `MAXVALUE` before the commit, the sequence is exhausted after it.
+- **A function, a trigger and an extension run for the transaction only, until it commits.** The body of a
+  function or an inline trigger is compiled at the statement, and an invalid body fails the statement. In
+  a cluster the statement runs on the node that holds the transaction, and not only on the schema leader.
+- **`CREATE TABLE … AS` is atomic.** The rows are writes of the transaction, within its limits
+  (`docs/transaction-limits.md`), so one `COMMIT` publishes the table with its rows.
+- **A materialized view with an unfinished refresh cannot be dropped in a transaction.** The drop must
+  first reclaim the storage the refresh left, for every transaction, so it is refused with `CADB0538`. Run
+  `REFRESH MATERIALIZED VIEW`, or the drop, outside a transaction.
 - **A failed online build leaves nothing after the rollback.** A row that breaks a new unique index
   fails the statement with `CADB0300`, and the index stops being maintained at once. A change of the
   schema leader while the build runs on the leader node fails the statement with the retryable

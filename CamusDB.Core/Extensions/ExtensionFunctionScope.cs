@@ -87,12 +87,19 @@ internal static class ExtensionFunctionScope
 ///
 /// <para>Holds the small catalog objects, not the database descriptor, so a frame that outlives its
 /// database pins no tables or storage.</para>
+///
+/// <para><b>A transaction with schema changes calls its own functions.</b> The frame is shared by every
+/// statement of the database, so it always holds the shared catalogs. A lookup made in the flow of a
+/// transaction with a private schema answers from that schema instead, decided at the lookup
+/// (<see cref="Catalogs.Transactional.TransactionSchemaScope"/>).</para>
 /// </summary>
 internal sealed class ExtensionScopeFrame
 {
     private readonly ExtensionScopeFrames? owner;
 
     private readonly Inline.InlineFunctionRuntime? inlineRuntime;
+
+    private volatile string? databaseId;
 
     private volatile InstalledExtensionCatalog? catalog;
 
@@ -118,32 +125,45 @@ internal sealed class ExtensionScopeFrame
 
     /// <summary>The installed extensions of the attached database, resolved for this engine.</summary>
     public InstalledExtensionSet Installed =>
-        catalog?.Resolve(Registry, DatabaseName, Logger) ?? InstalledExtensionSet.Empty;
+        (PrivateSchema?.ExtensionCatalog ?? catalog)?.Resolve(Registry, DatabaseName, Logger) ?? InstalledExtensionSet.Empty;
 
     /// <summary>
     /// The inline functions of the attached database, bound for this engine. Empty before a database
     /// is attached and for an engine built without an inline-function runtime.
     /// </summary>
     public Inline.InlineFunctionSet Inline =>
-        inlineRuntime is { } runtime && functions is { } attached
+        inlineRuntime is { } runtime && (PrivateSchema?.FunctionCatalog ?? functions) is { } attached
             ? attached.Resolve(runtime, DatabaseName)
             : CamusDB.Core.Extensions.Inline.InlineFunctionSet.Empty;
 
+    /// <summary>The private schema of the transaction that the current flow runs a statement of, when it changed this database.</summary>
+    private CommandsExecutor.Models.Schema? PrivateSchema =>
+        Catalogs.Transactional.TransactionSchemaScope.AnyOpen
+            ? Catalogs.Transactional.TransactionSchemaScope.OverlayFor(databaseId)?.Schema
+            : null;
+
     /// <summary>
-    /// Attaches the opened database. A no-op unless <paramref name="databaseName"/> is the database
-    /// this frame was entered for, so opening another database inside a statement does not change the
-    /// statement's scope. The first attach also keeps the frame for reuse by later statements.
+    /// Attaches the opened database. A no-op unless <paramref name="databaseName"/>, the name it was opened
+    /// by, is the name this frame was entered for, so opening another database inside a statement does not
+    /// change the statement's scope. Attaches the shared catalogs, also when a transaction with a private schema opens the
+    /// database: every other statement of the database uses this frame too. The first attach also keeps
+    /// the frame for reuse by later statements.
     /// </summary>
-    public void Attach(string databaseName, InstalledExtensionCatalog databaseCatalog, Inline.InlineFunctionCatalog functionCatalog)
+    public void Attach(string databaseName, CommandsExecutor.Models.DatabaseDescriptor database)
     {
         if (!string.Equals(DatabaseName, databaseName, StringComparison.OrdinalIgnoreCase))
             return;
 
-        if (!ReferenceEquals(catalog, databaseCatalog))
-            catalog = databaseCatalog;
+        CommandsExecutor.Models.Schema shared = database.SharedSchema;
 
-        if (!ReferenceEquals(functions, functionCatalog))
-            functions = functionCatalog;
+        if (!string.Equals(databaseId, database.Id, StringComparison.Ordinal))
+            databaseId = database.Id;
+
+        if (!ReferenceEquals(catalog, shared.ExtensionCatalog))
+            catalog = shared.ExtensionCatalog;
+
+        if (!ReferenceEquals(functions, shared.FunctionCatalog))
+            functions = shared.FunctionCatalog;
 
         owner?.Keep(this);
     }

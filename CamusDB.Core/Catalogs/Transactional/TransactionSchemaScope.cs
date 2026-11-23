@@ -108,7 +108,11 @@ internal static class TransactionSchemaScope
     /// by database id, so a descriptor that was evicted and opened again between two statements of the
     /// transaction still finds it.
     /// </summary>
-    internal static TransactionSchemaOverlay? OverlayFor(DatabaseDescriptor database)
+    internal static TransactionSchemaOverlay? OverlayFor(DatabaseDescriptor database) =>
+        Volatile.Read(ref openOverlays) == 0 ? null : OverlayFor(database.Id);
+
+    /// <summary>The same as <see cref="OverlayFor(DatabaseDescriptor)"/>, for code that holds only the database id.</summary>
+    internal static TransactionSchemaOverlay? OverlayFor(string? databaseId)
     {
         if (Volatile.Read(ref openOverlays) == 0)
             return null;
@@ -116,7 +120,7 @@ internal static class TransactionSchemaScope
         if (current.Value?.SchemaChanges is not TransactionSchemaOverlay overlay)
             return null;
 
-        return overlay.IsOpen && string.Equals(overlay.DatabaseId, database.Id, StringComparison.Ordinal)
+        return overlay.IsOpen && string.Equals(overlay.DatabaseId, databaseId, StringComparison.Ordinal)
             ? overlay
             : null;
     }
