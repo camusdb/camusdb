@@ -49,6 +49,13 @@ namespace CamusDB.App.Controllers;
 [ApiController]
 public sealed class ClusterController : CommandsController
 {
+    /// <summary>
+    /// The partition whose leader runs range splits: Kahuna keeps the range map on Kommander's system
+    /// partition and refuses a split on a node that does not lead it. <see cref="SplitRange"/> checks
+    /// the same leadership before its scan; Kahuna's own check still decides the split.
+    /// </summary>
+    private const int RangeMapPartition = RaftSystemConfig.SystemPartition;
+
     private readonly EmbeddedKahuna kahuna;
 
     public ClusterController(CommandExecutor executor, HttpTransactionCoordinator transactions, ILogger<ICamusDB> logger,
@@ -510,10 +517,14 @@ public sealed class ClusterController : CommandsController
     ///
     /// <para>Kahuna runs a split only on the node that leads the partition owning the range map; any
     /// other node answers <c>NotLeader</c> and names the leader when gossip knows it, so the caller tries
-    /// there. Refusals are reported as an outcome rather than a 500, with Kahuna's own status names; an
-    /// indeterminate status (<c>QuiesceFailed</c>, <c>TransferFailed</c>, <c>CutoverFailed</c>,
-    /// <c>ConcurrentSplit</c>) means the map may still change and the caller re-reads the ranges before
-    /// concluding anything. Held to the bar of the other mutations: superuser when authentication is
+    /// there. The leadership check runs before the scan for the split key, so a node that will be
+    /// refused answers at once. Refusals are reported as an outcome rather than a 500, with Kahuna's own
+    /// status names; an indeterminate status (<c>QuiesceFailed</c>, <c>TransferFailed</c>,
+    /// <c>CutoverFailed</c>, <c>ConcurrentSplit</c>) means the map may still change and the caller
+    /// re-reads the ranges before concluding anything. <c>MedianScanFailed</c> is this endpoint's own
+    /// status: Kahuna gave up on the scan for the split key, which a key holding an unresolved write
+    /// intent causes for some seconds after a node dies. No split was attempted and the same call can
+    /// succeed a moment later. Held to the bar of the other mutations: superuser when authentication is
     /// enabled, loopback-only otherwise.</para>
     /// </summary>
     [HttpPost]
@@ -553,68 +564,8 @@ public sealed class ClusterController : CommandsController
             string keySpace = ShowRangesReader.ResolveKeySpace(table, request.Index);
             response.KeySpace = keySpace;
 
-            // The node-local applied view of the space's ranges: how many there are, and where each
-            // starts, which the chooser needs so the split key is never a range's own start.
-            HashSet<string> rangeStarts = new(StringComparer.Ordinal);
-            int descriptors = 0;
-            string routingMode = "";
-
-            foreach (KahunaKeySpaceRangesResponse space in kahuna.Kahuna.GetRangeMap(keySpace).KeySpaces)
-            {
-                if (!string.Equals(space.KeySpace, keySpace, StringComparison.Ordinal))
-                    continue;
-
-                routingMode = space.RoutingMode;
-                descriptors = space.Descriptors.Count;
-
-                foreach (KahunaRangeDescriptorResponse descriptor in space.Descriptors)
-                {
-                    if (descriptor.StartKey is not null)
-                        rangeStarts.Add(descriptor.StartKey);
-                }
-            }
-
-            response.DescriptorsBefore = descriptors;
-
-            if (descriptors == 0 || !string.Equals(routingMode, "KeyRange", StringComparison.Ordinal))
-            {
-                response.Status = "NoRange";
-                response.Reason = $"Key space '{keySpace}' has no key-range descriptor on this node: the space is hash-routed, not yet seeded, or the node has not applied the range map yet";
-            }
-            else
-            {
-                RangeSplitKeyChooser.Choice choice = await RangeSplitKeyChooser
-                    .PickMedianAsync(kahuna.Kahuna, keySpace, rangeStarts, request.MaxKeys, HttpContext.RequestAborted)
-                    .ConfigureAwait(false);
-
-                response.KeysSeen = choice.KeysSeen;
-
-                if (choice.Truncated)
-                {
-                    response.Status = "Refused";
-                    response.Reason = $"Key space '{keySpace}' holds more than {request.MaxKeys} keys; raise 'maxKeys' to let the node scan it for a median";
-                }
-                else if (choice.SplitKey is null)
-                {
-                    response.Status = "BelowMinRangeSize";
-                    response.Reason = $"Key space '{keySpace}' holds {choice.KeysSeen} key(s) from its median up that are not already range starts; a split needs a key on each side";
-                }
-                else
-                {
-                    response.SplitKey = choice.SplitKey;
-
-                    KahunaSplitRangeResponse outcome = await kahuna.Kahuna
-                        .SplitRangeAtKeyWithOutcomeAsync(keySpace, choice.SplitKey, HttpContext.RequestAborted)
-                        .ConfigureAwait(false);
-
-                    response.Success = outcome.Success;
-                    response.Status = outcome.Status;
-                    response.Determinate = outcome.Determinate;
-                    response.NewPartitionId = outcome.NewPartitionId;
-                    response.LeaderHint = outcome.LeaderHint;
-                    response.Reason = outcome.Reason;
-                }
-            }
+            await SplitKeySpaceAsync(kahuna.Raft, kahuna.Kahuna, keySpace, request.MaxKeys, response, HttpContext.RequestAborted)
+                .ConfigureAwait(false);
 
             AuditCluster($"split-range:{keySpace}@{response.SplitKey ?? "-"}",
                 principal, response.Success ? "ok" : response.Status, failure: !response.Success);
@@ -637,6 +588,104 @@ public sealed class ClusterController : CommandsController
                     ? StatusCodes.Status400BadRequest
                     : CamusDBErrorCodes.GetHttpStatus(e.Code),
             };
+        }
+    }
+
+    /// <summary>
+    /// The split of one key space, from the leadership check to Kahuna's outcome, written into
+    /// <paramref name="response"/>: the range count, then <c>NoRange</c>, <c>NotLeader</c>,
+    /// <c>MedianScanFailed</c>, a refusal of the chooser, or Kahuna's own status.
+    ///
+    /// <para>The leadership check comes before the scan for the split key, so a node that Kahuna would
+    /// refuse answers without reading the key space. A scan Kahuna gave up on is an outcome the caller
+    /// can retry, and it attempts no split.</para>
+    ///
+    /// <para>Internal and static so a test can drive it with a Kahuna whose scan fails;
+    /// <see cref="SplitRange"/> is its one caller in the node.</para>
+    /// </summary>
+    internal static async Task SplitKeySpaceAsync(
+        IRaft raft,
+        IKahuna kahuna,
+        string keySpace,
+        int maxKeys,
+        ClusterSplitRangeResponse response,
+        CancellationToken cancellationToken)
+    {
+        // The node-local applied view of the space's ranges: how many there are, and where each
+        // starts, which the chooser needs so the split key is never a range's own start.
+        HashSet<string> rangeStarts = new(StringComparer.Ordinal);
+        int descriptors = 0;
+        string routingMode = "";
+
+        foreach (KahunaKeySpaceRangesResponse space in kahuna.GetRangeMap(keySpace).KeySpaces)
+        {
+            if (!string.Equals(space.KeySpace, keySpace, StringComparison.Ordinal))
+                continue;
+
+            routingMode = space.RoutingMode;
+            descriptors = space.Descriptors.Count;
+
+            foreach (KahunaRangeDescriptorResponse descriptor in space.Descriptors)
+            {
+                if (descriptor.StartKey is not null)
+                    rangeStarts.Add(descriptor.StartKey);
+            }
+        }
+
+        response.DescriptorsBefore = descriptors;
+
+        if (descriptors == 0 || !string.Equals(routingMode, "KeyRange", StringComparison.Ordinal))
+        {
+            response.Status = "NoRange";
+            response.Reason = $"Key space '{keySpace}' has no key-range descriptor on this node: the space is hash-routed, not yet seeded, or the node has not applied the range map yet";
+        }
+        else if (!await EmbeddedKahuna.AmILeaderOfPartitionAsync(raft, RangeMapPartition, cancellationToken).ConfigureAwait(false))
+        {
+            // Kahuna refuses a split on any node but this leader, and its own gate runs after the
+            // split key is known. Answering here saves the scan of the whole key space, which a
+            // caller that follows the leader hint under a time budget would pay on every wrong node.
+            response.Status = "NotLeader";
+            response.LeaderHint = raft.GetPartitionLeaderHint(RangeMapPartition);
+            response.Reason = "This node does not lead the partition that owns the range map, so no split was attempted. Retry against the leader.";
+        }
+        else
+        {
+            RangeSplitKeyChooser.Choice choice = await RangeSplitKeyChooser
+                .PickMedianAsync(kahuna, keySpace, rangeStarts, maxKeys, cancellationToken)
+                .ConfigureAwait(false);
+
+            response.KeysSeen = choice.KeysSeen;
+
+            if (choice.ScanFailure is not null)
+            {
+                response.Status = "MedianScanFailed";
+                response.Reason = $"The scan that picks the split key of '{keySpace}' did not complete, so no split was attempted. Retry the call. {choice.ScanFailure}";
+            }
+            else if (choice.Truncated)
+            {
+                response.Status = "Refused";
+                response.Reason = $"Key space '{keySpace}' holds more than {maxKeys} keys; raise 'maxKeys' to let the node scan it for a median";
+            }
+            else if (choice.SplitKey is null)
+            {
+                response.Status = "BelowMinRangeSize";
+                response.Reason = $"Key space '{keySpace}' holds {choice.KeysSeen} key(s) from its median up that are not already range starts; a split needs a key on each side";
+            }
+            else
+            {
+                response.SplitKey = choice.SplitKey;
+
+                KahunaSplitRangeResponse outcome = await kahuna
+                    .SplitRangeAtKeyWithOutcomeAsync(keySpace, choice.SplitKey, cancellationToken)
+                    .ConfigureAwait(false);
+
+                response.Success = outcome.Success;
+                response.Status = outcome.Status;
+                response.Determinate = outcome.Determinate;
+                response.NewPartitionId = outcome.NewPartitionId;
+                response.LeaderHint = outcome.LeaderHint;
+                response.Reason = outcome.Reason;
+            }
         }
     }
 
