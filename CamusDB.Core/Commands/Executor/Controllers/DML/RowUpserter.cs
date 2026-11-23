@@ -107,6 +107,7 @@ internal sealed class RowUpserter
 
         Extensions.StatementTriggers? updateTriggers = null;
         ForeignKeyStatementChecker updateKeys = ForeignKeyStatementChecker.None;
+        StatementExpressionTypes? updateExpressionTypes = null;
 
         if (setValues is not null)
         {
@@ -115,7 +116,7 @@ internal sealed class RowUpserter
             // The structural checks of UPDATE: every assigned column exists and is writable, no
             // primary-key column is assigned, and a literal NULL into a NOT NULL column is refused
             // unless a BEFORE UPDATE trigger may repair it.
-            RowUpdater.Validate(
+            updateExpressionTypes = RowUpdater.Validate(
                 table,
                 new UpdateTicket(tx, ticket.DatabaseName, ticket.TableName, null, setValues, clause.Where, null, parameters),
                 checkNotNull: updateTriggers is not { HasBefore: true });
@@ -125,6 +126,9 @@ internal sealed class RowUpserter
             updateKeys = await rowUpdater.CreateStatementCheckerAsync(
                 database, table, tx, setValues, assignsEveryColumn: updateTriggers is { HasBefore: true }).ConfigureAwait(false);
         }
+
+        // The types of the DO UPDATE's SET values and WHERE, current until the statement returns.
+        using StatementExpressionTypes.Scope updateExpressionTypesScope = StatementExpressionTypes.Enter(updateExpressionTypes);
 
         Extensions.StatementTriggers? insertTriggers = rowInserter.CreateStatementTriggers(database, table, tx);
 

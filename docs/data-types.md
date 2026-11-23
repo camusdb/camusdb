@@ -577,10 +577,13 @@ known; `X'…'` carries its type on its own.
 
 An array literal is written `ARRAY[a, b, c]`. Each element can be any expression: a literal, a column,
 a cast, a function call or arithmetic, as in `ARRAY[n::string, upper(name), n + 1]`. Its element type
-is inferred from the first non-NULL element and every other element must agree, so `ARRAY[1, 'two']`
-is an error. Elements coerce to the
-column's declared element type the same way scalars do, so `ARRAY[1, 2]` is accepted by an
-`array(float64)` column. `ARRAY[]` is empty and adopts the column's element type. Nested arrays
+is the common type of its elements, by the rule in
+[Result types of CASE, COALESCE, IFNULL and IF](#result-types-of-case-coalesce-ifnull-and-if), and
+every element is converted to it: `ARRAY[1, 2.5]` is an `array(float64)`, and `ARRAY[1, true]` and
+`ARRAY[1, 'two']` are errors. See
+[PostgreSQL expression syntax → Array elements](sql-expression-syntax.md#array-elements). Elements
+coerce to the column's declared element type the same way scalars do, so `ARRAY[1, 2]` is accepted by
+an `array(float64)` column. `ARRAY[]` is empty and adopts the column's element type. Nested arrays
 (`ARRAY[ARRAY[1]]`) are rejected.
 
 `CAST` works for all scalar types, e.g. `CAST('2026-01-01' AS date)`, `CAST(x AS float32)`,
@@ -827,7 +830,8 @@ a number.
 A `CASE`, `COALESCE`, `IFNULL` (and its alias `NVL`) and `IF` return one of several inputs: the
 `THEN` and `ELSE` results of a `CASE`, the arguments of `COALESCE` and `IFNULL`, and the two result
 arguments of `IF`. CamusDB follows GoogleSQL: the inputs must have a common type, and every value is
-converted to it. Two types combine like this:
+converted to it. The elements of an `ARRAY[...]` literal follow the same rule (see
+[Array elements](sql-expression-syntax.md#array-elements)). Two types combine like this:
 
 | Inputs | Result type |
 |---|---|
@@ -848,7 +852,9 @@ No common type for the results of CASE: Integer64 and String; write a CAST to ma
 Examples:
 
 - `CASE WHEN c THEN 1 ELSE 1.5 END` is `float64` in every row, also in a row that returns `1`.
-- `COALESCE(int_col, float_col)` is `float64`, also in a row where `float_col` is `NULL`.
+- `COALESCE(int_col, float_col)` is `float64`, also in a row where `float_col` is `NULL`. This holds
+  in a query, an `UPDATE`, a `DELETE`, a CHECK constraint, an expression index and a view's
+  `WITH CHECK OPTION` alike.
 - `CASE WHEN c THEN 1 ELSE 'a' END` and `COALESCE(1, 'a')` fail. `IFNULL(true, 1)` fails.
 - `CASE WHEN c THEN 1 ELSE '2' END` fails. A quoted literal is a `string`, so it does not become a
   number. PostgreSQL reads `'2'` as an integer here; GoogleSQL does not. Write `CAST('2' AS INT64)`.

@@ -220,7 +220,9 @@ internal static class ViewUpdatability
 /// <para><b>Row checks.</b> A row passes a check option only when the view's
 /// condition is true for it — visible through the view — so a NULL fails, unlike a <c>CHECK</c>
 /// constraint. It is evaluated on the complete new row, defaults applied, beside the table's own
-/// <c>CHECK</c> constraints and inside the same transaction, before the row is written.</para>
+/// <c>CHECK</c> constraints and inside the same transaction, before the row is written. Each condition
+/// is this write's own copy, typed from the base table's columns
+/// (<see cref="Queries.OwnedExpressionTypes.TypedCopy"/>).</para>
 /// </remarks>
 internal sealed class ViewWriteContext
 {
@@ -371,6 +373,19 @@ internal static class UpdatableViewRewriter
         // The table's row is keyed by bare column names, and an INSERT names its table without an alias.
         for (int i = 0; i < checks.Count; i++)
             checks[i] = (checks[i].ViewName, StripQualifier(checks[i].Condition, qualifier, budget));
+
+        // A condition can share nodes with a view body, which the parse cache shares with every
+        // statement that parses the same text, so this write checks its own copy of each one, typed from
+        // the base table's columns (see OwnedExpressionTypes.TypedCopy). A CASE, COALESCE or ARRAY[...]
+        // over columns then has one type in every row, as in a SELECT through the view, also in a row
+        // where a NULL hides the type of a column.
+        if (checks.Count > 0)
+        {
+            Queries.ConditionalResultTypes.ColumnTypeLookup columns = Queries.ConditionalResultTypes.LookupFor(baseTable);
+
+            for (int i = 0; i < checks.Count; i++)
+                checks[i] = (checks[i].ViewName, Queries.OwnedExpressionTypes.TypedCopy(checks[i].Condition, columns));
+        }
 
         statement = StripFinalQualifier(statement, qualifier, budget);
 

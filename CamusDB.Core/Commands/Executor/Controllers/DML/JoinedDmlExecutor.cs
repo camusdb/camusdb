@@ -147,7 +147,10 @@ internal sealed class JoinedDmlExecutor
 
                 UpdateTicket checkTicket = new(
                     tx, ticket.DatabaseName, table.Name, plainValues: null, plan.SetValues!, plan.Recheck, filters: null, ticket.Parameters);
-                RowUpdater.Validate(table, checkTicket, checkNotNull: !hasBefore);
+                StatementExpressionTypes? expressionTypes = RowUpdater.Validate(table, checkTicket, checkNotNull: !hasBefore);
+
+                // Current until the statement returns, for the SET values and the re-check of each row.
+                using StatementExpressionTypes.Scope expressionTypesScope = StatementExpressionTypes.Enter(expressionTypes);
 
                 ForeignKeyStatementChecker foreignKeys = await rowUpdater.CreateStatementCheckerAsync(
                     database, table, tx, plan.SetValues!, assignsEveryColumn: hasBefore).ConfigureAwait(false);
@@ -277,8 +280,11 @@ internal sealed class JoinedDmlExecutor
                 await using SelectRowSource source = await BindSourceAsync(database, plan, ticket, statementTimestamp).ConfigureAwait(false);
 
                 // The static checks of the re-checked predicate, as the plain DELETE runs them on its WHERE.
+                // The types they decide stay current until the statement returns, for the re-check.
+                StatementExpressionTypes expressionTypes = new();
                 ConditionalResultTypes.CheckCondition(
-                    plan.Recheck, ConditionalResultTypes.LookupFor(table.Schema), recorder: null, "WHERE", allowAggregates: false);
+                    plan.Recheck, ConditionalResultTypes.LookupFor(table.Schema), expressionTypes, "WHERE", allowAggregates: false);
+                using StatementExpressionTypes.Scope expressionTypesScope = StatementExpressionTypes.Enter(expressionTypes);
 
                 // Built before the first write, in the order of the plain DELETE.
                 ForeignKeyStatementChecker foreignKeys = await rowDeleter.CreateStatementCheckerAsync(database, table, tx).ConfigureAwait(false);

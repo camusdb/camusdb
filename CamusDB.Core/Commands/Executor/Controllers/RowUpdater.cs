@@ -150,7 +150,13 @@ public sealed class RowUpdater
     /// column exists, the primary key is not assigned) still run here, and every written row still
     /// passes the NOT NULL and type checks after the trigger ran.
     /// </param>
-    internal static void Validate(TableDescriptor table, UpdateTicket ticket, bool checkNotNull = true)
+    /// <returns>
+    /// The types the statement check decided from the column types for the SET values and the WHERE, or
+    /// null when it decided none. The caller makes it current with
+    /// <see cref="StatementExpressionTypes.Enter"/> for the time the statement runs, so every row gets one
+    /// type also where a NULL hides the type of a column.
+    /// </returns>
+    internal static StatementExpressionTypes? Validate(TableDescriptor table, UpdateTicket ticket, bool checkNotNull = true)
     {
         if (ticket.PlainValues is not null && ticket.ExprValues is not null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Cannot specify both plan and sql expr values at the same time");
@@ -168,17 +174,20 @@ public sealed class RowUpdater
         // which rows match: an unknown function, a known type mismatch, a value the column cannot take,
         // a non-boolean WHERE, and a CASE, COALESCE, IFNULL or IF whose inputs have no common type.
         ConditionalResultTypes.ColumnTypeLookup lookup = ConditionalResultTypes.LookupFor(table.Schema);
+        StatementExpressionTypes types = new();
 
         if (ticket.ExprValues is not null)
             foreach ((string columnName, NodeAst value) in ticket.ExprValues)
             {
                 if (checkNotNull && FindWritableColumn(columns, columnName) is { } column)
-                    ConditionalResultTypes.CheckAssignment(value, column, lookup);
+                    ConditionalResultTypes.CheckAssignment(value, column, lookup, types);
                 else
-                    ConditionalResultTypes.Check(value, lookup, recorder: null, allowAggregates: false);
+                    ConditionalResultTypes.Check(value, lookup, types, allowAggregates: false);
             }
 
-        ConditionalResultTypes.CheckCondition(ticket.Where, lookup, recorder: null, "WHERE", allowAggregates: false);
+        ConditionalResultTypes.CheckCondition(ticket.Where, lookup, types, "WHERE", allowAggregates: false);
+
+        return types.IsEmpty ? null : types;
     }
 
     private static TableColumnSchema? FindWritableColumn(List<TableColumnSchema> columns, string columnName)
@@ -242,7 +251,11 @@ public sealed class RowUpdater
         // the checker must prepare.
         Extensions.StatementTriggers? rowTriggers = triggers?.ForStatement(database, table, ticket.TxnState, TriggerEventSet.Update);
 
-        Validate(table, ticket, checkNotNull: rowTriggers is not { HasBefore: true });
+        StatementExpressionTypes? expressionTypes = Validate(table, ticket, checkNotNull: rowTriggers is not { HasBefore: true });
+
+        // Current until the statement returns: the locate scan, the re-check of each locked row, the SET
+        // values and the AFTER triggers all run inside it.
+        using StatementExpressionTypes.Scope expressionTypesScope = StatementExpressionTypes.Enter(expressionTypes);
 
         // Decided from the assigned columns before any row is read, and built before the first write:
         // it opens and pins the related tables, which may throw SchemaCatchingUp.

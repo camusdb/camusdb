@@ -42,6 +42,10 @@ internal static class CheckEnforcer
             if (check.ParsedCondition is null)
                 continue; // defensive: malformed entry — skip rather than crash
 
+            // A CASE, COALESCE or ARRAY[...] over columns takes its type from the column types, so a
+            // NULL in one row does not change the type the condition computes with.
+            Queries.OwnedExpressionTypes.TypeCheckCondition(check.ParsedCondition, table.Schema);
+
             bool? result = CheckEvaluator.Evaluate(check.ParsedCondition, row);
 
             if (result == false)

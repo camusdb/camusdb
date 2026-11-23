@@ -614,9 +614,9 @@ public sealed class TestOrderedQuantifiedComparisons : SharedNodeBaseTest
     /// the rule the operator uses outside a quantifier. A mixed numeric pair widens, so
     /// <c>0 &lt; ANY</c> and <c>0 &lt; ALL</c> over the rows 1 and 2.5 are both TRUE.
     ///
-    /// <para>The same two values written as <c>ARRAY[1, 2.5]</c> are still rejected, because an
-    /// array literal carries one element type. The rows of a subquery are not an array, so that
-    /// rule must not reach them.</para>
+    /// <para>The same two values written as <c>ARRAY[1, 2.5]</c> form an array of one element type,
+    /// <c>ARRAY&lt;Float64&gt;</c>, so they give the same answers. The rows of a subquery are not an
+    /// array and are not converted to one type: each keeps its own.</para>
     /// </summary>
     [Test]
     public async Task Subquery_WithMixedNumericRows_ComparesEachPair()
@@ -639,9 +639,9 @@ public sealed class TestOrderedQuantifiedComparisons : SharedNodeBaseTest
         // A NULL left operand still gives UNKNOWN over a mixed set.
         AssertUnknown(await ExecScalar(database, executor, dbname, $"SELECT NULL < ANY ({rows})"), "NULL < ANY");
 
-        // The written array literal keeps the one-element-type rule.
-        Assert.ThrowsAsync<CamusDBException>(async () =>
-            await ExecQuery(database, executor, dbname, "SELECT 0 < ANY (ARRAY[1, 2.5])"));
+        // The written array literal converts both values to its common element type, Float64.
+        AssertBool(true, await ExecScalar(database, executor, dbname, "SELECT 2 < ANY (ARRAY[1, 2.5])"), "2 < ANY (ARRAY)");
+        AssertBool(false, await ExecScalar(database, executor, dbname, "SELECT 2 < ALL (ARRAY[1, 2.5])"), "2 < ALL (ARRAY)");
     }
 
     /// <summary>

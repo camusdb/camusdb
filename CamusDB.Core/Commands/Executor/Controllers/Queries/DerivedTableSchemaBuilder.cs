@@ -658,7 +658,7 @@ internal static class DerivedTableSchemaBuilder
     /// The statically known element type of an array-typed projection, or null when only the
     /// evaluated cells can tell. Known for a column reference (a base-table array column declares its
     /// element type, and a derived-table column carries whatever its own projection knew) and for an
-    /// <c>ARRAY[…]</c> literal whose first non-NULL element has a certain type (see
+    /// <c>ARRAY[…]</c> literal whose elements all have a known type (see
     /// <see cref="InferArrayLiteralElementType"/>), and for a call to a function that declares it
     /// (<see cref="ScalarFunctionDescriptor.ArrayElementType"/>). Every other array expression is left
     /// null; the cells carry their element type, which is what a transport falls back to.
@@ -672,7 +672,7 @@ internal static class DerivedTableSchemaBuilder
         NodeAst target = QueryExpressionClassifier.UnwrapAlias(expression);
 
         if (target.nodeType == NodeType.ArrayLiteral)
-            return InferArrayLiteralElementType(target, innerBound, innerResolver, parameters);
+            return InferArrayLiteralElementType(target, innerBound);
 
         if (innerBound.RowNames.TryGetConditionalResultType(target, out ExpressionType conditional))
             return conditional is { Type: ColumnType.Array, ElementType: not ColumnType.Null } ? conditional.ElementType : null;
@@ -1324,8 +1324,8 @@ internal static class DerivedTableSchemaBuilder
 
     /// <summary>
     /// The static type of <c>array[index]</c> is the array's element type. It is known for an array
-    /// column of a base table (its declared element type) and for an <c>ARRAY[…]</c> literal (the type
-    /// of its first non-NULL literal element, the same rule evaluation uses). For any other operand
+    /// column of a base table (its declared element type) and for an <c>ARRAY[…]</c> literal (the
+    /// common type of its elements, the type evaluation converts them to). For any other operand
     /// the type is only known per row, so this falls back to <see cref="ColumnType.String"/>, like the
     /// other expressions this builder cannot type statically.
     /// </summary>
@@ -1357,93 +1357,21 @@ internal static class DerivedTableSchemaBuilder
             return ScalarFunctionEvaluator.InferArrayElementType(functionName) ?? ColumnType.String;
 
         if (arrayOperand.nodeType == NodeType.ArrayLiteral)
-        {
-            NodeAst? first = FirstNonNullArrayElement(arrayOperand.leftAst);
-            return first?.nodeType switch
-            {
-                NodeType.Integer => ColumnType.Integer64,
-                NodeType.Float => ColumnType.Float64,
-                NodeType.Bool => ColumnType.Bool,
-                NodeType.BytesLiteral => ColumnType.Bytes,
-                NodeType.ObjectIdLiteral => ColumnType.Id,
-                _ => ColumnType.String,
-            };
-        }
+            return InferArrayLiteralElementType(arrayOperand, innerBound) ?? ColumnType.String;
 
         return ColumnType.String;
     }
 
     /// <summary>
-    /// The element type an <c>ARRAY[…]</c> literal will evaluate to, when it is certain before any
-    /// row is read. The evaluator takes the type of the first non-NULL element and refuses any element
-    /// of another type, so the first element that is not a NULL literal decides it: a literal of a
-    /// fixed type, a <c>CAST</c> / <c>::</c>, or a reference to a base-table column.
-    ///
-    /// <para>Anything else (a function call, arithmetic, a placeholder, a derived-table column) returns
-    /// null rather than a guess: this builder types such expressions as <see cref="ColumnType.String"/>
-    /// when it does not know them, and declaring that as the element type would be wrong as often as
-    /// right. A null lets a transport read the type off the evaluated value instead. An empty or
-    /// all-NULL literal is null too: it evaluates with no element type.</para>
+    /// The element type an <c>ARRAY[…]</c> literal evaluates to, when the statement shows the type of
+    /// every element: the common type of the elements (<see cref="ArrayLiteralTypes"/>), the type the
+    /// evaluator converts every element to. Null when an element's type is not known (a placeholder,
+    /// a call whose type comes from its value): that element can still widen the type, so a transport
+    /// reads it off the evaluated value instead. An empty or all-NULL literal is null too: it evaluates
+    /// with no element type.
     /// </summary>
-    private static ColumnType? InferArrayLiteralElementType(
-        NodeAst arrayLiteral,
-        BoundSelectQuery innerBound,
-        QueryRowNameResolver innerResolver,
-        IReadOnlyDictionary<string, ColumnValue>? parameters)
-    {
-        NodeAst? first = FirstNonNullArrayElement(arrayLiteral.leftAst);
-
-        switch (first?.nodeType)
-        {
-            case NodeType.Integer: return ColumnType.Integer64;
-            case NodeType.Float: return ColumnType.Float64;
-            case NodeType.String: return ColumnType.String;
-            case NodeType.Bool: return ColumnType.Bool;
-            case NodeType.BytesLiteral: return ColumnType.Bytes;
-            case NodeType.ObjectIdLiteral: return ColumnType.Id;
-
-            case NodeType.ExprCast when first.rightAst is not null:
-                try
-                {
-                    ColumnType castType = CastScalarFunctions.InferCastReturnType(first.rightAst);
-                    return castType == ColumnType.Array ? null : castType;
-                }
-                catch (CamusDBException)
-                {
-                    return null;
-                }
-
-            case NodeType.Identifier when first.yytext is not null:
-                string lookupKey = innerResolver.ResolveRowLookupKey(first.yytext);
-
-                foreach (BoundTableSource source in innerBound.Sources)
-                {
-                    foreach (TableColumnSchema column in source.Table.Schema.Columns ?? [])
-                    {
-                        if (SchemaElementStateRules.IsReadable(column)
-                            && (lookupKey == column.Name || MatchesQualifiedKey(lookupKey, source.Alias, column.Name)))
-                            return column.Type == ColumnType.Array ? null : column.Type;
-                    }
-                }
-
-                return null;
-
-            default:
-                return null;
-        }
-    }
-
-    /// <summary>Returns the first element of an array literal's element list that is not a NULL literal.</summary>
-    private static NodeAst? FirstNonNullArrayElement(NodeAst? list)
-    {
-        if (list is null)
-            return null;
-
-        if (list.nodeType != NodeType.ExprList)
-            return list.nodeType == NodeType.Null ? null : list;
-
-        return FirstNonNullArrayElement(list.leftAst) ?? FirstNonNullArrayElement(list.rightAst);
-    }
+    private static ColumnType? InferArrayLiteralElementType(NodeAst arrayLiteral, BoundSelectQuery innerBound) =>
+        ArrayLiteralTypes.DeclaredElementType(arrayLiteral, ConditionalResultTypes.LookupFor(innerBound, excludeOutputAliases: false));
 
     /// <summary>
     /// The static type of a CASE, for derived-table and client column metadata.
