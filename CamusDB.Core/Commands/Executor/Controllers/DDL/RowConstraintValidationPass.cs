@@ -137,6 +137,10 @@ internal static class RowConstraintValidationPass
         string constraintName,
         SQLParser.NodeAst condition)
     {
+        // The same expression types the write path uses (CheckEnforcer), so an existing row is judged
+        // as a new one would be.
+        Queries.OwnedExpressionTypes.TypeCheckCondition(condition, table.Schema);
+
         KvTransaction tx = await database.Transactions.BeginAsync(
             CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadOnly
         ).ConfigureAwait(false);

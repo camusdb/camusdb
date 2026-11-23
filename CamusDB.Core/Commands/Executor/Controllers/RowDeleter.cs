@@ -101,6 +101,13 @@ internal sealed class RowDeleter
             ? triggers?.ForStatement(database, table, ticket.TxnState, TriggerEventSet.Delete)
             : null;
 
+        // The statement checks of a SELECT run on the WHERE too, before any row is read, so an error
+        // does not depend on which rows match. The types they decide from the column types stay current
+        // until the statement returns, for the locate scan and the re-check of each locked row.
+        StatementExpressionTypes expressionTypes = new();
+        ConditionalResultTypes.CheckCondition(ticket.Where, ConditionalResultTypes.LookupFor(table.Schema), expressionTypes, "WHERE", allowAggregates: false);
+        using StatementExpressionTypes.Scope expressionTypesScope = StatementExpressionTypes.Enter(expressionTypes);
+
         DeleteFluxState state = new(
             queryExecutor: queryExecutor,
             database: database,
@@ -299,10 +306,6 @@ internal sealed class RowDeleter
     private async Task<FluxAction> LocateTupleToDelete(DeleteFluxState state)
     {
         DeleteTicket ticket = state.Ticket;
-
-        // The statement checks of a SELECT run on the WHERE too, before any row is read, so an error
-        // does not depend on which rows match.
-        ConditionalResultTypes.CheckCondition(ticket.Where, ConditionalResultTypes.LookupFor(state.Table.Schema), recorder: null, "WHERE", allowAggregates: false);
 
         // Decode only the columns the WHERE/filter needs during the locate scan.
         // The write phase calls LoadWritableRow which does a full decode per matched row.

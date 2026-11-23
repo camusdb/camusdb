@@ -30,7 +30,8 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 ///   (<see cref="ScalarFunctionEvaluator.DeclaredResultType"/>), as in PostgreSQL. A pair with no
 ///   common type is <see cref="CamusDBErrorCodes.InvalidInput"/>, even when the branch never runs and
 ///   over an empty table, as in GoogleSQL. The result type is recorded on the binding's
-///   <see cref="QueryRowNameResolver"/> when there is one.</item>
+///   <see cref="QueryRowNameResolver"/> for a SELECT, and on a <see cref="StatementExpressionTypes"/>
+///   for an UPDATE, a DELETE and an upsert DO UPDATE, which have no binding.</item>
 /// <item><b>When the expression is evaluated</b> (<see cref="Apply"/>), the value it returns is
 ///   combined with the recorded type, or, without a record, with the types of its literal inputs, and
 ///   converted to the result (<see cref="ResultTypeRule.Widen"/>). An input whose type the statement
@@ -174,11 +175,35 @@ internal static class ConditionalResultTypes
     /// </summary>
     /// <param name="expression">The expression, or null when the statement has none at this position.</param>
     /// <param name="lookup">The column types of this scope, or null when the scope has no columns.</param>
-    /// <param name="recorder">Where a result type goes, or null when no binding holds it.</param>
+    /// <param name="recorder">Where a result type goes: the binding of a SELECT, the record of an UPDATE or
+    /// DELETE (<see cref="StatementExpressionTypes"/>), or null when nothing holds it.</param>
     /// <param name="allowAggregates">False where no aggregate can run (UPDATE, DELETE, VALUES). There an
     /// aggregate name resolves as a scalar function, and fails as it does when a row reaches it.</param>
-    internal static void Check(NodeAst? expression, ColumnTypeLookup? lookup, QueryRowNameResolver? recorder, bool allowAggregates = true) =>
-        Visit(expression, lookup, recorder, allowAggregates);
+    /// <param name="builtInCallsOnly">True to type a call only when it is a built-in function. A tree that
+    /// keeps its types for its whole life (<see cref="OwnedExpressionTypes"/>) passes it, because an
+    /// extension function can be replaced after the tree is typed.</param>
+    internal static void Check(NodeAst? expression, ColumnTypeLookup? lookup, IExpressionTypeRecorder? recorder, bool allowAggregates = true, bool builtInCallsOnly = false) =>
+        Visit(expression, lookup, recorder, OptionsFor(allowAggregates, builtInCallsOnly));
+
+    /// <summary>
+    /// The choices that hold for the whole walk of <see cref="Visit"/>. One value carries them, so the
+    /// recursion passes one argument for both and its frame stays small.
+    /// </summary>
+    [Flags]
+    private enum VisitOptions
+    {
+        None = 0,
+
+        /// <summary>An aggregate can run at this position; see the allowAggregates parameter of <see cref="Check"/>.</summary>
+        AllowAggregates = 1,
+
+        /// <summary>A call is typed only when it is a built-in function.</summary>
+        BuiltInCallsOnly = 2,
+    }
+
+    private static VisitOptions OptionsFor(bool allowAggregates, bool builtInCallsOnly = false) =>
+        (allowAggregates ? VisitOptions.AllowAggregates : VisitOptions.None)
+        | (builtInCallsOnly ? VisitOptions.BuiltInCallsOnly : VisitOptions.None);
 
     /// <summary>
     /// <see cref="Check"/> for the condition of a clause. The condition must also be a boolean or NULL,
@@ -187,9 +212,9 @@ internal static class ConditionalResultTypes
     /// (<see cref="QueryFilterer.ToPredicateResult"/>).
     /// </summary>
     /// <param name="clause">The clause name an error uses: WHERE, HAVING or ON.</param>
-    internal static void CheckCondition(NodeAst? condition, ColumnTypeLookup? lookup, QueryRowNameResolver? recorder, string clause, bool allowAggregates = true)
+    internal static void CheckCondition(NodeAst? condition, ColumnTypeLookup? lookup, IExpressionTypeRecorder? recorder, string clause, bool allowAggregates = true)
     {
-        if (Visit(condition, lookup, recorder, allowAggregates) is { Type: not (ColumnType.Bool or ColumnType.Null) } type)
+        if (Visit(condition, lookup, recorder, OptionsFor(allowAggregates)) is { Type: not (ColumnType.Bool or ColumnType.Null) } type)
             throw StaticOperandRules.ConditionNotBoolean(clause, type.ToString());
     }
 
@@ -197,9 +222,9 @@ internal static class ConditionalResultTypes
     /// <see cref="Check"/> for a value that is written to <paramref name="column"/>. The value must also
     /// have a type that the column accepts (<see cref="StaticOperandRules.RequireAssignable"/>).
     /// </summary>
-    internal static void CheckAssignment(NodeAst value, TableColumnSchema column, ColumnTypeLookup? lookup)
+    internal static void CheckAssignment(NodeAst value, TableColumnSchema column, ColumnTypeLookup? lookup, IExpressionTypeRecorder? recorder = null)
     {
-        if (Visit(value, lookup, recorder: null, allowAggregates: false) is { } type)
+        if (Visit(value, lookup, recorder, VisitOptions.None) is { } type)
             StaticOperandRules.RequireAssignable(value, type, column);
     }
 
@@ -238,7 +263,7 @@ internal static class ConditionalResultTypes
     /// depth of a statement is capped right after parsing (<see cref="StatementDepthGuard"/>), so this
     /// recursion is bounded, and the rules live in other methods so that its frame stays small.
     /// </summary>
-    private static ExpressionType? Visit(NodeAst? node, ColumnTypeLookup? lookup, QueryRowNameResolver? recorder, bool allowAggregates)
+    private static ExpressionType? Visit(NodeAst? node, ColumnTypeLookup? lookup, IExpressionTypeRecorder? recorder, VisitOptions options)
     {
         if (node is null)
             return null;
@@ -247,13 +272,13 @@ internal static class ConditionalResultTypes
         // the end, and the type of its body's column is recorded on it, so the comparison is checked here, as
         // the membership test of an uncorrelated IN is.
         if (node.nodeType is NodeType.ExprInSubquery or NodeType.ExprNotInSubquery)
-            StaticOperandRules.CheckSubqueryMembership(node, Visit(node.leftAst, lookup, recorder, allowAggregates));
+            StaticOperandRules.CheckSubqueryMembership(node, Visit(node.leftAst, lookup, recorder, options));
 
         if (IsSubquery(node.nodeType))
             return FromOperands(node, null, null, lookup);
 
         if (node.nodeType == NodeType.ExprAlias)
-            return Visit(node.leftAst, lookup, recorder, allowAggregates);
+            return Visit(node.leftAst, lookup, recorder, options);
 
         // A SELECT replaces each window call it allows with a result column when it is created, so one
         // that remains sits where SQL allows none. Its function is not a scalar call, so the walk stops here.
@@ -262,23 +287,28 @@ internal static class ConditionalResultTypes
 
         // The left child of a call is the function name, and the right child of a cast is the target
         // type. Neither is an expression.
-        ExpressionType? left = node.nodeType == NodeType.ExprFuncCall ? null : Visit(node.leftAst, lookup, recorder, allowAggregates);
-        ExpressionType? right = node.nodeType == NodeType.ExprCast ? null : Visit(node.rightAst, lookup, recorder, allowAggregates);
-        ExpressionType? one = Visit(node.extendedOne, lookup, recorder, allowAggregates);
-        ExpressionType? two = Visit(node.extendedTwo, lookup, recorder, allowAggregates);
+        ExpressionType? left = node.nodeType == NodeType.ExprFuncCall ? null : Visit(node.leftAst, lookup, recorder, options);
+        ExpressionType? right = node.nodeType == NodeType.ExprCast ? null : Visit(node.rightAst, lookup, recorder, options);
+        ExpressionType? one = Visit(node.extendedOne, lookup, recorder, options);
+        ExpressionType? two = Visit(node.extendedTwo, lookup, recorder, options);
 
-        Visit(node.extendedThree, lookup, recorder, allowAggregates);
-        Visit(node.extendedFour, lookup, recorder, allowAggregates);
-        Visit(node.extendedFive, lookup, recorder, allowAggregates);
-        Visit(node.extendedSix, lookup, recorder, allowAggregates);
-        Visit(node.extendedSeven, lookup, recorder, allowAggregates);
+        Visit(node.extendedThree, lookup, recorder, options);
+        Visit(node.extendedFour, lookup, recorder, options);
+        Visit(node.extendedFive, lookup, recorder, options);
+        Visit(node.extendedSix, lookup, recorder, options);
+        Visit(node.extendedSeven, lookup, recorder, options);
 
-        StaticOperandRules.Check(node, left, right, one, two, lookup, allowAggregates);
+        StaticOperandRules.Check(node, left, right, one, two, lookup, (options & VisitOptions.AllowAggregates) != 0);
+
+        bool builtInCallsOnly = (options & VisitOptions.BuiltInCallsOnly) != 0;
+
+        if (node.nodeType == NodeType.ArrayLiteral)
+            return ArrayLiteralTypes.Check(node, lookup, recorder, builtInCallsOnly ? CallTyping.BuiltIn : CallTyping.All);
 
         if (!IsConditional(node))
             return FromOperands(node, left, right, lookup);
 
-        ExpressionType? resultType = Combine(node, lookup, throwOnConflict: true, out bool complete, builtInOnly: false);
+        ExpressionType? resultType = Combine(node, lookup, throwOnConflict: true, out bool complete, builtInOnly: builtInCallsOnly);
 
         if (resultType is { } known)
             recorder?.RecordConditionalResultType(node, known);
@@ -402,9 +432,9 @@ internal static class ConditionalResultTypes
 
     /// <summary>
     /// Converts <paramref name="value"/>, the value <paramref name="node"/> returns for one row, to the
-    /// node's result type. The type is the one the binding recorded, or else the literal-only type
-    /// (<see cref="LiteralResultType"/>). Throws when the value's type has no common type with it: the
-    /// value came from an input whose type only its value shows.
+    /// node's result type. The type is the recorded one (<see cref="TryGetRecordedResultType"/>), or else
+    /// the literal-only type (<see cref="LiteralResultType"/>). Throws when the value's type has no common
+    /// type with it: the value came from an input whose type only its value shows.
     /// </summary>
     internal static ColumnValue Apply(NodeAst node, ColumnValue value, QueryRowNameResolver? resolver)
     {
@@ -413,7 +443,7 @@ internal static class ConditionalResultTypes
 
         ExpressionType? known = null;
 
-        if (resolver is not null && resolver.TryGetConditionalResultType(node, out ExpressionType recorded))
+        if (TryGetRecordedResultType(node, resolver, out ExpressionType recorded))
             known = recorded;
         else
             known = LiteralResultType(node);
@@ -429,6 +459,24 @@ internal static class ConditionalResultTypes
             throw ResultTypeRule.NoCommonType(ConstructName(node), resultType, valueType);
 
         return ResultTypeRule.Widen(value, combined.Type);
+    }
+
+    /// <summary>
+    /// The result type the statement check recorded for the conditional node <paramref name="node"/>.
+    /// An evaluation with a <paramref name="resolver"/> belongs to a SELECT and reads its binding, so a
+    /// SELECT pays no extra lookup. One without reads the record of the UPDATE, DELETE or upsert that is
+    /// running (<see cref="StatementExpressionTypes"/>), and then the types of a CHECK condition or an
+    /// index expression (<see cref="OwnedExpressionTypes"/>). A node belongs to one of them at most.
+    /// </summary>
+    internal static bool TryGetRecordedResultType(NodeAst node, QueryRowNameResolver? resolver, out ExpressionType resultType)
+    {
+        if (resolver is not null)
+            return resolver.TryGetConditionalResultType(node, out resultType);
+
+        if (StatementExpressionTypes.Current is { } statement && statement.TryGetConditionalResultType(node, out resultType))
+            return true;
+
+        return OwnedExpressionTypes.TryGetConditionalResultType(node, out resultType);
     }
 
     /// <summary>
@@ -625,7 +673,7 @@ internal static class ConditionalResultTypes
                 }
 
             case NodeType.ArrayLiteral:
-                return new ExpressionType(ColumnType.Array, ArrayLiteralElementType(target.leftAst, lookup, calls) ?? ColumnType.Null);
+                return ArrayLiteralTypes.StaticType(target, lookup, calls);
 
             case NodeType.ExprSubscript:
                 return left is { Type: ColumnType.Array, ElementType: not ColumnType.Null } array
@@ -695,31 +743,6 @@ internal static class ConditionalResultTypes
         }
 
         return ScalarFunctionEvaluator.DeclaredResultType(name.ToLowerInvariant(), argumentTypes, builtInOnly: calls == CallTyping.BuiltIn);
-    }
-
-    /// <summary>
-    /// The element type of an <c>ARRAY[…]</c> literal: the type of its first element that is not a NULL
-    /// literal, as evaluation decides it, or null when that element's type is not known.
-    /// </summary>
-    private static ColumnType? ArrayLiteralElementType(NodeAst? list, ColumnTypeLookup? lookup, CallTyping calls = CallTyping.None)
-    {
-        if (list is null)
-            return null;
-
-        if (list.nodeType == NodeType.ExprList)
-        {
-            ColumnType? left = ArrayLiteralElementType(list.leftAst, lookup, calls);
-            if (left is not null)
-                return left == ColumnType.Null ? ArrayLiteralElementType(list.rightAst, lookup, calls) : left;
-
-            // The first element is unknown, so the element type is unknown too.
-            return null;
-        }
-
-        if (list.nodeType == NodeType.Null)
-            return ColumnType.Null;
-
-        return TypeOf(list, lookup, calls) is { } element && element.Type != ColumnType.Array ? element.Type : null;
     }
 
     /// <summary>The arguments of a function call, in order (an in-order walk of the argument list nodes).</summary>

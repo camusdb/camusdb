@@ -175,6 +175,59 @@ internal static class NodeAstWalk
         return rebuilt[root];
     }
 
+    /// <summary>
+    /// Returns a copy of every node of <paramref name="root"/>, so a caller can key state by node
+    /// identity (a <see cref="System.Runtime.CompilerServices.ConditionalWeakTable{TKey,TValue}"/>)
+    /// without reaching a tree that the parser cache shares with other statements and databases. A node
+    /// reached through two slots is copied once, so the copy keeps the shape of the tree. The copies
+    /// start with no cached shape (<see cref="NodeAst.shape"/>). Iterative, so a deep tree does not grow
+    /// the call stack.
+    /// </summary>
+    public static NodeAst Copy(NodeAst root)
+    {
+        Dictionary<NodeAst, NodeAst> copied = new(ReferenceEqualityComparer.Instance);
+        Stack<(NodeAst Node, bool ChildrenDone)> pending = new();
+        pending.Push((root, false));
+
+        while (pending.TryPop(out (NodeAst Node, bool ChildrenDone) frame))
+        {
+            NodeAst node = frame.Node;
+
+            if (copied.ContainsKey(node))
+                continue;
+
+            if (!frame.ChildrenDone)
+            {
+                pending.Push((node, true));
+                PushFrame(pending, node.leftAst);
+                PushFrame(pending, node.rightAst);
+                PushFrame(pending, node.extendedOne);
+                PushFrame(pending, node.extendedTwo);
+                PushFrame(pending, node.extendedThree);
+                PushFrame(pending, node.extendedFour);
+                PushFrame(pending, node.extendedFive);
+                PushFrame(pending, node.extendedSix);
+                PushFrame(pending, node.extendedSeven);
+                continue;
+            }
+
+            copied[node] = new NodeAst(
+                node.nodeType,
+                Rebuilt(copied, node.leftAst),
+                Rebuilt(copied, node.rightAst),
+                Rebuilt(copied, node.extendedOne),
+                Rebuilt(copied, node.extendedTwo),
+                Rebuilt(copied, node.extendedThree),
+                Rebuilt(copied, node.extendedFour),
+                Rebuilt(copied, node.extendedFive),
+                node.yytext,
+                Rebuilt(copied, node.extendedSix),
+                Rebuilt(copied, node.extendedSeven));
+        }
+
+        return copied[root];
+    }
+
     private static void PushFrame(Stack<(NodeAst, bool)> pending, NodeAst? child)
     {
         if (child is not null)

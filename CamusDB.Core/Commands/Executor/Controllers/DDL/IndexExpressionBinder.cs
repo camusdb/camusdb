@@ -185,7 +185,8 @@ internal static class IndexExpressionBinder
     /// <summary>
     /// Binds a stored expression key part to the current names of <paramref name="columns"/>. Called
     /// when a table is opened and when an index job resumes. A token whose column is gone means the
-    /// schema is corrupt: DROP COLUMN refuses a column an index expression reads.
+    /// schema is corrupt: DROP COLUMN refuses a column an index expression reads. The bound tree is
+    /// typed from the column types (<see cref="OwnedExpressionTypes"/>) before any path can evaluate it.
     /// </summary>
     internal static BoundIndexExpression Bind(IndexKeyExpression stored, IReadOnlyList<IndexExpressionColumn> columns, string? tableName)
     {
@@ -218,6 +219,13 @@ internal static class IndexExpressionBinder
         }
 
         NodeAst named = NodeAstWalk.Replace(parsed, toNames);
+
+        // The tree belongs to this index alone, so its CASE, COALESCE and ARRAY[...] nodes keep the types
+        // the column types give. Every row's key then has the value a SELECT computes for the same
+        // expression, also in a row where a NULL hides a column's type.
+        OwnedExpressionTypes.Type(named, identifier => FindByName(columns, identifier) is { } column
+            ? new ExpressionType(column.Type, column.ArrayElementType ?? ColumnType.Null)
+            : null);
 
         return new BoundIndexExpression(
             KeyNameOf(stored.Sql, stored.Type),

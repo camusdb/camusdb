@@ -13,7 +13,7 @@ namespace CamusDB.Core.CommandsExecutor.Models.Queries;
 /// <summary>
 /// Resolves column references against bound query sources for validation and row lookup.
 /// </summary>
-public sealed class QueryRowNameResolver
+public sealed class QueryRowNameResolver : IExpressionTypeRecorder
 {
     private readonly IReadOnlyList<BoundTableSource> sources;
 
@@ -59,6 +59,16 @@ public sealed class QueryRowNameResolver
     /// above is, so concurrent executions read it lock-free.
     /// </summary>
     private Dictionary<SQLParser.NodeAst, ExpressionType>? conditionalResultTypes;
+
+    /// <summary>
+    /// The element type of each <c>ARRAY[…]</c> node of the bound statement, recorded while the
+    /// statement binds (<see cref="Controllers.Queries.ArrayLiteralTypes"/>). It is kept here, and not on
+    /// the node, for the same reason as <see cref="conditionalResultTypes"/>. The type can be partial:
+    /// an element whose type only its value shows is combined in when the array is evaluated. It is a
+    /// separate map because it holds the type of an element, and the map above holds the type of the
+    /// node itself.
+    /// </summary>
+    private Dictionary<SQLParser.NodeAst, ExpressionType>? arrayElementTypes;
 
     public QueryRowNameResolver(
         IReadOnlyList<BoundTableSource> sources,
@@ -237,6 +247,34 @@ public sealed class QueryRowNameResolver
             return true;
 
         resultType = default;
+        return false;
+    }
+
+    /// <summary>
+    /// Records the element type of an <c>ARRAY[…]</c> node while the statement binds. Ignored once the
+    /// resolver is frozen, since a frozen resolver is shared and must not be written.
+    /// </summary>
+    internal void RecordArrayElementType(SQLParser.NodeAst node, ExpressionType elementType)
+    {
+        if (frozen)
+            return;
+
+        (arrayElementTypes ??= new(ReferenceEqualityComparer.Instance))[node] = elementType;
+    }
+
+    void IExpressionTypeRecorder.RecordConditionalResultType(SQLParser.NodeAst node, ExpressionType resultType) =>
+        RecordConditionalResultType(node, resultType);
+
+    void IExpressionTypeRecorder.RecordArrayElementType(SQLParser.NodeAst node, ExpressionType elementType) =>
+        RecordArrayElementType(node, elementType);
+
+    /// <summary>The element type the binding recorded for the <c>ARRAY[…]</c> node <paramref name="node"/>, if any.</summary>
+    internal bool TryGetArrayElementType(SQLParser.NodeAst node, out ExpressionType elementType)
+    {
+        if (arrayElementTypes is { } recorded && recorded.TryGetValue(node, out elementType))
+            return true;
+
+        elementType = default;
         return false;
     }
 

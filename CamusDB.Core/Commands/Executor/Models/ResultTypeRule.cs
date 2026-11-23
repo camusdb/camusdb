@@ -41,8 +41,9 @@ public readonly record struct ExpressionType(ColumnType Type, ColumnType Element
 
 /// <summary>
 /// The one rule for the result type of an expression that returns one of several inputs: a CASE
-/// (its THEN and ELSE results), COALESCE, IFNULL and IF (their result arguments), and each output
-/// column of UNION, INTERSECT and EXCEPT. It follows GoogleSQL, as <see cref="ComparisonTypeRule"/>
+/// (its THEN and ELSE results), COALESCE, IFNULL and IF (their result arguments), each output
+/// column of UNION, INTERSECT and EXCEPT, and the element type of an <c>ARRAY[…]</c> literal
+/// (<see cref="Controllers.Queries.ArrayLiteralTypes"/>). It follows GoogleSQL, as <see cref="ComparisonTypeRule"/>
 /// does for comparisons: the inputs must have a common supertype, and a pair that has none is an
 /// <see cref="CamusDBErrorCodes.InvalidInput"/> error. Before this rule a CASE returned the value of
 /// the branch that ran, with that branch's type, so one column could hold an INT64 in one row and a
@@ -162,6 +163,14 @@ public static class ResultTypeRule
     public static CamusDBException NoCommonType(string construct, ExpressionType left, ExpressionType right) =>
         new(CamusDBErrorCodes.InvalidInput,
             $"No common type for the results of {construct}: {left} and {right}; write a CAST to make the types agree");
+
+    /// <summary>
+    /// The error for two elements of an <c>ARRAY[…]</c> literal that have no common type, such as
+    /// <c>ARRAY[1, true]</c>.
+    /// </summary>
+    public static CamusDBException NoCommonElementType(ExpressionType left, ExpressionType right) =>
+        new(CamusDBErrorCodes.InvalidInput,
+            $"No common type for the elements of ARRAY: {left} and {right}; write a CAST to make the types agree");
 
     /// <summary>
     /// Returns <paramref name="value"/> converted to <paramref name="resultType"/>: a number widens
