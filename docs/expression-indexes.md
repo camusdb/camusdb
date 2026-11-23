@@ -109,6 +109,14 @@ SELECT id FROM docs WHERE (doc->>'v')::int64 = 42;   -- uses docs_v
 The type is stored with the index. A later build that types a function another way does not change how
 an existing index encodes its keys.
 
+The value of each row is computed with the types of the columns, as a `SELECT` of the same expression
+computes it. A `CASE`, `COALESCE`, `IFNULL`, `IF`, `GREATEST`, `LEAST` or `ARRAY[...]` over columns of
+different types has their common type in every row, also in a row where a `NULL` hides the type of a
+column. With an `int64` column `i` and a `float64` column `f`, an index on `(COALESCE(i, f) / 4)` stores
+`0.5` for the row `i = 2, f = NULL`, which is what `SELECT COALESCE(i, f) / 4` gives. An index on such an
+expression that an earlier build created can hold keys computed from the values of each row (`0` in
+that example). Rebuild it with `DROP INDEX` and `CREATE INDEX`.
+
 ## How the planner uses an expression index
 
 The predicate analysis recognizes `column op constant`. A WHERE term over an expression first stays in

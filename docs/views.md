@@ -403,8 +403,11 @@ INSERT INTO acme_only (id, customer, total) VALUES (11, 'globex', 1);
 ```
 
 A row whose condition is NULL is not shown by the view, so it fails too — unlike a `CHECK`
-constraint, where NULL passes. `WITH CASCADED CHECK OPTION` (the meaning of a bare `WITH CHECK
-OPTION`) checks this view's condition and the condition of every view beneath it.
+constraint, where NULL passes. The condition is computed with the types of the base table's columns,
+as a `SELECT` through the view computes it: with an `int64` column `i` and a `float64` column `f`,
+`COALESCE(i, f) / 4` is `0.5` for the row `i = 2, f = NULL`, in the check and in the `SELECT` alike.
+`WITH CASCADED CHECK OPTION` (the meaning of a bare `WITH CHECK OPTION`) checks this view's condition
+and the condition of every view beneath it.
 `WITH LOCAL CHECK OPTION` checks this view's condition, and beneath it only views that have a check
 option of their own.
 

@@ -441,7 +441,7 @@ A subscript can appear anywhere an expression can: the select list, `WHERE`, `OR
 constraint and a view body.
 
 The result column of `tags[1]` has the element type of `tags`. For a subscript on an `ARRAY[...]`
-literal, the type is the type of its first non-`NULL` element.
+literal, the type is the element type of the literal (see [Array elements](#array-elements)).
 
 Not supported: slices (`tags[1:2]`) and assignment to an element (`UPDATE t SET tags[1] = 'x'`).
 
@@ -455,10 +455,42 @@ SELECT ARRAY[o.name, t.n::string] FROM t JOIN o ON t.id = o.id;
 SELECT ARRAY[min(n), max(n)] FROM t;
 ```
 
-Two rules differ from PostgreSQL:
+The element type is the common type of the elements, by the rule `CASE` and `COALESCE` use (see
+[Data types → Result types of CASE, COALESCE, IFNULL and IF](data-types.md#result-types-of-case-coalesce-ifnull-and-if)),
+and every element is converted to it:
 
-- All non-`NULL` elements must have the same type. PostgreSQL finds a common type, so it accepts
-  `ARRAY[1, 2.5]` and `ARRAY[1, '2']`. CamusDB rejects both. Cast the elements to one type.
+| Expression | Element type |
+|---|---|
+| `ARRAY[1, 2.5]` | `float64` |
+| `ARRAY[1, CAST(2.5 AS float32)]` | `float32` |
+| `ARRAY[1, NUMERIC '2.5']` | `numeric` |
+| `ARRAY[date_col, '2026-01-01']` | `date`; the literal is parsed |
+| `ARRAY[n::string, 'hello']` | `string` |
+| `ARRAY[1, true]` | error `CADB0400` |
+| `ARRAY[1, '2']` | error `CADB0400` |
+
+The error names both types:
+
+```
+No common type for the elements of ARRAY: Integer64 and Bool; write a CAST to make the types agree
+```
+
+The element type comes from the element expressions, so every row of a statement gets the same one,
+in a `SELECT`, an `UPDATE`, a `DELETE`, a CHECK constraint, an expression index and a view's
+`WITH CHECK OPTION` alike. `ARRAY[int_col, float_col]` is
+an `array(float64)` also in a row where `float_col` is `NULL`. Two
+elements with no common type fail when the statement is bound, before any row is read, also over an
+empty table. An element whose type only its value shows, such as a parameter, is checked when the
+array is built: `ARRAY[1, @p]` is an `array(float64)` when `@p` is a `float64`, and fails when `@p` is
+a `bool`. `NULL` elements, the empty `ARRAY[]` and the rejection of nested arrays do not change.
+
+These rules differ from PostgreSQL:
+
+- A quoted literal does not become a number. PostgreSQL reads `'2'` in `ARRAY[1, '2']` as an
+  integer. CamusDB keeps the rule it uses for `CASE`: a quoted literal is a `string`, and becomes only
+  a `date` or a `datetime`. Write `ARRAY[1, CAST('2' AS int64)]`.
+- `ARRAY[1, 2.5]` is an `array(float64)`, where PostgreSQL gives `numeric[]`, because CamusDB reads
+  `2.5` as a `float64`. Write `ARRAY[1, NUMERIC '2.5']` for a `numeric` array.
 - A scalar subquery in an element follows the rule of its clause: it can be correlated where a
   correlated subquery runs. See [Subqueries in expressions](#subqueries-in-expressions).
 
@@ -598,12 +630,12 @@ A subquery on the right must not reference a column of the outer query. CamusDB 
 once, before the outer scan starts, so an outer column has no value to read. This is the rule that
 `IN (SELECT ...)` already follows.
 
-A subquery on the right is not an array, and the rule that an array holds one element type does not
-apply to it. The rows it returns can hold more than one type. Each row is compared to the left
-operand on its own, by the same rule the operator uses outside a quantifier. So
+A subquery on the right is not an array, and its rows are not converted to one type. The rows it
+returns can hold more than one type. Each row is compared to the left operand on its own, by the same
+rule the operator uses outside a quantifier. So
 `SELECT 0 < ANY (SELECT CASE WHEN id = 1 THEN 1 ELSE 2.5 END FROM t)` compares `0` to an `int64`
-value and then to a `float64` value, and gives `true`. The same values written as
-`ARRAY[1, 2.5]` are still rejected, because an array literal does have one element type.
+value and then to a `float64` value, and gives `true`. The same values written as `ARRAY[1, 2.5]`
+form an `array(float64)` (see [Array elements](#array-elements)), and give the same answer.
 
 ### NULL rules
 

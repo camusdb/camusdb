@@ -440,15 +440,12 @@ internal abstract class SQLExecutorBaseCreator
     internal static string UnquoteStringLiteral(string raw) => SqlStringLiteral.Decode(raw);
 
     /// <summary>
-    /// Evaluates an <c>ARRAY[…]</c> literal.
-    ///
-    /// <para>The element type is inferred from the first non-NULL element, and
-    /// <see cref="ColumnValue.FromArray"/> then rejects any element that disagrees — a mixed-type
-    /// list has no single element type and would otherwise be stored under whichever type happened to
-    /// come first. An empty <c>ARRAY[]</c> carries <see cref="ColumnType.Null"/> as its element type,
-    /// meaning "not yet known"; the coercion applied against the target column adopts the declared
-    /// element type. Nested arrays are rejected because <see cref="ColumnValue"/> models exactly one
-    /// element type and cannot represent them.</para>
+    /// Evaluates an <c>ARRAY[…]</c> literal. Its element type is the common type of its elements,
+    /// decided from the statement where it can be, and every element is converted to it
+    /// (<see cref="ArrayLiteralTypes.Build"/>). An empty <c>ARRAY[]</c> carries
+    /// <see cref="ColumnType.Null"/> as its element type, meaning "not yet known"; the coercion applied
+    /// against the target column adopts the declared element type. Nested arrays are rejected because
+    /// <see cref="ColumnValue"/> models exactly one element type and cannot represent them.
     /// </summary>
     private static ColumnValue EvalArrayLiteral(
         NodeAst expr,
@@ -463,20 +460,7 @@ internal abstract class SQLExecutorBaseCreator
         List<ColumnValue> elements = new();
         CollectArrayElements(expr.leftAst, row, parameters, rowNameResolver, queryRow, elements);
 
-        ColumnType elementType = ColumnType.Null;
-
-        foreach (ColumnValue element in elements)
-        {
-            if (element.Type == ColumnType.Array)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInput,
-                    "Nested arrays are not supported; an array element must be a scalar or NULL");
-
-            if (elementType == ColumnType.Null && element.Type != ColumnType.Null)
-                elementType = element.Type;
-        }
-
-        ColumnValue array = ColumnValue.FromArray(elementType, elements);
+        ColumnValue array = ArrayLiteralTypes.Build(expr, elements, rowNameResolver);
 
         // A constant list such as ARRAY['paid', 'shipped'] is otherwise rebuilt for every row it
         // is evaluated against.
@@ -648,11 +632,11 @@ internal abstract class SQLExecutorBaseCreator
                     static (e, r, p, rnr) => EvalExpr(e, r, p, rnr));
 
                 // COALESCE, IFNULL and NVL check the types of their argument values themselves. A NULL
-                // argument hides the declared type of its column, so a type the binding recorded (from
-                // the column types) widens the result too: COALESCE(int_col, float_col) is FLOAT64 also
-                // in a row where float_col is NULL.
-                if (rowNameResolver is not null && rowNameResolver.TryGetConditionalResultType(expr, out ExpressionType recorded)
-                    && called.Type != ColumnType.Null)
+                // argument hides the declared type of its column, so a type the statement check recorded
+                // (from the column types) widens the result too: COALESCE(int_col, float_col) is FLOAT64
+                // also in a row where float_col is NULL.
+                if (called.Type != ColumnType.Null
+                    && ConditionalResultTypes.TryGetRecordedResultType(expr, rowNameResolver, out ExpressionType recorded))
                 {
                     if (!ResultTypeRule.TryCombine(recorded, ExpressionType.Of(called), out ExpressionType combined))
                         throw ResultTypeRule.NoCommonType(ConditionalResultTypes.ConstructName(expr), recorded, ExpressionType.Of(called));
