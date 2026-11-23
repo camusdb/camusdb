@@ -56,7 +56,8 @@ same row each time it runs, on every node and in every build. An index expressio
 - literals, and columns of the indexed table (with or without the table name as a qualifier);
 - arithmetic, string, bit, comparison and boolean operators, `LIKE`, the regular-expression operators,
   `IS NULL`, `IN` with a list of values, `BETWEEN`, subscripts, `CASE` and `IF`;
-- `CAST` to a type without a size, and the `::` form of it;
+- `CAST` and the `::` form of it, also to a type with a size such as `string(10)`, which keeps the first
+  10 characters (see [Data Types → Cast to a type with a size](data-types.md#cast-to-a-type-with-a-size));
 - calls of the immutable built-in functions.
 
 The immutable built-in functions are listed in `ScalarFunctionRegistry.ImmutableFunctionNames`. The
@@ -88,10 +89,6 @@ Each of these gives `CADB0423` (`InvalidIndexExpression`; HTTP 400, gRPC `INVALI
 | `date_trunc('day', ts, 'America/New_York')` | a time zone argument: the result depends on the build |
 | `doc->'a'`, an array, an interval | no ordered key encoding |
 | `json_value(doc, '$.a')` | the type is known only from the value |
-| `CAST(email AS string(10))` | a sized cast target |
-
-A sized cast is refused because the stored text of the expression keeps the target type but not its
-size. Cast to a type without a size, or index the column.
 
 ## Result type
 
