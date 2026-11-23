@@ -18,8 +18,10 @@ namespace CamusDB.Core.Transactions;
 /// (announce the change set in the schema log and stage the decision key in the transaction), the KV
 /// commit, then <see cref="OnCommitOutcomeAsync"/> with the KV outcome (publish or abort the change
 /// set). A rollback, and a commit refused before its request left the node, call
-/// <see cref="DiscardAsync"/>. Each hook is called at most once per outcome, and every path ends with
-/// either <see cref="OnCommitOutcomeAsync"/> or <see cref="DiscardAsync"/>, which free the DDL lock.</para>
+/// <see cref="DiscardAsync"/>. Each hook is called at most once per outcome. Every path that leaves the
+/// commit or the rollback, with an outcome or with an exception, calls <see cref="OnCommitOutcomeAsync"/>,
+/// <see cref="DiscardAsync"/> or <see cref="ReleaseAsync"/>, and each of them frees the DDL lock. A path
+/// that called none of them would keep the lock renewed for as long as the process lives.</para>
 /// </summary>
 public interface ITransactionSchemaChanges
 {
@@ -39,6 +41,13 @@ public interface ITransactionSchemaChanges
     /// into the transaction. A throw refuses the commit; the caller rolls the transaction back.
     /// </summary>
     Task PrepareCommitAsync(KvTransaction tx, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// True once <see cref="PrepareCommitAsync"/> finished: the change set is announced and the decision key
+    /// is staged. A commit attempt that resumes a transaction without it must not run, because it would
+    /// commit the rows and leave the schema changes out.
+    /// </summary>
+    bool IsCommitPrepared { get; }
 
     /// <summary>
     /// Runs once the KV commit has an outcome. <see cref="SchemaChangesCommitOutcome.Committed"/>
@@ -70,6 +79,14 @@ public interface ITransactionSchemaChanges
     /// request. Drops the private schema and frees the DDL lock. Never throws.
     /// </summary>
     Task DiscardAsync(KvTransaction tx);
+
+    /// <summary>
+    /// Runs when a finalize was cut off and no KV commit request left the node (a rollback without an
+    /// outcome, a commit that failed before its request), and when the transaction is abandoned while it
+    /// finalizes. Frees the DDL lock and decides nothing: a retried finalize, the resolver or the
+    /// coordinator's resume ends what the transaction left. Safe to call more than once. Never throws.
+    /// </summary>
+    Task ReleaseAsync(KvTransaction tx);
 }
 
 /// <summary>The outcome of a KV commit, as <see cref="ITransactionSchemaChanges.OnCommitOutcomeAsync"/> sees it.</summary>

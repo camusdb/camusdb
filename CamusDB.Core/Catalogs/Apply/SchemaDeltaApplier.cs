@@ -228,8 +228,9 @@ internal static class SchemaDeltaApplier
         // before the delta), and a typed trigger cannot land after one of its columns went away.
         CamusDB.Core.Extensions.TypedTriggerColumnGuard.Check(database.Schema, entry);
 
-        // Dry-run: apply to a throwaway clone so validation has no side effects on the live schema.
-        Schema clone = SchemaReplicator.CloneSchema(database.Schema);
+        // Dry-run: apply to a throwaway clone so validation has no side effects on the live schema. Only the
+        // table the delta changes is copied.
+        Schema clone = SchemaReplicator.CloneSchema(database.Schema, ChangeSetDeltaApplier.TableChangedBy(entry));
         try
         {
             ApplySchemaDelta(clone, database, entry);

@@ -169,13 +169,16 @@ internal static class MetaKeys
 
     internal static string ChangeSetKey(string dbId, string changeSetId) => $"{ChangeSetKeyPrefix(dbId)}{changeSetId}";
 
+    /// <summary>The prefix of the decision keys; see <see cref="ChangeSetDecisionKey"/>.</summary>
+    internal static string ChangeSetDecisionKeyPrefix(string dbId) => $"{dbId}/meta/ddlcommit:";
+
     /// <summary>
     /// The decision key of a change set. The committing transaction writes it in its own KV commit, and a
     /// resolver writes <c>aborted</c> to it in a transaction of its own; both take the key's exclusive
     /// lock first and read it under the lock, so exactly one of them writes it. A pending change set is
     /// published when the key says committed, and aborted when it says aborted.
     /// </summary>
-    internal static string ChangeSetDecisionKey(string dbId, string changeSetId) => $"{dbId}/meta/ddlcommit:{changeSetId}";
+    internal static string ChangeSetDecisionKey(string dbId, string changeSetId) => $"{ChangeSetDecisionKeyPrefix(dbId)}{changeSetId}";
 
     /// <summary>
     /// The prefix of the deferred purge records: data that a published change set made unreachable and

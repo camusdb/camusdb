@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Collections.Concurrent;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Meta;
 using CamusDB.Core.Catalogs.Models;
@@ -25,21 +26,39 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 /// <see cref="DeferredPurgeRecord"/>s. Two paths call it:
 /// <list type="bullet">
 /// <item>The committing node, right after its publish, for the records of its own change set
-/// (<see cref="RunAsync"/>). This is the normal path.</item>
+/// (<see cref="Schedule"/>). This is the normal path. It runs behind the commit: the removal takes time in
+/// proportion to the data, the record is durable already, and nobody can reach the data any more, so the
+/// client does not wait for it.</item>
 /// <item>The coordinator-job sweep on the schema leader (<see cref="RunDueAsync"/>), for records that a
 /// crash, a lost connection or a failed run left behind. It survives a restart and a leader change,
 /// because the records are in KV and any node can finish them.</item>
 /// </list>
 ///
-/// <para>Both paths can run the same record at once. That is safe: the removal is a verified,
-/// idempotent purge of one key space, and the record is deleted only after the key space is confirmed
-/// empty, so an interrupted run leaves the record for the next one.</para>
+/// <para>Two nodes can run the same record at once; one node runs it once at a time. That is safe: the
+/// removal is a verified, idempotent purge of one key space, and the record is deleted only after the key
+/// space is confirmed empty, so an interrupted run leaves the record for the next one.</para>
+///
+/// <para>A scheduled run stops when its database closes or this runner is disposed, and marks the database
+/// so that a sweep finishes the record.</para>
 /// </summary>
-internal sealed class DeferredPurgeRunner
+internal sealed class DeferredPurgeRunner : IAsyncDisposable
 {
+    /// <summary>How many scheduled records this node removes at once, so a batch of drops does not flood the store.</summary>
+    private const int MaxScheduledRuns = 2;
+
     private readonly DatabaseDropper dropper;
 
     private readonly ILogger<ICamusDB> logger;
+
+    private readonly SemaphoreSlim scheduledRuns = new(MaxScheduledRuns, MaxScheduledRuns);
+
+    /// <summary>The scheduled runs that have not ended, so the disposal can wait for them.</summary>
+    private readonly ConcurrentDictionary<Task, byte> scheduled = new();
+
+    /// <summary>The records a run of this node is removing, by purge id.</summary>
+    private readonly ConcurrentDictionary<string, byte> inProgress = new(StringComparer.Ordinal);
+
+    private readonly CancellationTokenSource stopping = new();
 
     internal DeferredPurgeRunner(DatabaseDropper dropper, ILogger<ICamusDB> logger)
     {
@@ -48,24 +67,100 @@ internal sealed class DeferredPurgeRunner
     }
 
     /// <summary>
-    /// Test-only. When set, <see cref="RunAsync"/> does nothing, as if the committing node stopped right
+    /// Test-only. When set, <see cref="Schedule"/> does nothing, as if the committing node stopped right
     /// after its publish, so a test can check that <see cref="RunDueAsync"/> finishes the records.
     /// </summary>
     internal bool TestSkipRunsAfterPublish { get; set; }
 
     /// <summary>
-    /// Runs the records of one change set on the node that published it. A record that is not done is left
-    /// for the sweep, and the database is marked so the next sweep looks for it.
+    /// Test-only. Awaited before each purge starts, so a test can hold the removal of the data and look at
+    /// the state that a client sees meanwhile. Null in production; a test clears it after use.
     /// </summary>
-    internal async Task RunAsync(DatabaseDescriptor database, IReadOnlyList<DeferredPurgeRecord> records, CancellationToken ct = default)
+    internal Func<Task>? TestInterceptBeforePurge { get; set; }
+
+    /// <summary>Test-only. Waits for the scheduled runs, so a test can look at what they leave.</summary>
+    internal Task WaitForScheduledRunsForTestsAsync() => Task.WhenAll(scheduled.Keys);
+
+    /// <summary>
+    /// Starts the removal of one record on the node that published its change set, and returns at once. A
+    /// record that is not done is left for the sweep, and the database is marked so the next sweep looks
+    /// for it.
+    /// </summary>
+    internal void Schedule(DatabaseDescriptor database, DeferredPurgeRecord record)
     {
-        if (TestSkipRunsAfterPublish || records.Count == 0)
+        if (TestSkipRunsAfterPublish)
             return;
 
-        foreach (DeferredPurgeRecord record in records)
+        if (stopping.IsCancellationRequested)
         {
-            if (!await TryRunAsync(database, record, ct).ConfigureAwait(false))
+            database.MarkDeferredPurgesDue();
+            return;
+        }
+
+        // The run outlives the statement and the request that committed, so it takes none of their
+        // ambient state with it (the private schema of the transaction, the principal, the trace).
+        Task run;
+        if (ExecutionContext.IsFlowSuppressed())
+        {
+            run = Task.Run(() => RunScheduledAsync(database, record));
+        }
+        else
+        {
+            using (ExecutionContext.SuppressFlow())
+                run = Task.Run(() => RunScheduledAsync(database, record));
+        }
+
+        scheduled.TryAdd(run, 0);
+        _ = run.ContinueWith(
+            static (ended, state) => ((ConcurrentDictionary<Task, byte>)state!).TryRemove(ended, out _),
+            scheduled, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+    }
+
+    private async Task RunScheduledAsync(DatabaseDescriptor database, DeferredPurgeRecord record)
+    {
+        bool done = false;
+
+        try
+        {
+            using CancellationTokenSource ends = CancellationTokenSource.CreateLinkedTokenSource(stopping.Token, database.Lifetime);
+
+            await scheduledRuns.WaitAsync(ends.Token).ConfigureAwait(false);
+            try
+            {
+                using DatabaseUseHandle _ = database.Use();
+                done = await TryRunAsync(database, record, ends.Token).ConfigureAwait(false);
+            }
+            finally
+            {
+                scheduledRuns.Release();
+            }
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException)
+        {
+            // The database closed or the engine stops; the record is durable and a sweep finishes it.
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "The scheduled purge {PurgeId} in database {Database} failed; a later run retries it", record.PurgeId, database.Name);
+        }
+        finally
+        {
+            if (!done)
                 database.MarkDeferredPurgesDue();
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await stopping.CancelAsync().ConfigureAwait(false);
+
+        try
+        {
+            await Task.WhenAll(scheduled.Keys).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "A scheduled purge failed while the engine stopped");
         }
     }
 
@@ -121,14 +216,20 @@ internal sealed class DeferredPurgeRunner
         return database.Schema.SchemaVersion >= record.BaseVersion + 2;
     }
 
-    /// <summary>Removes the data of one due record, then the record. False when it is not due or not done.</summary>
+    /// <summary>
+    /// Removes the data of one due record, then the record. False when it is not due or not done, or when
+    /// another run of this node is removing it.
+    /// </summary>
     private async Task<bool> TryRunAsync(DatabaseDescriptor database, DeferredPurgeRecord record, CancellationToken ct)
     {
-        if (!IsDue(database, record))
+        if (!IsDue(database, record) || !inProgress.TryAdd(record.PurgeId, 0))
             return false;
 
         try
         {
+            if (TestInterceptBeforePurge is { } intercept)
+                await intercept().ConfigureAwait(false);
+
             IKahuna kahuna = database.Kahuna.Kahuna;
 
             bool removed = record.Kind switch
@@ -161,6 +262,10 @@ internal sealed class DeferredPurgeRunner
                 "Deferred purge {PurgeId} ({Kind}) of table {TableId} in database {Database} failed; a later run retries it",
                 record.PurgeId, record.Kind, record.TableId, database.Name);
             return false;
+        }
+        finally
+        {
+            inProgress.TryRemove(record.PurgeId, out _);
         }
     }
 

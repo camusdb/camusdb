@@ -1017,6 +1017,15 @@ public sealed class KvTransactionsManager : IDisposable
             }
         }
 
+        else if (tx.SchemaChanges is { IsCommitPrepared: false })
+        {
+            // A finalize that resumes without a prepared change set resumes a rollback that was cut off.
+            // Committing it would keep the rows and drop the schema changes they belong to.
+            throw new CamusDBException(
+                CamusDBErrorCodes.TransactionAlreadyCompleted,
+                $"Transaction {tx.UniqueId} is being rolled back; retry ROLLBACK on the same transaction");
+        }
+
         // Install the finalize fence locally: from here the transaction is no longer Active, so a
         // stray data operation is rejected (see KvTransaction.EnsureSessionStartedAsync), and a
         // concurrent/duplicate finalize sees a non-Active status. The status only advances to a
@@ -1034,20 +1043,6 @@ public sealed class KvTransactionsManager : IDisposable
         List<(string key, KeyValueDurability durability)>? modKeys = null;
         List<string>? keyspaces = null;
         bool markedInFlight = false;
-        
-        if (_cache is not null && !tx.IsReadOnly)
-        {
-            modKeys = await CloseServerWorkingSetAsync(tx, cancellationToken).ConfigureAwait(false);
-            if (modKeys.Count > 0)
-            {
-                keyspaces = ExtractUniqueKeyspaces(modKeys);
-                if (keyspaces.Count > 0)
-                {
-                    _cache.PublishGate.MarkWriteInFlight(keyspaces);
-                    markedInFlight = true;
-                }
-            }
-        }
 
         // Finalize outcome semantics (Kahuna coordinator contract):
         //   Committed  → terminal success.
@@ -1076,12 +1071,6 @@ public sealed class KvTransactionsManager : IDisposable
         // fence and evict instead. See CachePublishGate's write protocol.
         bool commitRequestIssued = false;
 
-        // Time the Kahuna 2PC commit itself — this is the span dominated by WAL fsync latency,
-        // so surfacing it in the finalize log makes slow-commit diagnosis (e.g. native fsync cost)
-        // directly observable per transaction.
-        ValueStopwatch commitTimer = ValueStopwatch.StartNew();
-        using System.Diagnostics.Activity? commitSpan =
-            Diagnostics.ServerDiagnostics.StartSpan(Diagnostics.ServerDiagnostics.Spans.Commit);
         int commitAttempts = 0;
 
         // The coordinator names the check that refused the last attempt (a conflict, the decision
@@ -1090,8 +1079,35 @@ public sealed class KvTransactionsManager : IDisposable
         // the coordinator's log or counters.
         CommitRefusalClass lastRefusal = CommitRefusalClass.None;
         string? lastReason = null;
+
+        // Set right before the schema changes hear about the outcome. An exception that leaves this method
+        // without that call (a cancellation, a domain error of the request, a failed close of the working
+        // set) is handled for them in the finally block.
+        bool schemaOutcomeReported = false;
         try
         {
+            if (_cache is not null && !tx.IsReadOnly)
+            {
+                modKeys = await CloseServerWorkingSetAsync(tx, cancellationToken).ConfigureAwait(false);
+                if (modKeys.Count > 0)
+                {
+                    keyspaces = ExtractUniqueKeyspaces(modKeys);
+                    if (keyspaces.Count > 0)
+                    {
+                        _cache.PublishGate.MarkWriteInFlight(keyspaces);
+                        markedInFlight = true;
+                    }
+                }
+            }
+
+            // Time the Kahuna 2PC commit itself — this is the span dominated by WAL fsync latency,
+            // so surfacing it in the finalize log makes slow-commit diagnosis (e.g. native fsync cost)
+            // directly observable per transaction. Started after the close of the working set, which is
+            // not part of it.
+            ValueStopwatch commitTimer = ValueStopwatch.StartNew();
+            using System.Diagnostics.Activity? commitSpan =
+                Diagnostics.ServerDiagnostics.StartSpan(Diagnostics.ServerDiagnostics.Spans.Commit);
+
             try
             {
                 for (int attempt = 0; ; attempt++)
@@ -1148,9 +1164,6 @@ public sealed class KvTransactionsManager : IDisposable
                 // unresolved, the transaction stays Finalizing and tracked, and the caller must retry
                 // the SAME commit on the SAME handle (never replay the operation). The finally block
                 // fences and evicts the cache exactly as for any unknown outcome.
-                if (tx.SchemaChanges is { } faultedChanges)
-                    await faultedChanges.OnCommitOutcomeAsync(tx, SchemaChangesCommitOutcome.Unknown).ConfigureAwait(false);
-
                 throw new CamusDBException(
                     CamusDBErrorCodes.TransactionFinalizeUnresolved,
                     $"Transaction {tx.UniqueId} commit outcome is unknown after {commitAttempts} attempt(s) " +
@@ -1192,6 +1205,7 @@ public sealed class KvTransactionsManager : IDisposable
 
                 // Publishes the schema changes. After the KV commit, so the change becomes visible together
                 // with the data and never before it.
+                schemaOutcomeReported = true;
                 if (tx.SchemaChanges is { } committedChanges)
                     await committedChanges.OnCommitOutcomeAsync(tx, SchemaChangesCommitOutcome.Committed).ConfigureAwait(false);
 
@@ -1221,9 +1235,6 @@ public sealed class KvTransactionsManager : IDisposable
                     _cache!.PublishGate.FenceAndInvalidate(keyspaces!, _ => _cache.InvalidateByModifiedKeys(modKeys!));
                     markedInFlight = false;
                 }
-
-                if (tx.SchemaChanges is { } unresolvedChanges)
-                    await unresolvedChanges.OnCommitOutcomeAsync(tx, SchemaChangesCommitOutcome.Unknown).ConfigureAwait(false);
 
                 throw new CamusDBException(
                     CamusDBErrorCodes.TransactionFinalizeUnresolved,
@@ -1256,6 +1267,7 @@ public sealed class KvTransactionsManager : IDisposable
 
             // Aborted is a definite non-commit, so the change set is aborted. Errored leaves the outcome
             // unknown, and the decision key settles it through the resolver.
+            schemaOutcomeReported = true;
             if (tx.SchemaChanges is { } endedChanges)
                 await endedChanges.OnCommitOutcomeAsync(
                     tx,
@@ -1298,6 +1310,18 @@ public sealed class KvTransactionsManager : IDisposable
                 else
                     _cache!.PublishGate.AbortWrite(keyspaces!);
             }
+
+            // Every exit without an outcome: the transaction stays Finalizing, and a COMMIT retried on the
+            // same handle resumes it. Until then, and if the client never comes back, the schema changes
+            // are the resolver's to decide, and the DDL lock must not wait for either. Without a commit
+            // request the commit did not land, so a ROLLBACK that follows may still abort them itself.
+            if (!schemaOutcomeReported && tx.SchemaChanges is { } undecidedChanges)
+            {
+                if (commitRequestIssued)
+                    await undecidedChanges.OnCommitOutcomeAsync(tx, SchemaChangesCommitOutcome.Unknown).ConfigureAwait(false);
+                else
+                    await undecidedChanges.ReleaseAsync(tx).ConfigureAwait(false);
+            }
         }
     }
 
@@ -1330,7 +1354,9 @@ public sealed class KvTransactionsManager : IDisposable
 
         try
         {
-            await RollbackHandleWithRetryAsync(tx, cancellationToken).ConfigureAwait(false);
+            // With schema changes the rollback is sent even when the caller cancelled: the session holds the
+            // lock of the change set's decision key, which the abort below and the resolver need.
+            await RollbackHandleWithRetryAsync(tx, tx.SchemaChanges is null ? cancellationToken : CancellationToken.None).ConfigureAwait(false);
         }
         catch
         {
@@ -1554,8 +1580,21 @@ public sealed class KvTransactionsManager : IDisposable
 
         // The coordinator rolls back from its own working set (staged writes and folded point locks);
         // the client supplies only the routing handle.
-        (KeyValueResponseType result, int attempts, long retryElapsedMs) =
-            await RollbackHandleWithRetryAsync(tx, cancellationToken).ConfigureAwait(false);
+        KeyValueResponseType result = KeyValueResponseType.MustRetry;
+        int attempts;
+        long retryElapsedMs;
+        try
+        {
+            (result, attempts, retryElapsedMs) = await RollbackHandleWithRetryAsync(tx, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            // A rollback with no outcome, or one that was cut off, can be the client's last word. The DDL
+            // lock does not wait for a retry; the schema changes of the transaction can never commit from
+            // here, and a retried ROLLBACK, the resolver or the coordinator's resume removes them.
+            if (result == KeyValueResponseType.MustRetry && tx.SchemaChanges is { } heldChanges)
+                await heldChanges.ReleaseAsync(tx).ConfigureAwait(false);
+        }
 
         if (result == KeyValueResponseType.MustRetry)
             throw new CamusDBException(
@@ -1982,6 +2021,26 @@ public sealed class KvTransactionsManager : IDisposable
             return;
 
         await RollbackAsync(tx, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Rolls back a transaction that its client abandoned, when it can still be rolled back. A transaction
+    /// that the client left in the middle of its finalize cannot: its commit may have landed. Such a
+    /// transaction only gives up what it holds for its schema changes
+    /// (<see cref="ITransactionSchemaChanges.ReleaseAsync"/>); the resolver decides them. The caller makes
+    /// sure that no commit or rollback of the transaction runs.
+    /// </summary>
+    public async Task AbandonAsync(KvTransaction tx, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(tx);
+
+        if (tx.Status == KvTransactionStatus.Finalizing && tx.SchemaChanges is { } changes)
+        {
+            await changes.ReleaseAsync(tx).ConfigureAwait(false);
+            return;
+        }
+
+        await RollbackIfNotCompletedAsync(tx, cancellationToken).ConfigureAwait(false);
     }
 
     // Set once by Dispose. Read by the write-shape drain, which must not keep polling transactions

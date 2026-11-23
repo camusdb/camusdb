@@ -165,7 +165,11 @@ internal sealed class TableDropper
         if (purge is not null)
         {
             DatabaseDescriptor shared = overlay!.Database;
-            overlay.AddAfterPublish(() => deferredPurges.RunAsync(shared, [purge]));
+            overlay.AddAfterPublish(() =>
+            {
+                deferredPurges.Schedule(shared, purge);
+                return Task.CompletedTask;
+            });
         }
 
         Log.LogTableRemovedFromDatabaseSchema(logger, ticket.TableName);

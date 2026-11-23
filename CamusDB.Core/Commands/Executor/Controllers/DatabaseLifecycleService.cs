@@ -217,9 +217,49 @@ internal sealed class DatabaseLifecycleService
     internal Func<Task>? TestInterceptAfterExistenceCheck { get; set; }
 
     /// <summary>
+    /// How long a fork waits for a transaction that is committing its schema changes. Such a commit takes
+    /// one KV commit and one schema-log round trip; one that takes longer waits for the resolver, and the
+    /// fork is refused with the retryable code instead of waiting with it.
+    /// </summary>
+    private const int ForkPendingChangeSetWaitMs = 5_000;
+
+    /// <summary>
+    /// Takes the DDL gate of <paramref name="source"/> exclusively for a fork, at a moment when no change
+    /// set of a committing transaction is pending on this node. The gate is released between the attempts:
+    /// the commit that the fork waits for needs it to publish. A change set that another node announced and
+    /// this node has not applied yet is caught by the copy, which reads the source at the fork timestamp
+    /// (<see cref="Catalogs.Meta.BranchMetaCopier"/>).
+    /// </summary>
+    private async Task EnterGateForForkAsync(DatabaseDescriptor source, string sourceName)
+    {
+        long deadline = Environment.TickCount64 + ForkPendingChangeSetWaitMs;
+        int delayMs = 5;
+
+        while (true)
+        {
+            await source.DdlGate.EnterExclusiveAsync(context.Logger).ConfigureAwait(false);
+
+            if (source.SharedSchema.PendingChangeSet is not { } pending)
+                return;
+
+            source.DdlGate.Exit();
+
+            if (Environment.TickCount64 >= deadline)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.TransactionMustRetry,
+                    $"Database '{sourceName}' cannot be branched while the schema changes of a committing transaction " +
+                    $"(change set {pending.ChangeSetId}) are not published yet; retry the statement");
+
+            await Task.Delay(delayMs).ConfigureAwait(false);
+            delayMs = Math.Min(delayMs * 2, 100);
+        }
+    }
+
+    /// <summary>
     /// Creates a branch database from <paramref name="ticket"/>.<see cref="CreateDatabaseTicket.BranchFrom"/>.
     /// The source must be schema-stable — <c>HeadSchemaVersion == SchemaVersion</c>, all columns and
-    /// indexes in the Public state, and no persisted coordinator jobs — before the branch is taken.
+    /// indexes in the Public state, no persisted coordinator jobs, and no pending change set of a committing
+    /// transaction at the fork timestamp — before the branch is taken.
     /// A materialized-view refresh in flight on the source does <em>not</em> block the fork: its job
     /// record and staging relation are the source's own work, and the copy leaves them out so the
     /// branch opens with the view's published contents and no rebuild to inherit (see
@@ -240,7 +280,7 @@ internal sealed class DatabaseLifecycleService
         // while it runs, and the fork waits for it to finish, as it did when the change held the
         // semaphore itself. It then copies the element in Public, instead of being refused by the
         // stability checks below for a change that is about to complete.
-        await sourceDescriptor.DdlGate.EnterExclusiveAsync(context.Logger).ConfigureAwait(false);
+        await EnterGateForForkAsync(sourceDescriptor, ticket.BranchFrom!).ConfigureAwait(false);
         try
         {
             // Re-validate the source is still registered under the semaphore. DropDatabase acquires

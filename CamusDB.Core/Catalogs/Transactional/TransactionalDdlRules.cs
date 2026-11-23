@@ -51,7 +51,8 @@ internal static class TransactionalDdlRules
     /// <item>The transaction holds locks on the table's rows from a read, and <paramref name="locksRows"/> is
     /// true: an index build or a column fill locks each row before it reads it, so it would wait for the
     /// transaction while the transaction waits for the statement. A CHECK, NOT NULL or foreign key check
-    /// reads with no lock and passes false.</item>
+    /// reads with no lock and passes false. A foreign key that must build its backing index makes this check
+    /// on its own, once it knows that it must (<see cref="RequireNoRowLocks"/>).</item>
     /// <item>The transaction's change set already changed the table. The staged steps run on the shared
     /// table, which does not have those changes before the commit.</item>
     /// </list>
@@ -69,14 +70,8 @@ internal static class TransactionalDdlRules
                       "the table, and the statement checks the table's rows outside the transaction, where those writes are not " +
                       "visible. Run the statement before the writes, or in a transaction of its own");
 
-        // A Serializable read or a SELECT ... FOR UPDATE of the table locks its rows, and the batches would
-        // wait for those locks in the same way.
-        if (locksRows && overlay.Owner.CountRangeLocksForBucket(table.Store.RowKeySpace) > 0)
-            throw new CamusDBException(
-                CamusDBErrorCodes.StatementNotAllowedInTransaction,
-                $"{statement} on table '{table.Name}' cannot run in this transaction: the transaction holds locks on rows of " +
-                "the table from an earlier read, and the statement fills the table's rows in batches that lock each row, so " +
-                "it would wait for the transaction's own locks. Run the statement before the reads, or in a transaction of its own");
+        if (locksRows)
+            RequireNoRowLocks(overlay, table, statement);
 
         if (overlay.TouchedTableIds.Contains(table.Id))
             throw new CamusDBException(
@@ -84,6 +79,22 @@ internal static class TransactionalDdlRules
                 $"{statement} on table '{table.Name}' cannot run in this transaction: the transaction already changed the " +
                 "table's schema, and the statement runs on the shared table, which does not have that change before the " +
                 "commit. Run the statement before the other changes to the table, or commit first");
+    }
+
+    /// <summary>
+    /// Refuses <paramref name="statement"/>, which locks every row of <paramref name="table"/> in batches of
+    /// its own, when the transaction holds locks on rows of the table. A Serializable read or a
+    /// <c>SELECT ... FOR UPDATE</c> takes them, and the transaction cannot release them while it waits for
+    /// the statement.
+    /// </summary>
+    internal static void RequireNoRowLocks(TransactionSchemaOverlay overlay, TableDescriptor table, string statement)
+    {
+        if (overlay.Owner.CountRangeLocksForBucket(table.Store.RowKeySpace) > 0)
+            throw new CamusDBException(
+                CamusDBErrorCodes.StatementNotAllowedInTransaction,
+                $"{statement} on table '{table.Name}' cannot run in this transaction: the transaction holds locks on rows of " +
+                "the table from an earlier read, and the statement fills the table's rows in batches that lock each row, so " +
+                "it would wait for the transaction's own locks. Run the statement before the reads, or in a transaction of its own");
     }
 
     /// <summary>

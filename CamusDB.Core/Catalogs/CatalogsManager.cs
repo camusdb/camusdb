@@ -626,6 +626,10 @@ public sealed class CatalogsManager
     public async Task DeleteCoordinatorJobAsync(DatabaseDescriptor database, string tableId, string elementName, long leaderTerm = 0)
         => await CoordinatorJobStore.DeleteCoordinatorJobAsync(database, tableId, elementName, leaderTerm).ConfigureAwait(false);
 
+    internal Task DeleteOwnedCoordinatorJobAsync(
+        DatabaseDescriptor database, string tableId, string elementName, SchemaElementKind kind, string ownerChangeSetId)
+        => CoordinatorJobStore.DeleteOwnedCoordinatorJobAsync(database, tableId, elementName, kind, ownerChangeSetId);
+
     public async Task<PersistedCoordinatorJob?> TryLoadCoordinatorJobAsync(DatabaseDescriptor database, string tableId, string elementName)
         => await CoordinatorJobStore.TryLoadCoordinatorJobAsync(database, tableId, elementName).ConfigureAwait(false);
 

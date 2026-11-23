@@ -637,6 +637,10 @@ applies the delta, regardless of what the minority does — a single slow/unreac
 DDL latency at ~`SchemaAckQuorumBackstopDelay`, not the full timeout.* Set the delay to
 `Timeout.InfiniteTimeSpan` to restore the strict "every node must ack" behaviour.
 
+The post-commit gates of a pending change set and of its publish (§9.2) do not use the backstop. The
+commit of the transaction's rows follows the first, and a node that has not applied the pending entry does
+not fence the tables the change set touches. The success of `COMMIT` follows the second.
+
 **Why this needs a fence.** The backstop runs on *both* gates, including the §6.2 pre-proposal
 barrier. So the proposer can advance `N → N+1` while a minority node is still at `N-1`; under
 sustained DDL plus a persistently-slow node the divergence is otherwise **unbounded**, and a node
@@ -1468,7 +1472,10 @@ transaction.
 
 The first schema statement of the transaction takes the DDL lock (below), checks that the
 transaction's earlier statements still hold their schema pins, and copies the shared schema into a
-`TransactionSchemaOverlay`. While a statement of that transaction runs, `TransactionSchemaScope` makes
+`TransactionSchemaOverlay`. The copy shares every table with the shared schema, and a table is copied
+right before the first delta that changes it, so the cost does not grow with the other tables of the
+catalog. Because the tables are shared, a schema statement is refused with `CADB0502` once the shared
+schema moved under the transaction. While a statement of that transaction runs, `TransactionSchemaScope` makes
 `DatabaseDescriptor.Schema`, `TableDescriptors`, `SystemSchema` and `BoundQueries` answer from the
 overlay, and turns the result cache off. A query cursor re-enters the scope for each row
 (`TransactionSchemaScopedCursor`).
@@ -1507,7 +1514,8 @@ with the private schema out of the flow. The coordinator job carries the change 
    or the fill. Then it stops, with the element `WriteOnly` and the job record kept. Other transactions
    write the element from then on but cannot read it.
 2. The private schema takes the shared table over (`TransactionSchemaOverlay.RebaseOntoSharedTableAsync`):
-   its copy of the table is replaced by a copy of the shared one, and its base moves to the shared
+   its copy of the table is replaced by a copy of the shared one, the sequences the table owns come with
+   it (an identity column creates its sequence with the column), and its base moves to the shared
    version. The shared schema must have moved by the job's own steps only; otherwise the statement fails
    with `CADB0502`.
 3. The step to `Public` joins the change set, so the transaction reads the element at once and the
@@ -1549,18 +1557,25 @@ runs on a follower does not depend on the leadership, so it continues, and the c
 element through the new leader.
 
 The coordinator's resume never drives an owned job (`SchemaChangeCoordinator.ResumeOwnedJobAsync`). It
-waits while the owner's change set is pending. It deletes the record at once only when the element is
-gone and left nothing behind, which an index does not (its key space can still hold entries). Otherwise
-it tries the DDL lock once. Every open owner holds the DDL lock, so a resume that gets it knows the owner
-ended or lost it. It then reads the decision key as the resolver does. `committed` means the resume
-leaves the record. Absent means the owner never committed: the resume writes `aborted`, which refuses a
-late commit of the owner, and removes the element and purges its entries.
+waits while the owner's change set is pending. Otherwise it tries the DDL lock once. Every open owner
+holds the DDL lock, so a resume that gets it knows the owner ended or lost it. The job it works on was read
+by a scan that can be older than the owner's commit, and the work after a commit deletes the decision key,
+so neither the job nor an absent key proves that the owner did not commit. The resume takes the decision
+key's lock, and reads the job record again under it (`PendingChangeSetResolver.AbortOwnerAndReadJobAsync`):
+
+- A record that is gone, or that names another owner, leaves nothing to do.
+- A record that is still there means that the owner never committed. The resume writes `aborted`, which
+  refuses a late commit of the owner, and removes the element and purges its entries.
+
+A removal deletes the record only while it names the same owner, so it never takes the record of a later
+statement on an element of the same name.
 
 The online build is refused with `CADB0538` when the transaction wrote rows to the table or holds locks
 on its rows (the build locks each row, and would wait for the transaction), and when the change set
 already changed the table (the build runs on the shared table, which does not have that change). A CHECK,
 NOT NULL or foreign key check takes no lock, so the transaction's locks do not refuse it; its writes to
-the table do, because the check cannot see them. A foreign key is also refused when the transaction
+the table do, because the check cannot see them. A foreign key that must build its backing index locks
+each child row, so the transaction's locks on them refuse it before anything is staged. A foreign key is also refused when the transaction
 created, changed or wrote the parent table (`TransactionalDdlRules.RequireStageableParent`).
 
 #### Commit
@@ -1578,12 +1593,21 @@ created, changed or wrote the parent table (`TransactionalDdlRules.RequireStagea
 4. The pending apply fences the affected tables on every node. It stamps their write shape, so a writer
    that planned against the old shape is refused at its commit, and its acknowledgement waits for the
    commits in flight that wrote one of them. A new statement that opens an affected table waits in
-   `TableOpener` until the change set is published or aborted, then resolves the name again.
+   `TableOpener` until the change set is published or aborted, then resolves the name again. The commit
+   goes on only when **every live node** acknowledged the pending entry, with no quorum backstop (§6.3).
+   A node that does not answer within the gate timeout refuses the commit with the retryable `CADB0504`.
 5. Drop the transaction's write-shape pins (the check before step 3 and the base-version check cover
    them) and commit the transaction in KV. The rows, the decision key and the layouts land together.
-6. After a commit, propose `PublishChangeSet` and wait for every live node to acknowledge it. After a
-   definite abort, propose `AbortChangeSet`. After an unknown outcome, do nothing: a resumed commit or
-   the resolver decides.
+6. After a commit, propose `PublishChangeSet` and wait for every live node to acknowledge it, also with no
+   quorum backstop. After a definite abort, propose `AbortChangeSet`. After an unknown outcome, do nothing:
+   a resumed commit or the resolver decides.
+
+**Every exit frees the DDL lock.** A commit or a rollback that is cut off (a cancelled request, a transport
+fault, a failed close of the working set) leaves the transaction without an outcome, and the client may
+never come back. The transactions manager frees the lock on each of those exits, and the resolver decides
+what was left pending. The reaper of abandoned transactions frees it too for a transaction that a client
+left in the middle of its finalize, which it cannot roll back. A COMMIT that follows a cut-off ROLLBACK is
+refused: the change set was never announced, so the commit would keep the rows without their schema.
 
 The fence closes the window between the KV commit and the publish, in which the rows exist and the
 shared schema does not describe them yet. Without it, a delete of a parent row could pass while the
@@ -1606,8 +1630,15 @@ retryable `CADB0509`. The rows are committed. A `COMMIT` retried on the same tra
 publish, or confirms that the resolver completed it; the HTTP and gRPC transports keep such a
 transaction registered for that retry.
 
-**The DDL lock is freed before the work after the publish** (the purge of a dropped index's entries,
-the removal of a dropped owned sequence's counter), so that work does not hold other DDL back.
+**The DDL lock is freed before the work after the publish** (the removal of a dropped owned sequence's
+counter, the start of the purge of dropped data), so that work does not hold other DDL back.
+
+**A branch waits for a pending change set.** Between the KV commit and the publish, the rows of the
+transaction are visible at a fork timestamp and its schema is not, and nothing would publish the schema in
+the branch. `CREATE DATABASE … BRANCH FROM` waits a few seconds for the change set of the source to end and
+is then refused with the retryable `CADB0504`. The copy of the metadata reads the source at the fork
+timestamp and refuses when the pending record exists there, which also covers a node that has not applied
+the pending entry. The records of the source's change sets (decisions, data to remove) are not copied.
 
 #### Data removal after the publish
 
@@ -1635,14 +1666,15 @@ pending entry takes the version to the base plus one, and nothing else applies w
 `DeferredPurgeRunner` removes the data of a due record with the verified, batched key-space purge of
 `DatabaseDropper`, then deletes the record:
 
-- The committing node runs the records of its change set right after its publish, before `COMMIT`
-  returns.
+- The committing node starts the records of its change set right after its publish, behind `COMMIT`: the
+  removal takes time in proportion to the data, and the record is durable. Two records are removed at
+  once, and one node never removes the same record twice at once. A run stops when its database closes.
 - The coordinator-job sweep on the schema leader runs every due record that is left, for example after
   a crash of the committing node or a leader change. A database is scanned for records only after it
   opens and after a publish applies on that node.
 
-The removal is idempotent and the record is deleted last, so two runs at once, or an interrupted run,
-are safe. In a branch database the purge reaches only the branch's own entries.
+The removal is idempotent and the record is deleted last, so runs on two nodes at once, or an interrupted
+run, are safe. In a branch database the purge reaches only the branch's own entries.
 
 The pending checkpoint writes `{db}/meta/changeset:{id}`, so a reopen restores the pending change set
 from the checkpoint. The publish checkpoint writes every object the change set touched, deletes the
@@ -1675,11 +1707,14 @@ moved, with `CADB0502`.
 Tests: `TestTransactionalDdl` (single node: commit, rollback, reopen, the resolver, the class table,
 the cache isolation, the data removal after the publish, staged changes and constraints on created and
 on shared tables, a unique violation in a staged backfill, a migration whose last statement fails, and the
-removal of an owned element whose transaction vanished) and
+removal of an owned element whose transaction vanished), `TestTransactionalDdlRaces` (single node: a sweep
+that works on a job it read before the owner's commit, a branch during a commit, a finalize that is cut
+off, a removal slower than the commit, and the sharing of unchanged tables) and
 `CamusDB.Cluster.Tests/TestClusterTransactionalDdl` (three nodes: the transaction on a follower and on
 the leader, the lock order, lost drivers, a leader move while a change set is pending, a purge that
 the new schema leader finishes, a staged index on a shared table from a follower, a leader move
-during a staged backfill on the leader and on a follower, and staged constraints on shared tables).
+during a staged backfill on the leader and on a follower, staged constraints on shared tables, and a slow
+follower that holds back the commit and the publish).
 
 ---
 

@@ -30,8 +30,9 @@ namespace CamusDB.Core.Catalogs.Transactional;
 /// <c>{dbId}/meta/ddlcommit:{id}</c> = committed into the transaction, after an exclusive lock and a read
 /// that finds it absent; write the history key of every new table layout into the transaction; then
 /// propose a <see cref="SchemaOp.PendingChangeSet"/> entry. Its apply refuses the change set when the
-/// schema moved since the transaction's first schema change, and otherwise reserves the schema for
-/// it.</item>
+/// schema moved since the transaction's first schema change, and otherwise reserves the schema for it and
+/// fences its tables. The step ends when every live node applied the entry; a quorum is not enough,
+/// because the rows commit next.</item>
 /// <item>The KV commit of the transaction: rows, decision key and layouts land together or not at
 /// all.</item>
 /// <item><b>Decide</b>. After a commit, propose <see cref="SchemaOp.PublishChangeSet"/>; after a definite
@@ -64,6 +65,12 @@ namespace CamusDB.Core.Catalogs.Transactional;
 internal sealed class ChangeSetCommitter
 {
     private const int DecisionAttempts = 5;
+
+    /// <summary>
+    /// How long a decision is retried. An attempt that waits out a schema-acknowledgement gate takes the
+    /// whole gate timeout, and a second one would not help: the resolver ends the change set later.
+    /// </summary>
+    private const int DecisionRetryBudgetMs = 10_000;
 
     /// <summary>The value the committing transaction writes to the decision key.</summary>
     internal static readonly byte[] CommittedDecision = "committed"u8.ToArray();
@@ -350,10 +357,13 @@ internal sealed class ChangeSetCommitter
             && await DecideAsync(database, changeSetId, publish: true).ConfigureAwait(false))
             return true;
 
+        // Every live node, as for the publish itself: a quorum would report a commit whose schema changes
+        // a live node cannot see yet.
         return await database.Kahuna.WaitForSchemaAcksAsync(
             database.Id,
             database.Schema.SchemaVersion,
             database.Kahuna.SchemaAckWaitTimeout,
+            enforceFullConvergence: true,
             cancellationToken: CancellationToken.None).ConfigureAwait(false);
     }
 
@@ -394,11 +404,14 @@ internal sealed class ChangeSetCommitter
     /// <summary>
     /// Proposes the publish or the abort of the pending change set <paramref name="changeSetId"/>. Returns
     /// false when it is no longer pending: the other party (the committing node or a resolver) already
-    /// decided it. Retries a transient refusal a few times, then throws.
+    /// decided it. Retries a transient refusal a few times, within <see cref="DecisionRetryBudgetMs"/>, then
+    /// throws.
     /// </summary>
     internal async Task<bool> DecideAsync(DatabaseDescriptor database, string changeSetId, bool publish)
     {
         TransactionSchemaScope.Suppress();
+
+        long retryUntil = Environment.TickCount64 + DecisionRetryBudgetMs;
 
         for (int attempt = 1; ; attempt++)
         {
@@ -435,6 +448,7 @@ internal sealed class ChangeSetCommitter
                 return true;
             }
             catch (CamusDBException ex) when (attempt < DecisionAttempts
+                                               && Environment.TickCount64 < retryUntil
                                                && ex.Code is CamusDBErrorCodes.TransactionMustRetry or CamusDBErrorCodes.InvalidInternalOperation)
             {
                 transient = ex;
@@ -549,11 +563,6 @@ internal sealed class ChangeSetCommitter
     }
 
     /// <summary>
-    /// The work after a publish on the committing node: evict the cached results of the tables the change
-    /// set touched, carry the private copy of the legacy system schema over, and run the deferred work the
-    /// statements recorded.
-    /// </summary>
-    /// <summary>
     /// The work after the commit of a transaction whose only schema changes are staged constraints. The
     /// constraints are in the shared schema already, so only the cached results of their tables are
     /// dropped, and the decision key is deleted: no publish checkpoint deletes it. Best effort: a decision
@@ -576,6 +585,11 @@ internal sealed class ChangeSetCommitter
         await overlay.RunAfterPublishAsync().ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// The work after a publish on the committing node: evict the cached results of the tables the change
+    /// set touched, carry the private copy of the legacy system schema over, and run the deferred work the
+    /// statements recorded.
+    /// </summary>
     private static async Task AfterPublishAsync(DatabaseDescriptor database, TransactionSchemaOverlay overlay)
     {
         foreach (string tableId in overlay.TouchedTableIds)

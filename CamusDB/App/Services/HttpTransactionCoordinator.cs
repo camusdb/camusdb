@@ -253,7 +253,9 @@ public sealed class HttpTransactionCoordinator
     /// <para>Best-effort per entry: a rollback that throws (e.g. the transaction just committed on
     /// another thread, or a transient Kahuna error) is swallowed so one stuck entry cannot stall
     /// the sweep. A concurrent commit/rollback simply wins the <c>TryRemove</c> race; the loser
-    /// no-ops via <see cref="KvTransactionsManager.RollbackIfNotCompletedAsync"/>.</para>
+    /// no-ops via <see cref="KvTransactionsManager.RollbackIfNotCompletedAsync"/>. A transaction the client
+    /// left in the middle of its finalize cannot be rolled back and only gives up the DDL lock it may hold
+    /// (<see cref="KvTransactionsManager.AbandonAsync"/>).</para>
     /// </summary>
     public async Task<int> ReapIdleAsync(TimeSpan idleTimeout, CancellationToken cancellationToken = default)
     {
@@ -280,7 +282,7 @@ public sealed class HttpTransactionCoordinator
 
             try
             {
-                await entry.Manager.RollbackIfNotCompletedAsync(entry.Transaction, cancellationToken).ConfigureAwait(false);
+                await entry.Manager.AbandonAsync(entry.Transaction, cancellationToken).ConfigureAwait(false);
                 reaped++;
             }
             catch (OperationCanceledException)

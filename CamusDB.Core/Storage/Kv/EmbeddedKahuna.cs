@@ -1664,7 +1664,9 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     /// allowing quorum-only convergence there lets a proposer advance N→N+1 while a minority
     /// sits at N−1, breaking the invariant and risking schema mis-decode on those nodes. The
     /// quorum backstop is appropriate only for the <em>post-commit</em> ack gate (after the
-    /// log entry is already durable), where it bounds DDL latency without affecting safety.
+    /// log entry is already durable), where it bounds DDL latency without affecting safety. The
+    /// post-commit gates of a transaction's change set are the exception: the commit of its rows, and
+    /// the success it reports, depend on every live node (see <c>SchemaChangePublisher</c>).
     /// </param>
     public async Task<bool> WaitForSchemaAcksAsync(
         string db,

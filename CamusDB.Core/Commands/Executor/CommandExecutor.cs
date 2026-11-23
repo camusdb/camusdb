@@ -994,6 +994,12 @@ public sealed class CommandExecutor : IAsyncDisposable
     internal DeferredPurgeRunner DeferredPurgesForTests => deferredPurges;
 
     /// <summary>
+    /// Test-only seam: the coordinator that the sweep and the leader callback resume jobs with, so a test
+    /// can deliver a job that was read earlier, as a sweep that was slow between its scan and its work does.
+    /// </summary>
+    internal SchemaChangeCoordinator ResumeCoordinatorForTests => databaseOpener.ResumeCoordinator;
+
+    /// <summary>
     /// Test-only seam: attempts to release one database and reports why it was or was not released, so
     /// a test can assert on the reason a busy database was spared rather than only on the count.
     /// </summary>
@@ -2197,6 +2203,9 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         // The job sweep drives schema changes through descriptors; it stops before they are closed.
         await coordinatorJobSweeper.DisposeAsync().ConfigureAwait(false);
+
+        // The same for the removal of dropped data that runs behind a commit.
+        await deferredPurges.DisposeAsync().ConfigureAwait(false);
 
         await databaseCloser.DisposeAsync();
         await sqlParserCache.DisposeAsync().ConfigureAwait(false);

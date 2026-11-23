@@ -374,9 +374,11 @@ internal sealed partial class SchemaDdlService
     /// <item>The step of the constraint to <c>Public</c> joins the change set. The index's job record is
     /// owned too, so a rollback removes the index after the constraint.</item>
     /// </list>
-    /// The check reads with no lock. The transaction must not have created, changed or written the parent
-    /// table (<see cref="TransactionalDdlRules.RequireStageableParent"/>), because the steps and the check run
-    /// on the shared tables, outside the transaction.
+    /// The check reads with no lock, so locks of the transaction on the child rows matter only to the index
+    /// build of the first step (<see cref="TransactionalDdlRules.RequireNoRowLocks"/>). The transaction must
+    /// not have created, changed or written the parent table
+    /// (<see cref="TransactionalDdlRules.RequireStageableParent"/>), because the steps and the check run on
+    /// the shared tables, outside the transaction.
     /// </summary>
     private async Task<bool> StageForeignKeyOnSharedTableAsync(
         DatabaseDescriptor database, TransactionSchemaOverlay overlay, TableDescriptor child, ForeignKeyInfo info)
@@ -406,6 +408,10 @@ internal sealed partial class SchemaDdlService
                 {
                     database.Schema.ReleaseLock();
                 }
+
+                // Only the plan tells whether the statement builds an index, and nothing is staged yet.
+                if (plan.OwnedIndexName is not null)
+                    TransactionalDdlRules.RequireNoRowLocks(overlay, table, statement);
 
                 await RequireNoOtherJobNamedAsync(database, table.Id, info.Name).ConfigureAwait(false);
 

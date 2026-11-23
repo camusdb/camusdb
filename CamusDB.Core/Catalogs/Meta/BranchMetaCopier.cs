@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.Catalogs.Replication;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Transactions;
@@ -63,6 +64,11 @@ internal static class BranchMetaCopier
     /// Dropping only the job while keeping the staging relation would strand a relation no statement
     /// can name and nothing owns, which is exactly the leak the record exists to prevent.</para>
     ///
+    /// <para><b>The records of transactional DDL stay behind too:</b> the decision of a change set, and the
+    /// data that a published change set made unreachable. They name transactions and data of the source. A
+    /// change set that is pending at <paramref name="forkT"/> refuses the copy instead
+    /// (<see cref="RequireNoPendingChangeSet"/>).</para>
+    ///
     /// <para>The caller is responsible for holding the source's <c>SchemaDdlSemaphore</c> across this
     /// call to prevent a concurrent DDL on the same node from mutating the source schema between
     /// the stability check and the copy. In cluster mode a remote DDL can still commit between
@@ -89,6 +95,10 @@ internal static class BranchMetaCopier
         string sourceRefreshJobPrefix = MetaKeys.RefreshJobKeyPrefix(source.Id);
         string sourceTablePrefix = MetaKeys.TableKeyPrefix(source.Id);
         string sourceSequencePrefix = MetaKeys.SequenceKeyPrefix(source.Id);
+        string sourceVersionKey = MetaKeys.VersionKey(source.Id);
+        string sourceChangeSetPrefix = MetaKeys.ChangeSetKeyPrefix(source.Id);
+        string sourceDecisionPrefix = MetaKeys.ChangeSetDecisionKeyPrefix(source.Id);
+        string sourcePurgePrefix = MetaKeys.PurgeKeyPrefix(source.Id);
 
         // The sequence records the branch inherits, so their counters can be created afterwards.
         // Collected here rather than re-scanned later because the copy already walks every key and
@@ -101,6 +111,9 @@ internal static class BranchMetaCopier
         // Their table records are dropped as they are met; their history keys are dropped afterwards,
         // because history keys sort before table keys and so are met first.
         HashSet<string>? stagingTableIds = null;
+
+        List<(string ChangeSetId, long Version)>? pendingChangeSets = null;
+        long sourceVersion = 0;
 
         // Scan source metadata as-of forkT: any schema change committed after forkT is invisible,
         // so the branch gets exactly the schema the row/index snapshot at forkT reflects.
@@ -119,8 +132,19 @@ internal static class BranchMetaCopier
             if (entry.Value is null)
                 continue;
 
+            if (key.StartsWith(sourceChangeSetPrefix, StringComparison.Ordinal))
+            {
+                (pendingChangeSets ??= []).Add((key[sourceChangeSetPrefix.Length..], SchemaChangeLogEntryCodec.Decode(entry.Value).ToVersion));
+                continue;
+            }
+
+            if (string.Equals(key, sourceVersionKey, StringComparison.Ordinal))
+                sourceVersion = MetaJsonSerializer.DeserializeCompat(entry.Value, MetaJsonContext.Default.Int64);
+
             if (key.StartsWith(sourceCoordinatorPrefix, StringComparison.Ordinal) ||
-                key.StartsWith(sourceKeyspacePrefix, StringComparison.Ordinal))
+                key.StartsWith(sourceKeyspacePrefix, StringComparison.Ordinal) ||
+                key.StartsWith(sourceDecisionPrefix, StringComparison.Ordinal) ||
+                key.StartsWith(sourcePurgePrefix, StringComparison.Ordinal))
                 continue;
 
             if (!key.StartsWith(sourcePrefix, StringComparison.Ordinal))
@@ -135,6 +159,8 @@ internal static class BranchMetaCopier
             string destKey = branchPrefix + key[sourcePrefix.Length..];
             toCopy.Add((destKey, entry.Value));
         }
+
+        RequireNoPendingChangeSet(source, pendingChangeSets, sourceVersion);
 
         if (stagingTableIds is not null)
             RemoveStagingHistory(toCopy, branchDbId, stagingTableIds);
@@ -158,6 +184,34 @@ internal static class BranchMetaCopier
         }
 
         await SeedBranchSequencesAsync(source, branchDbId, inheritedSequences, retryBudgetMs).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Refuses a fork at a timestamp at which the source has a pending change set. The record of a pending
+    /// change set exists from before the KV commit of its transaction until the checkpoint of its publish
+    /// or abort. So while it exists the rows of the transaction can be visible and its schema is not, and a
+    /// branch would keep that half of the transaction for good: nothing publishes it there. Read at the fork
+    /// timestamp, the record is the same answer on every node, whatever this node has applied. Retryable: the
+    /// change set ends with its transaction or with the resolver.
+    ///
+    /// <para>No schema entry lands between a pending entry and its publish or abort. A schema version past
+    /// the pending one therefore means that the change set ended and that the checkpoint which deletes its
+    /// record was lost; such a record refuses nothing.</para>
+    /// </summary>
+    private static void RequireNoPendingChangeSet(
+        DatabaseDescriptor source, List<(string ChangeSetId, long Version)>? pendingChangeSets, long sourceVersion)
+    {
+        if (pendingChangeSets is null)
+            return;
+
+        foreach ((string changeSetId, long version) in pendingChangeSets)
+        {
+            if (version >= sourceVersion)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.TransactionMustRetry,
+                    $"Database '{source.Name}' cannot be branched while the schema changes of a committing transaction " +
+                    $"(change set {changeSetId}) are not published yet; retry the statement");
+        }
     }
 
     /// <summary>

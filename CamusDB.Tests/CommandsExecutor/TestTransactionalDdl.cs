@@ -1811,6 +1811,7 @@ internal sealed class TestTransactionalDdl : BaseTest
         await database.Transactions.CommitAsync(tx);
 
         Assert.IsFalse(database.Schema.Tables["items"].Indexes!.Exists(i => i.Name == "val_idx"));
+        await executor.DeferredPurgesForTests.WaitForScheduledRunsForTestsAsync();
         Assert.AreEqual(0, await CountIndexEntriesAsync(database, indexSpace), "the committing node removes the entries after its publish");
         Assert.AreEqual(0, await CountPurgeRecordsAsync(database), "and then deletes the record");
         Assert.AreEqual(3, (await QueryOutsideAsync(executor, database, dbname, "SELECT * FROM items")).Count, "the rows stay");
@@ -1936,6 +1937,7 @@ internal sealed class TestTransactionalDdl : BaseTest
         await database.Transactions.CommitAsync(tx);
 
         Assert.IsFalse(database.Schema.Tables.ContainsKey("items"));
+        await executor.DeferredPurgesForTests.WaitForScheduledRunsForTestsAsync();
         Assert.AreEqual(0, await CountStoredRowsAsync(database, storageId), "the committing node removes the rows after its publish");
         Assert.AreEqual(0, await CountIndexEntriesAsync(database, indexSpace), "and every index entry");
         Assert.AreEqual(0, await CountPurgeRecordsAsync(database), "and then deletes the record");
@@ -1972,6 +1974,7 @@ internal sealed class TestTransactionalDdl : BaseTest
         await branch.Transactions.CommitAsync(tx);
 
         Assert.IsFalse(branch.Schema.Tables.ContainsKey("items"));
+        await executor.DeferredPurgesForTests.WaitForScheduledRunsForTestsAsync();
         Assert.AreEqual(0, await CountStoredRowsAsync(branch, storageId), "the publish removes the rows of the branch");
         Assert.AreEqual(0, await CountPurgeRecordsAsync(branch));
         Assert.AreEqual(2, (await QueryOutsideAsync(executor, root, rootName, "SELECT * FROM items")).Count, "the root keeps its rows");

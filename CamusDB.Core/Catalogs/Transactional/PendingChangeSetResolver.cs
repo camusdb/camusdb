@@ -85,10 +85,64 @@ internal sealed class PendingChangeSetResolver
     }
 
     /// <summary>
+    /// The current record of <paramref name="job"/>, a job that a transaction owns, when the transaction
+    /// ended without a commit; null when there is nothing to remove. The coordinator's resume calls it with
+    /// the DDL lock held, for a job it read earlier.
+    ///
+    /// <para><b>Why the record is read again, under the decision key's lock.</b> The owner's KV commit
+    /// deletes its job records and writes the decision key together, and the work after the commit then
+    /// deletes the decision key. An absent decision key therefore means that the owner never committed only
+    /// while its record still exists. The owner holds the decision key's exclusive lock from its prepare to
+    /// the end of its KV commit, so under that lock the commit has ended, and the record read here shows it,
+    /// or it cannot start any more: <c>aborted</c> is committed before this method returns a record, and the
+    /// owner reads the key under the same lock.</para>
+    ///
+    /// <para>A record that names another owner is the job of a later transaction on an element of the same
+    /// name; it is not this job's business.</para>
+    /// </summary>
+    internal static async Task<PersistedCoordinatorJob?> AbortOwnerAndReadJobAsync(DatabaseDescriptor database, PersistedCoordinatorJob job)
+    {
+        string owner = job.OwnerChangeSetId!;
+        IKahuna kahuna = database.Kahuna.Kahuna;
+        string decisionKey = MetaKeys.ChangeSetDecisionKey(database.Id, owner);
+
+        KvTransaction tx = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+        ).ConfigureAwait(false);
+
+        try
+        {
+            await CatalogKeyLock.AcquireExclusiveAsync(kahuna, tx, decisionKey, DecisionKeyLockAttempts, "decision").ConfigureAwait(false);
+
+            byte[]? decision = await ChangeSetCommitter.ReadDecisionAsync(
+                kahuna, tx.TransactionId, decisionKey, CancellationToken.None).ConfigureAwait(false);
+
+            if (decision is not null && decision.AsSpan().SequenceEqual(ChangeSetCommitter.CommittedDecision))
+                return null;
+
+            if (await CoordinatorJobStore.ReadLockedCoordinatorJobAsync(database, tx, job.TableId, job.ElementName).ConfigureAwait(false) is not { } stored
+                || !CoordinatorJobStore.IsOwnedBy(stored, job.ElementKind, owner))
+                return null;
+
+            if (decision is null)
+            {
+                await MetaKeyWriter.WriteMetaKey(kahuna, tx, decisionKey, ChangeSetCommitter.AbortedDecision).ConfigureAwait(false);
+                await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
+            }
+
+            return stored;
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
     /// True when the decision key of <paramref name="changeSetId"/> says committed. When the key is absent,
     /// writes <c>aborted</c> and commits it before it returns false, so the transaction can no longer
-    /// commit. The resolver calls it for a pending change set, and the coordinator's resume for a staged
-    /// job whose owner is gone.
+    /// commit. Only for a pending change set: its record keeps the decision key in place until the publish
+    /// or the abort. A staged job whose owner is gone goes through <see cref="AbortOwnerAndReadJobAsync"/>.
     /// </summary>
     internal static async Task<bool> ReadOrAbortDecisionAsync(DatabaseDescriptor database, string changeSetId)
     {

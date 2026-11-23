@@ -193,14 +193,18 @@ internal sealed class SchemaChangePublisher
             database.Id,
             entry.ToVersion,
             database.Kahuna.SchemaAckWaitTimeout,
+            enforceFullConvergence: RequiresEveryLiveNode(entry.Op),
             cancellationToken: CancellationToken.None
         ).ConfigureAwait(false);
 
         if (!acked)
         {
             string timedOutLaggards = FormatLaggards(database.Kahuna.LastGateLaggards);
+
+            // A pending change set that not every node fences refuses the commit of its transaction, which
+            // has committed nothing yet, so the client can run the transaction again.
             throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInternalOperation,
+                entry.Op == SchemaOp.PendingChangeSet ? CamusDBErrorCodes.TransactionMustRetry : CamusDBErrorCodes.InvalidInternalOperation,
                 $"Timed out waiting for live schema apply acknowledgements for database '{database.Name}' " +
                 $"version {entry.ToVersion}; nodes that never acked: {timedOutLaggards}"
             );
@@ -217,6 +221,21 @@ internal sealed class SchemaChangePublisher
                 FormatLaggards(database.Kahuna.LastGateLaggards)
             );
     }
+
+    /// <summary>
+    /// True for an entry whose post-commit gate must hear from every live node, where a quorum is not
+    /// enough:
+    /// <list type="bullet">
+    /// <item><see cref="SchemaOp.PendingChangeSet"/>: the KV commit of the transaction follows the gate. A
+    /// node that did not apply the entry does not fence the tables of the change set, and would read the
+    /// committed rows with the schema from before it, or use an index the change set drops.</item>
+    /// <item><see cref="SchemaOp.PublishChangeSet"/>: the success of <c>COMMIT</c> says that the schema
+    /// changes are visible on every live node.</item>
+    /// </list>
+    /// Every other entry keeps the quorum backstop: the next proposal waits for every live node anyway.
+    /// </summary>
+    private static bool RequiresEveryLiveNode(SchemaOp op) =>
+        op is SchemaOp.PendingChangeSet or SchemaOp.PublishChangeSet;
 
     private static async Task WaitForPreviousVersionAcksAsync(DatabaseDescriptor database, SchemaChangeLogEntry entry)
     {
@@ -263,7 +282,7 @@ internal sealed class SchemaChangePublisher
 
             deltas = ChangeSetDeltaApplier.DecodeDeltas(pending.Payload, entry);
             copy = deltas.Exists(static delta => delta.Op is SchemaOp.DropTable or SchemaOp.DropView or SchemaOp.DropSequence)
-                ? SchemaReplicator.CloneSchema(database.Schema)
+                ? SchemaReplicator.CloneSchema(database.Schema, (_, table) => table.Id is { } id && pending.AffectedTableIds.Contains(id))
                 : database.Schema;
         }
         finally

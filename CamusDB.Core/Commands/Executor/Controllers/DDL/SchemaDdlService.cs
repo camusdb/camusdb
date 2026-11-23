@@ -1611,12 +1611,16 @@ internal sealed partial class SchemaDdlService
             await catalogs.ReplicateIndexChangeAsync(database, ticket, table, tx).ConfigureAwait(false);
 
             // The entries stay until the publish. The record commits with the transaction, and this node
-            // removes them right after its publish; the coordinator-job sweep finishes a removal that a
-            // crash interrupted. The key space is addressed by storage id and index id, which no rename
-            // changes.
+            // starts to remove them right after its publish; the coordinator-job sweep finishes a removal
+            // that a crash interrupted. The key space is addressed by storage id and index id, which no
+            // rename changes.
             DeferredPurgeRecord purge = overlay.AddDeferredPurge(
                 DeferredPurgeKind.IndexEntries, table.Id, table.Schema.EffectiveStorageId, [dropped.KvId]);
-            overlay.AddAfterPublish(() => context.DeferredPurges.RunAsync(overlay.Database, [purge]));
+            overlay.AddAfterPublish(() =>
+            {
+                context.DeferredPurges.Schedule(overlay.Database, purge);
+                return Task.CompletedTask;
+            });
 
             return true;
         }

@@ -906,11 +906,17 @@ What the transaction meets:
   touches (or a table that a new foreign key references) waits until the change is visible. The wait is
   normally a few milliseconds. A writer of such a table that planned before the commit is refused at its
   own commit with the retryable `CADB0502`.
+- **`COMMIT` needs every live node.** The rows commit after every live node fenced the changed tables, and
+  `COMMIT` returns after every live node sees the change. A live node that is slow to apply the schema log
+  makes `COMMIT` wait. When the node does not catch up before the timeout, `COMMIT` is refused with the
+  retryable `CADB0504`, and no row was committed.
+- **A branch is created from a settled schema.** `CREATE DATABASE … BRANCH FROM` waits a few seconds for a
+  transaction that is committing its schema changes, and is then refused with the retryable `CADB0504`.
 - **Dropped data leaves the disk after the commit.** A `DROP INDEX`, a `DROP TABLE … FORCE` and a
   `DROP TABLE` in a branch database remove no data inside the transaction, so a `ROLLBACK` keeps every
-  row and index entry. After the commit, the committing node removes the data before `COMMIT` returns,
-  and a background sweep finishes the removal if that node fails. A `DROP TABLE` without `FORCE` keeps
-  the table recoverable, as outside a transaction.
+  row and index entry. After the commit, the committing node removes the data in the background, and
+  `COMMIT` does not wait for it. A background sweep finishes the removal if that node fails. A
+  `DROP TABLE` without `FORCE` keeps the table recoverable, as outside a transaction.
 - **`DROP COLUMN` rewrites no row.** As in PostgreSQL, the column leaves the schema at once, and its
   value leaves the disk when each row is next updated or deleted. No query returns it, and a new column
   with the same name reads NULL in the old rows.
@@ -921,7 +927,8 @@ What the transaction meets:
   shared table, which does not have that change yet. Run such a statement first in the transaction.
   A CHECK, a NOT NULL and a foreign key check take no lock: they are refused only for the writes of the
   transaction to the table and, for a foreign key, for a parent table that the transaction created,
-  changed or wrote.
+  changed or wrote. A foreign key with no index to use builds one, so the locks of the transaction on the
+  child rows refuse it too.
 - **A failed online build leaves nothing after the rollback.** A row that breaks a new unique index
   fails the statement with `CADB0300`, and the index stops being maintained at once. A change of the
   schema leader while the build runs on the leader node fails the statement with the retryable

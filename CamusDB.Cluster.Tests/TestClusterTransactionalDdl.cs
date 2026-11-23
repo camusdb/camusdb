@@ -17,6 +17,7 @@ using NUnit.Framework;
 using CamusDB.Core;
 using CamusDB.Core.Catalogs.Meta;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.Catalogs.Transactional;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Storage.Kv;
@@ -142,6 +143,178 @@ public sealed class TestClusterTransactionalDdl
 
             Assert.AreEqual(1, (await QueryAsync(node, db, "SELECT * FROM fresh")).Count, $"node {node.Index} reads the new table's row");
         }
+    }
+
+    /// <summary>
+    /// Keeps <paramref name="node"/> from applying a schema entry, as a follower that is slow but reachable:
+    /// it answers the probes of an acknowledgement gate with its old version. Returns the action that lets it
+    /// go on. The lock is held in a flow of its own, so the caller's flow never counts as the holder.
+    /// </summary>
+    private static async Task<Func<Task>> HoldSchemaApplyAsync(InProcessSchemaCluster.Node node)
+    {
+        TaskCompletionSource held = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        Task holder = Task.Run(async () =>
+        {
+            Schema schema = node.Database!.Schema;
+            await schema.AcquireLockAsync();
+            try
+            {
+                held.TrySetResult();
+                await release.Task;
+            }
+            finally
+            {
+                schema.ReleaseLock();
+            }
+        });
+
+        await held.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        return async () =>
+        {
+            release.TrySetResult();
+            await holder.WaitAsync(TimeSpan.FromSeconds(10));
+        };
+    }
+
+    /// <summary>
+    /// The rows of a transaction commit only after every live node fenced the tables its change set touches.
+    /// A node that did not apply the pending entry would read them with the schema from before it, so a
+    /// quorum of acknowledgements is not enough, also after the time that a schema change waits for the rest.
+    /// </summary>
+    [Test]
+    public async Task Commit_WaitsForEveryLiveNodeToFenceTheChangeSet()
+    {
+        await using InProcessSchemaCluster cluster = await StartClusterAsync();
+        string db = cluster.NextSchemaLogDatabaseName();
+        (InProcessSchemaCluster.Node leader, InProcessSchemaCluster.Node follower) = await PrepareAsync(cluster, db);
+        InProcessSchemaCluster.Node slow = cluster.Nodes.First(n => n.Index != leader.Index && n.Index != follower.Index);
+
+        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+            node.Kahuna.SchemaAckQuorumBackstopDelay = TimeSpan.FromMilliseconds(200);
+
+        KvTransaction tx = await BeginSessionAsync(leader);
+        await Ddl(leader, tx, db, "CREATE TABLE fresh (id int64 PRIMARY KEY)");
+        await Write(leader, tx, db, "INSERT INTO fresh (id) VALUES (1)");
+
+        Func<Task> release = await HoldSchemaApplyAsync(slow);
+        Task commit = Task.Run(() => leader.Database!.Transactions.CommitAsync(tx));
+        try
+        {
+            await Task.Delay(1_500);
+
+            Assert.IsNull(slow.Database!.Schema.PendingChangeSet, "the slow node did not apply the pending entry");
+            Assert.AreNotEqual(KvTransactionStatus.Committed, tx.Status, "no row commits before every node fences the change set");
+            Assert.IsFalse(commit.IsCompleted);
+        }
+        finally
+        {
+            await release();
+        }
+
+        await commit.WaitAsync(TimeSpan.FromSeconds(30));
+
+        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+            Assert.AreEqual(1, (await QueryAsync(node, db, "SELECT * FROM fresh")).Count, $"node {node.Index} reads the new table's row");
+    }
+
+    /// <summary>
+    /// A live node that does not fence the change set in time refuses the commit with the retryable code.
+    /// Nothing committed, and the change set ends once the node caught up, so the schema can change again.
+    /// </summary>
+    [Test]
+    public async Task Commit_IsRefusedRetryably_WhenALiveNodeDoesNotFenceInTime()
+    {
+        await using InProcessSchemaCluster cluster = await StartClusterAsync(
+            CamusDBOptions.Default with { TransactionalDdlEnabled = true, TransactionalDdlResolveAfterMs = 1_000 });
+        string db = cluster.NextSchemaLogDatabaseName();
+        (InProcessSchemaCluster.Node leader, InProcessSchemaCluster.Node follower) = await PrepareAsync(cluster, db);
+        InProcessSchemaCluster.Node slow = cluster.Nodes.First(n => n.Index != leader.Index && n.Index != follower.Index);
+
+        KvTransaction tx = await BeginSessionAsync(leader);
+        await Ddl(leader, tx, db, "CREATE TABLE fresh (id int64 PRIMARY KEY)");
+        await Write(leader, tx, db, "INSERT INTO base (id, name) VALUES (2, 'two')");
+
+        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+        {
+            node.Kahuna.SchemaAckQuorumBackstopDelay = TimeSpan.FromMilliseconds(100);
+            node.Kahuna.SchemaAckWaitTimeout = TimeSpan.FromSeconds(1);
+        }
+
+        Func<Task> release = await HoldSchemaApplyAsync(slow);
+        try
+        {
+            CamusDBException? refused = Assert.ThrowsAsync<CamusDBException>(async () => await leader.Database!.Transactions.CommitAsync(tx));
+            Assert.AreEqual(CamusDBErrorCodes.TransactionMustRetry, refused!.Code);
+            Assert.AreEqual(KvTransactionStatus.RolledBack, tx.Status);
+        }
+        finally
+        {
+            await release();
+        }
+
+        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+            node.Kahuna.SchemaAckWaitTimeout = TimeSpan.FromSeconds(30);
+
+        for (int i = 0; i < 200 && cluster.Nodes.Any(n => n.Database!.Schema.PendingChangeSet is not null); i++)
+            await Task.Delay(100);
+
+        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+        {
+            Assert.IsNull(node.Database!.Schema.PendingChangeSet, $"node {node.Index} has nothing pending");
+            Assert.IsFalse(node.Database!.Schema.Tables.ContainsKey("fresh"));
+            Assert.AreEqual(1, (await QueryAsync(node, db, "SELECT * FROM base")).Count, $"node {node.Index}: no row committed");
+        }
+
+        await AutocommitAsync(leader, db, "CREATE TABLE later (id int64 PRIMARY KEY)", ddl: true);
+        await cluster.WaitForSchemaConvergenceAsync(db, leader.Database!.Schema.SchemaVersion);
+    }
+
+    /// <summary>
+    /// A successful COMMIT says that every live node sees the schema changes, also a COMMIT that is retried
+    /// after the rows committed and the publish was not confirmed.
+    /// </summary>
+    [Test]
+    public async Task CommitRetry_WaitsForEveryLiveNodeToApplyThePublish()
+    {
+        await using InProcessSchemaCluster cluster = await StartClusterAsync();
+        string db = cluster.NextSchemaLogDatabaseName();
+        (InProcessSchemaCluster.Node leader, InProcessSchemaCluster.Node follower) = await PrepareAsync(cluster, db);
+        InProcessSchemaCluster.Node slow = cluster.Nodes.First(n => n.Index != leader.Index && n.Index != follower.Index);
+
+        KvTransaction tx = await BeginSessionAsync(leader);
+        await Ddl(leader, tx, db, "CREATE TABLE fresh (id int64 PRIMARY KEY)");
+        await Write(leader, tx, db, "INSERT INTO fresh (id) VALUES (1)");
+
+        ChangeSetCommitter committer = ((TransactionSchemaOverlay)tx.SchemaChanges!).Committer;
+        committer.TestPublishFailure = new InvalidOperationException("the publish is lost");
+        CamusDBException? unconfirmed = Assert.ThrowsAsync<CamusDBException>(async () => await leader.Database!.Transactions.CommitAsync(tx));
+        Assert.AreEqual(CamusDBErrorCodes.TransactionFinalizeUnresolved, unconfirmed!.Code);
+        committer.TestPublishFailure = null;
+
+        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+            node.Kahuna.SchemaAckQuorumBackstopDelay = TimeSpan.FromMilliseconds(200);
+
+        Func<Task> release = await HoldSchemaApplyAsync(slow);
+        Task retry = Task.Run(() => leader.Database!.Transactions.CommitAsync(tx));
+        try
+        {
+            await Task.Delay(1_500);
+
+            Assert.IsFalse(slow.Database!.Schema.Tables.ContainsKey("fresh"), "the slow node did not apply the publish");
+            Assert.IsFalse(retry.IsCompleted, "a COMMIT that returned would promise a table that a live node cannot see");
+        }
+        finally
+        {
+            await release();
+        }
+
+        await retry.WaitAsync(TimeSpan.FromSeconds(30));
+
+        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+            Assert.IsTrue(node.Database!.Schema.Tables.ContainsKey("fresh"), $"node {node.Index} sees the new table");
     }
 
     [TestCase(false)]

@@ -619,18 +619,17 @@ public sealed class SchemaChangeCoordinator
     /// <list type="bullet">
     /// <item>The owner's change set is pending: its KV commit is on its way, and its publish or its abort
     /// decides, so the job waits.</item>
-    /// <item>The element is gone and left nothing to remove (a column or a constraint): the record is
-    /// deleted. An index that is gone can still have entries in its key space, from a build that failed, so
-    /// it takes the removal path below, which purges them.</item>
     /// <item>Otherwise the owner may still be open, and an open owner holds the DDL lock of the database. The
-    /// resume tries that lock once, and leaves the job when another holder has it. With the lock, it reads
-    /// the change set's decision key as the resolver does: absent means the owner never committed, so the
-    /// resume writes <c>aborted</c>, which stops a late commit of the owner, and removes the element.
-    /// <c>committed</c> means that the record was read before the owner's commit deleted it, so the job is
-    /// left.</item>
+    /// resume tries that lock once, and leaves the job when another holder has it.</item>
+    /// <item>With the lock, it reads the record again: <paramref name="persisted"/> was read by a scan that
+    /// can be older than the owner's commit or rollback. A record that is gone, or that names another owner,
+    /// leaves nothing to do. Otherwise the owner never committed; <c>aborted</c> in its decision key stops a
+    /// late commit, and the element is removed. See
+    /// <see cref="PendingChangeSetResolver.AbortOwnerAndReadJobAsync"/>.</item>
     /// </list>
-    /// A readable element proves no commit: a staged CHECK or NOT NULL, and the backing index of a staged
-    /// foreign key, are readable before their owner commits.
+    /// Neither the element nor the decision key proves anything on its own. A staged CHECK or NOT NULL, and
+    /// the backing index of a staged foreign key, are readable before their owner commits, and the work
+    /// after a commit deletes the decision key.
     /// <para>The order of the locks is the DDL lock, then the DDL gate, as on every path
     /// (<see cref="TransactionalDdlLock"/>).</para>
     /// </summary>
@@ -640,21 +639,21 @@ public sealed class SchemaChangeCoordinator
 
         string owner = persisted.OwnerChangeSetId!;
 
-        if (OwnerIsPending(database, owner) || await DeleteRecordIfGoneAsync(database, persisted, tableName).ConfigureAwait(false))
+        if (OwnerIsPending(database, owner))
             return;
 
         await using TransactionalDdlLock? ddlLock = await TransactionalDdlLock.TryAcquireAsync(database, logger).ConfigureAwait(false);
         if (ddlLock is null)
             return;
 
-        // Read again with the lock: the owner can have committed or rolled back meanwhile.
-        if (OwnerIsPending(database, owner) || await DeleteRecordIfGoneAsync(database, persisted, tableName).ConfigureAwait(false))
+        // Read again with the lock: the owner can have announced its change set meanwhile.
+        if (OwnerIsPending(database, owner))
             return;
 
-        bool committed;
+        PersistedCoordinatorJob? abandoned;
         try
         {
-            committed = await PendingChangeSetResolver.ReadOrAbortDecisionAsync(database, owner).ConfigureAwait(false);
+            abandoned = await PendingChangeSetResolver.AbortOwnerAndReadJobAsync(database, persisted).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -664,53 +663,22 @@ public sealed class SchemaChangeCoordinator
             return;
         }
 
-        if (committed)
+        if (abandoned is null)
+        {
+            ClearBackoff(database, persisted);
             return;
+        }
 
         logger?.LogWarning(
             "Removing the {Kind} {Element} of table {Table} in database {Database}: change set {ChangeSetId}, which staged it, ended without a commit",
-            persisted.ElementKind, persisted.ElementName, tableName, database.Name, owner);
+            abandoned.ElementKind, abandoned.ElementName, tableName, database.Name, owner);
 
-        await RemoveOwnedElementAsync(database, persisted).ConfigureAwait(false);
+        await RemoveOwnedElementAsync(database, abandoned).ConfigureAwait(false);
     }
 
     private static bool OwnerIsPending(DatabaseDescriptor database, string changeSetId) =>
         database.Schema.PendingChangeSet is { } pending
         && string.Equals(pending.ChangeSetId, changeSetId, StringComparison.Ordinal);
-
-    /// <summary>
-    /// Deletes the record of an owned job whose element is gone and left nothing to remove (a column, a
-    /// foreign key, a CHECK or a NOT NULL), and returns true. Returns false while the element exists, and
-    /// for an index that is gone, whose entries only <see cref="RemoveOwnedElementAsync"/> purges.
-    /// </summary>
-    private async Task<bool> DeleteRecordIfGoneAsync(DatabaseDescriptor database, PersistedCoordinatorJob persisted, string tableName)
-    {
-        if (persisted.ElementKind == SchemaElementKind.Index || OwnedElementExists(database.Schema, tableName, persisted))
-            return false;
-
-        try
-        {
-            await catalogs.DeleteCoordinatorJobAsync(database, persisted.TableId, persisted.ElementName).ConfigureAwait(false);
-            ClearBackoff(database, persisted);
-        }
-        catch (Exception ex)
-        {
-            logger?.LogWarning(ex, "Could not delete the record of the owned {Kind} {Element} of table {Table}; a later resume deletes it",
-                persisted.ElementKind, persisted.ElementName, tableName);
-        }
-
-        return true;
-    }
-
-    /// <summary>True while the element an owned job names is in <paramref name="schema"/>, in any state.</summary>
-    private static bool OwnedElementExists(Schema schema, string tableName, PersistedCoordinatorJob persisted)
-    {
-        if (persisted.ElementKind is SchemaElementKind.Check or SchemaElementKind.NotNull)
-            return schema.Tables.TryGetValue(tableName, out TableSchema? table)
-                && RowConstraintExists(table, persisted.ElementKind, persisted.ElementName);
-
-        return GetCurrentElementState(schema, tableName, persisted.ElementName, persisted.ElementKind) != SchemaElementState.Absent;
-    }
 
     /// <summary>
     /// Removes every element whose job record names <paramref name="changeSetId"/> as its owner, one at a
@@ -861,7 +829,8 @@ public sealed class SchemaChangeCoordinator
 
         try
         {
-            await catalogs.DeleteCoordinatorJobAsync(database, persisted.TableId, persisted.ElementName).ConfigureAwait(false);
+            await catalogs.DeleteOwnedCoordinatorJobAsync(
+                database, persisted.TableId, persisted.ElementName, persisted.ElementKind, persisted.OwnerChangeSetId!).ConfigureAwait(false);
             ClearBackoff(database, persisted);
         }
         catch (Exception ex)
@@ -1043,7 +1012,7 @@ public sealed class SchemaChangeCoordinator
                 "Column {ElementName} of {TableName} is published; its stale removal job is deleted and the column stays",
                 job.ElementName, job.TableName);
 
-            try { await catalogs.DeleteCoordinatorJobAsync(database, job.TableId, job.ElementName, term).ConfigureAwait(false); }
+            try { await DeleteRemovalJobAsync(database, job, term).ConfigureAwait(false); }
             catch (Exception ex) { logger?.LogWarning(ex, "Could not delete the stale removal job of column {ElementName} of {TableName}", job.ElementName, job.TableName); }
 
             return;
@@ -1101,7 +1070,7 @@ public sealed class SchemaChangeCoordinator
 
         try
         {
-            await catalogs.DeleteCoordinatorJobAsync(database, job.TableId, job.ElementName, term).ConfigureAwait(false);
+            await DeleteRemovalJobAsync(database, job, term).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -1111,6 +1080,15 @@ public sealed class SchemaChangeCoordinator
                 job.ElementName, job.TableName);
         }
     }
+
+    /// <summary>
+    /// Deletes the record of a column removal: under the term fence, or, for a column that a transaction
+    /// staged, only while the record is still that transaction's.
+    /// </summary>
+    private Task DeleteRemovalJobAsync(DatabaseDescriptor database, SchemaChangeJob job, long term) =>
+        job.OwnerChangeSetId is { } owner
+            ? catalogs.DeleteOwnedCoordinatorJobAsync(database, job.TableId, job.ElementName, job.ElementKind, owner)
+            : catalogs.DeleteCoordinatorJobAsync(database, job.TableId, job.ElementName, term);
 
     /// <summary>
     /// Runs the foreign-key validation pass. On a violation, removes the constraint on every node and

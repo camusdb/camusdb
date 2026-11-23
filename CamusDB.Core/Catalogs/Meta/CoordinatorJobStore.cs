@@ -128,6 +128,64 @@ internal static class CoordinatorJobStore
     }
 
     /// <summary>
+    /// Deletes the record of one staged element when it still belongs to the transaction
+    /// <paramref name="ownerChangeSetId"/>, and leaves any other record under the key alone. A removal works
+    /// on a job it read earlier; by the time it deletes the record, the key can hold the record of a later
+    /// statement on an element of the same name. The key's exclusive lock makes the read and the delete one
+    /// step.
+    /// </summary>
+    internal static async Task DeleteOwnedCoordinatorJobAsync(
+        DatabaseDescriptor database, string tableId, string elementName, SchemaElementKind kind, string ownerChangeSetId)
+    {
+        IKahuna kahuna = database.Kahuna.Kahuna;
+        string key = MetaKeys.CoordinatorKey(database.Id, tableId, elementName);
+
+        await SerializableRetryHelper.ExecuteAutocommitAsync(async _ =>
+        {
+            KvTransaction tx = await database.Transactions.BeginAsync(
+                CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+            ).ConfigureAwait(false);
+            try
+            {
+                if (await ReadLockedCoordinatorJobAsync(database, tx, tableId, elementName).ConfigureAwait(false) is not { } stored
+                    || !IsOwnedBy(stored, kind, ownerChangeSetId))
+                    return;
+
+                await MetaKeyWriter.DeleteMetaKey(kahuna, tx, key).ConfigureAwait(false);
+                await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
+            }
+            finally
+            {
+                await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+            }
+        }).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Takes the exclusive lock of one job's key in <paramref name="tx"/> and reads its record, or null when
+    /// there is none. A transaction that writes or deletes the record holds the key until its commit has an
+    /// outcome, so the answer already reflects it.
+    /// </summary>
+    internal static async Task<PersistedCoordinatorJob?> ReadLockedCoordinatorJobAsync(
+        DatabaseDescriptor database, KvTransaction tx, string tableId, string elementName)
+    {
+        IKahuna kahuna = database.Kahuna.Kahuna;
+        string key = MetaKeys.CoordinatorKey(database.Id, tableId, elementName);
+
+        await CatalogKeyLock.AcquireExclusiveAsync(kahuna, tx, key, MetaKeyMaxRetries, "meta").ConfigureAwait(false);
+        return await ReadCoordinatorJobAsync(kahuna, key).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// True when <paramref name="stored"/> is the record of an element of <paramref name="kind"/> that the
+    /// transaction <paramref name="ownerChangeSetId"/> staged. The key alone names only a table and an
+    /// element name, which a later statement can use again; the change set id is fresh per transaction.
+    /// </summary>
+    internal static bool IsOwnedBy(PersistedCoordinatorJob stored, SchemaElementKind kind, string ownerChangeSetId) =>
+        stored.ElementKind == kind
+        && string.Equals(stored.OwnerChangeSetId, ownerChangeSetId, StringComparison.Ordinal);
+
+    /// <summary>
     /// The term fence of a job write. Takes the key's exclusive lock in <paramref name="tx"/>, reads
     /// the stored record, and refuses the write when the record's <c>LeaderTerm</c> is newer than
     /// <paramref name="leaderTerm"/>. The lock makes the read and the caller's write one step: a

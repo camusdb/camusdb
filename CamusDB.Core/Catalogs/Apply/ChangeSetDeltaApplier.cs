@@ -139,8 +139,12 @@ internal static class ChangeSetDeltaApplier
 
         HashSet<string> affected = new(StringComparer.Ordinal);
 
-        Schema dryRun = SchemaReplicator.CloneSchema(schema);
+        // No table is copied up front: the dry run changes the tables of its deltas only, and each is copied
+        // right before its first delta.
+        Schema dryRun = SchemaReplicator.CloneSchema(schema, static (_, _) => false);
         dryRun.PendingChangeSet = null;
+
+        HashSet<TableSchema> ownTables = new(ReferenceEqualityComparer.Instance);
 
         foreach (SchemaChangeLogEntry delta in DecodeDeltas(payload, entry))
         {
@@ -151,6 +155,8 @@ internal static class ChangeSetDeltaApplier
                         CamusDBErrorCodes.InvalidInternalOperation, $"A change set cannot contain the operation '{delta.Op}'");
                 continue;
             }
+
+            CopyTableOnWrite(dryRun, delta, ownTables);
 
             if (TargetTableName(delta) is { } targetName
                 && dryRun.Tables.TryGetValue(targetName, out TableSchema? target)
@@ -194,12 +200,62 @@ internal static class ChangeSetDeltaApplier
                 throw new SchemaDeltaRefusedException(ex.Code, ex.Message);
             }
 
+            if (applied is not null)
+                ownTables.Add(applied);
+
             if (applied?.Id is { } appliedId && live.Contains(appliedId))
                 affected.Add(appliedId);
         }
 
         return affected;
     }
+
+    /// <summary>
+    /// Copies the table that <paramref name="delta"/> is about to change in <paramref name="schema"/>, a copy
+    /// of a catalog that shares its tables with the original, unless the copy owns that table already.
+    /// <paramref name="ownTables"/> holds the tables the copy owns: the ones copied here, and the ones its
+    /// deltas created, which the caller adds.
+    ///
+    /// <para>For the deltas of a change set only. Each of them changes at most the table that
+    /// <see cref="TargetTableName"/> names, besides views and sequences, which every copy of a schema owns;
+    /// the publish relies on the same fact when it copies the affected tables.</para>
+    /// </summary>
+    internal static void CopyTableOnWrite(Schema schema, SchemaChangeLogEntry delta, HashSet<TableSchema> ownTables)
+    {
+        if (TargetTableName(delta) is not { } name || !schema.Tables.TryGetValue(name, out TableSchema? table) || ownTables.Contains(table))
+            return;
+
+        TableSchema copy = SchemaReplicator.CloneTable(table);
+        schema.Tables[name] = copy;
+        ownTables.Add(copy);
+    }
+
+    /// <summary>
+    /// Which tables a copy of the schema must hold as copies of its own before <paramref name="entry"/>
+    /// applies to it, for <see cref="SchemaReplicator.CloneSchema"/>: the table the entry names, or none for
+    /// an entry that changes no table. Null, which copies every table, for an operation this method does not
+    /// know, so a new operation is safe until somebody decides what it changes.
+    /// </summary>
+    internal static Func<string, TableSchema, bool>? TableChangedBy(SchemaChangeLogEntry entry)
+    {
+        if (TargetTableName(entry) is { } target)
+            return (name, _) => string.Equals(name, target, StringComparison.OrdinalIgnoreCase);
+
+        return entry.Op switch
+        {
+            SchemaOp.CreateTable when entry.GetPayload<SchemaCreateTablePayload>().AdoptStagingTableId is null or "" => NoTable,
+
+            SchemaOp.CreateView or SchemaOp.ReplaceView or SchemaOp.DropView or SchemaOp.RenameView or SchemaOp.SetViewDefinition
+                or SchemaOp.CreateSequence or SchemaOp.DropSequence or SchemaOp.RenameSequence or SchemaOp.AlterSequence => NoTable,
+
+            // The pending entry and the publish work on copies of their own, and the abort changes no table.
+            SchemaOp.PendingChangeSet or SchemaOp.PublishChangeSet or SchemaOp.AbortChangeSet => NoTable,
+
+            _ => null
+        };
+    }
+
+    private static readonly Func<string, TableSchema, bool> NoTable = static (_, _) => false;
 
     /// <summary>
     /// The name of the table <paramref name="entry"/> changes, as it is before the delta applies; null for
@@ -253,7 +309,7 @@ internal static class ChangeSetDeltaApplier
 
         IReadOnlySet<string> affected = pending.AffectedTableIds;
 
-        Schema published = SchemaReplicator.CloneSchema(schema, table => table.Id is { } id && affected.Contains(id));
+        Schema published = SchemaReplicator.CloneSchema(schema, (_, table) => table.Id is { } id && affected.Contains(id));
         published.PendingChangeSet = null;
 
         foreach (SchemaChangeLogEntry delta in DecodeDeltas(pending.Payload, entry))

@@ -847,11 +847,18 @@ public sealed class SchemaReplicator
     private static T DecodePayload<T>(SchemaChangeLogEntry entry) where T : new()
         => entry.GetPayload<T>();
 
+    /// <summary>
+    /// Copies a schema so that a delta applied to the copy cannot be observed through the original. The maps,
+    /// the views and the sequences are copied; a table is copied with its columns and its loaded layout
+    /// history, so a copy of every table costs as much as the whole catalog.
+    /// </summary>
     /// <param name="cloneTable">
-    /// Which tables to copy; the others are the live objects, shared. Null copies every table. The publish
-    /// of a change set copies only the tables the change set changes.
+    /// Which tables to copy, by name; the others are the live objects, shared, and nothing may change them
+    /// through the copy. Null copies every table. A caller that knows which tables its deltas change names
+    /// those (<see cref="ChangeSetDeltaApplier.TableChangedBy"/>), or copies none here and each one before
+    /// its delta applies (<see cref="ChangeSetDeltaApplier.CopyTableOnWrite"/>).
     /// </param>
-    internal static Schema CloneSchema(Schema schema, Func<TableSchema, bool>? cloneTable = null)
+    internal static Schema CloneSchema(Schema schema, Func<string, TableSchema, bool>? cloneTable = null)
     {
         Schema clone = new()
         {
@@ -865,7 +872,7 @@ public sealed class SchemaReplicator
         };
 
         foreach ((string tableName, TableSchema table) in schema.Tables)
-            clone.Tables[tableName] = cloneTable is null || cloneTable(table) ? CloneTable(table) : table;
+            clone.Tables[tableName] = cloneTable is null || cloneTable(tableName, table) ? CloneTable(table) : table;
 
         // Views must be cloned, not skipped. This clone is what ValidateSchemaDelta dry-runs against,
         // so an empty view map would make every view delta validate against a database that appears
