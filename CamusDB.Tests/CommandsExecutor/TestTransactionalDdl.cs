@@ -326,19 +326,972 @@ internal sealed class TestTransactionalDdl : BaseTest
 
     [Test]
     [NonParallelizable]
-    public async Task CreateIndex_OnATableWithRows_IsRefused()
+    public async Task SharedTable_CreateIndexAfterTheTransactionWroteTheTable_IsRefused()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
         await ExecuteOutsideAsync(executor, database, dbname, "CREATE TABLE r (id int64 PRIMARY KEY, v int64)", ddl: true);
 
         KvTransaction tx = await BeginSessionAsync(database);
+        await Write(executor, tx, dbname, "INSERT INTO r (id, v) VALUES (1, 10)");
 
         CamusDBException? refused = Assert.ThrowsAsync<CamusDBException>(async () =>
             await Ddl(executor, tx, dbname, "CREATE INDEX r_v ON r (v)"));
         Assert.AreEqual(CamusDBErrorCodes.StatementNotAllowedInTransaction, refused!.Code);
+        StringAssert.Contains("already wrote rows", refused.Message);
 
         await database.Transactions.RollbackAsync(tx);
         Assert.IsFalse(database.Schema.Tables["r"].Indexes!.Exists(i => i.Name == "r_v"));
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task SharedTable_CreateIndexAfterTheTransactionChangedTheTable_IsRefused()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await ExecuteOutsideAsync(executor, database, dbname, "CREATE TABLE r (id int64 PRIMARY KEY, v int64)", ddl: true);
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, "ALTER TABLE r ADD COLUMN w int64");
+
+        CamusDBException? refused = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await Ddl(executor, tx, dbname, "CREATE INDEX r_w ON r (w)"));
+        Assert.AreEqual(CamusDBErrorCodes.StatementNotAllowedInTransaction, refused!.Code);
+        StringAssert.Contains("already changed the table", refused.Message);
+
+        await database.Transactions.RollbackAsync(tx);
+        Assert.IsFalse(database.Schema.Tables["r"].Columns!.Exists(c => c.Name == "w"));
+    }
+
+    /// <summary>An INSERT of rows <c>(i, i * 10)</c> for i in 1..<paramref name="count"/> into <paramref name="table"/>.</summary>
+    private static string InsertRowsSql(string table, int count) =>
+        $"INSERT INTO {table} (id, v) VALUES " + string.Join(", ", Enumerable.Range(1, count).Select(i => $"({i}, {i * 10})"));
+
+    /// <summary>The key space of the entries of <paramref name="indexName"/> on <paramref name="tableName"/> in <paramref name="schema"/>.</summary>
+    private static string IndexSpaceIn(DatabaseDescriptor database, Schema schema, string tableName, string indexName)
+    {
+        TableSchema table = schema.Tables[tableName];
+        TableIndexSchema index = table.Indexes!.First(i => i.Name == indexName);
+        return KvKeyBuilder.IndexSpaceOf(database.Id, table.EffectiveStorageId, index.KvId);
+    }
+
+    // More rows than one rewrite batch, so the build and the fill flush more than once.
+    private const int OwnRows = 600;
+
+    [Test]
+    [NonParallelizable]
+    public async Task OwnTableWithRows_CreateIndex_ThenCommit_TheIndexHoldsEveryRow()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, "CREATE TABLE t (id int64 PRIMARY KEY, v int64)");
+        await Write(executor, tx, dbname, InsertRowsSql("t", OwnRows));
+        await Ddl(executor, tx, dbname, "CREATE INDEX t_v ON t (v)");
+        await Write(executor, tx, dbname, $"INSERT INTO t (id, v) VALUES ({OwnRows + 1}, 7)");
+
+        Assert.AreEqual(1, (await QueryAsync(executor, tx, dbname, "SELECT * FROM t WHERE v = 200")).Count, "the transaction reads through its index");
+
+        await database.Transactions.CommitAsync(tx);
+
+        string indexSpace = IndexSpaceIn(database, database.Schema, "t", "t_v");
+        Assert.AreEqual(OwnRows + 1, await CountIndexEntriesAsync(database, indexSpace), "one entry for each row, before and after the index");
+        Assert.AreEqual(1, (await QueryOutsideAsync(executor, database, dbname, "SELECT * FROM t WHERE v = 200")).Count);
+        Assert.AreEqual(1, (await QueryOutsideAsync(executor, database, dbname, "SELECT * FROM t WHERE v = 7")).Count);
+
+        DatabaseDescriptor reopened = await ReopenAsync(executor, dbname);
+        Assert.AreEqual(OwnRows + 1, await CountIndexEntriesAsync(reopened, indexSpace));
+        Assert.AreEqual(1, (await QueryOutsideAsync(executor, reopened, dbname, "SELECT * FROM t WHERE v = 6000")).Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task OwnTableWithRows_CreateIndex_ThenRollback_LeavesNoEntry()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, "CREATE TABLE t (id int64 PRIMARY KEY, v int64)");
+        await Write(executor, tx, dbname, InsertRowsSql("t", 20));
+        await Ddl(executor, tx, dbname, "CREATE INDEX t_v ON t (v)");
+
+        string indexSpace = IndexSpaceIn(database, ((TransactionSchemaOverlay)tx.SchemaChanges!).Schema, "t", "t_v");
+
+        await database.Transactions.RollbackAsync(tx);
+
+        Assert.IsFalse(database.Schema.Tables.ContainsKey("t"));
+        Assert.AreEqual(0, await CountIndexEntriesAsync(database, indexSpace), "the entries were written in the transaction and leave with it");
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task OwnTableWithRows_CreateUniqueIndex_EnforcesTheKeyOverTheOwnRows()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, "CREATE TABLE t (id int64 PRIMARY KEY, v int64)");
+        await Write(executor, tx, dbname, InsertRowsSql("t", OwnRows));
+        await Ddl(executor, tx, dbname, "CREATE UNIQUE INDEX t_v ON t (v)");
+
+        CamusDBException? duplicate = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await Write(executor, tx, dbname, $"INSERT INTO t (id, v) VALUES ({OwnRows + 1}, 30)"));
+        Assert.AreEqual(CamusDBErrorCodes.DuplicateUniqueKeyValue, duplicate!.Code, "a later row with a taken key is refused");
+
+        await database.Transactions.RollbackAsync(tx);
+        Assert.IsFalse(database.Schema.Tables.ContainsKey("t"));
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task OwnTableWithDuplicateRows_CreateUniqueIndex_FailsWithTheDuplicateKey()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, "CREATE TABLE t (id int64 PRIMARY KEY, v int64)");
+        await Write(executor, tx, dbname, InsertRowsSql("t", 300));
+        await Write(executor, tx, dbname, "INSERT INTO t (id, v) VALUES (301, 2990), (302, 2990)");
+
+        CamusDBException? refused = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await Ddl(executor, tx, dbname, "CREATE UNIQUE INDEX t_v ON t (v)"));
+        Assert.AreEqual(CamusDBErrorCodes.DuplicateUniqueKeyValue, refused!.Code);
+
+        await database.Transactions.RollbackAsync(tx);
+        Assert.IsFalse(database.Schema.Tables.ContainsKey("t"));
+        Assert.IsNull(database.Schema.PendingChangeSet);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task OwnTableWithRows_AddColumnWithADefault_FillsEveryRow()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, "CREATE TABLE t (id int64 PRIMARY KEY, v int64)");
+        await Write(executor, tx, dbname, InsertRowsSql("t", OwnRows));
+        await Ddl(executor, tx, dbname, "ALTER TABLE t ADD COLUMN w int64 NOT NULL DEFAULT (7)");
+
+        List<Dictionary<string, ColumnValue>> inside = await QueryAsync(executor, tx, dbname, "SELECT * FROM t");
+        Assert.AreEqual(OwnRows, inside.Count);
+        Assert.IsTrue(inside.TrueForAll(r => r["w"].LongValue == 7), "the transaction reads the value in every row it wrote");
+
+        await database.Transactions.CommitAsync(tx);
+
+        Assert.AreEqual(OwnRows, (await QueryOutsideAsync(executor, database, dbname, "SELECT * FROM t WHERE w = 7")).Count);
+
+        DatabaseDescriptor reopened = await ReopenAsync(executor, dbname);
+        Assert.AreEqual(OwnRows, (await QueryOutsideAsync(executor, reopened, dbname, "SELECT * FROM t WHERE w = 7")).Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task OwnTableWithRows_AddIdentityColumn_NumbersEveryRow()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, "CREATE TABLE t (id int64 PRIMARY KEY, v int64)");
+        await Write(executor, tx, dbname, InsertRowsSql("t", OwnRows));
+        await Ddl(executor, tx, dbname, "ALTER TABLE t ADD COLUMN n INT64 GENERATED ALWAYS AS IDENTITY");
+        await database.Transactions.CommitAsync(tx);
+
+        List<Dictionary<string, ColumnValue>> rows = await QueryOutsideAsync(executor, database, dbname, "SELECT * FROM t");
+        Assert.AreEqual(OwnRows, rows.Count);
+        CollectionAssert.AreEquivalent(
+            Enumerable.Range(1, OwnRows).Select(i => (long)i),
+            rows.Select(r => r["n"].LongValue),
+            "each row draws its own value from the sequence");
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task OwnTableWithRows_AddNotNullColumnWithoutADefault_FailsWithNotNullViolation()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, "CREATE TABLE t (id int64 PRIMARY KEY, v int64)");
+        await Write(executor, tx, dbname, InsertRowsSql("t", 3));
+
+        CamusDBException? refused = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await Ddl(executor, tx, dbname, "ALTER TABLE t ADD COLUMN w int64 NOT NULL"));
+        Assert.AreEqual(CamusDBErrorCodes.NotNullViolation, refused!.Code);
+
+        await database.Transactions.RollbackAsync(tx);
+        Assert.IsFalse(database.Schema.Tables.ContainsKey("t"));
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task OwnTableWithRows_AddCheck_ThenCommit_PublishesTheCheck()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, "CREATE TABLE t (id int64 PRIMARY KEY, v int64)");
+        await Write(executor, tx, dbname, InsertRowsSql("t", OwnRows));
+        await Ddl(executor, tx, dbname, "ALTER TABLE t ADD CONSTRAINT v_positive CHECK (v > 0)");
+        await database.Transactions.CommitAsync(tx);
+
+        Assert.IsTrue(database.Schema.Tables["t"].CheckConstraints!.Exists(c => c.Name == "v_positive"));
+
+        CamusDBException? refused = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await ExecuteOutsideAsync(executor, database, dbname, "INSERT INTO t (id, v) VALUES (9999, -1)", ddl: false));
+        Assert.AreEqual(CamusDBErrorCodes.CheckConstraintViolation, refused!.Code, "the published check is enforced");
+
+        DatabaseDescriptor reopened = await ReopenAsync(executor, dbname);
+        Assert.IsTrue(reopened.Schema.Tables["t"].CheckConstraints!.Exists(c => c.Name == "v_positive"), "the check survives a reopen");
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task OwnTableWithAViolatingRow_AddCheck_FailsTheStatement()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, "CREATE TABLE t (id int64 PRIMARY KEY, v int64)");
+        await Write(executor, tx, dbname, InsertRowsSql("t", OwnRows));
+        await Write(executor, tx, dbname, "INSERT INTO t (id, v) VALUES (9999, -1)");
+
+        CamusDBException? refused = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await Ddl(executor, tx, dbname, "ALTER TABLE t ADD CONSTRAINT v_positive CHECK (v > 0)"));
+        Assert.AreEqual(CamusDBErrorCodes.CheckConstraintViolation, refused!.Code, "the row the transaction wrote is checked");
+
+        await database.Transactions.RollbackAsync(tx);
+        Assert.IsFalse(database.Schema.Tables.ContainsKey("t"));
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task OwnTableWithRows_SetNotNull_ThenCommit_PublishesTheConstraint()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, "CREATE TABLE t (id int64 PRIMARY KEY, v int64)");
+        await Write(executor, tx, dbname, InsertRowsSql("t", OwnRows));
+        await Ddl(executor, tx, dbname, "ALTER TABLE t ALTER COLUMN v SET NOT NULL");
+        await database.Transactions.CommitAsync(tx);
+
+        Assert.IsTrue(database.Schema.Tables["t"].Columns!.Find(c => c.Name == "v")!.NotNull);
+
+        CamusDBException? refused = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await ExecuteOutsideAsync(executor, database, dbname, "INSERT INTO t (id, v) VALUES (9999, NULL)", ddl: false));
+        Assert.AreEqual(CamusDBErrorCodes.NotNullViolation, refused!.Code);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task OwnTableWithANullRow_SetNotNull_FailsTheStatement()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, "CREATE TABLE t (id int64 PRIMARY KEY, v int64)");
+        await Write(executor, tx, dbname, InsertRowsSql("t", OwnRows));
+        await Write(executor, tx, dbname, "INSERT INTO t (id, v) VALUES (9999, NULL)");
+
+        CamusDBException? refused = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await Ddl(executor, tx, dbname, "ALTER TABLE t ALTER COLUMN v SET NOT NULL"));
+        Assert.AreEqual(CamusDBErrorCodes.NotNullViolation, refused!.Code);
+
+        await database.Transactions.RollbackAsync(tx);
+        Assert.IsFalse(database.Schema.Tables.ContainsKey("t"));
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task OwnChildWithRows_AddForeignKey_ThenCommit_EnforcesBothSides()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await ExecuteOutsideAsync(executor, database, dbname, "CREATE TABLE parents (id int64 PRIMARY KEY)", ddl: true);
+        await ExecuteOutsideAsync(executor, database, dbname, "INSERT INTO parents (id) VALUES (1), (2), (3)", ddl: false);
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, "CREATE TABLE children (id int64 PRIMARY KEY, parent_id int64)");
+        await Write(executor, tx, dbname, "INSERT INTO children (id, parent_id) VALUES (10, 1), (11, 2), (12, NULL)");
+        await Ddl(executor, tx, dbname, "ALTER TABLE children ADD CONSTRAINT children_parent FOREIGN KEY (parent_id) REFERENCES parents (id)");
+        await database.Transactions.CommitAsync(tx);
+
+        TableSchema children = database.Schema.Tables["children"];
+        Assert.AreEqual(SchemaElementState.Public, children.ForeignKeys!.Single(fk => fk.Name == "children_parent").State, "the publish makes the constraint visible checked");
+
+        CamusDBException? orphan = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await ExecuteOutsideAsync(executor, database, dbname, "INSERT INTO children (id, parent_id) VALUES (13, 99)", ddl: false));
+        Assert.AreEqual(CamusDBErrorCodes.ForeignKeyViolation, orphan!.Code, "the child side is enforced");
+
+        CamusDBException? restrict = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await ExecuteOutsideAsync(executor, database, dbname, "DELETE FROM parents WHERE id = 1", ddl: false));
+        Assert.AreEqual(CamusDBErrorCodes.ForeignKeyRestrictDelete, restrict!.Code, "the parent side finds the child through the backing index");
+
+        await ExecuteOutsideAsync(executor, database, dbname, "DELETE FROM parents WHERE id = 3", ddl: false);
+
+        DatabaseDescriptor reopened = await ReopenAsync(executor, dbname);
+        Assert.AreEqual(SchemaElementState.Public, reopened.Schema.Tables["children"].ForeignKeys!.Single(fk => fk.Name == "children_parent").State);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task OwnChildWithAnOrphan_AddForeignKey_FailsWithForeignKeyViolation()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await ExecuteOutsideAsync(executor, database, dbname, "CREATE TABLE parents (id int64 PRIMARY KEY)", ddl: true);
+        await ExecuteOutsideAsync(executor, database, dbname, "INSERT INTO parents (id) VALUES (1)", ddl: false);
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, "CREATE TABLE children (id int64 PRIMARY KEY, parent_id int64)");
+        await Write(executor, tx, dbname, "INSERT INTO children (id, parent_id) VALUES (10, 1), (11, 7)");
+
+        CamusDBException? refused = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await Ddl(executor, tx, dbname, "ALTER TABLE children ADD CONSTRAINT children_parent FOREIGN KEY (parent_id) REFERENCES parents (id)"));
+        Assert.AreEqual(CamusDBErrorCodes.ForeignKeyViolation, refused!.Code);
+
+        await database.Transactions.RollbackAsync(tx);
+        Assert.IsFalse(database.Schema.Tables.ContainsKey("children"));
+        Assert.IsTrue(database.Schema.ForeignKeys.IsEmpty, "the shared schema has no constraint");
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task OwnChild_AddForeignKey_AConcurrentDeleteCannotRemoveTheCheckedParent()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await ExecuteOutsideAsync(executor, database, dbname, "CREATE TABLE parents (id int64 PRIMARY KEY)", ddl: true);
+        await ExecuteOutsideAsync(executor, database, dbname, "INSERT INTO parents (id) VALUES (1)", ddl: false);
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, "CREATE TABLE children (id int64 PRIMARY KEY, parent_id int64)");
+        await Write(executor, tx, dbname, "INSERT INTO children (id, parent_id) VALUES (10, 1)");
+        await Ddl(executor, tx, dbname, "ALTER TABLE children ADD CONSTRAINT children_parent FOREIGN KEY (parent_id) REFERENCES parents (id)");
+
+        // The check of the constraint locked the parent key the child row references. The parent table
+        // does not know the constraint yet, so only that lock stops the delete: the delete either waits for
+        // the transaction or fails on the lock. It never removes the parent.
+        Task deleteParent = ExecuteOutsideAsync(executor, database, dbname, "DELETE FROM parents WHERE id = 1", ddl: false);
+
+        await Task.WhenAny(deleteParent, Task.Delay(500));
+
+        if (deleteParent.IsCompleted)
+        {
+            TestContext.Out.WriteLine($"The delete ended before the commit: {deleteParent.Exception?.InnerException?.Message ?? "no error"}");
+            Assert.IsTrue(deleteParent.IsFaulted, "a delete that ends while the transaction holds the parent key must fail");
+            Assert.AreEqual(1, (await QueryOutsideAsync(executor, database, dbname, "SELECT * FROM parents")).Count, "the parent is still there");
+            await database.Transactions.CommitAsync(tx);
+        }
+        else
+        {
+            TestContext.Out.WriteLine("The delete waited for the transaction");
+            await database.Transactions.CommitAsync(tx);
+
+            CamusDBException? refused = Assert.ThrowsAsync<CamusDBException>(async () => await deleteParent.WaitAsync(TimeSpan.FromSeconds(30)));
+            TestContext.Out.WriteLine($"After the commit the delete failed with {refused!.Code}: {refused.Message}");
+        }
+
+        Assert.AreEqual(1, (await QueryOutsideAsync(executor, database, dbname, "SELECT * FROM parents")).Count, "the parent of the committed child stays");
+        Assert.AreEqual(1, (await QueryOutsideAsync(executor, database, dbname, "SELECT * FROM children")).Count);
+    }
+
+    private static Task<int> CountJobRecordsAsync(DatabaseDescriptor database) =>
+        CountKeysAsync(database, MetaKeys.MetaBucketPrefix(database.Id), MetaKeys.CoordinatorKeyPrefix(database.Id));
+
+    /// <summary>Creates the shared table <c>r (id, v)</c> with <paramref name="rows"/> committed rows.</summary>
+    private static async Task CreateSharedTableAsync(CommandExecutor executor, DatabaseDescriptor database, string dbname, int rows)
+    {
+        await ExecuteOutsideAsync(executor, database, dbname, "CREATE TABLE r (id int64 PRIMARY KEY, v int64)", ddl: true);
+        await ExecuteOutsideAsync(executor, database, dbname, InsertRowsSql("r", rows), ddl: false);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task SharedTableWithRows_CreateIndex_ThenCommit_PublishesTheBackfilledIndex()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await CreateSharedTableAsync(executor, database, dbname, OwnRows);
+
+        // The shape of a migration: a new table with its seed rows, and an index on a table with rows.
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, "CREATE TABLE seeds (id int64 PRIMARY KEY, name string)");
+        await Write(executor, tx, dbname, "INSERT INTO seeds (id, name) VALUES (1, 'one')");
+        await Ddl(executor, tx, dbname, "CREATE INDEX r_v ON r (v)");
+
+        TableIndexSchema staged = database.Schema.Tables["r"].Indexes!.Single(i => i.Name == "r_v");
+        Assert.AreEqual(SchemaElementState.WriteOnly, staged.State, "other transactions maintain the index but cannot read it");
+        Assert.AreEqual(1, await CountJobRecordsAsync(database), "the job of the staged index is recorded");
+
+        string indexSpace = KvKeyBuilder.IndexSpaceOf(database.Id, database.Schema.Tables["r"].EffectiveStorageId, staged.KvId);
+        Assert.AreEqual(OwnRows, await CountIndexEntriesAsync(database, indexSpace), "the backfill indexed every row at the statement");
+
+        // A write of another transaction while the index is staged is indexed by that transaction.
+        await ExecuteOutsideAsync(executor, database, dbname, $"INSERT INTO r (id, v) VALUES ({OwnRows + 1}, 7)", ddl: false);
+
+        Assert.AreEqual(1, (await QueryAsync(executor, tx, dbname, "SELECT * FROM r WHERE v = 200")).Count, "the transaction reads through its index");
+
+        // A coordinator sweep while the transaction is open leaves the job alone.
+        await executor.SweepCoordinatorJobsForTests();
+        Assert.AreEqual(SchemaElementState.WriteOnly, database.Schema.Tables["r"].Indexes!.Single(i => i.Name == "r_v").State);
+
+        await database.Transactions.CommitAsync(tx);
+
+        Assert.AreEqual(SchemaElementState.Public, database.Schema.Tables["r"].Indexes!.Single(i => i.Name == "r_v").State, "the publish makes the index readable");
+        Assert.AreEqual(OwnRows + 1, await CountIndexEntriesAsync(database, indexSpace));
+        Assert.AreEqual(0, await CountJobRecordsAsync(database), "the job record leaves after the publish");
+        Assert.AreEqual(1, (await QueryOutsideAsync(executor, database, dbname, "SELECT * FROM r WHERE v = 7")).Count);
+        Assert.AreEqual(1, (await QueryOutsideAsync(executor, database, dbname, "SELECT * FROM seeds")).Count);
+
+        DatabaseDescriptor reopened = await ReopenAsync(executor, dbname);
+        Assert.AreEqual(SchemaElementState.Public, reopened.Schema.Tables["r"].Indexes!.Single(i => i.Name == "r_v").State);
+        Assert.AreEqual(1, (await QueryOutsideAsync(executor, reopened, dbname, "SELECT * FROM r WHERE v = 6000")).Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task SharedTableWithRows_CreateIndex_ThenRollback_RemovesTheIndexAndItsEntries()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await CreateSharedTableAsync(executor, database, dbname, OwnRows);
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, "CREATE INDEX r_v ON r (v)");
+
+        TableIndexSchema staged = database.Schema.Tables["r"].Indexes!.Single(i => i.Name == "r_v");
+        string indexSpace = KvKeyBuilder.IndexSpaceOf(database.Id, database.Schema.Tables["r"].EffectiveStorageId, staged.KvId);
+        Assert.AreEqual(OwnRows, await CountIndexEntriesAsync(database, indexSpace));
+
+        await database.Transactions.RollbackAsync(tx);
+
+        Assert.IsFalse(database.Schema.Tables["r"].Indexes!.Exists(i => i.Name == "r_v"), "the rollback removes the staged index");
+        Assert.AreEqual(0, await CountIndexEntriesAsync(database, indexSpace), "and its entries");
+        Assert.AreEqual(0, await CountJobRecordsAsync(database), "and its job record");
+        Assert.AreEqual(OwnRows, (await QueryOutsideAsync(executor, database, dbname, "SELECT * FROM r")).Count);
+
+        // The name is free again.
+        await ExecuteOutsideAsync(executor, database, dbname, "CREATE INDEX r_v ON r (v)", ddl: true);
+        Assert.AreEqual(1, (await QueryOutsideAsync(executor, database, dbname, "SELECT * FROM r WHERE v = 200")).Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task SharedTableWithDuplicates_CreateUniqueIndex_FailsAndLeavesNothing()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await CreateSharedTableAsync(executor, database, dbname, OwnRows);
+        await ExecuteOutsideAsync(executor, database, dbname, $"INSERT INTO r (id, v) VALUES ({OwnRows + 1}, 100)", ddl: false);
+
+        KvTransaction tx = await BeginSessionAsync(database);
+
+        CamusDBException? refused = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await Ddl(executor, tx, dbname, "CREATE UNIQUE INDEX r_v ON r (v)"));
+        Assert.AreEqual(CamusDBErrorCodes.DuplicateUniqueKeyValue, refused!.Code);
+
+        Assert.IsFalse(database.Schema.Tables["r"].Indexes!.Exists(i => i.Name == "r_v"), "the failed backfill removed the staged index");
+
+        // The job record stays for the rollback, which removes the entries the backfill wrote before it
+        // found the duplicate.
+        TableSchema table = database.Schema.Tables["r"];
+        PersistedCoordinatorJob? record = await executor.Catalogs.TryLoadCoordinatorJobAsync(database, table.Id, "r_v");
+        Assert.IsNotNull(record?.IndexId);
+
+        string indexSpace = KvKeyBuilder.IndexSpaceOf(database.Id, table.EffectiveStorageId, record!.IndexId!);
+        Assert.That(await CountIndexEntriesAsync(database, indexSpace), Is.GreaterThan(0), "the first batch wrote entries");
+
+        await database.Transactions.RollbackAsync(tx);
+
+        Assert.AreEqual(0, await CountIndexEntriesAsync(database, indexSpace), "the rollback removed the entries");
+        Assert.AreEqual(0, await CountJobRecordsAsync(database), "and the job record");
+
+        await ExecuteOutsideAsync(executor, database, dbname, "CREATE INDEX r_v ON r (v)", ddl: true);
+        Assert.AreEqual(2, (await QueryOutsideAsync(executor, database, dbname, "SELECT * FROM r WHERE v = 100")).Count, "the name is free again");
+    }
+
+    /// <summary>
+    /// The shape of a migration whose last statement fails: a new table with seed rows, a unique index on a
+    /// shared table with rows, and an INSERT that violates the new index. The failure aborts the
+    /// transaction; a ROLLBACK, or a COMMIT, which rolls an aborted transaction back, leaves nothing: no
+    /// table, no index, no index entry and no job record.
+    /// </summary>
+    [TestCase(false)]
+    [TestCase(true)]
+    [NonParallelizable]
+    public async Task Migration_WhoseLastStatementFails_LeavesNothing(bool endWithCommit)
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await CreateSharedTableAsync(executor, database, dbname, OwnRows);
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, "CREATE TABLE seeds (id int64 PRIMARY KEY, name string)");
+        await Ddl(executor, tx, dbname, "CREATE UNIQUE INDEX r_v ON r (v)");
+        await Write(executor, tx, dbname, "INSERT INTO seeds (id, name) VALUES (1, 'one'), (2, 'two')");
+
+        TableSchema table = database.Schema.Tables["r"];
+        string indexSpace = KvKeyBuilder.IndexSpaceOf(database.Id, table.EffectiveStorageId, table.Indexes!.Single(i => i.Name == "r_v").KvId);
+        Assert.AreEqual(OwnRows, await CountIndexEntriesAsync(database, indexSpace));
+
+        CamusDBException? failed = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await Write(executor, tx, dbname, $"INSERT INTO r (id, v) VALUES ({OwnRows + 1}, 10)"));
+        Assert.AreEqual(CamusDBErrorCodes.DuplicateUniqueKeyValue, failed!.Code, "the transaction enforces the index it created");
+
+        if (endWithCommit)
+        {
+            CamusDBException? refused = Assert.ThrowsAsync<CamusDBException>(async () => await database.Transactions.CommitAsync(tx));
+            Assert.AreEqual(CamusDBErrorCodes.TransactionRollbackOnly, refused!.Code);
+        }
+        else
+        {
+            await database.Transactions.RollbackAsync(tx);
+        }
+
+        Assert.IsFalse(database.Schema.Tables.ContainsKey("seeds"), "no table");
+        Assert.IsFalse(database.Schema.Tables["r"].Indexes!.Exists(i => i.Name == "r_v"), "no index");
+        Assert.AreEqual(0, await CountIndexEntriesAsync(database, indexSpace), "no index entry");
+        Assert.AreEqual(0, await CountJobRecordsAsync(database), "no job record");
+        Assert.AreEqual(OwnRows, (await QueryOutsideAsync(executor, database, dbname, "SELECT * FROM r")).Count, "the rows of r are as before");
+
+        DatabaseDescriptor reopened = await ReopenAsync(executor, dbname);
+        Assert.IsFalse(reopened.Schema.Tables.ContainsKey("seeds"));
+        Assert.IsFalse(reopened.Schema.Tables["r"].Indexes!.Exists(i => i.Name == "r_v"));
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task SharedTableWithRows_AddColumnWithADefault_ThenCommit_FillsEveryRow()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await CreateSharedTableAsync(executor, database, dbname, OwnRows);
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, "ALTER TABLE r ADD COLUMN w int64 NOT NULL DEFAULT (7)");
+
+        Assert.AreEqual(SchemaElementState.WriteOnly, database.Schema.Tables["r"].Columns!.Single(c => c.Name == "w").State, "other transactions write the column but cannot read it");
+        Assert.IsFalse((await QueryOutsideAsync(executor, database, dbname, "SELECT * FROM r WHERE id = 1"))[0].ContainsKey("w"), "another transaction does not see it");
+
+        // Before the transaction reads the table: its Serializable read locks the rows.
+        await ExecuteOutsideAsync(executor, database, dbname, $"INSERT INTO r (id, v) VALUES ({OwnRows + 1}, 1)", ddl: false);
+
+        Assert.IsTrue((await QueryAsync(executor, tx, dbname, "SELECT * FROM r")).TrueForAll(r => r["w"].LongValue == 7), "the transaction reads the filled column");
+
+        await database.Transactions.CommitAsync(tx);
+
+        Assert.AreEqual(SchemaElementState.Public, database.Schema.Tables["r"].Columns!.Single(c => c.Name == "w").State);
+        Assert.AreEqual(OwnRows + 1, (await QueryOutsideAsync(executor, database, dbname, "SELECT * FROM r WHERE w = 7")).Count, "every row holds the default, the one written while the column was staged too");
+        Assert.AreEqual(0, await CountJobRecordsAsync(database));
+
+        DatabaseDescriptor reopened = await ReopenAsync(executor, dbname);
+        Assert.AreEqual(OwnRows + 1, (await QueryOutsideAsync(executor, reopened, dbname, "SELECT * FROM r WHERE w = 7")).Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task SharedTableWithRows_AddIdentityColumn_ThenRollback_RemovesTheColumnAndItsSequence()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await CreateSharedTableAsync(executor, database, dbname, 50);
+        int sequencesBefore = database.Schema.Sequences.Count;
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, "ALTER TABLE r ADD COLUMN n INT64 GENERATED ALWAYS AS IDENTITY");
+
+        CollectionAssert.AreEquivalent(
+            Enumerable.Range(1, 50).Select(i => (long)i),
+            (await QueryAsync(executor, tx, dbname, "SELECT * FROM r")).Select(r => r["n"].LongValue),
+            "the fill drew one value for each row");
+
+        await database.Transactions.RollbackAsync(tx);
+
+        Assert.IsFalse(database.Schema.Tables["r"].Columns!.Exists(c => c.Name == "n"), "the rollback removes the staged column");
+        Assert.AreEqual(sequencesBefore, database.Schema.Sequences.Count, "and the sequence it owned");
+        Assert.AreEqual(0, await CountJobRecordsAsync(database));
+        Assert.AreEqual(50, (await QueryOutsideAsync(executor, database, dbname, "SELECT * FROM r")).Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task OwnedStagedIndex_OfATransactionThatVanished_IsRemovedByTheSweep_AndTheTransactionCannotCommit()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await CreateSharedTableAsync(executor, database, dbname, 40);
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, "CREATE INDEX r_v ON r (v)");
+
+        TableIndexSchema staged = database.Schema.Tables["r"].Indexes!.Single(i => i.Name == "r_v");
+        string indexSpace = KvKeyBuilder.IndexSpaceOf(database.Id, database.Schema.Tables["r"].EffectiveStorageId, staged.KvId);
+
+        // What a crash of the transaction's node leaves: the DDL lock lapses and nothing runs the
+        // rollback work. Closing the private schema frees the lock and runs nothing else.
+        TransactionSchemaOverlay overlay = (TransactionSchemaOverlay)tx.SchemaChanges!;
+        await overlay.CloseAsync();
+
+        await executor.SweepCoordinatorJobsForTests();
+
+        Assert.IsFalse(database.Schema.Tables["r"].Indexes!.Exists(i => i.Name == "r_v"), "the sweep removes the index of the vanished owner");
+        Assert.AreEqual(0, await CountIndexEntriesAsync(database, indexSpace));
+        Assert.AreEqual(0, await CountJobRecordsAsync(database));
+
+        // The sweep wrote 'aborted' to the decision key, so a late commit of the owner is refused.
+        CamusDBException? late = Assert.ThrowsAsync<CamusDBException>(async () => await database.Transactions.CommitAsync(tx));
+        Assert.AreEqual(CamusDBErrorCodes.TransactionConflict, late!.Code);
+        Assert.IsNull(database.Schema.PendingChangeSet);
+    }
+
+    private static Task<int> CountDecisionKeysAsync(DatabaseDescriptor database) =>
+        CountKeysAsync(database, MetaKeys.MetaBucketPrefix(database.Id), MetaKeys.ChangeSetDecisionKey(database.Id, ""));
+
+    private static bool HasCheck(DatabaseDescriptor database, string table, string name) =>
+        database.Schema.Tables[table].CheckConstraints?.Exists(c => c.Name == name) == true;
+
+    /// <summary>
+    /// A staged CHECK on a shared table is enforced for every transaction from the statement on, and the
+    /// transaction's change set holds no delta for it. COMMIT keeps it, and the KV commit deletes the job
+    /// record; ROLLBACK removes it and its record.
+    /// </summary>
+    [TestCase(true)]
+    [TestCase(false)]
+    [NonParallelizable]
+    public async Task SharedTableWithRows_AddCheck_IsEnforcedAtOnce_AndEndsWithTheTransaction(bool commit)
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await CreateSharedTableAsync(executor, database, dbname, OwnRows);
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, "ALTER TABLE r ADD CONSTRAINT v_positive CHECK (v > 0)");
+
+        Assert.IsTrue(HasCheck(database, "r", "v_positive"), "the constraint is in the shared schema");
+        Assert.AreEqual(1, await CountJobRecordsAsync(database), "its job record names the transaction as owner");
+
+        CamusDBException? outside = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await ExecuteOutsideAsync(executor, database, dbname, $"INSERT INTO r (id, v) VALUES ({OwnRows + 1}, -1)", ddl: false));
+        Assert.AreEqual(CamusDBErrorCodes.CheckConstraintViolation, outside!.Code, "another transaction meets the constraint before the commit");
+
+        await Write(executor, tx, dbname, $"INSERT INTO r (id, v) VALUES ({OwnRows + 2}, 5)");
+
+        if (commit)
+        {
+            await database.Transactions.CommitAsync(tx);
+
+            Assert.IsTrue(HasCheck(database, "r", "v_positive"));
+            Assert.AreEqual(0, await CountJobRecordsAsync(database), "the KV commit deleted the job record");
+            Assert.AreEqual(0, await CountDecisionKeysAsync(database), "no decision key is left");
+            Assert.AreEqual(OwnRows + 1, (await QueryOutsideAsync(executor, database, dbname, "SELECT * FROM r")).Count);
+
+            DatabaseDescriptor reopened = await ReopenAsync(executor, dbname);
+            Assert.IsTrue(HasCheck(reopened, "r", "v_positive"));
+        }
+        else
+        {
+            await database.Transactions.RollbackAsync(tx);
+
+            Assert.IsFalse(HasCheck(database, "r", "v_positive"), "the rollback removed the constraint");
+            Assert.AreEqual(0, await CountJobRecordsAsync(database), "and its job record");
+
+            await ExecuteOutsideAsync(executor, database, dbname, $"INSERT INTO r (id, v) VALUES ({OwnRows + 3}, -1)", ddl: false);
+            Assert.AreEqual(OwnRows + 1, (await QueryOutsideAsync(executor, database, dbname, "SELECT * FROM r")).Count);
+        }
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task SharedTableWithAViolatingRow_AddCheck_FailsAndLeavesNothing()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await CreateSharedTableAsync(executor, database, dbname, 40);
+        await ExecuteOutsideAsync(executor, database, dbname, "INSERT INTO r (id, v) VALUES (41, -3)", ddl: false);
+
+        KvTransaction tx = await BeginSessionAsync(database);
+
+        CamusDBException? refused = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await Ddl(executor, tx, dbname, "ALTER TABLE r ADD CONSTRAINT v_positive CHECK (v > 0)"));
+        Assert.AreEqual(CamusDBErrorCodes.CheckConstraintViolation, refused!.Code);
+        Assert.IsFalse(HasCheck(database, "r", "v_positive"), "the failed check took the constraint back at once");
+
+        await database.Transactions.RollbackAsync(tx);
+
+        Assert.AreEqual(0, await CountJobRecordsAsync(database));
+        await ExecuteOutsideAsync(executor, database, dbname, "INSERT INTO r (id, v) VALUES (42, -4)", ddl: false);
+    }
+
+    /// <summary>
+    /// The check of the existing rows takes the types of a CASE or COALESCE from the column types, as the
+    /// check of a new row does. A row whose NULL hides the float column therefore passes with float
+    /// division, on a table the transaction created and on a shared table.
+    /// </summary>
+    [TestCase(true)]
+    [TestCase(false)]
+    [NonParallelizable]
+    public async Task AddCheck_OverAnIntegerAndAFloatColumn_JudgesAnExistingRowAsANewOne(bool ownTable)
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        const string create = "CREATE TABLE ratio (id int64 PRIMARY KEY, i int64 NULL, f float64 NULL)";
+        const string insert = "INSERT INTO ratio (id, i, f) VALUES (1, 2, NULL)";
+
+        if (!ownTable)
+        {
+            await ExecuteOutsideAsync(executor, database, dbname, create, ddl: true);
+            await ExecuteOutsideAsync(executor, database, dbname, insert, ddl: false);
+        }
+
+        KvTransaction tx = await BeginSessionAsync(database);
+
+        if (ownTable)
+        {
+            await Ddl(executor, tx, dbname, create);
+            await Write(executor, tx, dbname, insert);
+        }
+
+        await Ddl(executor, tx, dbname, "ALTER TABLE ratio ADD CONSTRAINT ratio_min CHECK (COALESCE(i, f) / 4 > 0.1)");
+        await Write(executor, tx, dbname, "INSERT INTO ratio (id, i, f) VALUES (2, 3, NULL)");
+        await database.Transactions.CommitAsync(tx);
+
+        Assert.IsTrue(HasCheck(database, "ratio", "ratio_min"));
+        Assert.AreEqual(2, (await QueryOutsideAsync(executor, database, dbname, "SELECT * FROM ratio")).Count);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task SharedTable_AddCheckAfterTheTransactionReadTheTable_RunsBecauseTheCheckTakesNoLock()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await CreateSharedTableAsync(executor, database, dbname, 40);
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        Assert.AreEqual(40, (await QueryAsync(executor, tx, dbname, "SELECT * FROM r")).Count);
+
+        await Ddl(executor, tx, dbname, "ALTER TABLE r ADD CONSTRAINT v_positive CHECK (v > 0)");
+        await database.Transactions.CommitAsync(tx);
+
+        Assert.IsTrue(HasCheck(database, "r", "v_positive"));
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task SharedTable_AddCheckAfterTheTransactionWroteTheTable_IsRefused()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await CreateSharedTableAsync(executor, database, dbname, 40);
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Write(executor, tx, dbname, "INSERT INTO r (id, v) VALUES (41, -1)");
+
+        CamusDBException? refused = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await Ddl(executor, tx, dbname, "ALTER TABLE r ADD CONSTRAINT v_positive CHECK (v > 0)"));
+        Assert.AreEqual(CamusDBErrorCodes.StatementNotAllowedInTransaction, refused!.Code);
+        StringAssert.Contains("checks the table's rows outside the transaction", refused.Message);
+
+        await database.Transactions.RollbackAsync(tx);
+        Assert.IsFalse(HasCheck(database, "r", "v_positive"));
+    }
+
+    [TestCase(true)]
+    [TestCase(false)]
+    [NonParallelizable]
+    public async Task SharedTableWithRows_SetNotNull_IsEnforcedAtOnce_AndEndsWithTheTransaction(bool commit)
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await CreateSharedTableAsync(executor, database, dbname, OwnRows);
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, "ALTER TABLE r ALTER COLUMN v SET NOT NULL");
+
+        Assert.IsTrue(database.Schema.Tables["r"].Columns!.Single(c => c.Name == "v").NotNull, "the shared column is NOT NULL");
+
+        CamusDBException? outside = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await ExecuteOutsideAsync(executor, database, dbname, $"INSERT INTO r (id, v) VALUES ({OwnRows + 1}, NULL)", ddl: false));
+        Assert.AreEqual(CamusDBErrorCodes.NotNullViolation, outside!.Code, "another transaction meets the constraint before the commit");
+
+        if (commit)
+            await database.Transactions.CommitAsync(tx);
+        else
+            await database.Transactions.RollbackAsync(tx);
+
+        Assert.AreEqual(commit, database.Schema.Tables["r"].Columns!.Single(c => c.Name == "v").NotNull);
+        Assert.AreEqual(0, await CountJobRecordsAsync(database));
+
+        if (!commit)
+            await ExecuteOutsideAsync(executor, database, dbname, $"INSERT INTO r (id, v) VALUES ({OwnRows + 2}, NULL)", ddl: false);
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task SharedTableWithANullRow_SetNotNull_FailsAndLeavesTheColumnNullable()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await CreateSharedTableAsync(executor, database, dbname, 40);
+        await ExecuteOutsideAsync(executor, database, dbname, "INSERT INTO r (id, v) VALUES (41, NULL)", ddl: false);
+
+        KvTransaction tx = await BeginSessionAsync(database);
+
+        CamusDBException? refused = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await Ddl(executor, tx, dbname, "ALTER TABLE r ALTER COLUMN v SET NOT NULL"));
+        Assert.AreEqual(CamusDBErrorCodes.NotNullViolation, refused!.Code);
+
+        await database.Transactions.RollbackAsync(tx);
+
+        Assert.IsFalse(database.Schema.Tables["r"].Columns!.Single(c => c.Name == "v").NotNull);
+        Assert.AreEqual(0, await CountJobRecordsAsync(database));
+    }
+
+    /// <summary>Creates the shared tables <c>parents (1, 2, 3)</c> and <c>children</c> with rows that reference 1, 2 and NULL.</summary>
+    private static async Task CreateSharedParentAndChildAsync(CommandExecutor executor, DatabaseDescriptor database, string dbname)
+    {
+        await ExecuteOutsideAsync(executor, database, dbname, "CREATE TABLE parents (id int64 PRIMARY KEY)", ddl: true);
+        await ExecuteOutsideAsync(executor, database, dbname, "INSERT INTO parents (id) VALUES (1), (2), (3)", ddl: false);
+        await ExecuteOutsideAsync(executor, database, dbname, "CREATE TABLE children (id int64 PRIMARY KEY, parent_id int64)", ddl: true);
+        await ExecuteOutsideAsync(executor, database, dbname, "INSERT INTO children (id, parent_id) VALUES (10, 1), (11, 2), (12, NULL)", ddl: false);
+    }
+
+    private const string AddChildForeignKeySql = "ALTER TABLE children ADD CONSTRAINT children_parent FOREIGN KEY (parent_id) REFERENCES parents (id)";
+
+    /// <summary>
+    /// A staged foreign key from a shared child is enforced on both sides for every transaction from the
+    /// statement on. Its backing index is built and readable at the statement; both job records name the
+    /// transaction as owner. COMMIT publishes the constraint; ROLLBACK removes the constraint, the index and
+    /// its entries.
+    /// </summary>
+    [TestCase(true)]
+    [TestCase(false)]
+    [NonParallelizable]
+    public async Task SharedChildWithRows_AddForeignKey_IsEnforcedAtOnce_AndEndsWithTheTransaction(bool commit)
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await CreateSharedParentAndChildAsync(executor, database, dbname);
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, AddChildForeignKeySql);
+
+        TableSchema children = database.Schema.Tables["children"];
+        ForeignKeySchema staged = children.ForeignKeys!.Single(fk => fk.Name == "children_parent");
+        Assert.AreEqual(SchemaElementState.WriteOnly, staged.State, "the shared schema enforces the constraint and does not show it as checked");
+
+        TableIndexSchema backing = children.Indexes!.Single(i => i.OwnerConstraintId == staged.Id);
+        Assert.AreEqual(SchemaElementState.Public, backing.State, "the backing index is readable at once");
+        string indexSpace = KvKeyBuilder.IndexSpaceOf(database.Id, children.EffectiveStorageId, backing.KvId);
+        Assert.AreEqual(3, await CountIndexEntriesAsync(database, indexSpace));
+        Assert.AreEqual(2, await CountJobRecordsAsync(database), "the index and the constraint each have a job record");
+
+        CamusDBException? orphan = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await ExecuteOutsideAsync(executor, database, dbname, "INSERT INTO children (id, parent_id) VALUES (13, 99)", ddl: false));
+        Assert.AreEqual(CamusDBErrorCodes.ForeignKeyViolation, orphan!.Code, "another transaction meets the child side");
+
+        CamusDBException? restrict = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await ExecuteOutsideAsync(executor, database, dbname, "DELETE FROM parents WHERE id = 1", ddl: false));
+        Assert.AreEqual(CamusDBErrorCodes.ForeignKeyRestrictDelete, restrict!.Code, "and the parent side");
+
+        if (commit)
+        {
+            await database.Transactions.CommitAsync(tx);
+
+            Assert.AreEqual(SchemaElementState.Public, database.Schema.Tables["children"].ForeignKeys!.Single(fk => fk.Name == "children_parent").State);
+            Assert.AreEqual(0, await CountJobRecordsAsync(database), "the KV commit deleted both job records");
+
+            DatabaseDescriptor reopened = await ReopenAsync(executor, dbname);
+            Assert.AreEqual(SchemaElementState.Public, reopened.Schema.Tables["children"].ForeignKeys!.Single(fk => fk.Name == "children_parent").State);
+        }
+        else
+        {
+            await database.Transactions.RollbackAsync(tx);
+
+            Assert.IsTrue(database.Schema.Tables["children"].ForeignKeys is null or { Count: 0 }, "the rollback removed the constraint");
+            Assert.IsFalse(database.Schema.Tables["children"].Indexes!.Exists(i => i.KvId == backing.KvId), "and its backing index");
+            Assert.AreEqual(0, await CountIndexEntriesAsync(database, indexSpace), "and the index entries");
+            Assert.AreEqual(0, await CountJobRecordsAsync(database), "and both job records");
+
+            await ExecuteOutsideAsync(executor, database, dbname, "INSERT INTO children (id, parent_id) VALUES (13, 99)", ddl: false);
+            await ExecuteOutsideAsync(executor, database, dbname, "DELETE FROM parents WHERE id = 3", ddl: false);
+        }
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task SharedChildWithAnOrphan_AddForeignKey_FailsAndTheRollbackLeavesNothing()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await CreateSharedParentAndChildAsync(executor, database, dbname);
+        await ExecuteOutsideAsync(executor, database, dbname, "INSERT INTO children (id, parent_id) VALUES (14, 7)", ddl: false);
+
+        KvTransaction tx = await BeginSessionAsync(database);
+
+        CamusDBException? refused = Assert.ThrowsAsync<CamusDBException>(async () => await Ddl(executor, tx, dbname, AddChildForeignKeySql));
+        Assert.AreEqual(CamusDBErrorCodes.ForeignKeyViolation, refused!.Code);
+        Assert.IsTrue(database.Schema.Tables["children"].ForeignKeys is null or { Count: 0 }, "the failed check removed the constraint at once");
+
+        await database.Transactions.RollbackAsync(tx);
+
+        Assert.IsFalse(database.Schema.Tables["children"].Indexes?.Exists(i => i.Name == "~fk_children_parent") == true, "no backing index is left");
+        Assert.AreEqual(0, await CountJobRecordsAsync(database));
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task SharedChild_AddForeignKeyAfterTheTransactionWroteTheParent_IsRefused()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await CreateSharedParentAndChildAsync(executor, database, dbname);
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Write(executor, tx, dbname, "DELETE FROM parents WHERE id = 3");
+
+        CamusDBException? refused = Assert.ThrowsAsync<CamusDBException>(async () => await Ddl(executor, tx, dbname, AddChildForeignKeySql));
+        Assert.AreEqual(CamusDBErrorCodes.StatementNotAllowedInTransaction, refused!.Code);
+        StringAssert.Contains("referenced table 'parents'", refused.Message);
+
+        await database.Transactions.RollbackAsync(tx);
+        Assert.AreEqual(0, await CountJobRecordsAsync(database));
+    }
+
+    [Test]
+    [NonParallelizable]
+    public async Task SharedChild_AddForeignKeyToAParentTheTransactionCreated_IsRefused()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await ExecuteOutsideAsync(executor, database, dbname, "CREATE TABLE children (id int64 PRIMARY KEY, parent_id int64)", ddl: true);
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, "CREATE TABLE parents (id int64 PRIMARY KEY)");
+
+        CamusDBException? refused = Assert.ThrowsAsync<CamusDBException>(async () => await Ddl(executor, tx, dbname, AddChildForeignKeySql));
+        Assert.AreEqual(CamusDBErrorCodes.StatementNotAllowedInTransaction, refused!.Code);
+        StringAssert.Contains("which the transaction created", refused.Message);
+
+        await database.Transactions.RollbackAsync(tx);
+    }
+
+    /// <summary>
+    /// The owner of a staged CHECK and of a staged foreign key disappears before COMMIT. The sweep finds
+    /// the owned job records, aborts the change set and removes every element: the constraints and the
+    /// backing index. A late COMMIT of the owner is refused.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task OwnedStagedConstraints_OfATransactionThatVanished_AreRemovedByTheSweep()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await CreateSharedParentAndChildAsync(executor, database, dbname);
+        await CreateSharedTableAsync(executor, database, dbname, 40);
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, "ALTER TABLE r ADD CONSTRAINT v_positive CHECK (v > 0)");
+        await Ddl(executor, tx, dbname, AddChildForeignKeySql);
+        Assert.AreEqual(3, await CountJobRecordsAsync(database));
+
+        // What a crash of the transaction's node leaves: the DDL lock lapses and nothing runs the
+        // rollback work.
+        TransactionSchemaOverlay overlay = (TransactionSchemaOverlay)tx.SchemaChanges!;
+        await overlay.CloseAsync();
+
+        // The records come in key order, and a backing index waits for its constraint, so more than one
+        // sweep can be needed.
+        for (int sweep = 0; sweep < 3 && await CountJobRecordsAsync(database) > 0; sweep++)
+            await executor.SweepCoordinatorJobsForTests();
+
+        Assert.IsFalse(HasCheck(database, "r", "v_positive"), "the sweep removed the CHECK");
+        Assert.IsTrue(database.Schema.Tables["children"].ForeignKeys is null or { Count: 0 }, "and the foreign key");
+        Assert.IsFalse(database.Schema.Tables["children"].Indexes?.Exists(i => i.Name == "~fk_children_parent") == true, "and the backing index");
+        Assert.AreEqual(0, await CountJobRecordsAsync(database));
+
+        CamusDBException? late = Assert.ThrowsAsync<CamusDBException>(async () => await database.Transactions.CommitAsync(tx));
+        Assert.AreEqual(CamusDBErrorCodes.TransactionConflict, late!.Code);
     }
 
     [Test]

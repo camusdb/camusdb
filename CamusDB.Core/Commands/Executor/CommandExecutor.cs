@@ -1554,6 +1554,14 @@ public sealed class CommandExecutor : IAsyncDisposable
     internal Task DropIndexForRemovedConstraintAsync(DatabaseDescriptor database, string tableName, string indexName) =>
         schemaDdl.DropIndexWithinGateAsync(database, tableName, indexName);
 
+    /// <summary>
+    /// Purges the entries of one index by storage id and stable index id. <see cref="Controllers.DatabaseOpener"/>
+    /// wires it into the resume coordinator, which removes an index that a transaction staged on a shared
+    /// table and never published.
+    /// </summary>
+    internal Task<bool> PurgeIndexEntriesAsync(DatabaseDescriptor database, string storageId, string indexId) =>
+        deferredPurges.PurgeIndexKeySpaceAsync(database, storageId, indexId);
+
     public Task<bool> AlterIndex(AlterIndexTicket ticket) => schemaDdl.AlterIndex(ticket);
 
     public Task<bool> DropTable(DropTableTicket ticket) => schemaDdl.DropTable(ticket);

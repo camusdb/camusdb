@@ -131,6 +131,43 @@ internal sealed class TransactionalDdlLock : IAsyncDisposable
     }
 
     /// <summary>
+    /// Takes the DDL lock of <paramref name="database"/> when nobody holds it, without waiting for a
+    /// holder, and returns null when another holder has it. A transient refusal is retried a few times.
+    /// For a background check that must not stall behind an open DDL transaction: the resume of a staged
+    /// job that a transaction owns, which needs to know that no DDL transaction is open.
+    /// </summary>
+    internal static async Task<TransactionalDdlLock?> TryAcquireAsync(
+        DatabaseDescriptor database, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        IKahuna kahuna = database.Kahuna.Kahuna;
+        string resource = ResourceOf(database.Id);
+        byte[] owner = System.Text.Encoding.UTF8.GetBytes($"ddl:{Guid.NewGuid():N}");
+
+        for (int transient = 1; ; transient++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            (LockResponseType type, _) = await kahuna.LocateAndTryLock(
+                resource, owner, LeaseMs, LockDurability.Persistent, cancellationToken).ConfigureAwait(false);
+
+            if (type == LockResponseType.Locked)
+            {
+                TransactionalDdlLock acquired = new(kahuna, resource, owner, logger);
+                acquired.StartRenewer();
+                return acquired;
+            }
+
+            if (type is LockResponseType.MustRetry or LockResponseType.WaitingForReplication && transient < MaxTransientRetries)
+            {
+                await Task.Delay(transient * 10, cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Frees the lock: stops the renewer and unlocks, so the next waiter starts at once instead of after
     /// the lease. Safe to call twice. Best effort: a failed unlock leaves the lease to lapse.
     /// </summary>

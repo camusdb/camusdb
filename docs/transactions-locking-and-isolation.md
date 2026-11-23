@@ -866,11 +866,27 @@ Inside a transaction, these statements run with the setting on: `CREATE TABLE`, 
 with `FORCE`, and in a branch database), `ALTER TABLE … RENAME TO`, `RENAME COLUMN`, `RENAME INDEX`,
 `DROP COLUMN`, `DROP INDEX`,
 `ALTER TABLE … SET` and `RESET`, `COMMENT ON TABLE`, `COLUMN` and `INDEX`, and `CREATE`, `CREATE OR
-REPLACE`, `DROP` and `ALTER … RENAME` of a view. `ADD COLUMN`, `CREATE INDEX`, `ADD UNIQUE` and
-`ADD PRIMARY KEY` run when no existing row needs work: a nullable `ADD COLUMN` with no default runs on
-any table, and every one of them runs on a table the transaction created and has not written to yet.
-Every other schema statement is refused with `CADB0538` inside a transaction. Commit or roll back
-first, then run it.
+REPLACE`, `DROP` and `ALTER … RENAME` of a view.
+
+The statements that read every row of their table run too:
+
+- **On a table the transaction created:** `ADD COLUMN` (with a default, an identity or `NOT NULL`),
+  `CREATE INDEX`, `ADD UNIQUE`, `ADD PRIMARY KEY`, `ADD CONSTRAINT … CHECK`, `ALTER COLUMN … SET NOT
+  NULL` and `ADD … FOREIGN KEY`. No other transaction can see the table before the commit, so the
+  statement reads and writes the transaction's own rows inside the transaction. A row that breaks the
+  new index or constraint fails the statement.
+- **On any other table:** `ADD COLUMN` with a fill, `CREATE INDEX`, `ADD UNIQUE` and `ADD PRIMARY
+  KEY`. The statement runs the online build at once, as outside a transaction, and stops before the new
+  column or index becomes readable. Other transactions write the new element from then on but cannot
+  read it. `COMMIT` makes it readable together with the transaction's rows. `ROLLBACK` removes it and
+  its index entries.
+- **On any other table, `ADD CONSTRAINT … CHECK`, `ALTER COLUMN … SET NOT NULL` and `ADD … FOREIGN
+  KEY`:** the statement checks the rows at once, and every transaction meets the constraint from then
+  on. `COMMIT` keeps it. `ROLLBACK` removes it. A row that breaks the constraint fails the statement.
+- A nullable `ADD COLUMN` with no default runs on any table and needs no fill.
+
+Every other schema statement is refused with `CADB0538` inside a transaction. Commit or roll back first,
+then run it.
 
 What the transaction meets:
 
@@ -898,6 +914,22 @@ What the transaction meets:
 - **`DROP COLUMN` rewrites no row.** As in PostgreSQL, the column leaves the schema at once, and its
   value leaves the disk when each row is next updated or deleted. No query returns it, and a new column
   with the same name reads NULL in the old rows.
+- **An online build on a shared table has two limits.** It is refused with `CADB0538` when the
+  transaction already wrote rows to the table, or holds locks on its rows from a Serializable read or
+  `SELECT … FOR UPDATE`: the build locks each row, and would wait for the transaction's own locks. It is
+  also refused when the transaction already changed the table's schema, because the build runs on the
+  shared table, which does not have that change yet. Run such a statement first in the transaction.
+  A CHECK, a NOT NULL and a foreign key check take no lock: they are refused only for the writes of the
+  transaction to the table and, for a foreign key, for a parent table that the transaction created,
+  changed or wrote.
+- **A failed online build leaves nothing after the rollback.** A row that breaks a new unique index
+  fails the statement with `CADB0300`, and the index stops being maintained at once. A change of the
+  schema leader while the build runs on the leader node fails the statement with the retryable
+  `CADB0504`. In both cases the failure aborts the transaction (§9.4). Roll back, which removes the column
+  or index and every index entry the build wrote. After a `CADB0504`, run the transaction again.
+- **An online build of a transaction that disappears is removed.** When the node of the transaction
+  fails before `COMMIT`, a background sweep on the schema leader removes the column or index once the
+  transaction's DDL lock lapses. After that, the transaction cannot commit.
 - **`COMMIT` can fail with `CADB0509` after the rows committed.** This happens when the schema change
   cannot be confirmed on every live node, for example during a leader change. Retry `COMMIT` on the same
   transaction; it waits for the schema change and does not run the transaction again.

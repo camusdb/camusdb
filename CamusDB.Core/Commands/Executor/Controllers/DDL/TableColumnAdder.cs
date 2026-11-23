@@ -145,6 +145,80 @@ public sealed class TableColumnAdder
     }
 
     /// <summary>
+    /// Fills the newly added column <paramref name="columnName"/> in <paramref name="rows"/>, inside
+    /// <paramref name="tx"/>, and returns the number of rows written. For a table that a transaction with a
+    /// private schema created: only that transaction can see the table before its commit, so the rows are
+    /// its own, read through it, and no other writer can touch them. The column was added
+    /// <c>Public</c> in the same statement, so every row in <paramref name="rows"/> was written before the
+    /// column existed and takes a value. No batch transaction, lock pass or resume record is needed; the
+    /// writes count against the limits of <paramref name="tx"/>, and a ROLLBACK removes them with the rows.
+    ///
+    /// <para>Each row gets the value an INSERT would give it, as in <see cref="FillAddedColumnAsync"/>. A NOT
+    /// NULL column whose value is NULL fails the statement with <see cref="CamusDBErrorCodes.NotNullViolation"/>.</para>
+    /// </summary>
+    internal async Task<int> FillOwnRowsAsync(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        string columnName,
+        KvTransaction tx,
+        IAsyncEnumerable<QueryResultRow> rows,
+        CancellationToken cancellationToken = default)
+    {
+        TableColumnSchema column = table.Schema.Columns?.Find(
+            c => string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase))
+            ?? throw new CamusDBException(
+                CamusDBErrorCodes.UnknownColumn,
+                $"Column '{columnName}' does not exist in table '{table.Name}', so its rows cannot be filled");
+
+        if (!column.NotNull && column.DefaultSequenceId is null && column.DefaultFunction is null
+            && column.DefaultValue is null or { Type: ColumnType.Null })
+            return 0;
+
+        Dictionary<string, ColumnValue>? clockParameters =
+            column.DefaultFunction is { } function && ScalarFunctionEvaluator.IsStatementClockFunction(function)
+                ? ClockScalarFunctions.CreateFixedClock(DateTime.UtcNow)
+                : null;
+
+        List<(ObjectIdValue, IReadOnlyDictionary<string, ColumnValue>)> pending = new(StoredRowRewriter.BatchRows);
+        int modifiedRows = 0;
+
+        await foreach (QueryResultRow row in rows.WithCancellation(cancellationToken).ConfigureAwait(false))
+        {
+            // AssignValuesAsync writes the value into the row in place, so each row is a copy of its own.
+            pending.Add((row.RowId, new Dictionary<string, ColumnValue>(row.Row, StringComparer.OrdinalIgnoreCase)));
+
+            if (pending.Count >= StoredRowRewriter.BatchRows)
+            {
+                modifiedRows += await FillOwnBatchAsync(database, table, column, tx, pending, clockParameters).ConfigureAwait(false);
+                pending.Clear();
+            }
+        }
+
+        modifiedRows += await FillOwnBatchAsync(database, table, column, tx, pending, clockParameters).ConfigureAwait(false);
+
+        Log.LogColumnBackfillComplete(logger, modifiedRows, column.Name);
+
+        return modifiedRows;
+    }
+
+    private async Task<int> FillOwnBatchAsync(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        TableColumnSchema column,
+        KvTransaction tx,
+        List<(ObjectIdValue, IReadOnlyDictionary<string, ColumnValue>)> pending,
+        Dictionary<string, ColumnValue>? clockParameters)
+    {
+        if (pending.Count == 0)
+            return 0;
+
+        await AssignValuesAsync(database, table, column, tx, pending, clockParameters).ConfigureAwait(false);
+        await StoredRowRewriter.RewriteAsync(database, table, tx, pending).ConfigureAwait(false);
+
+        return pending.Count;
+    }
+
+    /// <summary>
     /// True when the column gives a row a value other than NULL: a non-NULL constant, a function or a
     /// sequence. ADD COLUMN ... NOT NULL without one is refused on a table that has a row.
     /// </summary>

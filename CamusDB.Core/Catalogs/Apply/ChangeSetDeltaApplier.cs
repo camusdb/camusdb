@@ -120,9 +120,10 @@ internal static class ChangeSetDeltaApplier
 
     /// <summary>
     /// Applies the deltas of a change set, in order, to a copy of <paramref name="schema"/>, and returns the
-    /// ids of the live tables the change set touches: every table a delta changes, and every table a
-    /// foreign key of a created table references. The pending change set fences those tables (see
-    /// <see cref="PendingSchemaChangeSet.AffectedTableIds"/>), and the publish copies them.
+    /// ids of the live tables the change set touches: every table a delta changes, and every table that a
+    /// foreign key of the change set references, on a created table or added to an existing one. The
+    /// pending change set fences those tables (see <see cref="PendingSchemaChangeSet.AffectedTableIds"/>),
+    /// and the publish copies them.
     /// With <paramref name="refuseOnFailure"/> a delta that does not apply refuses the change set; without
     /// it the delta is skipped, which only the load of an already checked record uses.
     /// </summary>
@@ -168,6 +169,11 @@ internal static class ChangeSetDeltaApplier
                 }
             }
 
+            if (delta.Op == SchemaOp.AddForeignKey
+                && delta.GetPayload<SchemaAddForeignKeyPayload>().ForeignKey?.ReferencedTableId is { } addedParentId
+                && live.Contains(addedParentId))
+                affected.Add(addedParentId);
+
             TableSchema? applied;
             try
             {
@@ -207,6 +213,10 @@ internal static class ChangeSetDeltaApplier
         SchemaOp.AddIndex or SchemaOp.DropIndex => entry.GetPayload<SchemaIndexPayload>().TableName,
         SchemaOp.SetTableSettings => entry.GetPayload<SchemaSetTableSettingsPayload>().TableName,
         SchemaOp.SetComment => entry.GetPayload<SchemaSetCommentPayload>().TableName,
+        SchemaOp.AddCheckConstraint => entry.GetPayload<SchemaCheckConstraintPayload>().TableName,
+        SchemaOp.SetColumnNotNull => entry.GetPayload<SchemaSetColumnNotNullPayload>().TableName,
+        SchemaOp.AddForeignKey => entry.GetPayload<SchemaAddForeignKeyPayload>().TableName,
+        SchemaOp.SetElementState => entry.GetPayload<SchemaElementStatePayload>().TableName,
         _ => null
     };
 

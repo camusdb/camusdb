@@ -9,8 +9,10 @@ using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Apply;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Catalogs.Replication;
+using CamusDB.Core.Catalogs.Transactional;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.ObjectIds;
 using Microsoft.Extensions.Logging;
 
@@ -61,10 +63,51 @@ internal sealed partial class SchemaDdlService
         if (ticket.Operation == AlterConstraintOperation.AddForeignKey)
             return await AddForeignKeyAsync(database, ticket).ConfigureAwait(false);
 
+        if (TransactionSchemaScope.OverlayFor(database) is { } overlay
+            && !overlay.CreatedTable(table.Id)
+            && ReadsRowsToValidate(table.Schema, ticket))
+            return await StageRowConstraintOnSharedTableAsync(database, overlay, table, ticket).ConfigureAwait(false);
+
         if (ticket.Operation == AlterConstraintOperation.DropConstraint && NamesOnlyAForeignKey(table.Schema, ticket.ConstraintName))
             return await DropForeignKeyAsync(database, ticket).ConfigureAwait(false);
 
         return await tableConstraintAlterer.Alter(catalogs, context.TableOpener, database, table, ticket, context.IsClusterMode).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// True for an ADD CHECK, and for a SET NOT NULL on a column that exists and is nullable: the two
+    /// constraint statements that must read every row of the table before the constraint holds.
+    /// </summary>
+    private static bool ReadsRowsToValidate(TableSchema table, AlterConstraintTicket ticket) => ticket.Operation switch
+    {
+        AlterConstraintOperation.AddCheck => true,
+        AlterConstraintOperation.SetNotNull => table.Columns?.Find(c => string.Equals(c.Name, ticket.ColumnName, StringComparison.OrdinalIgnoreCase)) is { NotNull: false },
+        _ => false,
+    };
+
+    /// <summary>
+    /// ADD CHECK, or SET NOT NULL on a nullable column, inside a transaction with a private schema, on a
+    /// table the transaction did not create: the cluster form runs on the shared table, owned by the
+    /// transaction (<see cref="TableConstraintAlterer.StageRowConstraintAsync"/>). The constraint is enforced
+    /// for every transaction from the statement on, and the existing rows are proven at the statement. No
+    /// step joins the change set; the commit makes the constraint permanent, and a rollback removes it
+    /// (<see cref="RunOwnedStagedChangeAsync"/>). The check reads with no lock, so locks the transaction
+    /// holds on the table's rows do not refuse it.
+    /// </summary>
+    private Task<bool> StageRowConstraintOnSharedTableAsync(
+        DatabaseDescriptor database, TransactionSchemaOverlay overlay, TableDescriptor table, AlterConstraintTicket ticket)
+    {
+        string statement = ticket.Operation == AlterConstraintOperation.AddCheck
+            ? "ALTER TABLE ... ADD CONSTRAINT ... CHECK"
+            : "ALTER TABLE ... ALTER COLUMN ... SET NOT NULL";
+
+        return RunOwnedStagedChangeAsync(database, overlay, table, statement, async () =>
+        {
+            (string tableId, string tableName, string constraintName) = await tableConstraintAlterer.StageRowConstraintAsync(
+                catalogs, context.TableOpener, database, ticket, overlay.ChangeSetId).ConfigureAwait(false);
+
+            return new OwnedStagedElement(tableId, tableName, 1, [constraintName], []);
+        }, locksRows: false);
     }
 
     /// <summary>
@@ -86,6 +129,9 @@ internal sealed partial class SchemaDdlService
     {
         ForeignKeyInfo info = ticket.ForeignKey
             ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "A foreign key definition is required for ADD FOREIGN KEY");
+
+        if (TransactionSchemaScope.OverlayFor(database) is { } overlay)
+            return await AddForeignKeyInOwnerTransactionAsync(database, overlay, ticket, info).ConfigureAwait(false);
 
         await database.DdlGate.EnterAsync(ticket.TableName, context.Logger).ConfigureAwait(false);
         try
@@ -195,6 +241,255 @@ internal sealed partial class SchemaDdlService
     }
 
     /// <summary>
+    /// <c>ADD ... FOREIGN KEY</c> inside a transaction with a private schema, on a child table the
+    /// transaction created. No other transaction can see that table before the commit, so the rollout runs
+    /// inside the transaction, with no job record and no coordinator:
+    /// <list type="number">
+    /// <item>Build the backing index over the transaction's own rows, when the constraint needs one
+    /// (<see cref="IndexBackfiller.BuildInTransactionAsync"/>).</item>
+    /// <item>Add the constraint in <c>WriteOnly</c> to the change set. From here on the private schema
+    /// enforces it on the transaction's own writes.</item>
+    /// <item>Check every row of the child through the transaction with the checker an INSERT uses
+    /// (<see cref="ForeignKeyStatementChecker"/>). It takes the shared rendezvous lock on each parent key
+    /// it finds, so a concurrent DELETE of that parent waits for the transaction to end, as it does for a
+    /// child row the transaction inserts. A missing parent fails the statement with
+    /// <see cref="CamusDBErrorCodes.ForeignKeyViolation"/>.</item>
+    /// <item>Move the constraint to <c>Public</c> in the change set, so the publish makes it visible
+    /// checked.</item>
+    /// </list>
+    /// The publish fences the parent table as well as the child (<see cref="ChangeSetDeltaApplier"/>), so a
+    /// DELETE planned without the constraint cannot remove a parent in the window before the publish. A
+    /// child table that other transactions write takes the staged form instead
+    /// (<see cref="StageForeignKeyOnSharedTableAsync"/>).
+    /// </summary>
+    private async Task<bool> AddForeignKeyInOwnerTransactionAsync(
+        DatabaseDescriptor database, TransactionSchemaOverlay overlay, AlterConstraintTicket ticket, ForeignKeyInfo info)
+    {
+        // Opened with the private schema: the form follows the transaction's own view of the table.
+        TableDescriptor target = await context.TableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+        if (!overlay.CreatedTable(target.Id))
+            return await StageForeignKeyOnSharedTableAsync(database, overlay, target, info).ConfigureAwait(false);
+
+        KvTransaction tx = overlay.Owner;
+        string tableName;
+        string constraintName;
+
+        await database.DdlGate.EnterAsync(ticket.TableName, context.Logger).ConfigureAwait(false);
+        try
+        {
+            TableDescriptor table = await context.TableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+            TransactionalDdlRules.RequireOwnTable(overlay, table, "ALTER TABLE ... ADD FOREIGN KEY");
+            tableName = table.Name;
+
+            ForeignKeyAlterPlan plan;
+
+            await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+            try
+            {
+                plan = ForeignKeyDefinitionBuilder.ResolveForAlter(database.Schema, table.Schema, info, options);
+                ForeignKeyDefinitionRules.RequireNoCycle(database.Schema, table.Schema, plan.ToSchema(plan.BackingIndexId ?? ""));
+            }
+            finally
+            {
+                database.Schema.ReleaseLock();
+            }
+
+            string backingIndexId;
+            string? claimedIndexId = null;
+
+            if (plan.OwnedIndexName is { } ownedIndexName)
+            {
+                backingIndexId = await BuildOwnedIndexAsync(database, table, plan, ownedIndexName).ConfigureAwait(false);
+                claimedIndexId = backingIndexId;
+            }
+            else
+            {
+                backingIndexId = plan.BackingIndexId!;
+            }
+
+            ForeignKeySchema foreignKey = plan.ToSchema(backingIndexId);
+            constraintName = foreignKey.Name;
+
+            await catalogs.ReplicateAddForeignKeyAsync(database, tableName, table.Id, foreignKey, claimedIndexId).ConfigureAwait(false);
+        }
+        finally
+        {
+            database.SchemaDdlSemaphore.Release();
+        }
+
+        TableDescriptor child = await context.TableOpener.Open(database, tableName).ConfigureAwait(false);
+        ForeignKeyStatementChecker checker = await ForeignKeyStatementChecker.ForChildWritesAsync(database, child, context.TableOpener, tx).ConfigureAwait(false);
+
+        QueryTicket rows = new(
+            txnState: tx,
+            databaseName: database.Name,
+            tableName: child.Name,
+            index: null,
+            projection: null,
+            filters: null,
+            where: null,
+            orderBy: null,
+            limit: null,
+            offset: null,
+            parameters: null
+        );
+
+        await foreach (QueryResultRow row in queryExecutor.Query(database, child, rows).ConfigureAwait(false))
+            checker.AddChildRow(new Dictionary<string, ColumnValue>(row.Row, StringComparer.OrdinalIgnoreCase));
+
+        await checker.CompleteAsync(tx).ConfigureAwait(false);
+
+        await database.DdlGate.EnterAsync(tableName, context.Logger).ConfigureAwait(false);
+        try
+        {
+            await catalogs.ReplicateElementStateAsync(
+                database, tableName, constraintName, SchemaElementState.Public, SchemaElementKind.ForeignKey
+            ).ConfigureAwait(false);
+        }
+        finally
+        {
+            database.SchemaDdlSemaphore.Release();
+        }
+
+        if (context.Logger.IsEnabled(LogLevel.Information))
+            context.Logger.LogInformation("Foreign key '{Constraint}' added to table '{Table}' inside a transaction", constraintName, tableName);
+
+        return true;
+    }
+
+    /// <summary>
+    /// <c>ADD ... FOREIGN KEY</c> inside a transaction with a private schema, on a child table the
+    /// transaction did not create: the online rollout of <see cref="AddForeignKeyAsync"/> runs on the shared
+    /// tables, owned by the transaction (<see cref="RunOwnedStagedChangeAsync"/>):
+    /// <list type="number">
+    /// <item>When no index can serve the parent-side probe, build <c>~fk_{name}</c> with the staged index
+    /// build, owned by the transaction, and make it <c>Public</c> at once: the constraint rules require a
+    /// readable backing index. An index changes no query result, so other transactions may read it before
+    /// the commit.</item>
+    /// <item>Record the constraint's job with its owner, and add the constraint in <c>WriteOnly</c>. From the
+    /// acknowledgement on, every node enforces both sides, for every transaction.</item>
+    /// <item>The coordinator checks the child rows (<see cref="ForeignKeyValidationPass"/>) and stops before
+    /// <c>Public</c>. An orphan removes the constraint and its index and fails the statement with
+    /// <see cref="CamusDBErrorCodes.ForeignKeyViolation"/>.</item>
+    /// <item>The step of the constraint to <c>Public</c> joins the change set. The index's job record is
+    /// owned too, so a rollback removes the index after the constraint.</item>
+    /// </list>
+    /// The check reads with no lock. The transaction must not have created, changed or written the parent
+    /// table (<see cref="TransactionalDdlRules.RequireStageableParent"/>), because the steps and the check run
+    /// on the shared tables, outside the transaction.
+    /// </summary>
+    private async Task<bool> StageForeignKeyOnSharedTableAsync(
+        DatabaseDescriptor database, TransactionSchemaOverlay overlay, TableDescriptor child, ForeignKeyInfo info)
+    {
+        const string statement = "ALTER TABLE ... ADD FOREIGN KEY";
+
+        TableDescriptor parent = await context.TableOpener.Open(database, info.ReferencedTable).ConfigureAwait(false);
+        TransactionalDdlRules.RequireStageableParent(overlay, parent, statement);
+
+        return await RunOwnedStagedChangeAsync(database, overlay, child, statement, async () =>
+        {
+            await database.DdlGate.EnterAsync(child.Name, context.Logger).ConfigureAwait(false);
+            try
+            {
+                TableDescriptor table = await context.TableOpener.Open(database, child.Name).ConfigureAwait(false);
+                string tableName = table.Name;
+
+                ForeignKeyAlterPlan plan;
+
+                await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+                try
+                {
+                    plan = ForeignKeyDefinitionBuilder.ResolveForAlter(database.Schema, table.Schema, info, options);
+                    ForeignKeyDefinitionRules.RequireNoCycle(database.Schema, table.Schema, plan.ToSchema(plan.BackingIndexId ?? ""));
+                }
+                finally
+                {
+                    database.Schema.ReleaseLock();
+                }
+
+                await RequireNoOtherJobNamedAsync(database, table.Id, info.Name).ConfigureAwait(false);
+
+                List<string> ownedElements = new(2);
+                int steps = 0;
+                string backingIndexId;
+                string? claimedIndexId = null;
+
+                if (plan.OwnedIndexName is { } ownedIndexName)
+                {
+                    IndexBuildInfo indexInfo = new(
+                        ObjectIdGenerator.Generate().ToString(),
+                        ownedIndexName,
+                        [.. plan.ChildColumnIds],
+                        [.. plan.ChildColumnNames],
+                        IndexType.Multi);
+
+                    steps += await StageIndexWithinGateAsync(database, table.Id, tableName, indexInfo, overlay.ChangeSetId).ConfigureAwait(false);
+                    ownedElements.Add(ownedIndexName);
+
+                    await catalogs.ReplicateElementStateAsync(
+                        database, tableName, ownedIndexName, SchemaElementState.Public, SchemaElementKind.Index).ConfigureAwait(false);
+                    steps++;
+
+                    backingIndexId = indexInfo.IndexId;
+                    claimedIndexId = backingIndexId;
+                }
+                else
+                {
+                    backingIndexId = plan.BackingIndexId!;
+                }
+
+                ForeignKeySchema foreignKey = plan.ToSchema(backingIndexId);
+
+                // Recorded before the constraint exists, so the rollback and the resume find it.
+                await catalogs.PersistCoordinatorJobAsync(database, new PersistedCoordinatorJob
+                {
+                    TableName = tableName,
+                    TableId = table.Id,
+                    ElementName = foreignKey.Name,
+                    TargetState = SchemaElementState.Public,
+                    ElementKind = SchemaElementKind.ForeignKey,
+                    OwnerChangeSetId = overlay.ChangeSetId,
+                }).ConfigureAwait(false);
+                ownedElements.Add(foreignKey.Name);
+
+                await catalogs.ReplicateAddForeignKeyAsync(database, tableName, table.Id, foreignKey, claimedIndexId).ConfigureAwait(false);
+                steps++;
+
+                database.Cache?.InvalidateByTableId(database.Id, table.Id);
+
+                SchemaChangeCoordinator coordinator = new(catalogs, context.Logger)
+                {
+                    ForeignKeyValidationAsync = async (db, childName, constraintName) =>
+                    {
+                        if (TestInterceptBeforeForeignKeyValidation is { } intercept)
+                            await intercept().ConfigureAwait(false);
+
+                        await ValidateForeignKeyRowsAsync(db, childName, constraintName).ConfigureAwait(false);
+                    },
+                    DropIndexAsync = (db, childName, indexName) => DropIndexWithinGateAsync(db, childName, indexName)
+                };
+
+                await coordinator.RunJobAsync(
+                    database,
+                    new SchemaChangeJob(database.Name, tableName, table.Id, foreignKey.Name, SchemaElementState.Public, SchemaElementKind.ForeignKey, overlay.ChangeSetId),
+                    gateHeldByCaller: true
+                ).ConfigureAwait(false);
+
+                steps += coordinator.StepsProposed;
+
+                if (context.Logger.IsEnabled(LogLevel.Information))
+                    context.Logger.LogInformation("Foreign key '{Constraint}' staged on table '{Table}' inside a transaction", foreignKey.Name, tableName);
+
+                return new OwnedStagedElement(table.Id, tableName, steps, ownedElements, [(foreignKey.Name, SchemaElementKind.ForeignKey)]);
+            }
+            finally
+            {
+                database.SchemaDdlSemaphore.Release();
+            }
+        }, locksRows: false).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Test-only hook, invoked by <c>ADD CONSTRAINT ... FOREIGN KEY</c> after every node acked the
     /// constraint in <c>WriteOnly</c> and before the validation pass. A test uses it to write rows or to
     /// fail the statement at exactly that point. Null in production; a test clears it after use.
@@ -232,7 +527,9 @@ internal sealed partial class SchemaDdlService
     {
         string tableName = table.Name;
 
-        if (context.IsClusterMode)
+        // Inside a transaction with a private schema the table is the transaction's own, and the index
+        // is built in the transaction by the local build.
+        if (context.IsClusterMode && TransactionSchemaScope.OverlayFor(database) is null)
         {
             IndexBuildInfo indexInfo = new(
                 ObjectIdGenerator.Generate().ToString(),

@@ -16,6 +16,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Catalogs;
+using CamusDB.Core.Catalogs.Transactional;
 using CamusDB.Core.Util.Diagnostics;
 using CamusDB.Core.Transactions;
 using Kahuna.Shared.KeyValue;
@@ -384,6 +385,12 @@ internal sealed class TableIndexAdder
             ?? table.Schema.Indexes?.FirstOrDefault(ix => string.Equals(ix.Name, ticket.IndexName, StringComparison.OrdinalIgnoreCase))?.Id
             ?? throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Index '{ticket.IndexName}' was not found in schema");
 
+        if (TransactionSchemaScope.OverlayFor(database) is { } overlay && overlay.CreatedTable(table.Id))
+        {
+            state.ModifiedRows = await BuildOverOwnRowsAsync(state, indexId, unique).ConfigureAwait(false);
+            return FluxAction.Continue;
+        }
+
         // The index is WriteOnly in the schema and in the descriptor, so every statement that starts
         // now maintains it. A transaction that wrote the table before that did not, and the backfill
         // reads committed rows only. The fence refuses the later commit of such a transaction, and
@@ -428,6 +435,56 @@ internal sealed class TableIndexAdder
         Log.LogIndexRowsAdded(logger, result.Rows, ticket.IndexName);
 
         return FluxAction.Continue;
+    }
+
+    /// <summary>
+    /// The build step for a table that the statement's transaction created, under its private schema. Only
+    /// that transaction can see the table before its commit, so every row is one it wrote: the rows are read
+    /// through the transaction, and the entries are written in it (<see cref="IndexBackfiller.BuildInTransactionAsync"/>).
+    /// A ROLLBACK removes them with the rows. No fence runs, because no other transaction writes the table.
+    /// </summary>
+    private async Task<int> BuildOverOwnRowsAsync(AddIndexFluxState state, string indexId, bool unique)
+    {
+        AlterIndexTicket ticket = state.Ticket;
+        TableDescriptor table = state.Table;
+
+        ResolvedIndexKey key = state.Key ?? ResolveKey(table, ticket);
+        string[] keyColumns = new string[ticket.Columns.Length];
+        for (int i = 0; i < ticket.Columns.Length; i++)
+            keyColumns[i] = key.Expressions?[i] is { } expression ? expression.KeyName : ticket.Columns[i].Name;
+
+        IndexBackfiller.Target target = new(
+            indexId,
+            ticket.IndexName,
+            unique,
+            keyColumns,
+            ticket.IncludeColumns.Length > 0 ? ticket.IncludeColumns : null,
+            Inverted: ticket.Operation == AlterIndexOperation.AddInvertedIndex,
+            Expressions: key.Expressions);
+
+        QueryTicket rows = new(
+            txnState: state.Tx,
+            databaseName: ticket.DatabaseName,
+            tableName: table.Name,
+            index: null,
+            projection: null,
+            filters: null,
+            where: null,
+            orderBy: null,
+            limit: null,
+            offset: null,
+            parameters: null
+        );
+
+        int built = await IndexBackfiller.BuildInTransactionAsync(
+            state.Tx, table, target,
+            state.QueryExecutor.Query(state.Database, table, rows),
+            state.Database.Options,
+            CancellationToken.None).ConfigureAwait(false);
+
+        Log.LogIndexRowsAdded(logger, built, ticket.IndexName);
+
+        return built;
     }
 
     private async Task<FluxAction> PublishIndex(AddIndexFluxState state)

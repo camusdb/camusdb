@@ -94,6 +94,18 @@ internal sealed class TableColumnAlterer
         CancellationToken cancellationToken = default
     ) => tableColumnAdder.FillAddedColumnAsync(database, table, columnName, cancellationToken);
 
+    /// <summary>
+    /// Fills a newly added column in the rows of a table that the transaction created. See
+    /// <see cref="TableColumnAdder.FillOwnRowsAsync"/>.
+    /// </summary>
+    internal Task<int> FillOwnRowsAsync(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        string columnName,
+        KvTransaction tx,
+        IAsyncEnumerable<QueryResultRow> rows
+    ) => tableColumnAdder.FillOwnRowsAsync(database, table, columnName, tx, rows);
+
     private async Task<bool> RenameColumn(DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket, KvTransaction tx)
     {
         AlterColumnTicket alterColumnTicket = new(

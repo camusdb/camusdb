@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 
 using NUnit.Framework;
@@ -431,5 +432,293 @@ public sealed class TestClusterTransactionalDdl
 
         foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
             Assert.AreEqual(3, (await QueryAsync(node, db, "SELECT * FROM base")).Count, $"node {node.Index} keeps every row");
+    }
+
+    /// <summary>
+    /// A transaction on a follower creates an index on a shared table with rows. The staged build runs at
+    /// the statement and leaves the index WriteOnly on every node, the leader's sweep leaves the owned job
+    /// alone, and a write on the leader meanwhile is indexed. COMMIT publishes the index on every node;
+    /// ROLLBACK removes it from every node.
+    /// </summary>
+    [TestCase(true)]
+    [TestCase(false)]
+    public async Task StagedIndexOnASharedTable_FromAFollower_EndsWithTheTransactionOnEveryNode(bool commit)
+    {
+        await using InProcessSchemaCluster cluster = await StartClusterAsync();
+        string db = cluster.NextSchemaLogDatabaseName();
+        (InProcessSchemaCluster.Node leader, InProcessSchemaCluster.Node follower) = await PrepareAsync(cluster, db);
+
+        await AutocommitAsync(leader, db,
+            "INSERT INTO base (id, name) VALUES " + string.Join(", ", Enumerable.Range(2, 299).Select(i => $"({i}, 'n{i}')")),
+            ddl: false);
+
+        KvTransaction tx = await BeginSessionAsync(follower);
+        await Ddl(follower, tx, db, "CREATE INDEX base_name ON base (name)");
+
+        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+            Assert.AreEqual(SchemaElementState.WriteOnly, node.Database!.Schema.Tables["base"].Indexes!.Single(i => i.Name == "base_name").State,
+                $"node {node.Index} maintains the staged index and cannot read it");
+
+        await AutocommitAsync(leader, db, "INSERT INTO base (id, name) VALUES (1000, 'late')", ddl: false);
+
+        await leader.Executor.SweepCoordinatorJobsForTests();
+        Assert.AreEqual(SchemaElementState.WriteOnly, leader.Database!.Schema.Tables["base"].Indexes!.Single(i => i.Name == "base_name").State,
+            "the leader's sweep does not drive the job of an open transaction");
+
+        if (commit)
+            await follower.Database!.Transactions.CommitAsync(tx);
+        else
+            await follower.Database!.Transactions.RollbackAsync(tx);
+
+        await cluster.WaitForSchemaConvergenceAsync(db, leader.Database!.Schema.SchemaVersion);
+
+        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+        {
+            TableIndexSchema? index = node.Database!.Schema.Tables["base"].Indexes!.Find(i => i.Name == "base_name");
+
+            if (commit)
+            {
+                Assert.AreEqual(SchemaElementState.Public, index?.State, $"node {node.Index} reads the published index");
+                Assert.AreEqual(1, (await QueryAsync(node, db, "SELECT * FROM base WHERE name = 'late'")).Count, $"node {node.Index} finds the row written while the index was staged");
+                Assert.AreEqual(1, (await QueryAsync(node, db, "SELECT * FROM base WHERE name = 'n150'")).Count, $"node {node.Index} finds a backfilled row");
+            }
+            else
+            {
+                Assert.IsNull(index, $"node {node.Index} no longer has the index");
+            }
+        }
+
+        Assert.AreEqual(0, await CountKeysAsync(leader.Database!, MetaKeys.MetaBucketPrefix(leader.Database!.Id), MetaKeys.CoordinatorKeyPrefix(leader.Database!.Id)),
+            "no job record is left");
+    }
+    /// <summary>Adds the rows <c>(i, 'n{i}')</c> for i in 2..<paramref name="lastId"/> to <c>base</c>.</summary>
+    private static string InsertBaseRowsSql(int lastId) =>
+        "INSERT INTO base (id, name) VALUES " + string.Join(", ", Enumerable.Range(2, lastId - 1).Select(i => $"({i}, 'n{i}')"));
+
+    // More rows than one backfill batch, so the backfill stops at a checkpoint before it ends.
+    private const int BackfillRows = 700;
+
+    /// <summary>
+    /// A transaction on the schema leader creates an index on a shared table with more rows than one
+    /// backfill batch, and the schema leadership moves after the first batch. The backfill stops, and the
+    /// statement fails with the retryable code. The rollback then leaves no index, no entry and no job
+    /// record on any node, and the same CREATE INDEX runs again afterwards.
+    /// </summary>
+    [Test]
+    public async Task StagedIndexOnASharedTable_LeaderMovesDuringTheBackfill_FailsRetryably_AndTheRollbackLeavesNothing()
+    {
+        await using InProcessSchemaCluster cluster = await StartClusterAsync();
+        string db = cluster.NextSchemaLogDatabaseName();
+        (InProcessSchemaCluster.Node leader, InProcessSchemaCluster.Node follower) = await PrepareAsync(cluster, db);
+
+        await AutocommitAsync(leader, db, InsertBaseRowsSql(BackfillRows), ddl: false);
+
+        TaskCompletionSource firstBatchDone = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource leaderMoved = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource leadershipLost = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        int checkpoints = 0;
+
+        leader.Executor.TestInterceptAfterBackfillCheckpoint = async () =>
+        {
+            if (Interlocked.Increment(ref checkpoints) != 1)
+                return;
+
+            firstBatchDone.TrySetResult();
+            await leaderMoved.Task;
+        };
+
+        using IDisposable watch = leader.Kahuna.RegisterSchemaLeadershipLostCallback(leader.Database!.Id, _ =>
+        {
+            leadershipLost.TrySetResult();
+            return Task.CompletedTask;
+        });
+
+        string tableId = leader.Database!.Schema.Tables["base"].Id;
+        string storageId = leader.Database!.Schema.Tables["base"].EffectiveStorageId;
+        string indexSpace;
+
+        try
+        {
+            KvTransaction tx = await BeginSessionAsync(leader);
+            Task statement = Ddl(leader, tx, db, "CREATE INDEX base_name ON base (name)");
+
+            await firstBatchDone.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            await cluster.TransferSchemaLeadershipAsync(db, follower, timeout: TimeSpan.FromSeconds(30));
+            await leadershipLost.Task.WaitAsync(TimeSpan.FromSeconds(15));
+
+            // The coordinator's own leadership callback runs on the thread pool, as the one above does.
+            await Task.Delay(200);
+            leaderMoved.TrySetResult();
+
+            CamusDBException? failed = Assert.ThrowsAsync<CamusDBException>(async () => await statement.WaitAsync(TimeSpan.FromSeconds(30)));
+            Assert.AreEqual(CamusDBErrorCodes.TransactionMustRetry, failed!.Code, failed.Message);
+
+            PersistedCoordinatorJob? record = await leader.Executor.Catalogs.TryLoadCoordinatorJobAsync(leader.Database!, tableId, "base_name");
+            Assert.IsNotNull(record?.IndexId, "the job record stays for the rollback");
+
+            indexSpace = KvKeyBuilder.IndexSpaceOf(leader.Database!.Id, storageId, record!.IndexId!);
+            Assert.That(await CountKeysAsync(leader.Database!, indexSpace, indexSpace + "/"), Is.GreaterThan(0), "the first batch wrote entries");
+
+            await leader.Database!.Transactions.RollbackAsync(tx);
+        }
+        finally
+        {
+            leader.Executor.TestInterceptAfterBackfillCheckpoint = null;
+            leaderMoved.TrySetResult();
+        }
+
+        await cluster.WaitForSchemaConvergenceAsync(db, follower.Database!.Schema.SchemaVersion);
+
+        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+            Assert.IsFalse(node.Database!.Schema.Tables["base"].Indexes!.Exists(i => i.Name == "base_name"), $"node {node.Index} has no index");
+
+        Assert.AreEqual(0, await CountKeysAsync(follower.Database!, indexSpace, indexSpace + "/"), "the rollback removed the entries");
+        Assert.AreEqual(0, await CountKeysAsync(follower.Database!, MetaKeys.MetaBucketPrefix(follower.Database!.Id), MetaKeys.CoordinatorKeyPrefix(follower.Database!.Id)),
+            "and the job record");
+
+        await AutocommitAsync(follower, db, "CREATE INDEX base_name ON base (name)", ddl: true);
+        await cluster.WaitForSchemaConvergenceAsync(db, follower.Database!.Schema.SchemaVersion);
+
+        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+            Assert.AreEqual(1, (await QueryAsync(node, db, "SELECT * FROM base WHERE name = 'n600'")).Count, $"node {node.Index} reads through the index built again");
+    }
+
+    /// <summary>
+    /// A transaction on a follower creates an index on a shared table with more rows than one backfill
+    /// batch, and the schema leadership moves to the third node after the first batch. The backfill of a
+    /// follower does not stop for a change of the leader, so the statement ends, and the commit publishes
+    /// the index, with an entry for every row, through the new leader.
+    /// </summary>
+    [Test]
+    public async Task StagedIndexOnASharedTable_FromAFollower_LeaderMovesDuringTheBackfill_TheCommitPublishesTheIndex()
+    {
+        await using InProcessSchemaCluster cluster = await StartClusterAsync();
+        string db = cluster.NextSchemaLogDatabaseName();
+        (InProcessSchemaCluster.Node leader, InProcessSchemaCluster.Node follower) = await PrepareAsync(cluster, db);
+        InProcessSchemaCluster.Node third = cluster.Nodes.First(n => n.Index != leader.Index && n.Index != follower.Index);
+
+        await AutocommitAsync(leader, db, InsertBaseRowsSql(BackfillRows), ddl: false);
+
+        TaskCompletionSource firstBatchDone = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource leaderMoved = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        int checkpoints = 0;
+
+        follower.Executor.TestInterceptAfterBackfillCheckpoint = async () =>
+        {
+            if (Interlocked.Increment(ref checkpoints) != 1)
+                return;
+
+            firstBatchDone.TrySetResult();
+            await leaderMoved.Task;
+        };
+
+        KvTransaction tx = await BeginSessionAsync(follower);
+
+        try
+        {
+            Task statement = Ddl(follower, tx, db, "CREATE INDEX base_name ON base (name)");
+
+            await firstBatchDone.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            await cluster.TransferSchemaLeadershipAsync(db, third, timeout: TimeSpan.FromSeconds(30));
+            leaderMoved.TrySetResult();
+
+            await statement.WaitAsync(TimeSpan.FromSeconds(30));
+        }
+        finally
+        {
+            follower.Executor.TestInterceptAfterBackfillCheckpoint = null;
+            leaderMoved.TrySetResult();
+        }
+
+        await follower.Database!.Transactions.CommitAsync(tx);
+        await cluster.WaitForSchemaConvergenceAsync(db, third.Database!.Schema.SchemaVersion);
+
+        TableSchema table = third.Database!.Schema.Tables["base"];
+        TableIndexSchema? published = table.Indexes!.Find(i => i.Name == "base_name");
+        Assert.AreEqual(SchemaElementState.Public, published?.State);
+
+        string indexSpace = KvKeyBuilder.IndexSpaceOf(third.Database!.Id, table.EffectiveStorageId, published!.KvId);
+        Assert.AreEqual(BackfillRows, await CountKeysAsync(third.Database!, indexSpace, indexSpace + "/"), "every row has its entry");
+
+        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+        {
+            Assert.AreEqual(SchemaElementState.Public, node.Database!.Schema.Tables["base"].Indexes!.Single(i => i.Name == "base_name").State, $"node {node.Index} reads the index");
+            Assert.AreEqual(1, (await QueryAsync(node, db, "SELECT * FROM base WHERE name = 'n650'")).Count, $"node {node.Index} finds a row of the second batch");
+        }
+
+        Assert.AreEqual(0, await CountKeysAsync(third.Database!, MetaKeys.MetaBucketPrefix(third.Database!.Id), MetaKeys.CoordinatorKeyPrefix(third.Database!.Id)),
+            "no job record is left");
+    }
+    /// <summary>
+    /// A transaction on a follower stages a CHECK on one shared table and a foreign key from another shared
+    /// table. Every node enforces both on the leader's writes before the commit. COMMIT keeps them on every
+    /// node, with the foreign key published; ROLLBACK removes both, and the backing index, from every node.
+    /// No job record is left.
+    /// </summary>
+    [TestCase(true)]
+    [TestCase(false)]
+    public async Task StagedConstraintsOnSharedTables_FromAFollower_AreEnforcedAtOnce_AndEndWithTheTransaction(bool commit)
+    {
+        await using InProcessSchemaCluster cluster = await StartClusterAsync();
+        string db = cluster.NextSchemaLogDatabaseName();
+        (InProcessSchemaCluster.Node leader, InProcessSchemaCluster.Node follower) = await PrepareAsync(cluster, db);
+
+        await AutocommitAsync(leader, db, "CREATE TABLE other (id int64 PRIMARY KEY, v int64)", ddl: true);
+        await AutocommitAsync(leader, db, "INSERT INTO other (id, v) VALUES (1, 10), (2, 20)", ddl: false);
+        await AutocommitAsync(leader, db, "CREATE TABLE kids (id int64 PRIMARY KEY, base_id int64)", ddl: true);
+        await AutocommitAsync(leader, db, "INSERT INTO kids (id, base_id) VALUES (1, 1), (2, NULL)", ddl: false);
+        await cluster.WaitForSchemaConvergenceAsync(db, leader.Database!.Schema.SchemaVersion);
+
+        KvTransaction tx = await BeginSessionAsync(follower);
+        await Ddl(follower, tx, db, "ALTER TABLE other ADD CONSTRAINT v_positive CHECK (v > 0)");
+        await Ddl(follower, tx, db, "ALTER TABLE kids ADD CONSTRAINT kids_base FOREIGN KEY (base_id) REFERENCES base (id)");
+
+        await cluster.WaitForSchemaConvergenceAsync(db, follower.Database!.Schema.SchemaVersion);
+
+        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+        {
+            Assert.IsTrue(node.Database!.Schema.Tables["other"].CheckConstraints?.Exists(c => c.Name == "v_positive") == true, $"node {node.Index} enforces the CHECK");
+            Assert.AreEqual(SchemaElementState.WriteOnly, node.Database!.Schema.Tables["kids"].ForeignKeys!.Single(fk => fk.Name == "kids_base").State,
+                $"node {node.Index} enforces the foreign key and does not show it as checked");
+        }
+
+        CamusDBException? check = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await AutocommitAsync(leader, db, "INSERT INTO other (id, v) VALUES (3, -1)", ddl: false));
+        Assert.AreEqual(CamusDBErrorCodes.CheckConstraintViolation, check!.Code, "a write on the leader meets the CHECK before the commit");
+
+        CamusDBException? orphan = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await AutocommitAsync(leader, db, "INSERT INTO kids (id, base_id) VALUES (3, 99)", ddl: false));
+        Assert.AreEqual(CamusDBErrorCodes.ForeignKeyViolation, orphan!.Code, "and the foreign key");
+
+        if (commit)
+            await follower.Database!.Transactions.CommitAsync(tx);
+        else
+            await follower.Database!.Transactions.RollbackAsync(tx);
+
+        await cluster.WaitForSchemaConvergenceAsync(db, leader.Database!.Schema.SchemaVersion);
+
+        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+        {
+            TableSchema other = node.Database!.Schema.Tables["other"];
+            TableSchema kids = node.Database!.Schema.Tables["kids"];
+
+            if (commit)
+            {
+                Assert.IsTrue(other.CheckConstraints?.Exists(c => c.Name == "v_positive") == true, $"node {node.Index} keeps the CHECK");
+                Assert.AreEqual(SchemaElementState.Public, kids.ForeignKeys!.Single(fk => fk.Name == "kids_base").State, $"node {node.Index} shows the foreign key as checked");
+            }
+            else
+            {
+                Assert.IsFalse(other.CheckConstraints?.Exists(c => c.Name == "v_positive") == true, $"node {node.Index} has no CHECK");
+                Assert.IsTrue(kids.ForeignKeys is null or { Count: 0 }, $"node {node.Index} has no foreign key");
+                Assert.IsFalse(kids.Indexes?.Exists(i => i.Name == "~fk_kids_base") == true, $"node {node.Index} has no backing index");
+            }
+        }
+
+        if (!commit)
+            await AutocommitAsync(leader, db, "INSERT INTO kids (id, base_id) VALUES (3, 99)", ddl: false);
+
+        Assert.AreEqual(0, await CountKeysAsync(leader.Database!, MetaKeys.MetaBucketPrefix(leader.Database!.Id), MetaKeys.CoordinatorKeyPrefix(leader.Database!.Id)),
+            "no job record is left");
     }
 }

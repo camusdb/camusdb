@@ -242,64 +242,7 @@ internal static class IndexBackfiller
                     visibilitySchemaVersion: table.Schema.Version,
                     decodeState: decodeState).ConfigureAwait(false);
 
-                // The values of the expression key parts, under their hidden key names. A row decoded
-                // here holds every column the index reads, so an absent one is a bug, not a NULL.
-                Dictionary<string, ColumnValue> keyRow = IndexKeyRows.For(keyShape, row);
-
-                // NULLs are distinct: a unique index holds no entry for a row with a NULL (or absent)
-                // value in any key column, so several such rows can coexist. The insert path applies the
-                // same rule, which keeps a backfilled index identical to one built row by row. A
-                // non-unique index keeps every row (the row id breaks ties).
-                if (target.Unique && HasNullKeyColumn(keyRow, target.KeyColumns))
-                    continue;
-
-                // A GIN index: one non-unique entry per distinct entry of the document, none for NULL.
-                // The insert path builds the same entries, so a backfilled index matches one built row
-                // by row.
-                if (target.Inverted)
-                {
-                    if (JsonbGinIndexKeys.EntriesOf(target.KeyColumns[0], row) is { } entries)
-                    {
-                        JsonbGinIndexKeys.CheckEntryWrites(target.IndexName, target.KeyColumns[0], entries.Count, tx.MutationLimit);
-                        ColumnValue rowIdValue = JsonbGinIndexKeys.RowIdValue(rowId);
-                        foreach (string entry in entries)
-                            await table.Store.PutIndexEntry(
-                                tx, target.IndexId, JsonbGinIndexKeys.Key(entry, rowIdValue), rowId, unique: false,
-                                backfillMode: true, includeTuple: null, cancellationToken: cancellationToken).ConfigureAwait(false);
-                    }
-                    continue;
-                }
-
-                int k = 0;
-                ColumnValue[] columnValues = target.Unique
-                    ? new ColumnValue[target.KeyColumns.Length]
-                    : new ColumnValue[target.KeyColumns.Length + 1];
-
-                foreach (string columnName in target.KeyColumns)
-                {
-                    ColumnValue? keyValue = keyRow.GetValueOrDefault(columnName);
-                    if (keyValue is null)
-                        throw new CamusDBException(
-                            CamusDBErrorCodes.InvalidInternalOperation,
-                            $"A null value was found for index key field '{columnName}'"
-                        );
-                    columnValues[k++] = keyValue;
-                }
-
-                if (!target.Unique)
-                    columnValues[k] = new(ColumnType.Id, rowId.ToString());
-
-                CompositeColumnValue compositeKey = new(columnValues);
-
-                // The stored (INCLUDE) values of a covering index; they may be NULL, as payload, unlike
-                // a key column. EncodeTupleChecked enforces the per-entry byte ceiling before the KV write.
-                byte[]? includeTuple = target.IncludeColumns is { } includeColumns
-                    ? IndexIncludeValueCodec.EncodeTupleChecked(includeColumns, row, target.IndexName, options)
-                    : null;
-
-                await table.Store.PutIndexEntry(
-                    tx, target.IndexId, compositeKey, rowId, target.Unique,
-                    backfillMode: true, includeTuple: includeTuple, cancellationToken: cancellationToken).ConfigureAwait(false);
+                await WriteRowEntriesAsync(tx, table, target, keyShape, rowId, row, backfillMode: true, options, cancellationToken).ConfigureAwait(false);
             }
 
             await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
@@ -311,6 +254,117 @@ internal static class IndexBackfiller
             await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
             throw;
         }
+    }
+
+    /// <summary>
+    /// Builds <paramref name="target"/> over <paramref name="rows"/> inside <paramref name="tx"/>, and returns
+    /// the number of rows. For a table that a transaction with a private schema created: only that
+    /// transaction can see the table before its commit, so <paramref name="rows"/> are its own rows, read
+    /// through it, and no other writer can touch them. No batch, lock pass or fence is needed. The entries
+    /// count against the limits of <paramref name="tx"/>, as the rows did.
+    ///
+    /// <para>The write is the plain form of <see cref="KvTableStore.PutIndexEntry"/>: Kahuna checks a unique
+    /// entry against the transaction's own staged copy of the key, so a second row with the same key fails
+    /// with <see cref="CamusDBErrorCodes.DuplicateUniqueKeyValue"/>, as a second INSERT of it would.</para>
+    /// </summary>
+    internal static async Task<int> BuildInTransactionAsync(
+        KvTransaction tx,
+        TableDescriptor table,
+        Target target,
+        IAsyncEnumerable<QueryResultRow> rows,
+        CamusDBOptions options,
+        CancellationToken cancellationToken)
+    {
+        TableIndexSchema keyShape = target.KeyShape;
+        int count = 0;
+
+        await foreach (QueryResultRow result in rows.WithCancellation(cancellationToken).ConfigureAwait(false))
+        {
+            // The decoder's rows match column names without case; a lazy query row is copied the same way.
+            Dictionary<string, ColumnValue> row = result.Row as Dictionary<string, ColumnValue>
+                ?? new(result.Row, StringComparer.OrdinalIgnoreCase);
+
+            await WriteRowEntriesAsync(tx, table, target, keyShape, result.RowId, row, backfillMode: false, options, cancellationToken).ConfigureAwait(false);
+            count++;
+        }
+
+        return count;
+    }
+
+    /// <summary>
+    /// Writes the entries of <paramref name="target"/> for one decoded row: one key for an ordered index
+    /// (none on a unique index when a key column is NULL), one entry per distinct document entry for a GIN
+    /// index. <paramref name="backfillMode"/> selects the idempotent write of a backfill that runs beside
+    /// other writers; see the class summary.
+    /// </summary>
+    private static async Task WriteRowEntriesAsync(
+        KvTransaction tx,
+        TableDescriptor table,
+        Target target,
+        TableIndexSchema keyShape,
+        ObjectIdValue rowId,
+        Dictionary<string, ColumnValue> row,
+        bool backfillMode,
+        CamusDBOptions options,
+        CancellationToken cancellationToken)
+    {
+        // The values of the expression key parts, under their hidden key names. A row decoded here holds
+        // every column the index reads, so an absent one is a bug, not a NULL.
+        Dictionary<string, ColumnValue> keyRow = IndexKeyRows.For(keyShape, row);
+
+        // NULLs are distinct: a unique index holds no entry for a row with a NULL (or absent) value in any
+        // key column, so several such rows can coexist. The insert path applies the same rule, which keeps
+        // a backfilled index identical to one built row by row. A non-unique index keeps every row (the
+        // row id breaks ties).
+        if (target.Unique && HasNullKeyColumn(keyRow, target.KeyColumns))
+            return;
+
+        // A GIN index: one non-unique entry per distinct entry of the document, none for NULL. The insert
+        // path builds the same entries, so a backfilled index matches one built row by row.
+        if (target.Inverted)
+        {
+            if (JsonbGinIndexKeys.EntriesOf(target.KeyColumns[0], row) is { } entries)
+            {
+                JsonbGinIndexKeys.CheckEntryWrites(target.IndexName, target.KeyColumns[0], entries.Count, tx.MutationLimit);
+                ColumnValue rowIdValue = JsonbGinIndexKeys.RowIdValue(rowId);
+                foreach (string entry in entries)
+                    await table.Store.PutIndexEntry(
+                        tx, target.IndexId, JsonbGinIndexKeys.Key(entry, rowIdValue), rowId, unique: false,
+                        backfillMode: backfillMode, includeTuple: null, cancellationToken: cancellationToken).ConfigureAwait(false);
+            }
+            return;
+        }
+
+        int k = 0;
+        ColumnValue[] columnValues = target.Unique
+            ? new ColumnValue[target.KeyColumns.Length]
+            : new ColumnValue[target.KeyColumns.Length + 1];
+
+        foreach (string columnName in target.KeyColumns)
+        {
+            ColumnValue? keyValue = keyRow.GetValueOrDefault(columnName);
+            if (keyValue is null)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    $"A null value was found for index key field '{columnName}'"
+                );
+            columnValues[k++] = keyValue;
+        }
+
+        if (!target.Unique)
+            columnValues[k] = new(ColumnType.Id, rowId.ToString());
+
+        CompositeColumnValue compositeKey = new(columnValues);
+
+        // The stored (INCLUDE) values of a covering index; they may be NULL, as payload, unlike a key
+        // column. EncodeTupleChecked enforces the per-entry byte ceiling before the KV write.
+        byte[]? includeTuple = target.IncludeColumns is { } includeColumns
+            ? IndexIncludeValueCodec.EncodeTupleChecked(includeColumns, row, target.IndexName, options)
+            : null;
+
+        await table.Store.PutIndexEntry(
+            tx, target.IndexId, compositeKey, rowId, target.Unique,
+            backfillMode: backfillMode, includeTuple: includeTuple, cancellationToken: cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

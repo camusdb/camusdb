@@ -144,4 +144,14 @@ public sealed class PersistedCoordinatorJob
 
     /// <summary>The message of the error recorded in <see cref="FailureCode"/>.</summary>
     public string? FailureMessage { get; set; }
+
+    /// <summary>
+    /// The change set of the explicit transaction that owns the job, or null for a job a statement drives
+    /// on its own. An owned job stops before <c>Public</c>: the step to <c>Public</c> is in the owner's
+    /// change set, so the owner's publish makes the element visible together with the owner's data. A
+    /// resume never drives an owned job. It deletes the record once the element is <c>Public</c> or gone,
+    /// and removes the element when the owner ended without a publish
+    /// (<c>SchemaChangeCoordinator.ResumeOwnedJobAsync</c>).
+    /// </summary>
+    public string? OwnerChangeSetId { get; set; }
 }

@@ -74,7 +74,7 @@ internal sealed class PendingChangeSetResolver
         if (!force && Environment.TickCount64 - pending.RecordedAtTicks < database.Options.TransactionalDdlResolveAfterMs)
             return null;
 
-        bool committed = await ReadOrAbortDecisionAsync(database, pending).ConfigureAwait(false);
+        bool committed = await ReadOrAbortDecisionAsync(database, pending.ChangeSetId).ConfigureAwait(false);
 
         logger.LogWarning(
             "Resolving change set {ChangeSetId} of database {Database} left pending by its transaction: {Decision}",
@@ -85,13 +85,15 @@ internal sealed class PendingChangeSetResolver
     }
 
     /// <summary>
-    /// True when the decision key says committed. When the key is absent, writes <c>aborted</c> and commits
-    /// it before it returns false, so the transaction can no longer commit.
+    /// True when the decision key of <paramref name="changeSetId"/> says committed. When the key is absent,
+    /// writes <c>aborted</c> and commits it before it returns false, so the transaction can no longer
+    /// commit. The resolver calls it for a pending change set, and the coordinator's resume for a staged
+    /// job whose owner is gone.
     /// </summary>
-    private static async Task<bool> ReadOrAbortDecisionAsync(DatabaseDescriptor database, PendingSchemaChangeSet pending)
+    internal static async Task<bool> ReadOrAbortDecisionAsync(DatabaseDescriptor database, string changeSetId)
     {
         IKahuna kahuna = database.Kahuna.Kahuna;
-        string decisionKey = MetaKeys.ChangeSetDecisionKey(database.Id, pending.ChangeSetId);
+        string decisionKey = MetaKeys.ChangeSetDecisionKey(database.Id, changeSetId);
 
         KvTransaction tx = await database.Transactions.BeginAsync(
             CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
@@ -111,6 +113,31 @@ internal sealed class PendingChangeSetResolver
             await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
 
             return false;
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Deletes the decision key of <paramref name="changeSetId"/> in a transaction of its own. Only for a
+    /// change set that no publish or abort checkpoint ends, because it had no delta to announce: the
+    /// committer calls it after such a transaction committed.
+    /// </summary>
+    internal static async Task DeleteDecisionAsync(DatabaseDescriptor database, string changeSetId)
+    {
+        IKahuna kahuna = database.Kahuna.Kahuna;
+        string decisionKey = MetaKeys.ChangeSetDecisionKey(database.Id, changeSetId);
+
+        KvTransaction tx = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+        ).ConfigureAwait(false);
+
+        try
+        {
+            await MetaKeyWriter.DeleteMetaKey(kahuna, tx, decisionKey).ConfigureAwait(false);
+            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
         }
         finally
         {

@@ -776,6 +776,23 @@ internal sealed partial class SchemaDdlService
         if (TransactionSchemaScope.OverlayFor(database) is { } overlay)
             return await AddColumnInOwnerTransactionAsync(database, overlay, table, ticket).ConfigureAwait(false);
 
+        await AddColumnStagedAsync(database, table, ticket, ownerChangeSetId: null).ConfigureAwait(false);
+        return true;
+    }
+
+    /// <summary>What <see cref="AddColumnStagedAsync"/> staged: the column as resolved, its table, and the deltas it took.</summary>
+    private readonly record struct StagedColumn(ColumnInfo Column, string TableId, string TableName, int StepsTaken);
+
+    /// <summary>
+    /// The staged body of <see cref="AddColumnAsync"/>: the NOT NULL check, the identity sequence, and the
+    /// coordinator job that adds, fills and publishes the column. With <paramref name="ownerChangeSetId"/>
+    /// the job belongs to that explicit transaction and stops after the fill with the column
+    /// <c>WriteOnly</c>; the caller then adds the step to <c>Public</c> to the transaction's change set.
+    /// </summary>
+    private async Task<StagedColumn> AddColumnStagedAsync(DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket, string? ownerChangeSetId)
+    {
+        ColumnInfo requested = ticket.Column;
+
         if (requested.NotNull && !TableColumnAdder.HasFillValue(requested)
             && await TableHasAnyRowAsync(database, table).ConfigureAwait(false))
             throw TableColumnAdder.ContainsNullValues(table.Name, requested.Name);
@@ -801,14 +818,15 @@ internal sealed partial class SchemaDdlService
             // The gate is released while the rows are filled; see SchemaChangeCoordinator.RunJobAsync.
             await coordinator.RunJobAsync(
                 database,
-                new SchemaChangeJob(database.Name, gated.Name, gated.Id, resolved.Name, SchemaElementState.Public),
+                new SchemaChangeJob(database.Name, gated.Name, gated.Id, resolved.Name, SchemaElementState.Public, SchemaElementKind.Column, ownerChangeSetId),
                 columnDefinition: resolved,
                 gateHeldByCaller: true
             ).ConfigureAwait(false);
 
             database.Cache?.InvalidateByTableId(database.Id, gated.Id);
 
-            return true;
+            // Each sequence an identity column created took one schema version, as each job step did.
+            return new StagedColumn(resolved, gated.Id, gated.Name, coordinator.StepsProposed + createdSequences.Count);
         }
         catch
         {
@@ -830,20 +848,29 @@ internal sealed partial class SchemaDdlService
 
     /// <summary>
     /// <c>ADD COLUMN</c> inside a transaction with a private schema: one delta that adds the column as
-    /// Public, with no staged steps and no fill. Allowed when no existing row needs a value: a nullable
-    /// column with no default (an older row reads NULL for it, which is its value), or any column on a
-    /// table the transaction created and has not written to. Any other column needs the fill, which
-    /// reads every row, and is refused.
+    /// Public, with no staged steps.
+    /// <list type="bullet">
+    /// <item>A nullable column with no default runs on any table: an older row reads NULL for it, which is
+    /// its value.</item>
+    /// <item>On a table the transaction created, any column runs: the rows are the transaction's own, and
+    /// it fills them itself, right after the delta (<see cref="TableColumnAdder.FillOwnRowsAsync"/>). A NOT
+    /// NULL column with no value for a row fails the statement.</item>
+    /// <item>On any other table, a column that needs a fill runs the staged add of the shared table, owned
+    /// by the transaction (<see cref="StageColumnOnSharedTableAsync"/>).</item>
+    /// </list>
     /// </summary>
     private async Task<bool> AddColumnInOwnerTransactionAsync(
         DatabaseDescriptor database, TransactionSchemaOverlay overlay, TableDescriptor table, AlterTableTicket ticket)
     {
         ColumnInfo requested = ticket.Column;
+        bool needsFill = requested.NotNull || TableColumnAdder.HasFillValue(requested);
 
-        if ((requested.NotNull || TableColumnAdder.HasFillValue(requested)) && !TransactionalDdlRules.IsOwnEmptyTable(overlay, table))
-            TransactionalDdlRules.RequireOwnEmptyTable(overlay, table, "ALTER TABLE ... ADD COLUMN with a default value, an identity or NOT NULL");
+        if (needsFill && !overlay.CreatedTable(table.Id))
+            return await StageColumnOnSharedTableAsync(database, overlay, table, ticket).ConfigureAwait(false);
 
         List<string> createdSequences = [];
+        string tableName;
+        ColumnInfo resolved;
 
         await database.DdlGate.EnterAsync(ticket.TableName, context.Logger).ConfigureAwait(false);
         try
@@ -851,18 +878,64 @@ internal sealed partial class SchemaDdlService
             TableDescriptor gated = await context.TableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
             RequireColumnCanBeAdded(gated, requested, options);
 
-            ColumnInfo resolved = await ResolveSequenceColumnAsync(
+            resolved = await ResolveSequenceColumnAsync(
                 database, gated.Name, gated.Id, requested, createdSequences, CancellationToken.None).ConfigureAwait(false);
 
             await catalogs.ReplicateAddColumnInStateAsync(database, gated.Name, resolved, SchemaElementState.Public).ConfigureAwait(false);
 
-            return true;
+            tableName = gated.Name;
         }
         finally
         {
             database.SchemaDdlSemaphore.Release();
         }
+
+        if (!needsFill)
+            return true;
+
+        // Opened again after the delta: the private schema now has the column, so the rows decode with it
+        // (NULL in every row written before it) and are written back with its value.
+        KvTransaction tx = overlay.Owner;
+        TableDescriptor added = await context.TableOpener.Open(database, tableName).ConfigureAwait(false);
+
+        QueryTicket rows = new(
+            txnState: tx,
+            databaseName: database.Name,
+            tableName: added.Name,
+            index: null,
+            projection: null,
+            filters: null,
+            where: null,
+            orderBy: null,
+            limit: null,
+            offset: null,
+            parameters: null
+        );
+
+        await tableColumnAlterer.FillOwnRowsAsync(
+            database, added, resolved.Name, tx, queryExecutor.Query(database, added, rows)).ConfigureAwait(false);
+
+        return true;
     }
+
+    /// <summary>
+    /// <c>ADD COLUMN</c> with a fill inside a transaction with a private schema, on a table the transaction
+    /// did not create: the staged add of <see cref="AddColumnAsync"/> runs on the shared table, owned by the
+    /// transaction, and stops with the column <c>WriteOnly</c> and every row filled. Other transactions write
+    /// the column from then on but cannot read it. The step to <c>Public</c> joins the change set; see
+    /// <see cref="RunOwnedStagedChangeAsync"/>. An identity column's sequence is created in the shared
+    /// schema with the column, and the removal of the column releases it.
+    /// </summary>
+    private Task<bool> StageColumnOnSharedTableAsync(
+        DatabaseDescriptor database, TransactionSchemaOverlay overlay, TableDescriptor table, AlterTableTicket ticket) =>
+        RunOwnedStagedChangeAsync(database, overlay, table, "ALTER TABLE ... ADD COLUMN with a default value, an identity or NOT NULL", async () =>
+        {
+            TableDescriptor shared = await context.TableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+
+            StagedColumn staged = await AddColumnStagedAsync(database, shared, ticket, overlay.ChangeSetId).ConfigureAwait(false);
+
+            return new OwnedStagedElement(staged.TableId, staged.TableName, staged.StepsTaken, [staged.Column.Name], [(staged.Column.Name, SchemaElementKind.Column)]);
+        });
 
     /// <summary>
     /// Refuses a column that <paramref name="table"/> cannot take: a name that is taken in any state, a
@@ -1206,7 +1279,12 @@ internal sealed partial class SchemaDdlService
     /// compensation below proposes under it. The cluster add-index path and the foreign-key add path
     /// both call it.
     /// </summary>
-    private async Task StageIndexWithinGateAsync(DatabaseDescriptor database, string tableId, string tableName, IndexBuildInfo indexInfo)
+    /// <remarks>
+    /// With <paramref name="ownerChangeSetId"/> the job belongs to that explicit transaction: it stops after
+    /// the backfill with the index still <c>WriteOnly</c>, and the transaction's change set holds the step
+    /// to <c>Public</c>. Returns the number of schema deltas the job proposed.
+    /// </remarks>
+    private async Task<int> StageIndexWithinGateAsync(DatabaseDescriptor database, string tableId, string tableName, IndexBuildInfo indexInfo, string? ownerChangeSetId = null)
     {
         SchemaChangeCoordinator coordinator = new(catalogs, context.Logger);
         coordinator.IndexBackfillAsync = (db, tbl, info, start, checkpoint, cancellationToken) => BackfillIndexEntriesAsync(db, tbl, info, start, checkpoint, cancellationToken);
@@ -1215,10 +1293,12 @@ internal sealed partial class SchemaDdlService
         {
             await coordinator.RunJobAsync(
                 database,
-                new SchemaChangeJob(database.Name, tableName, tableId, indexInfo.IndexName, SchemaElementState.Public, SchemaElementKind.Index),
+                new SchemaChangeJob(database.Name, tableName, tableId, indexInfo.IndexName, SchemaElementState.Public, SchemaElementKind.Index, ownerChangeSetId),
                 indexBuildInfo: indexInfo,
                 gateHeldByCaller: true
             ).ConfigureAwait(false);
+
+            return coordinator.StepsProposed;
         }
         catch (SchemaChangeHandedOverException)
         {
@@ -1234,7 +1314,11 @@ internal sealed partial class SchemaDdlService
             // Note: if this node is now degraded, compensation may be skipped by the
             // degraded gate in ReplicateDropIndexAsync; a healthy peer's ResumeJobsAsync
             // will reconcile the state after the step-down below.
-            await CompensateClusterAddIndexAsync(database, tableId, tableName, indexInfo.IndexName, coordinator.LeaderTerm).ConfigureAwait(false);
+            // An owned job keeps its record: the owner's rollback reads it to remove the entries
+            // the backfill wrote, and deletes it then.
+            await CompensateClusterAddIndexAsync(
+                database, tableId, tableName, indexInfo.IndexName, coordinator.LeaderTerm, deleteRecord: ownerChangeSetId is null
+            ).ConfigureAwait(false);
             throw;
         }
     }
@@ -1259,7 +1343,14 @@ internal sealed partial class SchemaDdlService
         }
     }
 
-    private async Task CompensateClusterAddIndexAsync(DatabaseDescriptor database, string tableId, string tableName, string indexName, long leaderTerm = 0)
+    /// <summary>
+    /// Drops an index whose staged build failed before <c>Public</c>, and deletes its job record unless
+    /// <paramref name="deleteRecord"/> is false. The entries the backfill wrote stay in the index's key
+    /// space, whose id is never used again. A caller that keeps the record removes them later from it.
+    /// Never throws.
+    /// </summary>
+    private async Task CompensateClusterAddIndexAsync(
+        DatabaseDescriptor database, string tableId, string tableName, string indexName, long leaderTerm = 0, bool deleteRecord = true)
     {
         try
         {
@@ -1273,6 +1364,9 @@ internal sealed partial class SchemaDdlService
         {
             context.Logger.LogWarning(ex, "Failed to compensate partial index add for {IndexName} on {TableName}", indexName, tableName);
         }
+
+        if (!deleteRecord)
+            return;
 
         try
         {
@@ -1485,8 +1579,11 @@ internal sealed partial class SchemaDdlService
     /// <summary>
     /// Index DDL inside a transaction with a private schema.
     /// <list type="bullet">
-    /// <item>An index add runs its local work in the transaction, on a table the transaction created and
-    /// has not written to, so the build reads no row; then its delta joins the change set.</item>
+    /// <item>An index add on a table the transaction created runs its local work in the transaction: the
+    /// build reads the transaction's own rows and writes their entries in it
+    /// (<see cref="IndexBackfiller.BuildInTransactionAsync"/>). Then its delta joins the change set.</item>
+    /// <item>An index add on any other table runs the staged build on the shared table, owned by the
+    /// transaction (<see cref="StageIndexOnSharedTableAsync"/>).</item>
     /// <item>An index drop only removes the index from the private schema. Its entries stay until the
     /// change set is published, so a ROLLBACK finds them intact. A durable purge record removes them after
     /// the publish (<see cref="DeferredPurgeRecord"/>).</item>
@@ -1524,7 +1621,8 @@ internal sealed partial class SchemaDdlService
             return true;
         }
 
-        TransactionalDdlRules.RequireOwnEmptyTable(overlay, table, "CREATE INDEX");
+        if (!overlay.CreatedTable(table.Id))
+            return await StageIndexOnSharedTableAsync(database, overlay, table, ticket).ConfigureAwait(false);
 
         bool result = await localWork(tx).ConfigureAwait(false);
         if (!result)
@@ -1532,6 +1630,128 @@ internal sealed partial class SchemaDdlService
 
         await catalogs.ReplicateIndexChangeAsync(database, ticket, table, tx).ConfigureAwait(false);
         return true;
+    }
+
+    /// <summary>
+    /// <c>CREATE INDEX</c> inside a transaction with a private schema, on a table the transaction did not
+    /// create: the staged build of <see cref="ExecuteClusterAddIndexAsync"/> runs on the shared table, owned
+    /// by the transaction, and stops with the index <c>WriteOnly</c> and backfilled. Other transactions
+    /// maintain the index from then on but cannot read it. The step to <c>Public</c> joins the change set,
+    /// so the publish makes the index readable together with the transaction's data; see
+    /// <see cref="RunOwnedStagedChangeAsync"/>. The caller holds the DDL gate, as the staged build requires.
+    /// </summary>
+    private Task<bool> StageIndexOnSharedTableAsync(
+        DatabaseDescriptor database, TransactionSchemaOverlay overlay, TableDescriptor table, AlterIndexTicket ticket)
+    {
+        if (table.AllIndexes.ContainsKey(ticket.IndexName))
+        {
+            if (ticket.IfNotExists)
+                return Task.FromResult(false);
+
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Index '{ticket.IndexName}' already exists on table '{table.Name}'");
+        }
+
+        return RunOwnedStagedChangeAsync(database, overlay, table, "CREATE INDEX", async () =>
+        {
+            TableDescriptor shared = await context.TableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+
+            if (BuildClusterIndexInfo(shared, ticket, options) is not { } indexInfo)
+                return null;
+
+            int steps = await StageIndexWithinGateAsync(database, shared.Id, shared.Name, indexInfo, overlay.ChangeSetId).ConfigureAwait(false);
+
+            return new OwnedStagedElement(shared.Id, shared.Name, steps, [indexInfo.IndexName], [(indexInfo.IndexName, SchemaElementKind.Index)]);
+        });
+    }
+
+    /// <summary>
+    /// What a statement staged on a shared table for an explicit transaction: the table's id and name, the
+    /// number of schema versions the staged steps took, the element names of the job records it left (each
+    /// owned by the transaction), and the elements whose step to <c>Public</c> joins the change set. A CHECK
+    /// or NOT NULL constraint has no such step: it is enforced and proven at the statement.
+    /// </summary>
+    private sealed record OwnedStagedElement(
+        string TableId,
+        string TableName,
+        int StepsTaken,
+        IReadOnlyList<string> OwnedElementNames,
+        IReadOnlyList<(string Name, SchemaElementKind Kind)> PublicSteps);
+
+    /// <summary>
+    /// Runs a staged change on a shared table for the transaction of <paramref name="overlay"/>, in this
+    /// order:
+    /// <list type="number">
+    /// <item>Refuse the cases the staged form cannot handle (<see cref="TransactionalDdlRules.RequireStageableSharedTable"/>;
+    /// <paramref name="locksRows"/> is false for a statement whose check reads with no lock), and a shared
+    /// schema that moved under the private one.</item>
+    /// <item>Record the removal of every element the transaction stages, once per transaction
+    /// (<see cref="SchemaChangeCoordinator.RemoveOwnedElementsOfAsync"/>). It runs at a rollback or an abort,
+    /// while the transaction still holds the DDL lock, and reads the job records, so it also finds what a
+    /// failure in the next step left behind. Once the lock is free, the coordinator's resume removes an
+    /// element whose owner ended without a commit (<see cref="SchemaChangeCoordinator.ResumeOwnedJobAsync"/>).</item>
+    /// <item>Run the staged steps on the shared schema, with the private schema out of the flow
+    /// (<paramref name="stageOnShared"/>). Every job carries the change set id as its owner, so it stops
+    /// before <c>Public</c> and no resume drives it. Null means the statement had nothing to do.</item>
+    /// <item>Record the job records for the commit, which deletes them in the transaction's own KV commit
+    /// (<see cref="TransactionSchemaOverlay.AddOwnedJob"/>).</item>
+    /// <item>Take the shared table over into the private schema
+    /// (<see cref="TransactionSchemaOverlay.RebaseOntoSharedTableAsync"/>).</item>
+    /// <item>Add the steps to <c>Public</c> to the change set. From here on the transaction reads the
+    /// elements; the publish makes them readable to everyone.</item>
+    /// </list>
+    /// A failure fails the statement and leaves the transaction to roll back, and the rollback removes what
+    /// was staged.
+    /// </summary>
+    private async Task<bool> RunOwnedStagedChangeAsync(
+        DatabaseDescriptor database,
+        TransactionSchemaOverlay overlay,
+        TableDescriptor table,
+        string statement,
+        Func<Task<OwnedStagedElement?>> stageOnShared,
+        bool locksRows = true)
+    {
+        TransactionalDdlRules.RequireStageableSharedTable(overlay, table, statement, locksRows);
+        overlay.RequireSharedBase();
+
+        if (!overlay.OwnedRemovalRecorded)
+        {
+            string changeSetId = overlay.ChangeSetId;
+            SchemaChangeCoordinator remover = context.DatabaseOpener.ResumeCoordinator;
+            overlay.AddOnRollback(() => remover.RemoveOwnedElementsOfAsync(database, changeSetId));
+            overlay.OwnedRemovalRecorded = true;
+        }
+
+        OwnedStagedElement? staged = await RunOnSharedSchemaAsync(stageOnShared).ConfigureAwait(false);
+        if (staged is null)
+            return false;
+
+        foreach (string elementName in staged.OwnedElementNames)
+            overlay.AddOwnedJob(staged.TableId, elementName);
+
+        // The rebase replaces the private copy of the table by id. A name that resolved to another table
+        // means a drop and a create landed in between; the rollback then removes what was staged.
+        if (!string.Equals(staged.TableId, table.Id, StringComparison.Ordinal))
+            throw new CamusDBException(
+                CamusDBErrorCodes.ConcurrentSchemaChange,
+                $"Table '{table.Name}' was replaced by another statement while the transaction staged a change on it; roll back and retry");
+
+        await overlay.RebaseOntoSharedTableAsync(staged.TableId, staged.StepsTaken).ConfigureAwait(false);
+
+        foreach ((string name, SchemaElementKind kind) in staged.PublicSteps)
+            await catalogs.ReplicateElementStateAsync(database, staged.TableName, name, SchemaElementState.Public, kind).ConfigureAwait(false);
+
+        return true;
+    }
+
+    /// <summary>
+    /// Runs <paramref name="steps"/> against the shared schema: the flow's private schema is cleared for
+    /// the length of this call only, because an async method restores the caller's flow value when it
+    /// returns.
+    /// </summary>
+    private static async Task<T> RunOnSharedSchemaAsync<T>(Func<Task<T>> steps)
+    {
+        TransactionSchemaScope.Suppress();
+        return await steps().ConfigureAwait(false);
     }
 
     /// <summary>

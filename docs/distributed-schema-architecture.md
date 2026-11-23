@@ -1445,18 +1445,17 @@ log (a single node has a one-node Raft schema log).
 | Class | Inside an explicit transaction, setting on |
 |---|---|
 | Metadata-only (CREATE/DROP/RENAME TABLE, DROP/RENAME COLUMN, DROP/RENAME INDEX, COMMENT ON TABLE/COLUMN/INDEX, ALTER TABLE SET/RESET, CREATE/REPLACE/DROP/RENAME VIEW) | Part of the transaction. |
-| Staged (ADD COLUMN, CREATE INDEX, ADD UNIQUE, ADD PRIMARY KEY) | Part of the transaction when no existing row needs work: a nullable ADD COLUMN with no default, or any of them on a table the transaction created and has not written to. Otherwise refused with `CADB0538`. |
+| Staged (ADD COLUMN, CREATE INDEX, ADD UNIQUE, ADD PRIMARY KEY, ADD CHECK, SET NOT NULL, ADD FOREIGN KEY) | Part of the transaction; see "Staged changes" below. |
 | Irrevocable (TRUNCATE, REWRITE STORAGE, CREATE MATERIALIZED VIEW, REFRESH) | Refused with `CADB0538`. TRUNCATE and REWRITE STORAGE are refused with the setting off too. |
-| Not yet transactional (sequences, triggers, functions, extensions, constraints other than inline ones, CTAS, RELINK, materialized-view rename and drop, the other comment targets) | Refused with `CADB0538`. |
+| Not yet transactional (sequences, triggers, functions, extensions, DROP CONSTRAINT, DROP NOT NULL, CTAS, RELINK, materialized-view rename and drop, the other comment targets) | Refused with `CADB0538`. |
 
 `DROP TABLE` inside a transaction uses the deferred drop, which keeps the rows and index entries, so
 a rollback has nothing to restore. Its orphan record is built from the relation as it was right before
 the drop in the change set, so a table the same transaction created or altered stays relinkable with
-the layout its rows were written with. `DROP TABLE … FORCE` is refused. A dropped index keeps its entries
-until the change set is published; a best-effort purge removes them after that, and finds the table by
-its id. A crash before the purge leaves the entries in a key space nothing reads. The owned sequence of
-a dropped identity column leaves the catalog with the change set; only its Kahuna counter is removed
-after the publish.
+the layout its rows were written with. `DROP TABLE … FORCE`, `DROP TABLE` in a branch database and
+`DROP INDEX` keep their data until the change set is published, and a durable record removes it after
+that ("Data removal after the publish" below). The owned sequence of a dropped identity column leaves
+the catalog with the change set; only its Kahuna counter is removed after the publish.
 
 A statement that changes nothing (for example `CREATE TABLE IF NOT EXISTS` on a table that exists)
 leaves no private schema behind: the transaction's next statements read the shared schema.
@@ -1483,6 +1482,86 @@ schema log. Statement-level forwarding to the schema leader is skipped too.
 
 The transaction writes its rows with the private layouts. A table layout version is counted per
 table, so the publish produces the same version numbers with the same layouts.
+
+#### Staged changes
+
+A staged statement reads every row of its table. Inside a transaction it takes one of two forms.
+
+**A table the transaction created.** No other transaction can see the table before the commit, so every
+row is one the transaction wrote. The statement runs inside the transaction: an index build reads the
+transaction's rows through it and writes their entries in it (`IndexBackfiller.BuildInTransactionAsync`),
+an `ADD COLUMN` fill rewrites them (`TableColumnAdder.FillOwnRowsAsync`), and `ADD CHECK` and `SET NOT
+NULL` check them (`RowConstraintValidationPass` with the owner transaction). `ADD FOREIGN KEY` builds its
+backing index this way, adds the constraint in `WriteOnly`, checks every child row with the checker an
+`INSERT` uses (`ForeignKeyStatementChecker`), and moves the constraint to `Public` in the change set.
+The checker takes the shared rendezvous lock on each parent key, so a concurrent `DELETE` of a parent
+cannot remove it before the transaction ends. No fence, batch or coordinator job is needed. A row that
+breaks the new index or constraint fails the statement.
+
+**A table other transactions write.** `CREATE INDEX` (all index kinds) and `ADD COLUMN` with a fill run
+the online build of a statement outside a transaction (`SchemaChangeCoordinator`) on the shared schema,
+with the private schema out of the flow. The coordinator job carries the change set id as its owner
+(`PersistedCoordinatorJob.OwnerChangeSetId`):
+
+1. The job proposes `DeleteOnly` and `WriteOnly`, waits for the earlier writers, and runs the backfill
+   or the fill. Then it stops, with the element `WriteOnly` and the job record kept. Other transactions
+   write the element from then on but cannot read it.
+2. The private schema takes the shared table over (`TransactionSchemaOverlay.RebaseOntoSharedTableAsync`):
+   its copy of the table is replaced by a copy of the shared one, and its base moves to the shared
+   version. The shared schema must have moved by the job's own steps only; otherwise the statement fails
+   with `CADB0502`.
+3. The step to `Public` joins the change set, so the transaction reads the element at once and the
+   publish makes it readable to everyone.
+4. The transaction's own KV commit deletes the job records it owns, next to the decision key
+   (`TransactionSchemaOverlay.OwnedJobs`). An owned record that exists therefore means that its
+   transaction did not commit.
+5. A rollback or an abort removes every element the transaction owns, while the transaction still holds
+   the DDL lock (`SchemaChangeCoordinator.RemoveOwnedElementsOfAsync`): foreign keys first, then CHECK
+   and NOT NULL constraints, columns and indexes. A column goes down its states and releases its owned
+   sequence, and an index leaves the schema before its key space is purged. An index that a live foreign
+   key still uses stays for a later run.
+
+`ADD CHECK`, `SET NOT NULL` and `ADD FOREIGN KEY` on a shared table take the same form, with two
+differences. Each statement checks the rows of the table outside the transaction, with no row lock, and
+the constraint holds for every transaction from the statement on.
+
+- **CHECK and NOT NULL** have no element state, so no step of theirs joins the change set
+  (`TableConstraintAlterer.StageRowConstraintAsync`). The job adds the constraint to the shared schema,
+  waits for the earlier writers and checks the rows. Then it keeps its record.
+- **A foreign key** builds its backing index `~fk_{name}` on the shared child table and makes it `Public`
+  at once, because the foreign-key rules need a readable index. The job adds the constraint in
+  `WriteOnly` and checks the child rows. The step to `Public` of the constraint joins the change set.
+
+A transaction whose only schema change is a staged CHECK or NOT NULL has no delta. Its KV commit writes
+the decision key and deletes the records, proposes no pending entry, and the decision key is deleted
+after the commit (`PendingChangeSetResolver.DeleteDecisionAsync`).
+
+A failure in step 1 fails the statement, which aborts the transaction, and the rollback removes what
+the job left. A unique violation in the backfill drops the index from the schema at once, so other
+transactions stop maintaining it, and keeps the job record. The rollback reads the record and purges the
+entries the backfill wrote before the violation. A row that breaks a CHECK or a NOT NULL takes the
+constraint back at once.
+
+A change of the schema leader stops a backfill or a fill that runs on the old leader, at its next batch.
+For an owned job the statement then fails with the retryable `CADB0504`: no successor drives the job, and
+the client rolls back and runs the transaction again. The rollback removes the element. A backfill that
+runs on a follower does not depend on the leadership, so it continues, and the commit publishes the
+element through the new leader.
+
+The coordinator's resume never drives an owned job (`SchemaChangeCoordinator.ResumeOwnedJobAsync`). It
+waits while the owner's change set is pending. It deletes the record at once only when the element is
+gone and left nothing behind, which an index does not (its key space can still hold entries). Otherwise
+it tries the DDL lock once. Every open owner holds the DDL lock, so a resume that gets it knows the owner
+ended or lost it. It then reads the decision key as the resolver does. `committed` means the resume
+leaves the record. Absent means the owner never committed: the resume writes `aborted`, which refuses a
+late commit of the owner, and removes the element and purges its entries.
+
+The online build is refused with `CADB0538` when the transaction wrote rows to the table or holds locks
+on its rows (the build locks each row, and would wait for the transaction), and when the change set
+already changed the table (the build runs on the shared table, which does not have that change). A CHECK,
+NOT NULL or foreign key check takes no lock, so the transaction's locks do not refuse it; its writes to
+the table do, because the check cannot see them. A foreign key is also refused when the transaction
+created, changed or wrote the parent table (`TransactionalDdlRules.RequireStageableParent`).
 
 #### Commit
 
@@ -1594,10 +1673,13 @@ serialization only: the base-version check of the pending entry still refuses a 
 moved, with `CADB0502`.
 
 Tests: `TestTransactionalDdl` (single node: commit, rollback, reopen, the resolver, the class table,
-the cache isolation, the data removal after the publish) and
+the cache isolation, the data removal after the publish, staged changes and constraints on created and
+on shared tables, a unique violation in a staged backfill, a migration whose last statement fails, and the
+removal of an owned element whose transaction vanished) and
 `CamusDB.Cluster.Tests/TestClusterTransactionalDdl` (three nodes: the transaction on a follower and on
-the leader, the lock order, lost drivers, a leader move while a change set is pending, and a purge that
-the new schema leader finishes).
+the leader, the lock order, lost drivers, a leader move while a change set is pending, a purge that
+the new schema leader finishes, a staged index on a shared table from a follower, a leader move
+during a staged backfill on the leader and on a follower, and staged constraints on shared tables).
 
 ---
 

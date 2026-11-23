@@ -92,9 +92,12 @@ internal static class RowConstraintValidationPass
     /// whose <paramref name="columnName"/> is NULL. Only that column is decoded. A row written before
     /// the column existed decodes to the column's default, which is what a full decode gives.
     /// </summary>
-    internal static async Task ScanForNullAsync(DatabaseDescriptor database, TableDescriptor table, string columnName)
+    /// <param name="ownerTx">The transaction to read through, for a table that a transaction with a
+    /// private schema created: its rows are visible only to that transaction. Null for a read of the
+    /// committed rows in a transaction of this pass's own.</param>
+    internal static async Task ScanForNullAsync(DatabaseDescriptor database, TableDescriptor table, string columnName, KvTransaction? ownerTx = null)
     {
-        KvTransaction tx = await database.Transactions.BeginAsync(
+        KvTransaction tx = ownerTx ?? await database.Transactions.BeginAsync(
             CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadOnly
         ).ConfigureAwait(false);
         try
@@ -123,7 +126,8 @@ internal static class RowConstraintValidationPass
         }
         finally
         {
-            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+            if (ownerTx is null)
+                await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
         }
     }
 
@@ -131,17 +135,19 @@ internal static class RowConstraintValidationPass
     /// Scans every row and throws <see cref="CamusDBErrorCodes.CheckConstraintViolation"/> on the first
     /// row for which <paramref name="condition"/> is FALSE. A NULL result passes, as it does for DML.
     /// </summary>
+    /// <param name="ownerTx">As for <see cref="ScanForNullAsync"/>.</param>
     internal static async Task ScanForCheckViolationAsync(
         DatabaseDescriptor database,
         TableDescriptor table,
         string constraintName,
-        SQLParser.NodeAst condition)
+        SQLParser.NodeAst condition,
+        KvTransaction? ownerTx = null)
     {
         // The same expression types the write path uses (CheckEnforcer), so an existing row is judged
         // as a new one would be.
         Queries.OwnedExpressionTypes.TypeCheckCondition(condition, table.Schema);
 
-        KvTransaction tx = await database.Transactions.BeginAsync(
+        KvTransaction tx = ownerTx ?? await database.Transactions.BeginAsync(
             CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadOnly
         ).ConfigureAwait(false);
         try
@@ -170,7 +176,8 @@ internal static class RowConstraintValidationPass
         }
         finally
         {
-            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+            if (ownerTx is null)
+                await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
         }
     }
 }

@@ -10,6 +10,7 @@ using CamusDB.Core;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Apply;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.Catalogs.Transactional;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -47,6 +48,15 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// of one database cannot interleave their checks and their replication. In a cluster the read of the
 /// rows runs with the gate released and the table held (<see cref="SchemaChangeCoordinator.ValidateRowConstraintAsync"/>),
 /// so DDL on other tables proceeds while the rows are read; a standalone node reads under the gate.</para>
+///
+/// <para><b>Inside a transaction with a private schema</b>, ADD CHECK and SET NOT NULL take one of two
+/// forms. On a table the transaction created, the constraint joins the transaction's change set, and the
+/// transaction's own rows are read through it and checked; no other transaction can see such a table
+/// before the commit. On any other table the cluster form above runs, owned by the transaction
+/// (<see cref="StageRowConstraintAsync"/>): the constraint is enforced for every transaction from the
+/// statement on, the rows are proven at the statement, the commit makes it permanent, and a rollback
+/// removes it. A SET NOT NULL on a column that is already NOT NULL only takes the new name, in the change
+/// set, on any table.</para>
 ///
 /// <para><b>DROP CONSTRAINT</b>: resolves the name against <see cref="TableSchema.CheckConstraints"/>
 /// AND each column's <see cref="TableColumnSchema.NotNullConstraintName"/>. Immediate — no
@@ -108,6 +118,12 @@ internal sealed class TableConstraintAlterer
 
         SQLParser.NodeAst parsedCondition = SQLParser.SQLParserProcessor.ParseCondition(ticket.Expression!);
 
+        if (TransactionSchemaScope.OverlayFor(database) is { } overlay)
+        {
+            await AddCheckInOwnerTransactionAsync(catalogs, tableOpener, database, overlay, table, ticket, parsedCondition).ConfigureAwait(false);
+            return true;
+        }
+
         await database.DdlGate.EnterAsync(ticket.TableName, logger).ConfigureAwait(false);
         try
         {
@@ -124,6 +140,48 @@ internal sealed class TableConstraintAlterer
         if (logger.IsEnabled(Microsoft.Extensions.Logging.LogLevel.Information))
             logger.LogInformation("Check constraint '{Constraint}' added to table '{Table}'", ticket.ConstraintName, ticket.TableName);
         return true;
+    }
+
+    /// <summary>
+    /// ADD CHECK inside a transaction with a private schema, on a table the transaction created: the
+    /// constraint joins the change set, then the transaction's own rows are read through it and checked.
+    /// No fence runs and no job is recorded, because no other transaction can see the table before the
+    /// commit. The rows the transaction writes later are checked by their own statements. A violating row
+    /// fails the statement, which leaves the transaction to roll back.
+    /// </summary>
+    private async Task AddCheckInOwnerTransactionAsync(
+        CatalogsManager catalogs,
+        TableOpener tableOpener,
+        DatabaseDescriptor database,
+        TransactionSchemaOverlay overlay,
+        TableDescriptor table,
+        AlterConstraintTicket ticket,
+        SQLParser.NodeAst parsedCondition)
+    {
+        TransactionalDdlRules.RequireOwnTable(overlay, table, "ALTER TABLE ... ADD CONSTRAINT ... CHECK");
+
+        string tableName;
+
+        await database.DdlGate.EnterAsync(ticket.TableName, logger).ConfigureAwait(false);
+        try
+        {
+            TableDescriptor gated = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+            ConstraintNameRules.RequireUnused(gated.Schema, ticket.ConstraintName);
+
+            await catalogs.ReplicateAddCheckConstraintAsync(
+                database, gated.Name, ticket.ConstraintName, ticket.Expression!, ticket.ReferencedColumns ?? [])
+                .ConfigureAwait(false);
+
+            tableName = gated.Name;
+        }
+        finally
+        {
+            database.SchemaDdlSemaphore.Release();
+        }
+
+        TableDescriptor constrained = await tableOpener.Open(database, tableName).ConfigureAwait(false);
+        await RowConstraintValidationPass.ScanForCheckViolationAsync(
+            database, constrained, ticket.ConstraintName, parsedCondition, overlay.Owner).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -421,6 +479,12 @@ internal sealed class TableConstraintAlterer
         string constraintName = $"{table.Name}_{columnName}_not_null";
         ConstraintNameRules.RequireUnusedForNotNull(table.Schema, constraintName, column.Id);
 
+        if (TransactionSchemaScope.OverlayFor(database) is { } overlay)
+        {
+            await SetNotNullInOwnerTransactionAsync(catalogs, tableOpener, database, overlay, table, columnName, constraintName).ConfigureAwait(false);
+            return true;
+        }
+
         await database.DdlGate.EnterAsync(ticket.TableName, logger).ConfigureAwait(false);
         try
         {
@@ -437,6 +501,56 @@ internal sealed class TableConstraintAlterer
         if (logger.IsEnabled(Microsoft.Extensions.Logging.LogLevel.Information))
             logger.LogInformation("NOT NULL set on column '{Column}' of table '{Table}'", columnName, ticket.TableName);
         return true;
+    }
+
+    /// <summary>
+    /// SET NOT NULL inside a transaction with a private schema, on a table the transaction created: the
+    /// flag joins the change set, then the transaction's own rows are read through it. See
+    /// <see cref="AddCheckInOwnerTransactionAsync"/> for why no fence or job is needed. A column that is
+    /// already NOT NULL only takes the new name, which joins the change set on any table.
+    /// </summary>
+    private async Task SetNotNullInOwnerTransactionAsync(
+        CatalogsManager catalogs,
+        TableOpener tableOpener,
+        DatabaseDescriptor database,
+        TransactionSchemaOverlay overlay,
+        TableDescriptor table,
+        string columnName,
+        string constraintName)
+    {
+        string tableName;
+        bool wasNotNull;
+
+        await database.DdlGate.EnterAsync(table.Name, logger).ConfigureAwait(false);
+        try
+        {
+            TableDescriptor gated = await tableOpener.Open(database, table.Name).ConfigureAwait(false);
+
+            TableColumnSchema column = gated.Schema.Columns?.Find(c => string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase))
+                ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Column '{columnName}' does not exist on table '{gated.Name}'");
+
+            ConstraintNameRules.RequireUnusedForNotNull(gated.Schema, constraintName, column.Id);
+            wasNotNull = column.NotNull;
+
+            // A rename of an existing NOT NULL reads no row, so it joins the change set on any table. The
+            // staged form handles a nullable column of a shared table before this method is reached.
+            if (!wasNotNull)
+                TransactionalDdlRules.RequireOwnTable(overlay, gated, "ALTER TABLE ... ALTER COLUMN ... SET NOT NULL");
+
+            await catalogs.ReplicateSetColumnNotNullAsync(database, gated.Name, columnName, notNull: true, constraintName).ConfigureAwait(false);
+
+            tableName = gated.Name;
+        }
+        finally
+        {
+            database.SchemaDdlSemaphore.Release();
+        }
+
+        if (wasNotNull)
+            return;
+
+        TableDescriptor constrained = await tableOpener.Open(database, tableName).ConfigureAwait(false);
+        await RowConstraintValidationPass.ScanForNullAsync(database, constrained, columnName, overlay.Owner).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -556,8 +670,95 @@ internal sealed class TableConstraintAlterer
     }
 
     /// <summary>
+    /// ADD CHECK, or SET NOT NULL on a nullable column, inside a transaction with a private schema, on a
+    /// table other transactions write: the cluster form of the statement, owned by the change set
+    /// <paramref name="ownerChangeSetId"/>, on both single-node and cluster databases (both keep the schema
+    /// in a schema log). The job is recorded with its owner, the constraint replicates to the shared schema,
+    /// and every node enforces it from its apply on, for every transaction. The coordinator then waits for
+    /// the earlier writers and reads the rows (<see cref="SchemaChangeCoordinator.ValidateRowConstraintAsync"/>).
+    /// A row that breaks the constraint takes it back and fails the statement. After a read that passed the
+    /// job record stays: the owner's commit deletes it, and its rollback removes the constraint.
+    /// <para>Runs on the shared schema; the caller clears the private one. Returns the table's id and name
+    /// and the constraint name, which is the element name of the job record. The schema moves by one
+    /// version.</para>
+    /// </summary>
+    internal async Task<(string TableId, string TableName, string ConstraintName)> StageRowConstraintAsync(
+        CatalogsManager catalogs,
+        TableOpener tableOpener,
+        DatabaseDescriptor database,
+        AlterConstraintTicket ticket,
+        string ownerChangeSetId)
+    {
+        bool check = ticket.Operation == AlterConstraintOperation.AddCheck;
+        SchemaElementKind kind = check ? SchemaElementKind.Check : SchemaElementKind.NotNull;
+
+        // Parsed before any work, so a bad expression is refused with nothing recorded.
+        if (check)
+            SQLParser.SQLParserProcessor.ParseCondition(ticket.Expression!);
+
+        await database.DdlGate.EnterAsync(ticket.TableName, logger).ConfigureAwait(false);
+        try
+        {
+            TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+            string tableName = table.Name;
+            string constraintName;
+            string? columnName = null;
+
+            if (check)
+            {
+                constraintName = ticket.ConstraintName;
+                ConstraintNameRules.RequireUnused(table.Schema, constraintName);
+            }
+            else
+            {
+                columnName = ticket.ColumnName!;
+
+                TableColumnSchema column = table.Schema.Columns?.Find(c => string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase))
+                    ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Column '{columnName}' does not exist on table '{tableName}'");
+
+                if (column.NotNull)
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.ConcurrentSchemaChange,
+                        $"Column '{columnName}' of table '{tableName}' became NOT NULL while the statement started; roll back and retry");
+
+                constraintName = $"{tableName}_{columnName}_not_null";
+                ConstraintNameRules.RequireUnusedForNotNull(table.Schema, constraintName, column.Id);
+            }
+
+            await RequireNoOtherJobNamedAsync(catalogs, database, table.Id, tableName, constraintName).ConfigureAwait(false);
+            await PersistRowConstraintJobAsync(catalogs, database, table.Id, tableName, constraintName, kind, ownerChangeSetId).ConfigureAwait(false);
+
+            try
+            {
+                if (check)
+                    await catalogs.ReplicateAddCheckConstraintAsync(
+                        database, tableName, constraintName, ticket.Expression!, ticket.ReferencedColumns ?? []).ConfigureAwait(false);
+                else
+                    await catalogs.ReplicateSetColumnNotNullAsync(database, tableName, columnName!, notNull: true, constraintName).ConfigureAwait(false);
+            }
+            catch
+            {
+                await TakeBackAfterReplicationFailureAsync(catalogs, database, table.Id, tableName, constraintName, kind).ConfigureAwait(false);
+                throw;
+            }
+
+            await ValidateThroughCoordinatorAsync(catalogs, tableOpener, database, table.Id, tableName, constraintName, kind, ownerChangeSetId).ConfigureAwait(false);
+
+            if (logger.IsEnabled(Microsoft.Extensions.Logging.LogLevel.Information))
+                logger.LogInformation("Constraint '{Constraint}' staged on table '{Table}' inside a transaction", constraintName, tableName);
+
+            return (table.Id, tableName, constraintName);
+        }
+        finally
+        {
+            database.SchemaDdlSemaphore.Release();
+        }
+    }
+
+    /// <summary>
     /// Runs <see cref="SchemaChangeCoordinator.ValidateRowConstraintAsync"/> for a constraint this node
-    /// just replicated, with the test hook in front of the read.
+    /// just replicated, with the test hook in front of the read. A job of an explicit transaction
+    /// (<paramref name="ownerChangeSetId"/>) keeps its record after a read that passed.
     /// </summary>
     private async Task ValidateThroughCoordinatorAsync(
         CatalogsManager catalogs,
@@ -566,7 +767,8 @@ internal sealed class TableConstraintAlterer
         string tableId,
         string tableName,
         string constraintName,
-        SchemaElementKind kind)
+        SchemaElementKind kind,
+        string? ownerChangeSetId = null)
     {
         database.Cache?.InvalidateByTableId(database.Id, tableId);
 
@@ -585,7 +787,7 @@ internal sealed class TableConstraintAlterer
         // again on return.
         await coordinator.ValidateRowConstraintAsync(
             database,
-            new SchemaChangeJob(database.Name, tableName, tableId, constraintName, SchemaElementState.Public, kind),
+            new SchemaChangeJob(database.Name, tableName, tableId, constraintName, SchemaElementState.Public, kind, ownerChangeSetId),
             gateHeldByCaller: true
         ).ConfigureAwait(false);
     }
@@ -600,7 +802,8 @@ internal sealed class TableConstraintAlterer
         string tableId,
         string tableName,
         string constraintName,
-        SchemaElementKind kind) =>
+        SchemaElementKind kind,
+        string? ownerChangeSetId = null) =>
         catalogs.PersistCoordinatorJobAsync(database, new PersistedCoordinatorJob
         {
             TableName = tableName,
@@ -608,6 +811,7 @@ internal sealed class TableConstraintAlterer
             ElementName = constraintName,
             TargetState = SchemaElementState.Public,
             ElementKind = kind,
+            OwnerChangeSetId = ownerChangeSetId,
         });
 
     /// <summary>

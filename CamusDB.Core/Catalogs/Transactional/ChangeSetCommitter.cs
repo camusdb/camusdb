@@ -46,6 +46,15 @@ namespace CamusDB.Core.Catalogs.Transactional;
 /// proposes the abort. The transaction's own read under the lock then finds <c>aborted</c> and refuses
 /// its commit. One of the two writes the key, never both.</para>
 ///
+/// <para><b>Elements staged on shared tables.</b> The prepare also deletes, in the transaction, the
+/// coordinator job record of every element the transaction staged on a shared table
+/// (<see cref="TransactionSchemaOverlay.OwnedJobs"/>). The KV commit makes the delete permanent together
+/// with the rows, so a record that names the change set as its owner always means that the transaction
+/// did not commit, and the coordinator's resume removes the element. A transaction whose only schema
+/// changes are staged CHECK or NOT NULL constraints has no delta: those constraints are in the shared
+/// schema already. Its prepare writes the decision key and the record deletes and proposes no pending
+/// entry, and the decide step has nothing to publish.</para>
+///
 /// <para><b>Lock order.</b> The DDL lock (held since the transaction's first DDL statement), then the
 /// node's DDL gate semaphore, then the schema lock. See <see cref="TransactionalDdlLock"/>.</para>
 ///
@@ -97,14 +106,17 @@ internal sealed class ChangeSetCommitter
         if (!overlay.HasChanges)
         {
             // Statements discard an overlay that stays empty, so this is a statement that failed before
-            // its first delta, which leaves the transaction rollback-only. Checked anyway: an empty overlay
-            // announces nothing, so this is the only check that its private copy is still the live schema.
+            // its first delta, which leaves the transaction rollback-only, or an overlay that holds only
+            // staged constraints. Checked anyway: an overlay with no delta announces nothing, so this is
+            // the only check that its private copy is still the live schema.
             if (database.Schema.SchemaVersion != overlay.BaseVersion)
                 throw new CamusDBException(
                     CamusDBErrorCodes.TransactionConflict,
                     $"Transaction {tx.UniqueId} planned against schema version {overlay.BaseVersion} of database " +
                     $"'{database.Name}', which is at version {database.Schema.SchemaVersion}; it was rolled back, retry it from BEGIN");
-            return;
+
+            if (!overlay.HoldsOwnedJobs)
+                return;
         }
 
         overlay.MarkPreparing();
@@ -126,6 +138,9 @@ internal sealed class ChangeSetCommitter
 
             await MetaKeyWriter.WriteMetaKey(kahuna, tx, decisionKey, CommittedDecision).ConfigureAwait(false);
 
+            foreach ((string tableId, string elementName) in overlay.OwnedJobs)
+                await MetaKeyWriter.DeleteMetaKey(kahuna, tx, MetaKeys.CoordinatorKey(database.Id, tableId, elementName)).ConfigureAwait(false);
+
             await WriteNewLayoutsAsync(database, overlay, tx).ConfigureAwait(false);
 
             await WriteDeferredPurgesAsync(database, overlay, tx).ConfigureAwait(false);
@@ -134,6 +149,10 @@ internal sealed class ChangeSetCommitter
         {
             overlay.AllowsCatalogWrites = false;
         }
+
+        // Only staged constraints: nothing to announce, and nothing to publish after the KV commit.
+        if (!overlay.HasChanges)
+            return;
 
         await database.SchemaDdlSemaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -223,7 +242,9 @@ internal sealed class ChangeSetCommitter
                 if (overlay.HasChanges && IsPendingInLog(database, overlay.ChangeSetId))
                     await DecideAsync(database, overlay.ChangeSetId, publish: false).ConfigureAwait(false);
 
-                await overlay.CloseAsync().ConfigureAwait(false);
+                // Before the DDL lock is freed: the rollback work removes the elements the transaction
+                // staged on shared tables, and the coordinator's resume removes them too once the lock is
+                // free. With the lock held, the two never run at once.
                 await overlay.RunOnRollbackAsync().ConfigureAwait(false);
             }
             catch (Exception ex)
@@ -243,6 +264,10 @@ internal sealed class ChangeSetCommitter
         if (!overlay.HasChanges)
         {
             await overlay.CloseAsync().ConfigureAwait(false);
+
+            if (overlay.HoldsOwnedJobs)
+                await AfterOwnedOnlyCommitAsync(database, overlay).ConfigureAwait(false);
+
             return;
         }
 
@@ -514,6 +539,10 @@ internal sealed class ChangeSetCommitter
 
         foreach (DeferredPurgeRecord record in overlay.DeferredPurges)
         {
+            // The base the pending entry is proposed from. A staged statement on a shared table can move
+            // the base after the record was added, and the due rule counts from the pending entry.
+            record.BaseVersion = overlay.BaseVersion;
+
             byte[] bytes = MetaJsonSerializer.Serialize(record, MetaJsonContext.Default.DeferredPurgeRecord);
             await MetaKeyWriter.WriteMetaKey(kahuna, tx, MetaKeys.PurgeKey(database.Id, record.PurgeId), bytes).ConfigureAwait(false);
         }
@@ -524,6 +553,29 @@ internal sealed class ChangeSetCommitter
     /// set touched, carry the private copy of the legacy system schema over, and run the deferred work the
     /// statements recorded.
     /// </summary>
+    /// <summary>
+    /// The work after the commit of a transaction whose only schema changes are staged constraints. The
+    /// constraints are in the shared schema already, so only the cached results of their tables are
+    /// dropped, and the decision key is deleted: no publish checkpoint deletes it. Best effort: a decision
+    /// key left behind is never read again, because the transaction's job records are gone.
+    /// </summary>
+    private async Task AfterOwnedOnlyCommitAsync(DatabaseDescriptor database, TransactionSchemaOverlay overlay)
+    {
+        foreach ((string tableId, _) in overlay.OwnedJobs)
+            database.Cache?.InvalidateByTableId(database.Id, tableId);
+
+        try
+        {
+            await PendingChangeSetResolver.DeleteDecisionAsync(database, overlay.ChangeSetId).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Could not delete the decision key of change set {ChangeSetId} of database {Database}", overlay.ChangeSetId, database.Name);
+        }
+
+        await overlay.RunAfterPublishAsync().ConfigureAwait(false);
+    }
+
     private static async Task AfterPublishAsync(DatabaseDescriptor database, TransactionSchemaOverlay overlay)
     {
         foreach (string tableId in overlay.TouchedTableIds)

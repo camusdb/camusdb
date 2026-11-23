@@ -120,6 +120,11 @@ internal sealed class DatabaseOpener
             // its identity column owned once the column is gone.
             ReleaseOwnedSequenceAsync = (db, tableId, sequenceId) =>
                 commandExecutor.ReleaseOwnedSequenceAsync(db, tableId, sequenceId),
+
+            // Wire the index purge: the removal of an index that a transaction staged on a shared table
+            // and never published purges its entries once the index left the schema.
+            PurgeIndexEntriesAsync = (db, storageId, indexId) =>
+                commandExecutor.PurgeIndexEntriesAsync(db, storageId, indexId),
         };
         this.logger = logger;
         this.sharedNode = sharedNode ?? throw new ArgumentNullException(nameof(sharedNode), "A shared Kahuna node is required");

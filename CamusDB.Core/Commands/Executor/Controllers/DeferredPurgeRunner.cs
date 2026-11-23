@@ -164,6 +164,14 @@ internal sealed class DeferredPurgeRunner
         }
     }
 
+    /// <summary>
+    /// Purges the entries of one index, by storage id and stable index id, and returns true when the key
+    /// space is confirmed empty. For an index that leaves the schema without a purge record: one that a
+    /// transaction staged on a shared table and never published.
+    /// </summary>
+    internal Task<bool> PurgeIndexKeySpaceAsync(DatabaseDescriptor database, string storageId, string indexId, CancellationToken ct = default) =>
+        dropper.PurgeKeySpaceAsync(database.Kahuna.Kahuna, database.Id, KvKeyBuilder.IndexSpaceOf(database.Id, storageId, indexId), ct);
+
     /// <summary>Purges the key space of every index the record names; true only when all are confirmed empty.</summary>
     private async Task<bool> PurgeIndexesAsync(IKahuna kahuna, DatabaseDescriptor database, DeferredPurgeRecord record, CancellationToken ct)
     {

@@ -23,8 +23,9 @@ internal enum DdlStatementClass
 
     /// <summary>
     /// Reads every row of its table (an index build, a column fill, a constraint validation). Inside a
-    /// transaction it is metadata-only on a table the transaction created and has not written to, and
-    /// is refused otherwise until the staged rule of the feature is built.
+    /// transaction it runs on a table the transaction created, over the transaction's own rows. On any
+    /// other table it runs the staged form: the online steps on the shared table, owned by the
+    /// transaction, which commits or removes them with the transaction.
     /// </summary>
     Staged,
 
@@ -72,7 +73,9 @@ internal static class DdlStatementClasses
         NodeType.AlterTableAddColumn or
         NodeType.AlterTableAddIndex or NodeType.AlterTableAddIndexIfNotExists or
         NodeType.AlterTableAddUniqueIndex or NodeType.AlterTableAddUniqueIndexIfNotExists or
-        NodeType.AlterTableAddPrimaryKey
+        NodeType.AlterTableAddPrimaryKey or
+        NodeType.AlterTableAddConstraintCheck or NodeType.AlterTableAddConstraintForeignKey or
+        NodeType.AlterTableSetNotNull
             => DdlStatementClass.Staged,
 
         NodeType.TruncateTable or
@@ -83,9 +86,8 @@ internal static class DdlStatementClasses
 
         NodeType.CreateTableRelink or
         NodeType.CreateTableAsSelect or NodeType.CreateTableAsSelectIfNotExists or
-        NodeType.AlterTableAddConstraintCheck or NodeType.AlterTableAddConstraintForeignKey or
         NodeType.AlterTableDropConstraint or
-        NodeType.AlterTableSetNotNull or NodeType.AlterTableDropNotNull or
+        NodeType.AlterTableDropNotNull or
         NodeType.AlterTableSetColumnStorage or
         NodeType.AlterViewOwnerTo or
         NodeType.CommentOnView or NodeType.CommentOnMaterializedView or NodeType.CommentOnSequence or

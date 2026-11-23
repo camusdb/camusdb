@@ -8,6 +8,7 @@
 
 using System.Collections.Concurrent;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.Catalogs.Transactional;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using Microsoft.Extensions.Logging;
@@ -147,11 +148,26 @@ public sealed class SchemaChangeCoordinator
     public Func<DatabaseDescriptor, string, string, Task>? ReleaseOwnedSequenceAsync { get; set; }
 
     /// <summary>
+    /// Delegate that removes the entries of one index from storage, by database, storage id and the
+    /// index's stable id (<see cref="TableIndexSchema.KvId"/>), and returns true when the key space is
+    /// confirmed empty. <see cref="RemoveOwnedElementAsync"/> calls it after an owned index left the schema.
+    /// Without it the entries stay in storage, unreachable.
+    /// </summary>
+    public Func<DatabaseDescriptor, string, string, Task<bool>>? PurgeIndexEntriesAsync { get; set; }
+
+    /// <summary>
     /// The schema-leader term the last job run or resume on this coordinator read when it started
     /// (<see cref="EmbeddedKahuna.SchemaLeaderTerm"/>). Every job-record write of that run carries it,
     /// so a statement's compensation can fence its own job-record delete with the same term.
     /// </summary>
     public long LeaderTerm { get; private set; }
+
+    /// <summary>
+    /// The number of schema deltas the last <see cref="RunJobAsync"/> on this coordinator proposed, one
+    /// schema version each. A statement that stages an element for an explicit transaction reads it to
+    /// check that the shared schema moved by its own steps only.
+    /// </summary>
+    public int StepsProposed { get; private set; }
 
     /// <summary>
     /// Test-only seam: replaces the read of the schema-leader term, so a test on one node can play a
@@ -210,6 +226,11 @@ public sealed class SchemaChangeCoordinator
     /// successor took it back, with the reason it recorded, or when the job is still in progress after
     /// <see cref="HandoverOutcomeWait"/>. When this node leads again meanwhile, it drives the job to
     /// its end itself, through the resume.</para>
+    ///
+    /// <para>A job that an explicit transaction owns (<see cref="SchemaChangeJob.OwnerChangeSetId"/>) is
+    /// not answered from its outcome, because no resume drives it. After a leadership change it fails
+    /// with <see cref="CamusDBErrorCodes.TransactionMustRetry"/>, and the owner's rollback removes the
+    /// element.</para>
     /// </summary>
     public async Task RunJobAsync(
         DatabaseDescriptor database,
@@ -223,6 +244,7 @@ public sealed class SchemaChangeCoordinator
         SchemaDdlGateHold gate = new(database.DdlGate, gateHeldByCaller);
         long term = ReadLeaderTerm(database);
         LeaderTerm = term;
+        StepsProposed = 0;
 
         try
         {
@@ -249,6 +271,22 @@ public sealed class SchemaChangeCoordinator
         }
         catch (Exception ex)
         {
+            // An owned job is never answered from a successor: no resume drives it, so nothing would
+            // finish it. The statement fails, and its compensation or its owner's rollback removes the
+            // element. After a change of the schema leader the failure carries a retryable code: the
+            // owner rolls back, and the whole transaction can run again.
+            if (job.OwnerChangeSetId is not null)
+            {
+                if (!JobWasHandedOver(database, term, ex))
+                    throw;
+
+                throw new CamusDBException(
+                    CamusDBErrorCodes.TransactionMustRetry,
+                    $"The schema leader of database '{database.Name}' changed while the transaction staged {DescribeElement(job)} " +
+                    $"on table '{job.TableName}' ({ex.Message}). Roll back the transaction and run it again",
+                    ex);
+            }
+
             if (!JobWasHandedOver(database, term, ex))
                 throw;
 
@@ -501,6 +539,12 @@ public sealed class SchemaChangeCoordinator
                         // after a failure, both propose deltas.
                         await gate.AcquireAsync().ConfigureAwait(false);
                     }
+
+                    // An owned job ends here, filled or backfilled and still WriteOnly. The step to
+                    // Public is in its owner's change set, and the record stays until that change set
+                    // is published or the element is removed.
+                    if (job.OwnerChangeSetId is not null)
+                        break;
                 }
 
                 if (current == SchemaElementState.Absent && nextState == SchemaElementState.DeleteOnly)
@@ -540,6 +584,7 @@ public sealed class SchemaChangeCoordinator
                 }
 
                 current = nextState;
+                StepsProposed++;
 
                 if (OnStepCompleted is not null)
                     await OnStepCompleted(nextState, database.Schema.SchemaVersion).ConfigureAwait(false);
@@ -565,6 +610,269 @@ public sealed class SchemaChangeCoordinator
             }
         }
     }
+
+    /// <summary>
+    /// Decides a job that an explicit transaction owns (<see cref="PersistedCoordinatorJob.OwnerChangeSetId"/>)
+    /// on a resume. The resume never drives such a job. The owner's KV commit deletes the record
+    /// (<see cref="ChangeSetCommitter"/>), so a record that is still there means that the owner did not
+    /// commit, or did not end yet.
+    /// <list type="bullet">
+    /// <item>The owner's change set is pending: its KV commit is on its way, and its publish or its abort
+    /// decides, so the job waits.</item>
+    /// <item>The element is gone and left nothing to remove (a column or a constraint): the record is
+    /// deleted. An index that is gone can still have entries in its key space, from a build that failed, so
+    /// it takes the removal path below, which purges them.</item>
+    /// <item>Otherwise the owner may still be open, and an open owner holds the DDL lock of the database. The
+    /// resume tries that lock once, and leaves the job when another holder has it. With the lock, it reads
+    /// the change set's decision key as the resolver does: absent means the owner never committed, so the
+    /// resume writes <c>aborted</c>, which stops a late commit of the owner, and removes the element.
+    /// <c>committed</c> means that the record was read before the owner's commit deleted it, so the job is
+    /// left.</item>
+    /// </list>
+    /// A readable element proves no commit: a staged CHECK or NOT NULL, and the backing index of a staged
+    /// foreign key, are readable before their owner commits.
+    /// <para>The order of the locks is the DDL lock, then the DDL gate, as on every path
+    /// (<see cref="TransactionalDdlLock"/>).</para>
+    /// </summary>
+    internal async Task ResumeOwnedJobAsync(DatabaseDescriptor database, PersistedCoordinatorJob persisted, string tableName)
+    {
+        TransactionSchemaScope.Suppress();
+
+        string owner = persisted.OwnerChangeSetId!;
+
+        if (OwnerIsPending(database, owner) || await DeleteRecordIfGoneAsync(database, persisted, tableName).ConfigureAwait(false))
+            return;
+
+        await using TransactionalDdlLock? ddlLock = await TransactionalDdlLock.TryAcquireAsync(database, logger).ConfigureAwait(false);
+        if (ddlLock is null)
+            return;
+
+        // Read again with the lock: the owner can have committed or rolled back meanwhile.
+        if (OwnerIsPending(database, owner) || await DeleteRecordIfGoneAsync(database, persisted, tableName).ConfigureAwait(false))
+            return;
+
+        bool committed;
+        try
+        {
+            committed = await PendingChangeSetResolver.ReadOrAbortDecisionAsync(database, owner).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogWarning(ex,
+                "Could not read the decision of change set {ChangeSetId}, which owns the {Kind} {Element} of table {Table} in database {Database}; a later resume tries again",
+                owner, persisted.ElementKind, persisted.ElementName, tableName, database.Name);
+            return;
+        }
+
+        if (committed)
+            return;
+
+        logger?.LogWarning(
+            "Removing the {Kind} {Element} of table {Table} in database {Database}: change set {ChangeSetId}, which staged it, ended without a commit",
+            persisted.ElementKind, persisted.ElementName, tableName, database.Name, owner);
+
+        await RemoveOwnedElementAsync(database, persisted).ConfigureAwait(false);
+    }
+
+    private static bool OwnerIsPending(DatabaseDescriptor database, string changeSetId) =>
+        database.Schema.PendingChangeSet is { } pending
+        && string.Equals(pending.ChangeSetId, changeSetId, StringComparison.Ordinal);
+
+    /// <summary>
+    /// Deletes the record of an owned job whose element is gone and left nothing to remove (a column, a
+    /// foreign key, a CHECK or a NOT NULL), and returns true. Returns false while the element exists, and
+    /// for an index that is gone, whose entries only <see cref="RemoveOwnedElementAsync"/> purges.
+    /// </summary>
+    private async Task<bool> DeleteRecordIfGoneAsync(DatabaseDescriptor database, PersistedCoordinatorJob persisted, string tableName)
+    {
+        if (persisted.ElementKind == SchemaElementKind.Index || OwnedElementExists(database.Schema, tableName, persisted))
+            return false;
+
+        try
+        {
+            await catalogs.DeleteCoordinatorJobAsync(database, persisted.TableId, persisted.ElementName).ConfigureAwait(false);
+            ClearBackoff(database, persisted);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogWarning(ex, "Could not delete the record of the owned {Kind} {Element} of table {Table}; a later resume deletes it",
+                persisted.ElementKind, persisted.ElementName, tableName);
+        }
+
+        return true;
+    }
+
+    /// <summary>True while the element an owned job names is in <paramref name="schema"/>, in any state.</summary>
+    private static bool OwnedElementExists(Schema schema, string tableName, PersistedCoordinatorJob persisted)
+    {
+        if (persisted.ElementKind is SchemaElementKind.Check or SchemaElementKind.NotNull)
+            return schema.Tables.TryGetValue(tableName, out TableSchema? table)
+                && RowConstraintExists(table, persisted.ElementKind, persisted.ElementName);
+
+        return GetCurrentElementState(schema, tableName, persisted.ElementName, persisted.ElementKind) != SchemaElementState.Absent;
+    }
+
+    /// <summary>
+    /// Removes every element whose job record names <paramref name="changeSetId"/> as its owner, one at a
+    /// time with <see cref="RemoveOwnedElementAsync"/>. The owner's rollback calls it while the owner holds
+    /// the DDL lock, so no resume removes the same elements at the same time. A foreign key goes first, so
+    /// its backing index is free when its own record comes; then the CHECK and NOT NULL constraints, the
+    /// columns and the indexes. Never throws: a removal that fails leaves its record for the resume, which
+    /// finds the owner gone and removes the element.
+    /// </summary>
+    internal async Task RemoveOwnedElementsOfAsync(DatabaseDescriptor database, string changeSetId)
+    {
+        TransactionSchemaScope.Suppress();
+
+        List<PersistedCoordinatorJob> jobs;
+        try
+        {
+            jobs = await catalogs.LoadCoordinatorJobsAsync(database).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogWarning(ex,
+                "Could not read the job records of change set {ChangeSetId} in database {Database}; the coordinator's resume removes its elements",
+                changeSetId, database.Name);
+            return;
+        }
+
+        jobs.RemoveAll(job => !string.Equals(job.OwnerChangeSetId, changeSetId, StringComparison.Ordinal));
+        jobs.Sort((a, b) => RemovalOrder(a.ElementKind).CompareTo(RemovalOrder(b.ElementKind)));
+
+        foreach (PersistedCoordinatorJob job in jobs)
+            await RemoveOwnedElementAsync(database, job).ConfigureAwait(false);
+    }
+
+    private static int RemovalOrder(SchemaElementKind kind) => kind switch
+    {
+        SchemaElementKind.ForeignKey => 0,
+        SchemaElementKind.Check or SchemaElementKind.NotNull => 1,
+        SchemaElementKind.Column => 2,
+        _ => 3,
+    };
+
+    /// <summary>
+    /// Removes an element that an owned job staged and its owner never committed, then deletes the job.
+    /// Runs at the owner's rollback or abort, on the owner's node (<see cref="RemoveOwnedElementsOfAsync"/>),
+    /// and from <see cref="ResumeOwnedJobAsync"/> on the schema leader. A record of an owned job exists only
+    /// while its owner did not commit, so the element is removed in any state. Each step checks the element
+    /// first, so a second run is safe. Never throws: a step that fails leaves the record for the next resume.
+    /// <list type="bullet">
+    /// <item>A column goes down its staged states, and the sequence it owned is released
+    /// (<see cref="RemoveColumnAsync"/>, which deletes the record).</item>
+    /// <item>A CHECK constraint is dropped, and a NOT NULL column becomes nullable again.</item>
+    /// <item>A foreign key moves to <c>Absent</c>, which also frees its backing index.</item>
+    /// <item>An index leaves the schema first, so every node stops writing its entries once it
+    /// acknowledged the drop, and then its key space is purged (<see cref="PurgeIndexEntriesAsync"/>). An
+    /// index that the compensation of its failed build already dropped is only purged. An index that a
+    /// foreign key still uses is left until that constraint is removed.</item>
+    /// </list>
+    /// The caller must not hold the DDL gate: this method takes it for its proposals.
+    /// </summary>
+    internal async Task RemoveOwnedElementAsync(DatabaseDescriptor database, PersistedCoordinatorJob persisted)
+    {
+        TransactionSchemaScope.Suppress();
+
+        TableSchema? table = FindTableById(database.Schema, persisted.TableId);
+
+        if (table?.Name is { } tableName)
+        {
+            SchemaDdlGateHold gate = new(database.DdlGate, heldByCaller: false);
+            try
+            {
+                await gate.AcquireAsync().ConfigureAwait(false);
+
+                // Read again under the gate: another removal can have changed the table meanwhile.
+                table = FindTableById(database.Schema, persisted.TableId) ?? table;
+
+                switch (persisted.ElementKind)
+                {
+                    case SchemaElementKind.Column:
+                        SchemaChangeJob removal = new(
+                            database.Name, tableName, persisted.TableId, persisted.ElementName,
+                            SchemaElementState.Absent, SchemaElementKind.Column, persisted.OwnerChangeSetId);
+
+                        await RemoveColumnAsync(database, removal, persisted.ColumnDefaultSequenceId, term: 0).ConfigureAwait(false);
+                        return;
+
+                    case SchemaElementKind.Check or SchemaElementKind.NotNull:
+                        await RemoveRowConstraintAsync(database, new SchemaChangeJob(
+                            database.Name, tableName, persisted.TableId, persisted.ElementName,
+                            SchemaElementState.Absent, persisted.ElementKind, persisted.OwnerChangeSetId)).ConfigureAwait(false);
+                        break;
+
+                    case SchemaElementKind.ForeignKey:
+                        if (GetCurrentElementState(database.Schema, tableName, persisted.ElementName, SchemaElementKind.ForeignKey) != SchemaElementState.Absent)
+                            await catalogs.ReplicateElementStateAsync(
+                                database, tableName, persisted.ElementName, SchemaElementState.Absent, SchemaElementKind.ForeignKey
+                            ).ConfigureAwait(false);
+                        break;
+
+                    default:
+                        TableIndexSchema? index = table.Indexes?.Find(ix =>
+                            string.Equals(ix.Name, persisted.ElementName, StringComparison.OrdinalIgnoreCase)
+                            || (persisted.IndexId is { } id && string.Equals(ix.Id, id, StringComparison.Ordinal)));
+
+                        if (index is null)
+                            break;
+
+                        if (index.OwnerConstraintId is { } constraintId
+                            && table.ForeignKeys?.Exists(fk => string.Equals(fk.Id, constraintId, StringComparison.Ordinal)) == true)
+                        {
+                            logger?.LogInformation(
+                                "The owned index {Element} of table {Table} in database {Database} backs a foreign key that is not removed yet; a later removal drops it",
+                                persisted.ElementName, tableName, database.Name);
+                            return;
+                        }
+
+                        await catalogs.ReplicateDropIndexAsync(database, tableName, index.Name).ConfigureAwait(false);
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                logger?.LogWarning(ex,
+                    "Could not remove the owned {Kind} {Element} of table {Table} in database {Database}; a later resume tries again",
+                    persisted.ElementKind, persisted.ElementName, tableName, database.Name);
+                return;
+            }
+            finally
+            {
+                gate.Release();
+            }
+
+            if (persisted.ElementKind == SchemaElementKind.Index && persisted.IndexId is { } indexId && PurgeIndexEntriesAsync is { } purge)
+            {
+                try
+                {
+                    if (!await purge(database, table.EffectiveStorageId, indexId).ConfigureAwait(false))
+                        return;
+                }
+                catch (Exception ex)
+                {
+                    logger?.LogWarning(ex,
+                        "Could not purge the entries of the removed index {Element} of table {Table} in database {Database}; a later resume tries again",
+                        persisted.ElementName, tableName, database.Name);
+                    return;
+                }
+            }
+        }
+
+        try
+        {
+            await catalogs.DeleteCoordinatorJobAsync(database, persisted.TableId, persisted.ElementName).ConfigureAwait(false);
+            ClearBackoff(database, persisted);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogWarning(ex, "Could not delete the record of the removed owned {Kind} {Element}; a later resume deletes it",
+                persisted.ElementKind, persisted.ElementName);
+        }
+    }
+
+    private static TableSchema? FindTableById(Schema schema, string tableId) =>
+        schema.Tables.Values.FirstOrDefault(t => string.Equals(t.Id, tableId, StringComparison.Ordinal));
 
     /// <summary>The element a job changes, for the gate's hold and its log lines.</summary>
     private static string DescribeElement(SchemaChangeJob job) =>
@@ -907,6 +1215,11 @@ public sealed class SchemaChangeCoordinator
 
             await gate.AcquireAsync().ConfigureAwait(false);
 
+            // An owned job keeps its record: the owner's commit deletes it, and its rollback removes the
+            // constraint.
+            if (job.OwnerChangeSetId is not null)
+                return;
+
             try
             {
                 await catalogs.DeleteCoordinatorJobAsync(database, job.TableId, job.ElementName).ConfigureAwait(false);
@@ -1072,6 +1385,7 @@ public sealed class SchemaChangeCoordinator
         IndexColumnDirections = indexBuildInfo?.ColumnDirections,
         IndexKeyExpressions = indexBuildInfo?.KeyExpressions,
         Attempts = attempts,
+        OwnerChangeSetId = job.OwnerChangeSetId,
     };
 
     /// <summary>
@@ -1271,6 +1585,15 @@ public sealed class SchemaChangeCoordinator
             // A job that failed on this node a moment ago waits its backoff out; the sweep comes back.
             if (IsInBackoff(database, persisted, liveTableName))
                 continue;
+
+            // A job an explicit transaction owns is decided by that transaction's change set, never
+            // driven. A removal it recorded after a failed fill is finished by the removal below, which
+            // is always safe to run.
+            if (persisted.OwnerChangeSetId is not null && persisted.TargetState != SchemaElementState.Absent)
+            {
+                await ResumeOwnedJobAsync(database, persisted, liveTableName).ConfigureAwait(false);
+                continue;
+            }
 
             // A CHECK or NOT NULL job applies its own attempt limit: abandoning it must remove the
             // constraint, not just delete the job.
@@ -1573,13 +1896,19 @@ public sealed class SchemaChangeCoordinator
 /// <param name="ElementName">The column or index name.</param>
 /// <param name="TargetState">The desired final state for the element.</param>
 /// <param name="ElementKind">Whether the element is a column (default) or an index.</param>
+/// <param name="OwnerChangeSetId">
+/// The change set of the explicit transaction that owns the job, or null. An owned job runs every step up
+/// to and including the fill or backfill, then stops before <c>Public</c> and keeps its record; see
+/// <see cref="PersistedCoordinatorJob.OwnerChangeSetId"/>.
+/// </param>
 public sealed record SchemaChangeJob(
     string DatabaseName,
     string TableName,
     string TableId,
     string ElementName,
     SchemaElementState TargetState,
-    SchemaElementKind ElementKind = SchemaElementKind.Column
+    SchemaElementKind ElementKind = SchemaElementKind.Column,
+    string? OwnerChangeSetId = null
 );
 
 /// <summary>

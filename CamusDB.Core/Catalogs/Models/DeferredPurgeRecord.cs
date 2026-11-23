@@ -36,9 +36,9 @@ public sealed class DeferredPurgeRecord
     public string ChangeSetId { get; set; } = "";
 
     /// <summary>
-    /// The schema version the change set started from. Its pending entry moves the version to this plus
-    /// one, and no other schema change applies while it is pending, so a version of this plus two or
-    /// later means the change set ended.
+    /// The schema version the change set's pending entry is proposed from, set when the commit writes the
+    /// record. The pending entry moves the version to this plus one, and no other schema change applies
+    /// while it is pending, so a version of this plus two or later means the change set ended.
     /// </summary>
     public long BaseVersion { get; set; }
 

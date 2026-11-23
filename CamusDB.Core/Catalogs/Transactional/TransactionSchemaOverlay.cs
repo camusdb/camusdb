@@ -80,6 +80,8 @@ internal sealed class TransactionSchemaOverlay : ITransactionSchemaChanges
 
     private readonly List<Func<Task>> onRollback = [];
 
+    private readonly List<(string TableId, string ElementName)> ownedJobs = [];
+
     private readonly List<DeferredPurgeRecord> deferredPurges = [];
 
     private OverlayState state = OverlayState.Open;
@@ -127,8 +129,12 @@ internal sealed class TransactionSchemaOverlay : ITransactionSchemaChanges
     /// <summary>A private bound-query cache, so no bound statement of the owner reaches the shared one.</summary>
     internal BoundQueryCache BoundQueries { get; } = new();
 
-    /// <summary>The shared schema version the private copy was taken at.</summary>
-    internal long BaseVersion { get; }
+    /// <summary>
+    /// The shared schema version the private copy is based on: the version at the transaction's first
+    /// schema change, moved forward by <see cref="RebaseOntoSharedTableAsync"/> after the staged steps of a
+    /// statement on a shared table.
+    /// </summary>
+    internal long BaseVersion { get; private set; }
 
     /// <summary>The id that names the change set's decision key and pending record. Fresh per transaction.</summary>
     internal string ChangeSetId { get; } = Guid.NewGuid().ToString("N");
@@ -160,6 +166,30 @@ internal sealed class TransactionSchemaOverlay : ITransactionSchemaChanges
     internal ChangeSetCommitter Committer => committer;
 
     public bool HasChanges => deltas.Count > 0;
+
+    /// <summary>
+    /// The coordinator job records of the elements this transaction staged on shared tables, by table id
+    /// and element name (<see cref="AddOwnedJob"/>). The commit deletes them in the transaction's own KV
+    /// commit, so a record that names this change set as its owner exists only while the transaction did
+    /// not commit.
+    /// </summary>
+    internal IReadOnlyList<(string TableId, string ElementName)> OwnedJobs => ownedJobs;
+
+    /// <summary>
+    /// True when the transaction staged an element on a shared table. Such an overlay must reach the commit
+    /// even with no delta: a staged CHECK or NOT NULL is already in the shared schema, and only the commit
+    /// makes it permanent.
+    /// </summary>
+    internal bool HoldsOwnedJobs => ownedJobs.Count > 0;
+
+    /// <summary>Records the job record of an element the transaction staged; see <see cref="OwnedJobs"/>.</summary>
+    internal void AddOwnedJob(string tableId, string elementName) => ownedJobs.Add((tableId, elementName));
+
+    /// <summary>
+    /// True once a statement recorded the removal of the elements the transaction staged on shared tables.
+    /// One removal covers every such element, so it is recorded once.
+    /// </summary>
+    internal bool OwnedRemovalRecorded { get; set; }
 
     /// <summary>True when the change set created the table, so only the owner can have written rows to it.</summary>
     internal bool CreatedTable(string tableId) => createdTableIds.Contains(tableId);
@@ -322,16 +352,99 @@ internal sealed class TransactionSchemaOverlay : ITransactionSchemaChanges
     }
 
     /// <summary>
+    /// Refuses a staged statement on a shared table when the shared schema moved since the private copy
+    /// was based on it: the staged steps change the shared table, and the private copy can take them over
+    /// only from the base it was built on. The commit would refuse such a transaction anyway.
+    /// </summary>
+    internal void RequireSharedBase()
+    {
+        Schema shared = Database.SharedSchema;
+
+        if (shared.SchemaVersion == BaseVersion && shared.PendingChangeSet is null)
+            return;
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.TransactionConflict,
+            $"The transaction changed the schema of database '{Database.Name}' from version {BaseVersion}, but the schema " +
+            $"is at version {shared.SchemaVersion}: another schema change landed while the transaction was open; roll back " +
+            "and retry it from BEGIN");
+    }
+
+    /// <summary>
+    /// Takes over the staged steps that a statement of the owner ran on the shared table
+    /// <paramref name="tableId"/>: the private copy of that table is replaced by a copy of the shared one,
+    /// and the base moves to the shared version. <paramref name="stepsTaken"/> is the number of schema
+    /// versions the statement's steps took. The private copy of every other table was built on the old
+    /// base, so the shared schema must have moved by exactly those steps; otherwise another change landed
+    /// in between and the statement fails with <see cref="CamusDBErrorCodes.TransactionConflict"/>.
+    ///
+    /// <para>The caller checked that the change set has not changed the table, so the shared copy holds
+    /// everything the private one held, plus the staged element. The owner's pins on the table are dropped:
+    /// they describe the table before the element, and a staged element changes no row.</para>
+    /// </summary>
+    internal async Task RebaseOntoSharedTableAsync(string tableId, long stepsTaken)
+    {
+        Schema shared = Database.SharedSchema;
+        TableSchema copy;
+        long sharedVersion;
+
+        await shared.AcquireLockAsync().ConfigureAwait(false);
+        try
+        {
+            sharedVersion = shared.SchemaVersion;
+
+            if (sharedVersion != BaseVersion + stepsTaken || shared.PendingChangeSet is not null)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.TransactionConflict,
+                    $"Another schema change of database '{Database.Name}' landed while the transaction staged a change on one of " +
+                    "its tables; roll back and retry the transaction from BEGIN");
+
+            TableSchema sharedTable = SchemaDeltaApplier.FindRelationById(shared, tableId)
+                ?? throw new CamusDBException(
+                    CamusDBErrorCodes.TableDoesntExist,
+                    $"The table with id '{tableId}' left the schema while the transaction staged a change on it");
+
+            copy = SchemaReplicator.CloneTable(sharedTable);
+        }
+        finally
+        {
+            shared.ReleaseLock();
+        }
+
+        await Schema.AcquireLockAsync().ConfigureAwait(false);
+        try
+        {
+            Schema.Tables[copy.Name!] = copy;
+            Schema.RebuildRelationNameIndex();
+            Schema.RebuildForeignKeyGraph();
+
+            // The private version stays the base plus one per delta of the change set, which is the
+            // version the next statement of the owner builds its delta from.
+            Schema.SchemaVersion += sharedVersion - BaseVersion;
+            BaseVersion = sharedVersion;
+
+            touchedTableIds.Add(tableId);
+        }
+        finally
+        {
+            Schema.ReleaseLock();
+        }
+
+        TableDescriptors.Clear();
+        owner.RemoveSchemaPins($"{DatabaseId}/{tableId}");
+    }
+
+    /// <summary>
     /// Drops the overlay of <paramref name="tx"/> when no statement added a delta to it, and frees the DDL
     /// lock. Called after every successful statement. An overlay with no delta is a private copy of the
     /// shared schema that nothing keeps current: a later statement of the transaction would plan against
     /// it, and its commit would check nothing, because there is no change set to announce. Without it, the
     /// transaction's statements read the shared schema and take their pins on it, as before its first
-    /// schema statement.
+    /// schema statement. An overlay that holds an element staged on a shared table stays (<see cref="HoldsOwnedJobs"/>).
     /// </summary>
     internal static async Task DiscardIfEmptyAsync(KvTransaction tx)
     {
-        if (tx.SchemaChanges is not TransactionSchemaOverlay { IsOpen: true, HasChanges: false } overlay)
+        if (tx.SchemaChanges is not TransactionSchemaOverlay { IsOpen: true, HasChanges: false, HoldsOwnedJobs: false } overlay)
             return;
 
         if (overlay.state != OverlayState.Open)
@@ -486,6 +599,15 @@ internal sealed class TransactionSchemaOverlay : ITransactionSchemaChanges
             // A sequence enters a change set only as the owned sequence of a column: created with an
             // identity column, dropped with its column. The statements on sequences themselves are refused.
             SchemaOp.CreateSequence or SchemaOp.DropSequence => true,
+
+            // A constraint added inside the transaction: its statement checks the rows the transaction can
+            // see before the change set is published.
+            SchemaOp.AddCheckConstraint or SchemaOp.SetColumnNotNull or SchemaOp.AddForeignKey => true,
+
+            // A state step joins a change set only to finish an element: a foreign key goes WriteOnly then
+            // Public in one statement, so the publish makes it visible enforced and checked. A step back
+            // (a removal) has no transactional form.
+            SchemaOp.SetElementState => entry.GetPayload<SchemaElementStatePayload>().State == SchemaElementState.Public,
 
             // A drop keeps the rows and index entries until the publish, so a rollback has nothing to
             // restore: a deferred drop leaves them to its orphan record, and a drop without retention
