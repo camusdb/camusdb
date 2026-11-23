@@ -788,9 +788,10 @@ public sealed class SchemaChangeCoordinator
                         if (index.OwnerConstraintId is { } constraintId
                             && table.ForeignKeys?.Exists(fk => string.Equals(fk.Id, constraintId, StringComparison.Ordinal)) == true)
                         {
-                            logger?.LogInformation(
-                                "The owned index {Element} of table {Table} in database {Database} backs a foreign key that is not removed yet; a later removal drops it",
-                                persisted.ElementName, tableName, database.Name);
+                            if (logger is not null && logger.IsEnabled(LogLevel.Information))
+                                logger.LogInformation(
+                                    "The owned index {Element} of table {Table} in database {Database} backs a foreign key that is not removed yet; a later removal drops it",
+                                    persisted.ElementName, tableName, database.Name);
                             return;
                         }
 
