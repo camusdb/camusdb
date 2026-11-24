@@ -452,11 +452,17 @@ Leader SchemaDdlForwardController
     walk over the replica set after a refusal therefore skips the local endpoint; when it is the
     only candidate left, the coordinator re-checks its own leadership and either runs the ticket
     locally or resolves again after a pause.
-  - **A forward holds nothing on the follower.** The leader serializes the statement through its
+  - **A forwarded statement holds nothing on the follower.** The leader serializes the statement through its
     DDL gate (§4.1). The follower reads the pre-forward schema version without a lock, forwards,
     and waits for the local apply; two forwards from one node run concurrently. A hold here only
     made every DDL sent through the follower wait for the leader's answer, which for a forwarded
     `CREATE INDEX` was the whole build.
+  - **A forwarded delta is the exception.** A change that this node built itself (a view, a function,
+    the entries of a change set at `COMMIT`) is forwarded while the sender holds its own DDL gate. The
+    receiver waits for its gate only while it leads the schema log
+    (`CatalogsManager.PublishForwardedSchemaDeltaAsync`), and answers "not the leader" when the
+    leadership moves during the wait. Without that, the statement that holds the receiver's gate can
+    forward its own delta to the sender, and each node waits for the other until the HTTP timeout.
 - **`DdlOperationIdCache`** (`CamusDB/App/Services`) is the two-layer dedup: a stable op id
   makes a lost-response retry replay the prior result instead of bumping the schema version
   twice, and an in-flight reservation collapses concurrent duplicates. This is the
@@ -1603,7 +1609,8 @@ key's lock, and reads the job record again under it (`PendingChangeSetResolver.A
   refuses a late commit of the owner, and removes the element and purges its entries.
 
 A removal deletes the record only while it names the same owner, so it never takes the record of a later
-statement on an element of the same name.
+statement on an element of the same name. After the last record of an owner, the resume deletes the
+decision key it wrote. A late commit of that owner is still refused: its commit needs every record it owns.
 
 The online build is refused with `CADB0538` when the transaction wrote rows to the table or holds locks
 on its rows (the build locks each row, and would wait for the transaction), and when the change set
@@ -1640,7 +1647,11 @@ needs `ALTER` on the child and `SELECT` on the parent, and the `SELECT` was chec
 
 1. Check the schema pins against the private schema.
 2. In the transaction: take the exclusive lock on the decision key `{db}/meta/ddlcommit:{id}`, read
-   it (it must be absent), and write `committed`. Write the history key of every new table layout.
+   it (it must be absent), and write `committed`. Read each job record the transaction owns under its lock
+   (it must be there), and delete it. Write the history key of every new table layout. The locks of this
+   step have a **lease** (`ChangeSetCommitter.StagedKeyLeaseMs`: the wait for the acknowledgements of step 4
+   plus 15 seconds). When a lease ran out, Kahuna refuses the commit for certain, and the KV commit takes the
+   locks over, so they cannot run out while it is in flight.
 3. Under the DDL gate semaphore, propose a `PendingChangeSet` entry. Its apply refuses the change set
    when the schema is not at the change set's base version or when a delta does not apply to the live
    schema, and otherwise records it as pending, with the set of **affected tables**: every live table a
@@ -1651,7 +1662,9 @@ needs `ALTER` on the child and `SELECT` on the parent, and the `SELECT` was chec
    commits in flight that wrote one of them. A new statement that opens an affected table waits in
    `TableOpener` until the change set is published or aborted, then resolves the name again. The commit
    goes on only when **every live node** acknowledged the pending entry, with no quorum backstop (§6.3).
-   A node that does not answer within the gate timeout refuses the commit with the retryable `CADB0504`.
+   A node that does not answer within the gate timeout refuses the commit with the retryable `CADB0504`, and
+   so does a schema log with no leader. The KV commit never starts after that, so a replay is safe also when
+   the pending entry still lands in the log: the resolver aborts it.
 5. Drop the transaction's write-shape pins (the check before step 3 and the base-version check cover
    them) and commit the transaction in KV. The rows, the decision key and the layouts land together.
 6. After a commit, propose `PublishChangeSet` and wait for every live node to acknowledge it, also with no
@@ -1752,14 +1765,29 @@ coordinator-job sweep, which also runs the resolver. The resolver takes the deci
 transaction of its own and reads it. `committed` means the transaction committed, so it publishes.
 Absent means the transaction did not commit, so it writes `aborted`, commits that, and aborts. The
 transaction writes the key under the same lock after it reads it absent, so the two never both write
-it. When the transaction still holds the lock, the resolver tries again on the next sweep.
+it. When the transaction still holds the lock, the resolver tries again at the next run.
+
+The node of the transaction can die between the announcement and the KV commit. A Kahuna lock without a
+lease lives as long as the session of its transaction, up to
+`max_serializable_transaction_lifetime_ms`, because nobody is left to end that session. The lease of the
+decision key ends the wait: the change set is resolved after the longer of the lease (45 seconds by
+default) and `transactional_ddl_resolve_after_ms`. The other keys that the commit staged have the same
+lease, because the next schema change of the table writes the same history keys, and the removal of a
+staged element deletes the same job record. The locks on rows have no lease, as in every transaction.
 
 #### DDL lock
 
 The DDL lock is a Kahuna distributed lock, `{db}/meta/ddllock`, one per database, with a 30-second
-lease that a renewer extends. A DDL transaction holds it from its first schema statement until it
-ends; a schema statement outside a DDL transaction holds it for its length when the setting is on.
-A waiter gives up after 30 seconds with `CADB0504`.
+lease that a renewer extends. A DDL transaction holds it alone, from its first schema statement until it
+ends. The schema statements outside a DDL transaction hold it together while any of them runs, when the
+setting is on (`StatementDdlLock`). A waiter gives up after 30 seconds with `CADB0504`.
+
+The statements share the lock because they do not need it between them: the DDL gate serializes their
+proposals, and a statement waits only for a staged change of its own table, as with the setting off. All of
+them use one owner value, on every node. Kahuna frees a lock for its whole owner value, so the last
+statement of one node also frees it for a statement that runs on another node. The renewer of that node
+takes it again within two seconds. A transaction that takes the lock in between runs beside the statement,
+which costs serialization only.
 
 Lock order: the DDL lock, then the DDL gate semaphore, then the schema lock. A lost lock costs
 serialization only: the base-version check of the pending entry still refuses a change set whose base
@@ -1778,7 +1806,14 @@ autocommit inside a transaction) and
 the leader, the lock order, lost drivers, a leader move while a change set is pending, a purge that
 the new schema leader finishes, a staged index on a shared table from a follower, a leader move
 during a staged backfill on the leader and on a follower, staged constraints on shared tables, the other
-objects from a follower, and a slow follower that holds back the commit and the publish).
+objects from a follower, a slow follower that holds back the commit and the publish, the shared DDL lock,
+and a staged change that runs with no DDL lock). `CamusDB.Cluster.Tests/TestClusterTransactionalDdlFaults`
+stops the commit at each of its steps (`ChangeSetStep`): the node of the transaction dies, the schema leader
+moves or dies, the client goes away, or the node is slower than its lease. Each case must end with the whole
+change set or none of it, as the KV commit decided. `TestTransactionalDdlConcurrency` (one node) and
+`CamusDB.Cluster.Tests/TestClusterTransactionalDdlConcurrency` (three nodes) run random DDL transactions
+beside each other, beside schema statements outside a transaction, and beside transactions that write the
+same table, and compare the result with a model.
 
 ---
 

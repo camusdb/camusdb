@@ -207,6 +207,12 @@ public sealed record DatabaseDescriptor : IDisposable
     /// </summary>
     public SemaphoreSlim SchemaDdlSemaphore => DdlGate.Semaphore;
 
+    /// <summary>
+    /// The share of this node's schema statements in the DDL lock of the database, when transactional DDL is
+    /// on; see <see cref="Catalogs.Transactional.StatementDdlLock"/>.
+    /// </summary>
+    internal Catalogs.Transactional.StatementDdlLock StatementDdlLock { get; } = new();
+
     public SemaphoreSlim SystemSchemaSemaphore { get; } = new(1, 1);
 
     // Set when persist-checkpoint exhausts all retries after a committed DDL.

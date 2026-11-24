@@ -26,7 +26,8 @@ namespace CamusDB.Core.Catalogs.Transactional;
 /// commit and cannot any more once the resolver writes <c>aborted</c> and commits that write, so the
 /// resolver aborts. The transaction writes the key under the same lock after reading it absent, so the
 /// two can never both write it. When the transaction still holds the lock, the resolver's lock attempt
-/// fails and the next run tries again.</para>
+/// fails and the next run tries again. The lock of a transaction whose node died runs out with its lease
+/// (<see cref="ChangeSetCommitter.StagedKeyLeaseMs"/>).</para>
 ///
 /// <para><b>When it runs.</b> On the schema leader of the database, for a change set that has been pending
 /// on this node longer than <see cref="CamusDBOptions.TransactionalDdlResolveAfterMs"/>. Two sources drive
@@ -167,6 +168,40 @@ internal sealed class PendingChangeSetResolver
             await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
 
             return false;
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Deletes the decision key that <see cref="AbortOwnerAndReadJobAsync"/> wrote for
+    /// <paramref name="changeSetId"/>, after the last element that the transaction staged is removed. Only for
+    /// a change set that is not pending: the checkpoint of an abort deletes the key of a pending one. The
+    /// transaction cannot commit without the key either, because its prepare finds no job record.
+    /// </summary>
+    internal static async Task DeleteAbortedDecisionAsync(DatabaseDescriptor database, string changeSetId)
+    {
+        IKahuna kahuna = database.Kahuna.Kahuna;
+        string decisionKey = MetaKeys.ChangeSetDecisionKey(database.Id, changeSetId);
+
+        KvTransaction tx = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+        ).ConfigureAwait(false);
+
+        try
+        {
+            await CatalogKeyLock.AcquireExclusiveAsync(kahuna, tx, decisionKey, DecisionKeyLockAttempts, "decision").ConfigureAwait(false);
+
+            byte[]? decision = await ChangeSetCommitter.ReadDecisionAsync(
+                kahuna, tx.TransactionId, decisionKey, CancellationToken.None).ConfigureAwait(false);
+
+            if (decision is null || !decision.AsSpan().SequenceEqual(ChangeSetCommitter.AbortedDecision))
+                return;
+
+            await MetaKeyWriter.DeleteMetaKey(kahuna, tx, decisionKey).ConfigureAwait(false);
+            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
         }
         finally
         {

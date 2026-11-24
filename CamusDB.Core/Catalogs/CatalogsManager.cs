@@ -280,18 +280,35 @@ public sealed class CatalogsManager
         => publisher.ForwardWhenNotLeader = forward;
 
     /// <summary>
+    /// How often a forwarded schema change that waits for this node's DDL gate checks that this node still
+    /// leads the schema log.
+    /// </summary>
+    private static readonly TimeSpan ForwardedDeltaLeaderCheckInterval = TimeSpan.FromMilliseconds(500);
+
+    /// <summary>
     /// Publishes a schema change a follower built and forwarded, as the schema leader. Returns the
-    /// version it was committed at.
+    /// version it was committed at, or null when this node stopped being the leader while the change
+    /// waited for the DDL gate; the follower then tries the leader again.
     /// </summary>
     /// <remarks>
-    /// The payload is wrapped at this node's version and checked again under the DDL gate and the
+    /// <para>The payload is wrapped at this node's version and checked again under the DDL gate and the
     /// schema lock, as a local proposal is, then published. The follower checked it against its own
     /// schema, which can be behind; each payload carries the preconditions its apply checks, so a
-    /// stale one is refused here or in log order. A refusal is raised to the follower with its code.
+    /// stale one is refused here or in log order. A refusal is raised to the follower with its code.</para>
+    ///
+    /// <para><b>Why the wait for the gate ends with the leadership.</b> The follower holds its own DDL gate
+    /// until this call answers. When leadership moves to that follower during the wait, the statement that
+    /// holds the gate here forwards its change to the follower and waits for the follower's gate, so each
+    /// node waits for the other. The answer "not the leader" frees the follower's gate.</para>
     /// </remarks>
-    internal async Task<long> PublishForwardedSchemaDeltaAsync(DatabaseDescriptor database, SchemaOp op, byte[] payload, HLCTimestamp ts)
+    internal async Task<long?> PublishForwardedSchemaDeltaAsync(DatabaseDescriptor database, SchemaOp op, byte[] payload, HLCTimestamp ts)
     {
-        await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
+        while (!await database.SchemaDdlSemaphore.WaitAsync(ForwardedDeltaLeaderCheckInterval).ConfigureAwait(false))
+        {
+            if (!await database.Kahuna.AmISchemaLeaderAsync(database.Id, CancellationToken.None).ConfigureAwait(false))
+                return null;
+        }
+
         try
         {
             SchemaChangeLogEntry entry;

@@ -40,7 +40,9 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// statements of this node wait for the leader's answer, which for a <c>CREATE INDEX</c> is the whole
 /// index build. It used to: a forwarded index build then made every DDL sent through the same follower
 /// wait for the build. The pre-forward version is read without a lock, since it serves only as a lower
-/// bound for the apply wait.</para>
+/// bound for the apply wait. A schema entry is the exception (<see cref="TryForwardSchemaEntryAsync"/>):
+/// the code that built it holds the DDL gate of this node until the leader answers, so the leader must not
+/// make it wait past its own leadership.</para>
 /// </summary>
 internal sealed class DdlForwardingCoordinator
 {

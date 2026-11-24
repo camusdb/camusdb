@@ -674,6 +674,28 @@ public sealed class SchemaChangeCoordinator
             abandoned.ElementKind, abandoned.ElementName, tableName, database.Name, owner);
 
         await RemoveOwnedElementAsync(database, abandoned).ConfigureAwait(false);
+        await DeleteDecisionOfRemovedOwnerAsync(database, owner).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Deletes the decision key of <paramref name="owner"/> once no job record names it any more. Never
+    /// throws: a key that stays is not read again, because the records it answers for are gone.
+    /// </summary>
+    private async Task DeleteDecisionOfRemovedOwnerAsync(DatabaseDescriptor database, string owner)
+    {
+        try
+        {
+            List<PersistedCoordinatorJob> jobs = await catalogs.LoadCoordinatorJobsAsync(database).ConfigureAwait(false);
+
+            if (jobs.Exists(job => string.Equals(job.OwnerChangeSetId, owner, StringComparison.Ordinal)))
+                return;
+
+            await PendingChangeSetResolver.DeleteAbortedDecisionAsync(database, owner).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogWarning(ex, "Could not delete the decision key of change set {ChangeSetId} of database {Database}", owner, database.Name);
+        }
     }
 
     private static bool OwnerIsPending(DatabaseDescriptor database, string changeSetId) =>

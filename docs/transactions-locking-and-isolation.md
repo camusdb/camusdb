@@ -902,6 +902,10 @@ What the transaction meets:
   takes the database's DDL lock and holds it until the transaction ends. Another transaction's first
   schema statement, and a schema statement outside a transaction, waits for it. After 30 seconds the
   waiter gets the retryable `CADB0504`.
+- **Schema statements outside a transaction run beside each other.** They share the DDL lock, so a
+  `CREATE TABLE` does not wait for an index build on another table. A transaction waits for all of them:
+  its first schema statement gets `CADB0504` when an index build or a `REFRESH MATERIALIZED VIEW` runs
+  longer than 30 seconds.
 - **A schema change that landed meanwhile refuses the commit.** If the schema of the database moved
   after the transaction's first schema statement, `COMMIT` fails with the retryable `CADB0502` and
   rolls the transaction back. Replay it from `BEGIN`.
@@ -916,8 +920,8 @@ What the transaction meets:
   own commit with the retryable `CADB0502`.
 - **`COMMIT` needs every live node.** The rows commit after every live node fenced the changed tables, and
   `COMMIT` returns after every live node sees the change. A live node that is slow to apply the schema log
-  makes `COMMIT` wait. When the node does not catch up before the timeout, `COMMIT` is refused with the
-  retryable `CADB0504`, and no row was committed.
+  makes `COMMIT` wait. When the node does not catch up before the timeout, or when the schema log has no
+  leader, `COMMIT` is refused with the retryable `CADB0504`, and no row was committed.
 - **A branch is created from a settled schema.** `CREATE DATABASE … BRANCH FROM` waits a few seconds for a
   transaction that is committing its schema changes, and is then refused with the retryable `CADB0504`.
 - **Dropped data leaves the disk after the commit.** A `DROP INDEX`, a `DROP TABLE … FORCE` and a
@@ -970,6 +974,9 @@ What the transaction meets:
 - **An online build of a transaction that disappears is removed.** When the node of the transaction
   fails before `COMMIT`, a background sweep on the schema leader removes the column or index once the
   transaction's DDL lock lapses. After that, the transaction cannot commit.
+- **A node that dies during `COMMIT` holds the changed tables for up to a minute.** Its change set is then
+  ended as its KV commit decided: the whole of it becomes visible, or none of it. Until then a statement
+  on a changed table waits, and other schema changes get the retryable `CADB0504`.
 - **`COMMIT` can fail with `CADB0509` after the rows committed.** This happens when the schema change
   cannot be confirmed on every live node, for example during a leader change. Retry `COMMIT` on the same
   transaction; it waits for the schema change and does not run the transaction again.

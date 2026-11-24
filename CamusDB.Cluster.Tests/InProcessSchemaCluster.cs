@@ -58,6 +58,9 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
     /// <summary>The cluster's nodes in the order they started or joined. A node's index is its position here.</summary>
     public Node[] Nodes => Volatile.Read(ref nodes);
 
+    /// <summary>The nodes that <see cref="KillNodeAsync"/> did not kill, in the order of <see cref="Nodes"/>.</summary>
+    public IEnumerable<Node> LiveNodes => Nodes.Where(node => !node.IsKilled);
+
     /// <summary>
     /// What <see cref="StartAsync"/> built the cluster with, kept so that <see cref="JoinNodeAsync"/> builds a
     /// joining node the same way: the same transports, configuration and per-node hooks.
@@ -118,7 +121,7 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         BuildContext context = buildContext;
 
         List<RaftNode> peers = [.. current.Select(n => new RaftNode(n.Kahuna.Raft.GetLocalEndpoint()))];
-        string seed = current[0].Kahuna.Raft.GetLocalEndpoint();
+        string seed = current.First(n => !n.IsKilled).Kahuna.Raft.GetLocalEndpoint();
 
         EmbeddedKahuna kahuna = CreateClusterNode(
             nodeName: $"schema-{context.ClusterId}-{index + 1}",
@@ -127,7 +130,7 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
             peers: peers,
             partitions: context.Partitions,
             raftCommunication: faultComm,
-            interNode: context.InterNode,
+            interNode: context.InterNode.ForNode($"localhost:{context.PortBase + index + 1}"),
             loggerFactory: context.LoggerFactory,
             configureNode: options =>
             {
@@ -139,6 +142,9 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         EmbeddedKahuna[] all = [.. current.Select(n => n.Kahuna), kahuna];
         faultComm.SetNodes(all.ToDictionary(node => node.Raft.GetLocalEndpoint(), node => node.Raft));
         context.InterNode.SetNodes(all.ToDictionary(node => node.Raft.GetLocalEndpoint(), node => node.Kahuna));
+
+        foreach (Node killed in current.Where(n => n.IsKilled))
+            context.InterNode.BlockLink(killed.Kahuna.Raft.GetLocalEndpoint(), kahuna.Raft.GetLocalEndpoint());
 
         try
         {
@@ -227,7 +233,7 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
                     peers: peers,
                     partitions: partitions,
                     raftCommunication: faultComm,
-                    interNode: interNode,
+                    interNode: interNode.ForNode($"localhost:{port}"),
                     loggerFactory: loggerFactory,
                     configureNode: configureNode
                 );
@@ -471,7 +477,7 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         }
 
         CamusDB.Core.CommandsExecutor.Controllers.DatabaseRegistry registry =
-            await Nodes[0].Executor.GetDatabaseRegistryAsync().ConfigureAwait(false);
+            await LiveNodes.First().Executor.GetDatabaseRegistryAsync().ConfigureAwait(false);
 
         return await registry.TryResolveIdAsync(databaseName).ConfigureAwait(false) ?? databaseName;
     }
@@ -479,7 +485,7 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
     public async Task<Node> WaitForSchemaLeaderNodeAsync(string databaseName, TimeSpan? timeout = null)
     {
         string schemaKey = await SchemaKeyForAsync(databaseName).ConfigureAwait(false);
-        int partitionId = Nodes[0].Kahuna.SchemaLogPartition(schemaKey);
+        int partitionId = LiveNodes.First().Kahuna.SchemaLogPartition(schemaKey);
 
         // Raft answers per-partition questions only on a node that hosts the partition; under
         // replica placement node 0 may not. Ask a replica instead.
@@ -505,7 +511,7 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
 
         while (DateTime.UtcNow < deadline)
         {
-            foreach (Node node in Nodes)
+            foreach (Node node in LiveNodes)
             {
                 if (await node.Kahuna.AmISchemaLeaderAsync(schemaKey, CancellationToken.None).ConfigureAwait(false))
                     return node;
@@ -535,8 +541,8 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
     /// all under the schema lock; <see cref="HasAppliedAsync"/> passes through that lock so a caller
     /// that queries the node next cannot open a descriptor built from the previous schema.</para>
     ///
-    /// <para>A node that the test isolated or killed never applies anything, so reconnect it before
-    /// the wait. A node that does not hold the database open has no schema to wait for and is
+    /// <para>A node that the test isolated never applies anything, so reconnect it before the wait. A
+    /// killed node and a node that does not hold the database open have no schema to wait for and are
     /// skipped.</para>
     /// </summary>
     public async Task WaitForSchemaConvergenceAsync(
@@ -576,7 +582,7 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
     {
         bool anyOpen = false;
 
-        foreach (Node node in Nodes)
+        foreach (Node node in LiveNodes)
         {
             DatabaseDescriptor? database = OpenDescriptor(node, databaseName);
             if (database is null)
@@ -691,19 +697,24 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
 
     /// <summary>
     /// Kills the node at <paramref name="nodeIndex"/>: blocks all inbound AND outbound
-    /// messages for it at the Raft transport layer, removes it from the in-process node registry
-    /// (so schema probes, schema acks and query fragments addressed to it fail as unreachable),
-    /// then disposes its Kahuna instance. The Kahuna inter-node channel is not blocked, so a request
-    /// can still reach the node while it stops. The remaining nodes retain quorum for a 3-node cluster.
+    /// messages for it at the Raft transport layer and at the Kahuna inter-node channel, removes it from
+    /// the in-process node registry (so schema probes, schema acks and query fragments addressed to it
+    /// fail as unreachable), then disposes its Kahuna instance. What still runs on the node in this
+    /// process, a lock renewer for example, reaches no other node. The remaining nodes retain quorum for a
+    /// 3-node cluster.
     /// </summary>
     public async Task KillNodeAsync(int nodeIndex)
     {
         ValidateNodeIndex(nodeIndex);
+        Nodes[nodeIndex].IsKilled = true;
         string endpoint = Nodes[nodeIndex].Kahuna.Raft.GetLocalEndpoint();
 
         // Block transport before disposal so in-flight messages are not forwarded.
         faultComm.BlockSender(endpoint);
         faultComm.BlockRecipient(endpoint);
+
+        foreach (Node other in Nodes.Where(n => n.Index != nodeIndex))
+            buildContext.InterNode.BlockLink(endpoint, other.Kahuna.Raft.GetLocalEndpoint());
 
         // A crashed host answers no schema probe, schema ack or query fragment either. Left
         // registered, the dead node still answers the schema pull probe, so the ack gate counts it
@@ -983,7 +994,7 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
     /// <summary>The first cluster node that hosts <paramref name="partitionId"/>; see the static overload.</summary>
     public Node NodeHosting(int partitionId)
     {
-        foreach (Node node in Nodes)
+        foreach (Node node in LiveNodes)
         {
             if (node.Kahuna.Raft.HostsPartition(partitionId))
                 return node;
@@ -1014,6 +1025,9 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         public CommandExecutor Executor { get; }
 
         public DatabaseDescriptor? Database { get; internal set; }
+
+        /// <summary>Set by <see cref="KillNodeAsync"/>. A killed node answers nothing, so the waits of the harness skip it.</summary>
+        public bool IsKilled { get; internal set; }
     }
 
     /// <summary>

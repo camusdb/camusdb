@@ -53,6 +53,9 @@
     <!-- The gRPC transport test doubles (call context, stream readers and writers) are shared with
          the main test project rather than duplicated, so the two suites drive the service the same way. -->
     <Compile Include="..\CamusDB.Tests\Grpc\GrpcTestInfrastructure.cs" Link="Grpc\GrpcTestInfrastructure.cs" />
+    <!-- The schema-as-text helper and the stress scenarios of transactional DDL, for the same reason. -->
+    <Compile Include="..\CamusDB.Tests\CommandsExecutor\SchemaShape.cs" Link="SchemaShape.cs" />
+    <Compile Include="..\CamusDB.Tests\CommandsExecutor\TransactionalDdlStress.cs" Link="TransactionalDdlStress.cs" />
   </ItemGroup>
 
 </Project>

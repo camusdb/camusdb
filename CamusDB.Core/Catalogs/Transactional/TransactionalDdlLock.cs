@@ -15,10 +15,18 @@ namespace CamusDB.Core.Catalogs.Transactional;
 
 /// <summary>
 /// The DDL lock of one database: a Kahuna distributed lock that one DDL transaction holds from its first
-/// schema change until it ends, and that an autocommit DDL statement holds for the length of the
-/// statement, when transactional DDL is on. One lock per database: two DDL transactions of the same
-/// database never build change sets against the same base, so the second waits instead of failing at
+/// schema change until it ends, and that the schema statements outside a DDL transaction hold together
+/// while any of them runs, when transactional DDL is on. One lock per database: two DDL transactions of the
+/// same database never build change sets against the same base, so the second waits instead of failing at
 /// its commit.
+///
+/// <para><b>Two kinds of holder.</b> A DDL transaction takes the lock alone (<see cref="AcquireAsync"/>):
+/// its owner value is unique. The schema statements outside a DDL transaction take it with one owner value
+/// that all of them use on every node (<see cref="AcquireForStatementsAsync"/>), so they do not exclude each
+/// other; <see cref="SchemaDdlGate"/> serializes them as it does when transactional DDL is off, and a
+/// <c>CREATE TABLE</c> runs beside an index build that takes an hour. Kahuna frees a lock for its whole
+/// owner value, so the last statement of one node also frees it for a statement of another node, whose
+/// renewer takes it again within <see cref="StatementRenewIntervalMs"/>.</para>
 ///
 /// <para><b>A Kahuna lock, so a transaction on any node can hold it.</b> The in-memory
 /// <see cref="SchemaDdlGate"/> serializes proposals on one node only, and an explicit transaction can
@@ -43,8 +51,17 @@ internal sealed class TransactionalDdlLock : IAsyncDisposable
     /// <summary>How long a holder keeps the lock without a renewal.</summary>
     internal const int LeaseMs = 30_000;
 
-    /// <summary>How often the renewer extends the lease.</summary>
+    /// <summary>How often the renewer extends the lease of a DDL transaction.</summary>
     private const int RenewIntervalMs = 10_000;
+
+    /// <summary>
+    /// How often the renewer of the statements of one node extends their lease, and takes the lock again
+    /// when the last statement of another node freed it.
+    /// </summary>
+    private const int StatementRenewIntervalMs = 2_000;
+
+    /// <summary>The owner value of every schema statement outside a DDL transaction, on every node.</summary>
+    private static readonly byte[] StatementOwner = "ddl:statement"u8.ToArray();
 
     /// <summary>
     /// How long an acquisition waits for another holder before it gives up with the retryable
@@ -64,7 +81,11 @@ internal sealed class TransactionalDdlLock : IAsyncDisposable
 
     private readonly CancellationTokenSource renewal = new();
 
+    private Task renewer = Task.CompletedTask;
+
     private int released;
+
+    private int lost;
 
     private TransactionalDdlLock(IKahuna kahuna, string resource, byte[] owner, ILogger? logger)
     {
@@ -73,6 +94,14 @@ internal sealed class TransactionalDdlLock : IAsyncDisposable
         this.owner = owner;
         this.logger = logger;
     }
+
+    /// <summary>
+    /// True while the lock is known to be lost: its lease lapsed, or another holder took it. Only the
+    /// renewer of <see cref="AcquireForStatementsAsync"/> gets it back.
+    /// </summary>
+    internal bool IsLost => Volatile.Read(ref lost) != 0;
+
+    private bool IsStatementHolder => ReferenceEquals(owner, StatementOwner);
 
     /// <summary>The Kahuna lock resource of a database's DDL lock.</summary>
     internal static string ResourceOf(string databaseId) => $"{databaseId}/meta/ddllock";
@@ -85,10 +114,36 @@ internal sealed class TransactionalDdlLock : IAsyncDisposable
     internal static async Task<TransactionalDdlLock> AcquireAsync(
         DatabaseDescriptor database, TimeSpan waitTimeout, ILogger? logger, CancellationToken cancellationToken = default)
     {
-        IKahuna kahuna = database.Kahuna.Kahuna;
-        string resource = ResourceOf(database.Id);
-        byte[] owner = System.Text.Encoding.UTF8.GetBytes($"ddl:{Guid.NewGuid():N}");
+        TransactionalDdlLock acquired = new(
+            database.Kahuna.Kahuna, ResourceOf(database.Id), NewOwner(), logger);
 
+        await acquired.TakeAsync(database, waitTimeout, cancellationToken).ConfigureAwait(false);
+        acquired.StartRenewer();
+
+        return acquired;
+    }
+
+    /// <summary>
+    /// Takes the DDL lock of <paramref name="database"/> for the schema statements of this node that run
+    /// outside a DDL transaction, waiting up to <paramref name="waitTimeout"/> for a DDL transaction. Only
+    /// <see cref="StatementDdlLock"/> calls it: it counts the statements, so that one holder serves them all.
+    /// </summary>
+    internal static async Task<TransactionalDdlLock> AcquireForStatementsAsync(
+        DatabaseDescriptor database, TimeSpan waitTimeout, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        TransactionalDdlLock acquired = new(
+            database.Kahuna.Kahuna, ResourceOf(database.Id), StatementOwner, logger);
+
+        await acquired.TakeAsync(database, waitTimeout, cancellationToken).ConfigureAwait(false);
+        acquired.StartRenewer();
+
+        return acquired;
+    }
+
+    private static byte[] NewOwner() => System.Text.Encoding.UTF8.GetBytes($"ddl:{Guid.NewGuid():N}");
+
+    private async Task TakeAsync(DatabaseDescriptor database, TimeSpan waitTimeout, CancellationToken cancellationToken)
+    {
         long deadline = Environment.TickCount64 + (long)waitTimeout.TotalMilliseconds;
         int transient = 0;
         int busyDelayMs = 10;
@@ -101,11 +156,7 @@ internal sealed class TransactionalDdlLock : IAsyncDisposable
                 resource, owner, LeaseMs, LockDurability.Persistent, cancellationToken).ConfigureAwait(false);
 
             if (type == LockResponseType.Locked)
-            {
-                TransactionalDdlLock acquired = new(kahuna, resource, owner, logger);
-                acquired.StartRenewer();
-                return acquired;
-            }
+                return;
 
             if (type is LockResponseType.MustRetry or LockResponseType.WaitingForReplication && ++transient < MaxTransientRetries)
             {
@@ -119,16 +170,19 @@ internal sealed class TransactionalDdlLock : IAsyncDisposable
                     $"The DDL lock of database '{database.Name}' could not be taken ({type}); retry the statement");
 
             if (Environment.TickCount64 >= deadline)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.TransactionMustRetry,
-                    $"Another transaction holds the DDL lock of database '{database.Name}' and did not end within " +
-                    $"{(long)waitTimeout.TotalMilliseconds} ms; commit or roll back that transaction, then retry the statement");
+                throw Busy(database, waitTimeout);
 
             transient = 0;
             await Task.Delay(busyDelayMs, cancellationToken).ConfigureAwait(false);
             busyDelayMs = Math.Min(busyDelayMs * 2, 250);
         }
     }
+
+    /// <summary>The retryable refusal of a wait for the DDL lock that another holder did not free in time.</summary>
+    internal static CamusDBException Busy(DatabaseDescriptor database, TimeSpan waitTimeout) => new(
+        CamusDBErrorCodes.TransactionMustRetry,
+        $"Another transaction or schema statement holds the DDL lock of database '{database.Name}' and did not end within " +
+        $"{(long)waitTimeout.TotalMilliseconds} ms; commit or roll back that transaction, or let the statement end, then retry");
 
     /// <summary>
     /// Takes the DDL lock of <paramref name="database"/> when nobody holds it, without waiting for a
@@ -141,7 +195,7 @@ internal sealed class TransactionalDdlLock : IAsyncDisposable
     {
         IKahuna kahuna = database.Kahuna.Kahuna;
         string resource = ResourceOf(database.Id);
-        byte[] owner = System.Text.Encoding.UTF8.GetBytes($"ddl:{Guid.NewGuid():N}");
+        byte[] owner = NewOwner();
 
         for (int transient = 1; ; transient++)
         {
@@ -184,6 +238,11 @@ internal sealed class TransactionalDdlLock : IAsyncDisposable
         {
         }
 
+        // The renewer of the statements can be about to take the lock again, and a lock that it takes after the
+        // unlock would stay until its lease lapses. It never throws.
+        if (IsStatementHolder)
+            await renewer.ConfigureAwait(false);
+
         try
         {
             await kahuna.LocateAndTryUnlock(resource, owner, LockDurability.Persistent, CancellationToken.None).ConfigureAwait(false);
@@ -197,37 +256,59 @@ internal sealed class TransactionalDdlLock : IAsyncDisposable
     /// <summary>Frees the lock; see <see cref="ReleaseAsync"/>. Lets a statement hold it with <c>await using</c>.</summary>
     public ValueTask DisposeAsync() => new(ReleaseAsync());
 
-    private void StartRenewer() => _ = RenewLoopAsync(renewal.Token);
+    private void StartRenewer() => renewer = RenewLoopAsync(renewal.Token);
 
     /// <summary>
-    /// Extends the lease every <see cref="RenewIntervalMs"/> until <see cref="ReleaseAsync"/> cancels it,
-    /// or until Kahuna says the lock is no longer this owner's. Owned by this object and stopped by its
-    /// release; it never throws.
+    /// Extends the lease until <see cref="ReleaseAsync"/> cancels it, or until Kahuna says that a DDL
+    /// transaction's lock is no longer its own. The lock of the statements is taken again instead: the last
+    /// statement of another node frees it for all of them. A failed call is tried again at the next
+    /// interval, which the lease outlives. Owned by this object and stopped by its release; it never throws.
     /// </summary>
     private async Task RenewLoopAsync(CancellationToken cancellationToken)
     {
+        int intervalMs = IsStatementHolder ? StatementRenewIntervalMs : RenewIntervalMs;
+
         try
         {
             while (!cancellationToken.IsCancellationRequested)
             {
-                await Task.Delay(RenewIntervalMs, cancellationToken).ConfigureAwait(false);
+                await Task.Delay(intervalMs, cancellationToken).ConfigureAwait(false);
 
-                (LockResponseType type, _) = await kahuna.LocateAndTryExtendLock(
-                    resource, owner, LeaseMs, LockDurability.Persistent, cancellationToken).ConfigureAwait(false);
-
-                if (type is LockResponseType.InvalidOwner or LockResponseType.LockDoesNotExist)
+                try
                 {
-                    logger?.LogWarning("The DDL lock {Resource} was lost before its holder ended; its commit checks the schema base instead", resource);
-                    return;
+                    (LockResponseType type, _) = await kahuna.LocateAndTryExtendLock(
+                        resource, owner, LeaseMs, LockDurability.Persistent, cancellationToken).ConfigureAwait(false);
+
+                    // Not cancellable: a release waits for the answer, so it knows whether there is a lock to free.
+                    if (IsStatementHolder && type is (LockResponseType.InvalidOwner or LockResponseType.LockDoesNotExist))
+                        (type, _) = await kahuna.LocateAndTryLock(
+                            resource, owner, LeaseMs, LockDurability.Persistent, CancellationToken.None).ConfigureAwait(false);
+
+                    // Extended is also the answer when a statement of another node took a lost lock again
+                    // first: its owner value is the same.
+                    if (type is LockResponseType.Extended or LockResponseType.Locked)
+                    {
+                        Volatile.Write(ref lost, 0);
+                        continue;
+                    }
+
+                    if (type is not (LockResponseType.InvalidOwner or LockResponseType.LockDoesNotExist or LockResponseType.Busy))
+                        continue;
+
+                    if (Interlocked.Exchange(ref lost, 1) == 0)
+                        logger?.LogWarning("The DDL lock {Resource} was lost before its holder ended; its commit checks the schema base instead", resource);
+
+                    if (!IsStatementHolder)
+                        return;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+                {
+                    logger?.LogWarning(ex, "The DDL lock {Resource} could not be renewed; the next attempt is in {IntervalMs} ms", resource, intervalMs);
                 }
             }
         }
         catch (OperationCanceledException)
         {
-        }
-        catch (Exception ex)
-        {
-            logger?.LogWarning(ex, "The renewer of the DDL lock {Resource} stopped; the lease lapses in {LeaseMs} ms", resource, LeaseMs);
         }
         finally
         {
