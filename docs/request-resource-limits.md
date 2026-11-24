@@ -249,6 +249,35 @@ This cap bounds memory. It does not stop one client from owning locks. A Seriali
 that wrote owns its range locks until it ends, up to the lifetime cap. With authentication on,
 grant write access only to accounts you trust with that.
 
+### Idle transactions
+
+The idle reaper rolls back an explicit transaction that waits for its client for longer than
+`transaction_idle_timeout_ms` (5 minutes by default). This frees the locks of a client that
+disconnected, crashed or forgot to commit. A later statement in the transaction returns `Unknown
+transaction`. A later rollback succeeds and does nothing.
+
+The reaper uses the following rules.
+
+- The idle time counts from the end of the last statement, or from the begin when there was none.
+- A transaction with a running statement is not idle, however long the statement takes. A statement
+  that returns rows ends when its last row is written, so a client that reads slowly keeps its
+  transaction. To limit a statement, set [`statement_timeout_ms`](#statement-timeout).
+- A batch operation that reached the node and waits for an execution slot is not idle.
+- The request of an autocommit statement owns its transaction until it ends. The reaper takes that
+  transaction only when the request failed to commit it and to roll it back.
+- A client that disconnects in a row stream ends its statement, and the transaction is rolled back at
+  once. A client that disconnects in a write does not stop the write. The write ends on its own, and
+  the idle time starts then.
+- The commit and the rollback of a statement do not stop when its client disconnects.
+- A client host that dies or becomes unreachable without a TCP close is found by TCP keepalive, after
+  about 2 minutes without an answer. Its statements then end as for any other disconnect.
+- A client that stays connected and does not read its rows keeps its transaction, as in PostgreSQL.
+  Close its connection to end it. The storage layer reclaims its locks when the transaction is older
+  than `max_serializable_transaction_lifetime_ms`, one hour by default.
+
+`transaction_reaper_interval_ms` (30 seconds by default) is how often the node looks for idle
+transactions. A transaction can therefore stay idle for the timeout plus one interval.
+
 ## Client connections
 
 Each connection on the HTTP, HTTPS or gRPC listener takes one slot of `max_client_connections`.

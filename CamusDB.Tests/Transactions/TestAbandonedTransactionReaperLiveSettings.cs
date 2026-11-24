@@ -107,6 +107,7 @@ internal sealed class TestAbandonedTransactionReaperLiveSettings : BaseTest
             db,
             CamusIsolationLevel.Serializable,
             CamusTransactionMode.ReadWrite,
+            sessionOwned: true,
             cancellationToken: CancellationToken.None);
 
     private static async Task<bool> WaitUntilAsync(Func<bool> condition, int deadlineMs)

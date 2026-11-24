@@ -53,10 +53,10 @@ public sealed class QueryController : CommandsController
             // Explicit (caller-supplied) transaction — client handles retry and lifecycle.
             if (request.TxnIdPT > 0)
             {
-                KvTransaction? txnState = null;
+                using RunningStatement statement = transactions.EnterStatement(request.TxnIdPT, request.TxnIdCounter);
+                KvTransaction txnState = statement.Transaction;
                 try
                 {
-                    txnState = transactions.GetState(request.TxnIdPT, request.TxnIdCounter);
                     QueryTicket ticket = new(
                         txnState: txnState,
                         databaseName: request.DatabaseName ?? "",
@@ -77,8 +77,7 @@ public sealed class QueryController : CommandsController
                 }
                 catch (Exception)
                 {
-                    if (txnState is not null)
-                        await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
+                    await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
                     throw;
                 }
             }
@@ -150,12 +149,13 @@ public sealed class QueryController : CommandsController
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "QueryById request is not valid");
 
-            (bool _, KvTransaction txnState) = await BeginOrResumeAsync(
+            (bool _, KvTransaction txnState, RunningStatement resumed) = await BeginOrResumeAsync(
                 request.DatabaseName,
                 request.TxnIdPT,
                 request.TxnIdCounter,
                 readOnly: true  // point lookup by id: a pure read, no range lock needed
             ).ConfigureAwait(false);
+            using RunningStatement statement = resumed;
 
             QueryByIdTicket ticket = new(
                 txnState: txnState,

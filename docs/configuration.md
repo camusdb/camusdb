@@ -72,6 +72,8 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 | `transaction_admission_wait_ms` | — | `0` (node default) |
 | `range_lock_expires_ms` | — | `150000` |
 | `max_serializable_transaction_lifetime_ms` | — | `3600000` |
+| `transaction_idle_timeout_ms` | — | `300000`; how long an explicit transaction may wait for its client before the node rolls it back, counted from the end of its last statement. A transaction with a running statement is not idle, also when its client reads the rows slowly. `0` or less disables it. Runtime and cluster-wide (see [idle transactions](request-resource-limits.md#idle-transactions)) |
+| `transaction_reaper_interval_ms` | — | `30000`; how often the node looks for idle transactions. Runtime, per node |
 | `transactional_ddl_enabled` | — | `false`; makes schema DDL in an explicit transaction commit and roll back with it, with the PostgreSQL rule. Runtime and cluster-wide. See [schema statements inside an explicit transaction](transactions-locking-and-isolation.md#97-schema-statements-inside-an-explicit-transaction) |
 | `transactional_ddl_resolve_after_ms` | — | `30000`; how long the schema changes of a committing transaction may stay pending on the schema leader before the resolver ends them from their decision key (after a crash of the committing node). Runtime, per node. `0` resolves at the next run |
 | `lock_escalation_threshold` | — | `1000`; the number of shared point locks that one Serializable read-write transaction can take on one table (or one index). Past this number, it replaces them with one lock on the table (or index) |

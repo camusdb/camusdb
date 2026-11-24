@@ -43,6 +43,7 @@ public sealed class TestHttpRollbackIdempotency : SharedNodeBaseTest
             dbname,
             CamusIsolationLevel.Serializable,
             CamusTransactionMode.ReadWrite,
+            sessionOwned: true,
             cancellationToken: CancellationToken.None);
 
     /// <summary>

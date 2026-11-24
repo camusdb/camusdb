@@ -153,7 +153,15 @@ public abstract class CommandsController : ControllerBase
         return await executor.ResolvePrincipalAsync(bearer).ConfigureAwait(false);
     }
 
-    protected async Task<(bool NewTransaction, KvTransaction Tx)> BeginOrResumeAsync(
+    /// <summary>
+    /// Resumes the explicit transaction the request names, or begins the transaction of an autocommit
+    /// statement. <c>NewTransaction</c> is true when the caller must finalize the transaction itself.
+    ///
+    /// <para>The caller disposes <c>Statement</c> when the statement ends, its rows included. On a
+    /// resumed transaction it keeps the idle reaper away while the statement runs. On a transaction
+    /// begun here it is the default value, because the request owns that transaction.</para>
+    /// </summary>
+    protected async Task<(bool NewTransaction, KvTransaction Tx, RunningStatement Statement)> BeginOrResumeAsync(
         string? databaseName,
         long txnIdPT,
         uint txnIdCounter,
@@ -165,7 +173,10 @@ public abstract class CommandsController : ControllerBase
         CancellationToken cancellationToken = default)
     {
         if (txnIdPT > 0)
-            return (false, transactions.GetState(txnIdPT, txnIdCounter));
+        {
+            RunningStatement statement = transactions.EnterStatement(txnIdPT, txnIdCounter);
+            return (false, statement.Transaction, statement);
+        }
 
         if (string.IsNullOrEmpty(databaseName))
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "DatabaseName is required to start a transaction");
@@ -174,12 +185,12 @@ public abstract class CommandsController : ControllerBase
         // LocateAndCommitTransaction round trips to Kahuna, and nothing to finalize, so it is not
         // reported as a new transaction.
         if (readOnly)
-            return (false, await transactions.BeginReadOnlyAsync(databaseName).ConfigureAwait(false));
+            return (false, await transactions.BeginReadOnlyAsync(databaseName).ConfigureAwait(false), default);
 
         KvTransaction tx = await transactions.StartAsync(
             databaseName, isolationLevel, transactionMode, locking, priority: priority,
             cancellationToken: cancellationToken).ConfigureAwait(false);
-        return (true, tx);
+        return (true, tx, default);
     }
 
     /// <summary>

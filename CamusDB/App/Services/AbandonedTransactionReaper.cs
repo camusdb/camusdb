@@ -25,6 +25,14 @@ namespace CamusDB.App.Services;
 /// them back. One timer covers all transactions — the cost is one pass per
 /// <see cref="CamusDBOptions.TransactionReaperIntervalMs"/>, independent of transaction count.</para>
 ///
+/// <para>A transaction is idle only while the server waits for its client. A running statement, a row
+/// stream that a slow client reads, and an autocommit request that still runs are not idle, however
+/// long they take; the idle time starts when they end (see <see cref="ActiveTransaction"/>). A client
+/// that disconnects ends its row stream through the request token, so a statement cannot keep the
+/// reaper away after its client left; <see cref="ClientConnectionKeepAlive"/> finds a client that left
+/// without a TCP close. A write does not observe the disconnect; it ends on its own, and the idle time
+/// starts then.</para>
+///
 /// <para>The same tick also releases the key mirrors parked by a rollback that met the
 /// coordinator-unknown outcome before its transaction was old enough to release. Those keys have no
 /// other owner left — the transaction is terminal and untracked — so this sweep is what turns "not

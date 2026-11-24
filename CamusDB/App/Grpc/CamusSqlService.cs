@@ -364,10 +364,10 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         bool writesRows,
         CancellationToken ct)
     {
-        KvTransaction? txnState = null;
+        using RunningStatement statement = transactions.EnterStatement(handle.TxnIdPt, (uint)handle.TxnIdCounter);
+        KvTransaction txnState = statement.Transaction;
         try
         {
-            txnState = transactions.GetState(handle.TxnIdPt, (uint)handle.TxnIdCounter);
             ExecuteSQLTicket ticket = new(
                 txnState: txnState,
                 database: request.Database,
@@ -382,8 +382,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         }
         catch (Exception)
         {
-            if (txnState is not null)
-                await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
+            await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
             throw;
         }
     }
@@ -555,10 +554,10 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             // transaction; it never relocates this one.
             if (request.TxnHandle is { TxnIdPt: > 0 } handle)
             {
-                KvTransaction? txnState = null;
+                using RunningStatement statement = transactions.EnterStatement(handle.TxnIdPt, (uint)handle.TxnIdCounter);
+                KvTransaction txnState = statement.Transaction;
                 try
                 {
-                    txnState = transactions.GetState(handle.TxnIdPt, (uint)handle.TxnIdCounter);
                     Core.Routing.StatementRoutingCollector? txnCollector = BeginRoutingCollection(request);
                     ExecuteSQLTicket ticket = new(
                         txnState: txnState,
@@ -580,8 +579,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                 }
                 catch (Exception)
                 {
-                    if (txnState is not null)
-                        await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
+                    await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
                     throw;
                 }
             }
@@ -629,11 +627,12 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                 }
             }
 
+            // Never the call's token: a commit or rollback that a disconnect cuts leaves its locks to expire.
             CamusIsolationLevel resolvedLevel = reqLevel ?? options.DefaultIsolationLevel;
             if (resolvedLevel == CamusIsolationLevel.Serializable)
                 await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitDml).ConfigureAwait(false);
             else
-                await AutocommitDml(ct).ConfigureAwait(false);
+                await AutocommitDml(CancellationToken.None).ConfigureAwait(false);
 
             NonQueryReply reply = returningReply;
             reply.AffectedRows = modifiedRows;
@@ -665,6 +664,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
 
             KvTransaction? txnState = null;
             bool newTransaction = false;
+            RunningStatement statement = default;
 
             try
             {
@@ -675,7 +675,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
 
                     if (request.TxnHandle is { TxnIdPt: > 0 } handle)
                     {
-                        txnState = transactions.GetState(handle.TxnIdPt, (uint)handle.TxnIdCounter);
+                        statement = transactions.EnterStatement(handle.TxnIdPt, (uint)handle.TxnIdCounter);
+                        txnState = statement.Transaction;
                     }
                     else
                     {
@@ -709,6 +710,10 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                 if (txnState is not null)
                     await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
                 throw;
+            }
+            finally
+            {
+                statement.Dispose();
             }
         });
 
@@ -1370,6 +1375,11 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     {
         CancellationToken ct = state.Ct;
 
+        // An op that waits for a slot waits for the server, so its transaction is not idle.
+        using RunningStatement arrived = HandleKey(req.Request?.TxnHandle) is { } handle
+            ? transactions.TryEnterStatement(handle.Pt, handle.Counter)
+            : default;
+
         try
         {
             using QueryStageProfile.StageScope slotWait = QueryStageProfile.Measure(QueryStage.SlotWait);
@@ -1609,7 +1619,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             // START on that table's leader; it never moves this one.
             if (stageClock is not null)
                 stageClock.Path = QueryStageProfile.Paths.Txn;
-            KvTransaction txnState = transactions.GetState(handle.TxnIdPt, (uint)handle.TxnIdCounter);
+            using RunningStatement statement = transactions.EnterStatement(handle.TxnIdPt, (uint)handle.TxnIdCounter);
+            KvTransaction txnState = statement.Transaction;
             routingCollector = BeginRoutingCollection(request);
             ExecuteSQLTicket ticket = new(
                 txnState: txnState, database: resolved.Database, sql: sql,
@@ -1790,7 +1801,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         {
             // Explicit transaction — client owns commit/rollback. Advice is collected all the same
             // (see the query path above): it informs where the client starts its next transaction.
-            KvTransaction txnState = transactions.GetState(handle.TxnIdPt, (uint)handle.TxnIdCounter);
+            using RunningStatement statement = transactions.EnterStatement(handle.TxnIdPt, (uint)handle.TxnIdCounter);
+            KvTransaction txnState = statement.Transaction;
             Core.Routing.StatementRoutingCollector? routingCollector = BeginRoutingCollection(request);
             RetryableAbortSink aborts = new();
             ExecuteSQLTicket ticket = new(
@@ -1852,19 +1864,22 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                 // The statement lost to a concurrent commit: roll back, never commit what it wrote.
                 if (aborts.Abort is { } autocommitAbort)
                 {
-                    await transactions.RollbackIfNotCompletedAsync(tx, ct).ConfigureAwait(false);
+                    await transactions.RollbackIfNotCompletedAsync(tx, CancellationToken.None).ConfigureAwait(false);
                     return autocommitAbort;
                 }
 
                 AttachReturning(returningReply, r);
-                token = await transactions.CommitOrReleaseAsync(r.Database, tx, ct).ConfigureAwait(false);
+
+                // Never the stream's token: a commit or rollback that a dropped stream cuts leaves its
+                // locks to expire.
+                token = await transactions.CommitOrReleaseAsync(r.Database, tx, CancellationToken.None).ConfigureAwait(false);
                 rows = r.ModifiedRows;
                 batchWarning = r.Warning;
                 routingDb = r.Database;
             }
             catch
             {
-                await transactions.RollbackIfNotCompletedAsync(tx, ct).ConfigureAwait(false);
+                await transactions.RollbackIfNotCompletedAsync(tx, CancellationToken.None).ConfigureAwait(false);
                 throw;
             }
 
@@ -1956,7 +1971,10 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "COMMIT batch op requires a txn_handle");
 
         KvTransaction txnState = transactions.GetState(handle.TxnIdPt, (uint)handle.TxnIdCounter);
-        HLCTimestamp token = await transactions.CommitTrackedAsync(txnState, ct).ConfigureAwait(false);
+
+        // Never the stream's token: a commit that a dropped stream cuts has an unknown outcome, and nobody
+        // is left to retry it.
+        HLCTimestamp token = await transactions.CommitTrackedAsync(txnState, CancellationToken.None).ConfigureAwait(false);
         startedHandles.TryRemove((handle.TxnIdPt, handle.TxnIdCounter), out _);
 
         CommitReply reply = new();
@@ -2004,7 +2022,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
 
         try
         {
-            await transactions.RollbackByIdAsync(handle.TxnIdPt, (uint)handle.TxnIdCounter, ct).ConfigureAwait(false);
+            await transactions.RollbackByIdAsync(handle.TxnIdPt, (uint)handle.TxnIdCounter, CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -2041,8 +2059,9 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
 
         // Idempotent: a statement earlier in this chain may have failed and already rolled the
         // transaction back, which is precisely when a client sends ROLLBACK. The handle is dropped
-        // either way so teardown does not try again.
-        await transactions.RollbackByIdAsync(handle.TxnIdPt, (uint)handle.TxnIdCounter, ct).ConfigureAwait(false);
+        // either way so teardown does not try again. Not on the stream's token: a rollback that a
+        // dropped stream cuts leaves its locks to expire.
+        await transactions.RollbackByIdAsync(handle.TxnIdPt, (uint)handle.TxnIdCounter, CancellationToken.None).ConfigureAwait(false);
         startedHandles.TryRemove((handle.TxnIdPt, handle.TxnIdCounter), out _);
 
         await writer.TryWriteAsync(new BatchExecuteResponse

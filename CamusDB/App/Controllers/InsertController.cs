@@ -48,10 +48,10 @@ public sealed class InsertController : CommandsController
             // Explicit (caller-supplied) transaction — client handles retry and lifecycle.
             if (request.TxnIdPT > 0)
             {
-                KvTransaction? txnState = null;
+                using RunningStatement statement = transactions.EnterStatement(request.TxnIdPT, request.TxnIdCounter);
+                KvTransaction txnState = statement.Transaction;
                 try
                 {
-                    txnState = transactions.GetState(request.TxnIdPT, request.TxnIdCounter);
                     InsertTicket ticket = new(
                         txnState: txnState,
                         databaseName: request.DatabaseName ?? "",
@@ -63,8 +63,7 @@ public sealed class InsertController : CommandsController
                 }
                 catch (Exception)
                 {
-                    if (txnState is not null)
-                        await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
+                    await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
                     throw;
                 }
             }

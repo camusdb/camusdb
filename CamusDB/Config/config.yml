@@ -253,7 +253,8 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 # ── Abandoned transactions ────────────────────────────────────────────────────
 # A client that opens a transaction and never commits or rolls back would hold its locks forever
 # (the heartbeat of a Serializable read-write transaction renews them). The reaper rolls back any
-# explicit transaction that issues no statement for longer than transaction_idle_timeout_ms.
+# explicit transaction that waits for its client for longer than transaction_idle_timeout_ms, counted
+# from the end of its last statement. A running statement is never cut; statement_timeout_ms limits it.
 # transaction_idle_timeout_ms: 300000     # idle cutoff before rollback; <= 0 disables the reaper
 # transaction_reaper_interval_ms: 30000   # sweep interval; must be > 0
 #

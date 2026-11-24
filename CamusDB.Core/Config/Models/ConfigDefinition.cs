@@ -825,7 +825,8 @@ public class ConfigDefinition
 
     /// <summary>
     /// Idle timeout in milliseconds for explicit (client-driven) transactions before the background
-    /// reaper rolls them back. &lt;= 0 disables the reaper. Default 300 000 (5 min).
+    /// reaper rolls them back. Counts from the end of the last statement; a transaction with a running
+    /// statement is not idle. &lt;= 0 disables the reaper. Default 300 000 (5 min).
     /// </summary>
     public int TransactionIdleTimeoutMs { get; set; } = 300_000;
 

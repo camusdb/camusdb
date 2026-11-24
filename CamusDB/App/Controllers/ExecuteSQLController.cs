@@ -285,10 +285,10 @@ public sealed class ExecuteSQLController : CommandsController
             // place its next transaction there; it never relocates this one.
             if (request.TxnIdPT > 0)
             {
-                KvTransaction? txnState = null;
+                using RunningStatement statement = transactions.EnterStatement(request.TxnIdPT, request.TxnIdCounter);
+                KvTransaction txnState = statement.Transaction;
                 try
                 {
-                    txnState = transactions.GetState(request.TxnIdPT, request.TxnIdCounter);
                     QuerySchemaHolder schemaHolder = new();
                     StatementRoutingCollector? txnCollector = BeginRoutingCollection(request);
                     ExecuteSQLTicket ticket = new(
@@ -310,8 +310,7 @@ public sealed class ExecuteSQLController : CommandsController
                 }
                 catch (Exception)
                 {
-                    if (txnState is not null)
-                        await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
+                    await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
                     throw;
                 }
             }
@@ -488,6 +487,9 @@ public sealed class ExecuteSQLController : CommandsController
         int total = 0;
         Kommander.Time.HLCTimestamp causalToken = default;
 
+        // Ends after the trailer is flushed: the last rows of a slow client leave with that flush.
+        RunningStatement statement = default;
+
         try
         {
             // A server-level query reads the registry, the auth catalog or this process's own
@@ -508,7 +510,8 @@ public sealed class ExecuteSQLController : CommandsController
             // Explicit (caller-supplied) transaction — client owns commit/rollback and retry.
             else if (request.TxnIdPT > 0)
             {
-                KvTransaction txnState = transactions.GetState(request.TxnIdPT, request.TxnIdCounter);
+                statement = transactions.EnterStatement(request.TxnIdPT, request.TxnIdCounter);
+                KvTransaction txnState = statement.Transaction;
                 try
                 {
                     ExecuteSQLTicket ticket = new(
@@ -622,6 +625,10 @@ public sealed class ExecuteSQLController : CommandsController
                 // so emit a normal JSON error body with the correct HTTP status.
                 await WriteSetupErrorAsync(e, stopwatch).ConfigureAwait(false);
             }
+        }
+        finally
+        {
+            statement.Dispose();
         }
     }
 
@@ -815,10 +822,10 @@ public sealed class ExecuteSQLController : CommandsController
             // still emitted when negotiated (see the query path for why).
             if (request.TxnIdPT > 0)
             {
-                KvTransaction? txnState = null;
+                using RunningStatement statement = transactions.EnterStatement(request.TxnIdPT, request.TxnIdCounter);
+                KvTransaction txnState = statement.Transaction;
                 try
                 {
-                    txnState = transactions.GetState(request.TxnIdPT, request.TxnIdCounter);
                     StatementRoutingCollector? txnCollector = BeginRoutingCollection(request);
                     ExecuteSQLTicket ticket = new(
                         txnState: txnState,
@@ -839,8 +846,7 @@ public sealed class ExecuteSQLController : CommandsController
                 }
                 catch (Exception)
                 {
-                    if (txnState is not null)
-                        await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
+                    await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
                     throw;
                 }
             }
@@ -939,6 +945,7 @@ public sealed class ExecuteSQLController : CommandsController
 
             KvTransaction? txnState = null;
             bool newTransaction = false;
+            RunningStatement statement = default;
 
             try
             {
@@ -951,7 +958,7 @@ public sealed class ExecuteSQLController : CommandsController
                 if (!StatementScope.IsDatabaseScopedMutation(ast.nodeType))
                 {
                     (CamusIsolationLevel? reqLevel3, CamusTransactionMode? reqMode3, KeyValueTransactionLocking? reqLocking3, TransactionPriority? reqPriority3) = ParseRequestLevelMode(request);
-                    (newTransaction, txnState) = await BeginOrResumeAsync(
+                    (newTransaction, txnState, statement) = await BeginOrResumeAsync(
                         request.DatabaseName,
                         request.TxnIdPT,
                         request.TxnIdCounter,
@@ -983,6 +990,10 @@ public sealed class ExecuteSQLController : CommandsController
                     await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
 
                 throw;
+            }
+            finally
+            {
+                statement.Dispose();
             }
         }
         catch (CamusDBException e)

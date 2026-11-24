@@ -79,7 +79,6 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
     public override Task<NonQueryReply> InsertRow(InsertRowRequest request, ServerCallContext context)
         => InvokeAsync(context, Privilege.Insert, async () =>
         {
-            CancellationToken ct = context.CancellationToken;
             KeyValueTransactionLocking? reqLocking = ToLocking(request.Locking);
             EnginePriority? reqPriority = ToPriority(request.Priority);
             Dictionary<string, ColumnValue> values = ToColumnValueMap(request.Values);
@@ -87,10 +86,10 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
             // Explicit transaction — client owns the lifecycle.
             if (request.TxnHandle is { TxnIdPt: > 0 } handle)
             {
-                KvTransaction? txnState = null;
+                using RunningStatement statement = transactions.EnterStatement(handle.TxnIdPt, (uint)handle.TxnIdCounter);
+                KvTransaction txnState = statement.Transaction;
                 try
                 {
-                    txnState = transactions.GetState(handle.TxnIdPt, (uint)handle.TxnIdCounter);
                     InsertTicket ticket = new(
                         txnState: txnState,
                         databaseName: request.Database,
@@ -102,8 +101,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
                 }
                 catch (Exception)
                 {
-                    if (txnState is not null)
-                        await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
+                    await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
                     throw;
                 }
             }
@@ -135,10 +133,11 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
                 }
             }
 
+            // Never the call's token: a commit or rollback that a disconnect cuts leaves its locks to expire.
             if (options.DefaultIsolationLevel == CamusIsolationLevel.Serializable)
                 await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitInsert).ConfigureAwait(false);
             else
-                await AutocommitInsert(ct).ConfigureAwait(false);
+                await AutocommitInsert(CancellationToken.None).ConfigureAwait(false);
 
             NonQueryReply reply = new() { AffectedRows = insertedRows };
             if (!causalToken.IsNull())
@@ -167,26 +166,27 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
             List<EngineQueryFilter>? filters = ToFilters(request.Filters);
             List<QueryOrderBy>? orderBy = ToOrderBy(request.OrderBy);
 
+            // Entered before the table is opened: that open can wait for a schema change.
+            using RunningStatement statement = EnterStatement(request.TxnHandle);
+
             // Open the table once to derive the output schema from its column definitions (correct
             // types, and a full schema even for an empty result — unlike deriving from row values).
             (DatabaseDescriptor db, TableDescriptor table) = await OpenAsync(request.Database, request.Table).ConfigureAwait(false);
             IReadOnlyList<DerivedColumnSchema> schema = SchemaFromTable(table);
 
             // Explicit transaction.
-            if (request.TxnHandle is { TxnIdPt: > 0 } handle)
+            if (request.TxnHandle is { TxnIdPt: > 0 })
             {
-                KvTransaction? txnState = null;
+                KvTransaction txnState = statement.Transaction;
                 try
                 {
-                    txnState = transactions.GetState(handle.TxnIdPt, (uint)handle.TxnIdCounter);
                     QueryTicket ticket = BuildQueryTicket(txnState, request, filters, orderBy, ct);
                     await StreamQueryRowsAsync(ticket, schema, responseStream, ct).ConfigureAwait(false);
                     return;
                 }
                 catch (Exception)
                 {
-                    if (txnState is not null)
-                        await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
+                    await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
                     throw;
                 }
             }
@@ -229,6 +229,9 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
         {
             CancellationToken ct = context.CancellationToken;
 
+            // Entered before the table is opened: that open can wait for a schema change.
+            using RunningStatement statement = EnterStatement(request.TxnHandle);
+
             // Open the table once for the output schema (from column definitions, not row values).
             (DatabaseDescriptor db, TableDescriptor table) = await OpenAsync(request.Database, request.Table).ConfigureAwait(false);
             IReadOnlyList<DerivedColumnSchema> schema = SchemaFromTable(table);
@@ -246,19 +249,17 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
             }
 
             // Explicit transaction.
-            if (request.TxnHandle is { TxnIdPt: > 0 } handle)
+            if (request.TxnHandle is { TxnIdPt: > 0 })
             {
-                KvTransaction? txnState = null;
+                KvTransaction txnState = statement.Transaction;
                 try
                 {
-                    txnState = transactions.GetState(handle.TxnIdPt, (uint)handle.TxnIdCounter);
                     await RunQueryById(txnState).ConfigureAwait(false);
                     return;
                 }
                 catch (Exception)
                 {
-                    if (txnState is not null)
-                        await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
+                    await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
                     throw;
                 }
             }
@@ -296,7 +297,6 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
     public override Task<NonQueryReply> UpdateRows(UpdateRowsRequest request, ServerCallContext context)
         => InvokeAsync(context, Privilege.Update, async () =>
         {
-            CancellationToken ct = context.CancellationToken;
             KeyValueTransactionLocking? reqLocking = ToLocking(request.Locking);
             EnginePriority? reqPriority = ToPriority(request.Priority);
             Dictionary<string, ColumnValue> plainValues = ToColumnValueMap(request.Values);
@@ -305,10 +305,10 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
             // Explicit transaction.
             if (request.TxnHandle is { TxnIdPt: > 0 } handle)
             {
-                KvTransaction? txnState = null;
+                using RunningStatement statement = transactions.EnterStatement(handle.TxnIdPt, (uint)handle.TxnIdCounter);
+                KvTransaction txnState = statement.Transaction;
                 try
                 {
-                    txnState = transactions.GetState(handle.TxnIdPt, (uint)handle.TxnIdCounter);
                     // A refused request ends the transaction, as a failed SQL statement does.
                     RowWriteFilterRule.Require(filters?.Count ?? 0, RowWriteFilterRule.Update);
                     UpdateTicket ticket = new(
@@ -326,8 +326,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
                 }
                 catch (Exception)
                 {
-                    if (txnState is not null)
-                        await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
+                    await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
                     throw;
                 }
             }
@@ -365,10 +364,11 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
                 }
             }
 
+            // Never the call's token: a commit or rollback that a disconnect cuts leaves its locks to expire.
             if (options.DefaultIsolationLevel == CamusIsolationLevel.Serializable)
                 await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitUpdate).ConfigureAwait(false);
             else
-                await AutocommitUpdate(ct).ConfigureAwait(false);
+                await AutocommitUpdate(CancellationToken.None).ConfigureAwait(false);
 
             NonQueryReply reply = new() { AffectedRows = updatedRows };
             if (!causalToken.IsNull())
@@ -386,20 +386,22 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
     public override Task<NonQueryReply> UpdateById(UpdateByIdRequest request, ServerCallContext context)
         => InvokeAsync(context, Privilege.Update, async () =>
         {
-            CancellationToken ct = context.CancellationToken;
             KeyValueTransactionLocking? reqLocking = ToLocking(request.Locking);
             EnginePriority? reqPriority = ToPriority(request.Priority);
             Dictionary<string, ColumnValue> plainValues = ToColumnValueMap(request.Values);
+
+            // Entered before the table is opened: that open can wait for a schema change.
+            using RunningStatement statement = EnterStatement(request.TxnHandle);
+
             (_, TableDescriptor table) = await OpenAsync(request.Database, request.Table).ConfigureAwait(false);
             List<EngineQueryFilter> filters = [PrimaryKeyFilter(table, request.Id)];
 
             // Explicit transaction.
-            if (request.TxnHandle is { TxnIdPt: > 0 } handle)
+            if (request.TxnHandle is { TxnIdPt: > 0 })
             {
-                KvTransaction? txnState = null;
+                KvTransaction txnState = statement.Transaction;
                 try
                 {
-                    txnState = transactions.GetState(handle.TxnIdPt, (uint)handle.TxnIdCounter);
                     UpdateTicket ticket = new(
                         txnState: txnState,
                         databaseName: request.Database,
@@ -415,8 +417,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
                 }
                 catch (Exception)
                 {
-                    if (txnState is not null)
-                        await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
+                    await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
                     throw;
                 }
             }
@@ -452,10 +453,11 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
                 }
             }
 
+            // Never the call's token: a commit or rollback that a disconnect cuts leaves its locks to expire.
             if (options.DefaultIsolationLevel == CamusIsolationLevel.Serializable)
                 await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitUpdateById).ConfigureAwait(false);
             else
-                await AutocommitUpdateById(ct).ConfigureAwait(false);
+                await AutocommitUpdateById(CancellationToken.None).ConfigureAwait(false);
 
             NonQueryReply reply = new() { AffectedRows = updatedRows };
             if (!causalToken.IsNull())
@@ -471,7 +473,6 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
     public override Task<NonQueryReply> DeleteRows(DeleteRowsRequest request, ServerCallContext context)
         => InvokeAsync(context, Privilege.Delete, async () =>
         {
-            CancellationToken ct = context.CancellationToken;
             KeyValueTransactionLocking? reqLocking = ToLocking(request.Locking);
             EnginePriority? reqPriority = ToPriority(request.Priority);
             List<EngineQueryFilter>? filters = ToFilters(request.Filters);
@@ -479,10 +480,10 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
             // Explicit transaction.
             if (request.TxnHandle is { TxnIdPt: > 0 } handle)
             {
-                KvTransaction? txnState = null;
+                using RunningStatement statement = transactions.EnterStatement(handle.TxnIdPt, (uint)handle.TxnIdCounter);
+                KvTransaction txnState = statement.Transaction;
                 try
                 {
-                    txnState = transactions.GetState(handle.TxnIdPt, (uint)handle.TxnIdCounter);
                     // A refused request ends the transaction, as a failed SQL statement does.
                     RowWriteFilterRule.Require(filters?.Count ?? 0, RowWriteFilterRule.Delete);
                     DeleteTicket ticket = new(
@@ -497,8 +498,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
                 }
                 catch (Exception)
                 {
-                    if (txnState is not null)
-                        await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
+                    await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
                     throw;
                 }
             }
@@ -533,10 +533,11 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
                 }
             }
 
+            // Never the call's token: a commit or rollback that a disconnect cuts leaves its locks to expire.
             if (options.DefaultIsolationLevel == CamusIsolationLevel.Serializable)
                 await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitDelete).ConfigureAwait(false);
             else
-                await AutocommitDelete(ct).ConfigureAwait(false);
+                await AutocommitDelete(CancellationToken.None).ConfigureAwait(false);
 
             NonQueryReply reply = new() { AffectedRows = deletedRows };
             if (!causalToken.IsNull())
@@ -553,19 +554,21 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
     public override Task<NonQueryReply> DeleteById(RowByIdRequest request, ServerCallContext context)
         => InvokeAsync(context, Privilege.Delete, async () =>
         {
-            CancellationToken ct = context.CancellationToken;
             KeyValueTransactionLocking? reqLocking = ToLocking(request.Locking);
             EnginePriority? reqPriority = ToPriority(request.Priority);
+
+            // Entered before the table is opened: that open can wait for a schema change.
+            using RunningStatement statement = EnterStatement(request.TxnHandle);
+
             (_, TableDescriptor table) = await OpenAsync(request.Database, request.Table).ConfigureAwait(false);
             List<EngineQueryFilter> filters = [PrimaryKeyFilter(table, request.Id)];
 
             // Explicit transaction.
-            if (request.TxnHandle is { TxnIdPt: > 0 } handle)
+            if (request.TxnHandle is { TxnIdPt: > 0 })
             {
-                KvTransaction? txnState = null;
+                KvTransaction txnState = statement.Transaction;
                 try
                 {
-                    txnState = transactions.GetState(handle.TxnIdPt, (uint)handle.TxnIdCounter);
                     DeleteTicket ticket = new(
                         txnState: txnState,
                         databaseName: request.Database,
@@ -578,8 +581,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
                 }
                 catch (Exception)
                 {
-                    if (txnState is not null)
-                        await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
+                    await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
                     throw;
                 }
             }
@@ -612,16 +614,26 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
                 }
             }
 
+            // Never the call's token: a commit or rollback that a disconnect cuts leaves its locks to expire.
             if (options.DefaultIsolationLevel == CamusIsolationLevel.Serializable)
                 await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitDeleteById).ConfigureAwait(false);
             else
-                await AutocommitDeleteById(ct).ConfigureAwait(false);
+                await AutocommitDeleteById(CancellationToken.None).ConfigureAwait(false);
 
             NonQueryReply reply = new() { AffectedRows = deletedRows };
             if (!causalToken.IsNull())
                 ApplyCausalToken(reply, causalToken);
             return reply;
         });
+
+    /// <summary>
+    /// Starts a statement on the explicit transaction <paramref name="handle"/> names, or returns the
+    /// default value when the request names none. The caller disposes it when the statement ends.
+    /// </summary>
+    private RunningStatement EnterStatement(TxnHandle? handle) =>
+        handle is { TxnIdPt: > 0 }
+            ? transactions.EnterStatement(handle.TxnIdPt, (uint)handle.TxnIdCounter)
+            : default;
 
     // ─── Core streaming helpers ───────────────────────────────────────────────
 

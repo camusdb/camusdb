@@ -1152,10 +1152,15 @@ public sealed record CamusDBOptions
     public int SequenceRetryBudgetMs { get; init; } = 10_000;
 
     /// <summary>
-    /// How long, in milliseconds, an explicit (client-driven) transaction may sit idle — no
-    /// statement issued against it — before the background reaper rolls it back and releases its
-    /// locks. "Idle" is measured from the last time the client referenced the transaction (its
-    /// last statement, or its begin), using a monotonic clock immune to wall-clock jumps.
+    /// How long, in milliseconds, an explicit (client-driven) transaction may sit idle before the
+    /// background reaper rolls it back and releases its locks. A transaction is idle while the server
+    /// waits for its client. The idle time counts from the end of its last statement, or from its begin
+    /// when it ran none, on a monotonic clock that wall-clock jumps do not change.
+    ///
+    /// <para><b>A running statement is never idle.</b> A statement that takes longer than this value is
+    /// not cut, and neither is a row stream that its client reads slowly. The limit of a statement is
+    /// <see cref="StatementTimeoutMs"/>. The rule matches PostgreSQL's
+    /// <c>idle_in_transaction_session_timeout</c>.</para>
     ///
     /// <para>This targets abandoned transactions: a client that opens a transaction and then
     /// disconnects, crashes, or forgets to commit/rollback. Such a transaction is otherwise never
@@ -1164,11 +1169,11 @@ public sealed record CamusDBOptions
     /// locks, rolling back the Kahuna transaction, and dropping it from the in-flight map — as does the
     /// Kahuna server reaper once the session <c>Timeout</c> lapses.</para>
     ///
-    /// <para>Only transactions tracked by the HTTP transaction coordinator (explicit
-    /// <c>/start-transaction</c> sessions and promoted read-only scans) are subject to the reaper;
-    /// single-statement autocommit requests finalize within their own request and are never
-    /// tracked. A pause longer than this window inside an interactive session is treated as
-    /// abandonment and rolled back.</para>
+    /// <para>The transaction of an autocommit write or schema statement is tracked too, and its request
+    /// owns it: it is not idle while the request runs. It becomes the reaper's only when that request
+    /// failed to commit it and to roll it back, because the client never received a handle for it. An
+    /// autocommit read runs in an untracked snapshot. A pause longer than this window between two
+    /// statements of an interactive session is treated as abandonment and rolled back.</para>
     ///
     /// <para><c>&lt;= 0</c> disables this CamusDB-side reaper. Even when disabled, an abandoned
     /// Serializable+RW transaction's locks are still bounded by the Kahuna session <c>Timeout</c>

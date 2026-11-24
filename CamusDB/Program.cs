@@ -259,9 +259,13 @@ WebApplicationBuilder builder = WebApplication.CreateBuilder(new WebApplicationO
 
 builder.WebHost.ConfigureKestrel(kestrel =>
 {
-    // The client-facing listeners track their connections for SHOW CONNECTIONS. The Raft listener
-    // does not: it serves peers only.
-    kestrel.ListenAnyIP(config.HttpPort, o => CamusDB.App.Middleware.ClientActivityMiddleware.UseClientConnectionTracking(o));
+    // The client-facing listeners track their connections for SHOW CONNECTIONS, and find a client whose
+    // host died by TCP keepalive. The Raft listener does neither: it serves peers only.
+    kestrel.ListenAnyIP(config.HttpPort, o =>
+    {
+        CamusDB.App.Services.ClientConnectionKeepAlive.Use(o);
+        CamusDB.App.Middleware.ClientActivityMiddleware.UseClientConnectionTracking(o);
+    });
     // http3_enabled adds HTTP/3 to the HTTPS port only: HTTP/3 needs TLS. The web server binds QUIC
     // on the same port number over UDP and advertises it to TCP clients with an Alt-Svc header. Where
     // the host has no QUIC, it serves HTTP/1.1 and HTTP/2 only; Http3StartupChecks reports that.
@@ -270,6 +274,7 @@ builder.WebHost.ConfigureKestrel(kestrel =>
         {
             if (config.Http3Enabled)
                 o.Protocols = HttpProtocols.Http1AndHttp2AndHttp3;
+            CamusDB.App.Services.ClientConnectionKeepAlive.Use(o);
             CamusDB.App.Middleware.ClientActivityMiddleware.UseClientConnectionTracking(o);
             // QUIC on macOS needs an exportable private key; see HttpsCertificateLoader.
             if (config.Http3Enabled)
@@ -312,6 +317,7 @@ builder.WebHost.ConfigureKestrel(kestrel =>
         kestrel.ListenAnyIP(config.GrpcPort, o =>
         {
             o.Protocols = HttpProtocols.Http2;
+            CamusDB.App.Services.ClientConnectionKeepAlive.Use(o);
             CamusDB.App.Middleware.ClientActivityMiddleware.UseClientConnectionTracking(o);
             if (!string.IsNullOrEmpty(grpcCertificate))
                 o.UseHttps(grpcCertificate);

@@ -7,7 +7,6 @@
  */
 
 using System.Collections.Concurrent;
-using System.Diagnostics;
 using CamusDB.Core;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -19,8 +18,13 @@ using Kahuna.Shared.KeyValue;
 namespace CamusDB.App.Services;
 
 /// <summary>
-/// Tracks in-flight <see cref="KvTransaction"/> instances for the HTTP API and delegates
+/// Tracks in-flight <see cref="KvTransaction"/> instances for the HTTP and gRPC API and delegates
 /// lifecycle operations to each database's <see cref="KvTransactionsManager"/>.
+///
+/// <para>A statement of an explicit transaction runs between <see cref="EnterStatement"/> and the
+/// dispose of the <see cref="RunningStatement"/> it returns. An autocommit transaction belongs to its
+/// request from its begin until that request finalizes it. The idle reaper rolls back neither one while
+/// it runs; see <see cref="ActiveTransaction"/> for the rule.</para>
 /// </summary>
 public sealed class HttpTransactionCoordinator
 {
@@ -35,57 +39,6 @@ public sealed class HttpTransactionCoordinator
     /// entry, so a retried commit or a reap that races a rollback cannot release a slot twice.
     /// </summary>
     private int openExplicit;
-
-    /// <summary>
-    /// A tracked in-flight transaction plus a monotonic marker of when the client last touched it.
-    /// The marker is a <see cref="Stopwatch.GetTimestamp"/> tick (not wall-clock) so idle detection
-    /// is immune to NTP/clock jumps, consistent with the rest of the transaction machinery. It is
-    /// refreshed on begin and on every <see cref="GetState"/> (i.e. every statement issued against
-    /// the transaction), and read by the abandoned-transaction reaper.
-    /// </summary>
-    private sealed class ActiveTransaction(KvTransactionsManager manager, KvTransaction transaction, bool isExplicit)
-    {
-        public KvTransactionsManager Manager { get; } = manager;
-        public KvTransaction Transaction { get; } = transaction;
-
-        /// <summary>True when the entry holds a slot of <see cref="openExplicit"/>.</summary>
-        public bool IsExplicit { get; } = isExplicit;
-
-        private long lastActivityTicks = Stopwatch.GetTimestamp();
-
-        /// <summary>0 = idle, 1 = a commit/rollback is currently finalizing this transaction.</summary>
-        private int finalizing;
-
-        /// <summary>Marks the transaction as just-used, resetting its idle timer.</summary>
-        public void Touch() => Volatile.Write(ref lastActivityTicks, Stopwatch.GetTimestamp());
-
-        /// <summary>Elapsed monotonic time since the transaction was last touched.</summary>
-        public TimeSpan IdleTime => Stopwatch.GetElapsedTime(Volatile.Read(ref lastActivityTicks));
-
-        /// <summary>
-        /// Claims exclusive finalize (commit/rollback) ownership of this transaction; exactly one
-        /// caller wins with <see langword="true"/> and a concurrent finalize for the same id gets
-        /// <see langword="false"/>. This closes the unsynchronized check-then-act window in
-        /// <see cref="KvTransactionsManager.CommitAsync"/> (its <c>Status != Active</c> guard is a
-        /// plain read), so two same-node requests — e.g. a client that timed out on a slow commit
-        /// and re-issued it — can never both drive Kahuna 2PC on the same transaction concurrently.
-        /// </summary>
-        public bool TryBeginFinalize() => Interlocked.CompareExchange(ref finalizing, 1, 0) == 0;
-
-        /// <summary>
-        /// True while a commit or rollback owns the finalize claim for this transaction. Read by
-        /// <see cref="GetState"/> so a data statement issued against a transaction that is already being
-        /// finalized is rejected at the HTTP boundary rather than racing the commit on the same session.
-        /// </summary>
-        public bool IsFinalizing => Volatile.Read(ref finalizing) == 1;
-
-        /// <summary>
-        /// Releases a finalize claim after a <em>failed</em> attempt so a later sequential retry may
-        /// proceed. Not called on success — a completed transaction is removed from the tracking
-        /// map instead, so its claim can never be reused.
-        /// </summary>
-        public void EndFinalize() => Volatile.Write(ref finalizing, 0);
-    }
 
     public HttpTransactionCoordinator(CommandExecutor executor)
     {
@@ -121,7 +74,9 @@ public sealed class HttpTransactionCoordinator
     /// True when the caller is handling an explicit <c>BEGIN</c> / <c>START TRANSACTION</c> and the
     /// client will commit or roll the transaction back itself. The transaction is marked so a
     /// statement that cannot honour a later <c>ROLLBACK</c> — <c>TRUNCATE</c>, or
-    /// <c>ALTER TABLE ... REWRITE STORAGE</c> — can refuse to run inside it. Leave false for the server-side transaction wrapped around one autocommit statement.
+    /// <c>ALTER TABLE ... REWRITE STORAGE</c> — can refuse to run inside it. Leave false for the
+    /// server-side transaction wrapped around one autocommit statement: the request owns that one and
+    /// must finalize it on every path, because the idle reaper takes it only after a finalize failed.
     /// </param>
     /// <param name="causalToken">
     /// The causal token of the client's last commit, or null. Every Read Committed SELECT of the
@@ -222,40 +177,83 @@ public sealed class HttpTransactionCoordinator
         return database.Transactions.BeginReadOnly(causalToken, declaredReadOnly);
     }
 
+    /// <summary>
+    /// Resolves the handle of a tracked transaction for a commit or a rollback, and starts its idle time
+    /// from now. A statement must use <see cref="EnterStatement"/> instead: this method does not mark
+    /// anything as running, so the reaper could take the transaction before the statement ends.
+    /// </summary>
     public KvTransaction GetState(long txnIdPT, uint txnIdCounter)
     {
-        if (!active.TryGetValue((txnIdPT, txnIdCounter), out ActiveTransaction? entry))
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Unknown transaction");
+        ActiveTransaction entry = Resolve(txnIdPT, txnIdCounter);
 
-        // Reject a statement issued against a transaction that a commit/rollback is already finalizing:
-        // the coordinator has (or is about to) install its fence, so running a data statement now would
-        // race the finalize on the same session. This closes the DML-vs-commit window at the HTTP
-        // boundary, ahead of the server-side fence and the local Finalizing guard in the transaction.
-        if (entry.IsFinalizing)
-            throw new CamusDBException(
-                CamusDBErrorCodes.TransactionAlreadyCompleted,
-                "A commit or rollback is in progress for this transaction; no further statements may run");
+        if (!entry.TryTouch())
+            throw FinalizeInProgress();
 
-        // Every statement issued against an explicit transaction resolves it through here; refresh
-        // the idle timer so the reaper only reclaims transactions the client has genuinely stopped
-        // using, not ones that are actively doing work between requests.
-        entry.Touch();
         return entry.Transaction;
     }
 
     /// <summary>
-    /// Rolls back every tracked transaction that has been idle (no statement issued against it)
-    /// for at least <paramref name="idleTimeout"/>, releasing its locks and dropping it from the
-    /// in-flight map. Called periodically by the background reaper to reclaim abandoned
-    /// transactions — a client that opened a transaction and never committed/rolled back. Returns
-    /// the number of transactions reaped.
+    /// Starts a statement on the explicit transaction the handle names. The transaction is not idle
+    /// until the returned value is disposed, so the caller holds it for the whole statement, the read of
+    /// its rows included.
     ///
-    /// <para>Best-effort per entry: a rollback that throws (e.g. the transaction just committed on
-    /// another thread, or a transient Kahuna error) is swallowed so one stuck entry cannot stall
-    /// the sweep. A concurrent commit/rollback simply wins the <c>TryRemove</c> race; the loser
-    /// no-ops via <see cref="KvTransactionsManager.RollbackIfNotCompletedAsync"/>. A transaction the client
-    /// left in the middle of its finalize cannot be rolled back and only gives up the DDL lock it may hold
-    /// (<see cref="KvTransactionsManager.AbandonAsync"/>).</para>
+    /// <para>Throws <see cref="CamusDBErrorCodes.InvalidInput"/> for a handle that is not tracked, and
+    /// <see cref="CamusDBErrorCodes.TransactionAlreadyCompleted"/> while a commit, a rollback or a reap
+    /// owns the transaction. The second refusal keeps a data statement from running beside a finalize
+    /// of the same session, ahead of the server-side fence and of the transaction's own status
+    /// check.</para>
+    /// </summary>
+    public RunningStatement EnterStatement(long txnIdPT, uint txnIdCounter)
+    {
+        ActiveTransaction entry = Resolve(txnIdPT, txnIdCounter);
+
+        if (!entry.TryEnterStatement())
+            throw FinalizeInProgress();
+
+        return new RunningStatement(entry);
+    }
+
+    /// <summary>
+    /// <see cref="EnterStatement"/> that answers the default value instead of an error when the handle
+    /// is not tracked or a finalize owns the transaction. For a request that already arrived and waits
+    /// for the server before its statement can start: the wait is not idle time. The statement itself
+    /// still enters on its own and reports the error.
+    /// </summary>
+    public RunningStatement TryEnterStatement(long txnIdPT, uint txnIdCounter) =>
+        active.TryGetValue((txnIdPT, txnIdCounter), out ActiveTransaction? entry) && entry.TryEnterStatement()
+            ? new RunningStatement(entry)
+            : default;
+
+    private ActiveTransaction Resolve(long txnIdPT, uint txnIdCounter)
+    {
+        if (!active.TryGetValue((txnIdPT, txnIdCounter), out ActiveTransaction? entry))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Unknown transaction");
+
+        return entry;
+    }
+
+    private static CamusDBException FinalizeInProgress() => new(
+        CamusDBErrorCodes.TransactionAlreadyCompleted,
+        "A commit or rollback is in progress for this transaction; no further statements may run");
+
+    /// <summary>
+    /// Rolls back every tracked transaction that has been idle for at least
+    /// <paramref name="idleTimeout"/>, releasing its locks and dropping it from the in-flight map.
+    /// Called periodically by the background reaper to reclaim abandoned transactions: a client that
+    /// opened a transaction and never committed or rolled back, and an autocommit transaction whose
+    /// request failed to finalize it. Returns the number of transactions reaped.
+    ///
+    /// <para>A transaction with a running statement is not idle, however long the statement runs, and
+    /// neither is an autocommit transaction whose request still runs. The idle time counts from the end
+    /// of the last statement. The check and the finalize claim are one step
+    /// (<see cref="ActiveTransaction.TryClaimForReap"/>), so a statement that starts during the sweep is
+    /// either refused or stops the reap of its transaction.</para>
+    ///
+    /// <para>Best-effort per entry: a rollback that throws (e.g. a transient Kahuna error) is swallowed
+    /// so one stuck entry cannot stall the sweep. A commit or rollback that claimed the entry first
+    /// keeps it, and a later one loses the claim or no longer finds the entry. A transaction the client
+    /// left in the middle of its finalize cannot be rolled back and only gives up the DDL lock it may
+    /// hold (<see cref="KvTransactionsManager.AbandonAsync"/>).</para>
     /// </summary>
     public async Task<int> ReapIdleAsync(TimeSpan idleTimeout, CancellationToken cancellationToken = default)
     {
@@ -266,18 +264,15 @@ public sealed class HttpTransactionCoordinator
             cancellationToken.ThrowIfCancellationRequested();
 
             ActiveTransaction entry = pair.Value;
-            if (entry.IdleTime < idleTimeout)
+
+            // The claim comes first and decides everything: a running statement or a commit/rollback in
+            // flight refuses it, and after it no statement and no other finalize can start.
+            if (!entry.TryClaimForReap(idleTimeout))
                 continue;
 
-            // Remove first so a client racing in with a commit/rollback for the same id either
-            // already removed it (we skip) or finds it gone (its lookup fails cleanly).
+            // No await between the claim and the removal, so a client's next request finds the entry
+            // gone. False when a rollback retired an entry whose transaction was already terminal.
             if (!TryRemoveEntry(pair.Key, out _))
-                continue;
-
-            // Then claim the finalize gate: a commit/rollback that resolved this entry before the
-            // removal may already own it and be mid-flight — in that case skip, so the reaper and
-            // the client never both finalize the same transaction.
-            if (!entry.TryBeginFinalize())
                 continue;
 
             try
@@ -561,6 +556,11 @@ public sealed class HttpTransactionCoordinator
         if (active.TryGetValue(Key(tx), out ActiveTransaction? entry))
             entry.EndFinalize();
     }
+
+    /// <summary>Test seam: how many statements run on a tracked transaction now, so a test can wait until
+    /// the request of a statement has reached the server.</summary>
+    internal int RunningStatementsForTest(KvTransaction tx) =>
+        active.TryGetValue(Key(tx), out ActiveTransaction? entry) ? entry.RunningStatements : 0;
 
     private static bool IsTerminal(KvTransaction tx) =>
         tx.Status is KvTransactionStatus.Committed or KvTransactionStatus.RolledBack
