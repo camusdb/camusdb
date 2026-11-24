@@ -34,7 +34,7 @@ SELECT encode(hmac('what do ya want for nothing?', 'Jefe', 'sha256'), 'hex');
 SELECT crc32('abc');                                              -- 891568578
 ```
 
-`digest` and `hmac` do not change the hex functions: `sha256(x)` still returns text. pgcrypto also
+`digest` and `hmac` do not change the hex functions: `sha256(x)` returns text as before. pgcrypto also
 knows `sha224`. CamusDB does not support it.
 
 An HMAC with a secret key can authenticate a message. The digest functions alone cannot, and the
@@ -49,25 +49,25 @@ To convert `bytes` to text and back, see [bytes-functions.md](bytes-functions.md
 - A `bytes` value is hashed as its raw bytes.
 - `NULL` gives `NULL`.
 - Any other type is an error (`InvalidInput`). To hash a number, cast it first: `md5(x::text)`.
-- The functions are deterministic. You can use them in `WHERE`, in a `CHECK` constraint, and in a
-  column `DEFAULT`, and the query-result cache can keep their results. This is also true for
-  `digest`, `hmac` and `crc32`.
+- The functions are deterministic. This means that you can use them in `WHERE`, in a `CHECK`
+  constraint, and in a column `DEFAULT`. The query-result cache can also store their results. This
+  is also true for `digest`, `hmac` and `crc32`.
 
 ## Difference from PostgreSQL
 
 `md5` is the same as in PostgreSQL. In PostgreSQL, `sha1`, `sha256` and `sha512` return `bytea`. In
 CamusDB they return hex text, which is the same as PostgreSQL's `encode(sha256(x), 'hex')`.
 
-The digest of `md5(random()::text)` is not the same as in PostgreSQL, because `random()` gives other
-values and the float-to-text format can be different. Only the digest of the same input is the same.
+The digest of `md5(random()::text)` is not the same as in PostgreSQL. The reason is that `random()`
+gives other values and the float-to-text format can be different. Only the digest of the same input is the same.
 
 ## Browser build
 
-.NET on WebAssembly has no MD5. The browser build of the engine (see
+.NET on WebAssembly does not include MD5. The browser build of the engine (see
 [browser-playground.md](browser-playground.md)) computes `md5`, `digest(x, 'md5')` and
-`hmac(x, key, 'md5')` with its own implementation, which gives the same result.
+`hmac(x, key, 'md5')` with a separate implementation, which gives the same result.
 
 ## Not for security
 
 MD5 and SHA-1 have known collision attacks. None of these functions is a password hash: they have no
-salt and no work factor. Use them for checksums, change detection, bucketing, and test data.
+salt and no work factor. Use them for checksums and change detection. They also suit bucketing and test data.

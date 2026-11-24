@@ -1,8 +1,8 @@
 # Set-returning functions in FROM
 
-A set-returning function returns rows, not one value. CamusDB accepts one in the `FROM` clause of a
+A set-returning function returns a set of rows. You can use one in the `FROM` clause of a
 `SELECT`, where it acts as a relation with one column. The first and only such function is
-`generate_series`. It is the usual way to make test data:
+`generate_series`. It is the usual way to make test data, as in the following statements.
 
 ```sql
 INSERT INTO scores (id, score)
@@ -15,7 +15,7 @@ SELECT COUNT(*) FROM generate_series(1, 1000000);
 ## generate_series(start, stop [, step])
 
 The arguments are integers (`int64`). The default step is 1. The output column type is `int64`.
-The results are the same as in PostgreSQL:
+The results are the same as in PostgreSQL.
 
 | Call | Rows |
 |------|------|
@@ -40,21 +40,22 @@ scalar function call: `generate_series(1 + 1, @to, abs(@step))`. Each argument i
 before the first row.
 
 An argument can also name a column of an item to the left of the function in the same `FROM`, as in
-`FROM t, generate_series(1, t.n) AS g`. Such a call is `LATERAL`, with or without the keyword, as in
-PostgreSQL: it runs one time for each row of `t`, with that row's `n`. See
+`FROM t, generate_series(1, t.n) AS g`. Such a call is `LATERAL` whether or not you write the
+keyword, as in PostgreSQL. It is evaluated one time for each row of `t`, with that row's `n`. See
 [LATERAL](./joins.md#lateral). In a subquery or a `LATERAL` derived table, an argument can also name a
 column of the query around it, as in `CROSS JOIN LATERAL (SELECT g FROM generate_series(1, t.n) g) s`
 or `EXISTS (SELECT 1 FROM generate_series(1, t.n) g WHERE g = 2)`. A function that is the only item of
 the `FROM` of a statement can name no column.
 
-These arguments are refused:
+Two kinds of argument return an error.
 
 - A subquery, as in `generate_series(1, (SELECT MAX(n) FROM t))`.
 - A non-integer value, such as `1.5` or `'x'`.
 
 ## Names: the alias rule
 
-A function with one output column names the relation and the column with the same word:
+A function with one output column names the relation and the column with the same word. A
+column-alias list gives the column a separate name.
 
 | `FROM` clause | Relation | Column | Valid references |
 |---------------|----------|--------|------------------|
@@ -66,7 +67,7 @@ A function with one output column names the relation and the column with the sam
 A column-alias list must name exactly one column. `AS t(a, b)` is an error.
 
 When a joined table also has a column with the same name, a bare reference to that name is
-ambiguous, as in any join. Qualify it:
+ambiguous, as in any join. You should qualify it, as in this example.
 
 ```sql
 -- items has a column id, and the series column is also id.
@@ -75,13 +76,14 @@ SELECT items.id, id.id FROM items, generate_series(1, 2) id;
 
 ## Where the function can appear
 
-The function is a relation, so it goes where a table goes:
+The function is a relation. It can appear in any position where a table can appear.
 
 - alone: `SELECT * FROM generate_series(1, 5)`
 - in a comma join or an explicit join: `FROM items t, generate_series(1, 3) g`,
   `FROM generate_series(1, 9) g JOIN items t ON t.id = g`, `LEFT JOIN`, `CROSS JOIN`
 - with `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`, `DISTINCT`, `LIMIT` and `OFFSET`
-- in a derived table, a view body, a materialized view, and an `IN` or `EXISTS` subquery
+- in a derived table or a view body, including a materialized view
+- in an `IN` or `EXISTS` subquery
 - as the source of `INSERT ... SELECT` and `CREATE TABLE ... AS SELECT`
 
 A view over a series survives a restart. `SHOW CREATE VIEW` prints the call as it was written.
@@ -93,24 +95,24 @@ A view over a series survives a restart. `SHOW CREATE VIEW` prints the call as i
   returns at once. When a join reads the series again, the function makes the rows again.
 - **Row limit.** One read of the function makes at most `max_table_function_rows` rows (default
   5,000,000). The row past the limit fails the statement with `CADB0561`. The count includes the
-  rows that a `WHERE` filter drops. A `LIMIT` that stops the read early keeps it under the limit,
-  but a `LIMIT` above an `ORDER BY`, a `GROUP BY` or an aggregate does not, because these operators
-  read every row first. See [`request-resource-limits.md`](./request-resource-limits.md#functions-in-from).
-- **No storage access.** The function reads no table. It takes no lock, adds nothing to a
-  Serializable read set, and needs no privilege. A table joined to it still needs `SELECT` on that
-  table. See [`sql-authentication.md`](./sql-authentication.md).
-- **Row estimate.** When every argument is a literal, the planner uses the exact row count
+  rows that a `WHERE` filter drops. A `LIMIT` that stops the read early can keep the read under the
+  limit. However, a `LIMIT` above an `ORDER BY`, a `GROUP BY`, or an aggregate cannot. These
+  operators read all rows first. See [`request-resource-limits.md`](./request-resource-limits.md#functions-in-from).
+- **No storage access.** The function reads no table. It takes no lock and needs no privilege. It
+  adds no keys to a Serializable read set. A table joined to it needs `SELECT` on that table as
+  usual. See [`sql-authentication.md`](./sql-authentication.md).
+- **Row estimate.** When all arguments are literals, the planner uses the exact row count
   `(stop - start) / step + 1`. When an argument is a parameter or a function call, the planner uses
   its default table estimate. `EXPLAIN` shows the source as a `function-scan` node. See
   [`explain.md`](./explain.md).
-- **Distributed execution.** The function runs on the node that runs the statement. It is never sent
-  to another node as a query fragment. When it is the build side of a broadcast hash join, the node
-  ships the generated rows, not the function.
+- **Distributed execution.** The function is evaluated on the node that executes the statement. It
+  is not sent to another node as a query fragment. When it is the build side of a broadcast hash
+  join, the node ships the generated rows to the other nodes.
 - **Order.** The rows come in series order. After a join, the order is not defined unless the query
   has an `ORDER BY`.
 - **Result cache.** A `{cache=...}` hint cannot go on the function. A hinted query that also reads a
-  function is a join or a view read, so it bypasses the cache with the reason `join` or
-  `derived-source`. See [`query-result-cache.md`](./query-result-cache.md).
+  function is a join or a view read. This means that it bypasses the cache with the reason `join`
+  or `derived-source`. See [`query-result-cache.md`](./query-result-cache.md).
 
 ## Not supported
 
@@ -123,5 +125,5 @@ A view over a series survives a restart. `SHOW CREATE VIEW` prints the call as i
 | A scalar function in `FROM`, such as `FROM upper('a')` | error `CADB0400`: it is a scalar function |
 | An unknown name, such as `FROM no_such_function(1)` | error `CADB0400` that names the function |
 
-An `INSERT ... SELECT` from a series writes all its rows in one transaction, so it is subject to the
-transaction mutation limit. See [`transaction-limits.md`](./transaction-limits.md).
+An `INSERT ... SELECT` from a series writes all its rows in one transaction. It is therefore subject
+to the transaction mutation limit. See [`transaction-limits.md`](./transaction-limits.md).

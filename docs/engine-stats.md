@@ -1,15 +1,15 @@
 # `SHOW ENGINE STATS`
 
-CamusDB embeds Kahuna (the transactional KV store) and Kommander (the Raft implementation) **inside its
-own process**. Both libraries publish operational metrics through `System.Diagnostics.Metrics`, and
-because they are in-process CamusDB observes them directly and exposes them as a SQL statement.
+CamusDB embeds Kahuna (the transactional KV store) and Kommander (the Raft implementation) **in the
+CamusDB process**. Both libraries publish operational metrics through `System.Diagnostics.Metrics`.
+Since they are in-process, CamusDB observes these metrics directly and exposes them as a SQL statement.
 
 ```sql
 SHOW ENGINE STATS;
 SHOW ENGINE STATS LIKE 'raft.executor%';
 ```
 
-This statement reports engine internals. For table statistics, the optimizer's view of your data, see
+This statement shows engine internals. For table statistics, the optimizer's view of your data, see
 [`SHOW STATISTICS FOR <table>`](show-statistics.md), [`ANALYZE`](automatic-analyze.md) and
 [the query planner guide](query-planner.md). For placement, where a table's data
 lives across partitions, see [`SHOW RANGES`](show-ranges.md). For the Raft partitions themselves, with
@@ -17,14 +17,14 @@ their leaders, replicas, commit frontiers and load, see [`SHOW PARTITIONS`](show
 
 ## What it is for
 
-Kommander logs latency warnings like this one:
+Kommander logs a latency warning when a dispatch is slow. The following line is an example.
 
 ```text
 warn: Kommander.IRaft[0] [RaftPartitionExecutor/1] Slow dispatch: CheckLeader took 468ms
 ```
 
-That line tells you a dispatch was slow *once*. `SHOW ENGINE STATS` tells you whether it is a spike or a
-pattern, without leaving the SQL console:
+That line tells you a dispatch was slow *once*. `SHOW ENGINE STATS` tells you, from the SQL console,
+whether it is a spike or a pattern. The query below reads the dispatch latency histogram.
 
 ```sql
 SHOW ENGINE STATS LIKE 'raft.executor.operation_duration_ms';
@@ -35,8 +35,8 @@ SHOW ENGINE STATS LIKE 'raft.executor.operation_duration_ms';
 | localhost:8004 | kommander | raft.executor.operation_duration_ms | operation_class=Control,partition_id=1 | histogram | 12043 | 9821.5 | 0.01 | 468.2 | 0.03 |
 
 The `max` is the worst dispatch since the process started; `last` is the most recent one. A `max` far
-above the `total/count` average, with a `last` back at normal, is the signature of a periodic stall
-rather than sustained pressure — [Correlating a slow dispatch with a background cycle](#correlating-a-slow-dispatch-with-a-background-cycle)
+above the `total/count` average, with a `last` back at normal, is the signature of a periodic stall.
+It does not indicate sustained pressure. [Correlating a slow dispatch with a background cycle](#correlating-a-slow-dispatch-with-a-background-cycle)
 shows how to find what it lines up with.
 
 ## Result columns
@@ -44,34 +44,34 @@ shows how to find what it lines up with.
 | column | meaning |
 |---|---|
 | `node` | the local Raft endpoint this row came from |
-| `source` | which meter published it: `kommander` or `kahuna`; `camusdb` for a count that CamusDB keeps itself |
+| `source` | which meter published it: `kommander` or `kahuna`; `camusdb` for a count maintained by CamusDB |
 | `metric` | instrument name as the library publishes it |
 | `tags` | canonical `k=v` pairs, comma-separated and key-sorted; empty when the metric is untagged |
 | `kind` | `counter`, `histogram`, or `gauge` |
-| `count` | counter total, histogram observation count, or `1` for a sampled gauge |
+| `count` | for a counter, its total; for a histogram, the observation count; for a sampled gauge, `1` |
 | `total` | counter total, or histogram sum; NULL for a gauge |
 | `min` / `max` / `last` | histogram distribution; `last` only for a gauge; all NULL for a counter |
 
-Rows are ordered by `source`, `metric`, `tags`, so two invocations diff cleanly.
+Rows are ordered by `source`, `metric`, `tags`. This means that the output of two invocations diffs cleanly.
 
 ## Reading the window correctly
 
-Three properties decide how to read the numbers:
+Three properties of the output decide how to read the numbers.
 
 - **Counters and histograms are cumulative since process start.** There is no reset. To measure a
-  window, run the statement twice and subtract — a single reading of `raft.wal.batches_total` tells you
-  nothing about current rate.
-- **Gauges have no history.** They are sampled at the instant the statement runs and report only
-  `last`. An observable *counter* is reported as a gauge whose `last` is its running total.
-- **The statement is node-local and never forwards to the leader.** In a cluster each node answers for
-  its own process, which is what you want when one node is slow. To see the cluster, query
+  window, run the statement twice and subtract — a single reading of `raft.wal.batches_total` does not
+  tell you the current rate.
+- **Gauges have no history.** They are sampled at the instant the statement is executed, and only
+  `last` is filled in. An observable *counter* is reported as a gauge whose `last` is its running total.
+- **The statement is node-local and never forwards to the leader.** In a cluster each node answers
+  only for itself, which is what you want when one node is slow. To see the cluster, query
   each node. The `node` column is there so output pasted into an issue says which
   one it came from.
 
 ## Correlating a slow dispatch with a background cycle
 
 The usual cause of a once-a-minute latency spike is a periodic background cycle contending with the
-Raft executor. Take two readings a minute apart:
+Raft executor. To find it, take two readings a minute apart.
 
 ```sql
 SHOW ENGINE STATS LIKE 'raft.executor%';   -- reading 1
@@ -84,7 +84,7 @@ If `raft.executor.operation_duration_ms.max` jumped between the two readings whi
 filter and look for what *did* advance in the same interval — `kahuna.kv.write.*` for write-path
 batching, `raft.wal.*` for WAL flush behavior, `kahuna.backup.*` for a backup or PITR cycle.
 
-Kahuna's **collection-tick** statistics show most directly whether a collect cycle caused the stall:
+Kahuna's **collection-tick** statistics show most directly whether a collect cycle caused the stall.
 
 | metric | tells you |
 |---|---|
@@ -93,7 +93,7 @@ Kahuna's **collection-tick** statistics show most directly whether a collect cyc
 | `kahuna.collect.inspected` | entries walked, tagged `scan=expiry\|lru`; far exceeding evicted means cycles are burning budget on pinned entries |
 | `kahuna.collect.backlogged` | cycles that carried work past their budget — approaching the cycle count means collection is not keeping up |
 
-Useful starting points:
+The following metrics are also useful starting points.
 
 | metric | tells you |
 |---|---|
@@ -107,18 +107,18 @@ Useful starting points:
 ### Range auto-split outcomes
 
 These five are cumulative process counters, each tagged with the `keyspace` it acted on. They are the
-only way to tell "the range is not hot yet" from "the range is hot, and the split was refused" — the
-placement views report the shape of the key space, not the splitter's decisions. A counter that has
-never fired has no row at all. See [key-range-sharding.md](key-range-sharding.md) for the policy that
+only way to tell "the range is not hot yet" from "the range is hot, and the split was refused". The
+placement views show the shape of the key space, and they do not show the splitter's decisions. A counter
+that has not fired yet does not appear as a row. See [key-range-sharding.md](key-range-sharding.md) for the policy that
 drives them.
 
 | metric | tells you |
 |---|---|
 | `kahuna.range.splits` | splits committed, by either the count branch or the load branch |
-| `kahuna.range.split.indivisible_refusals` | one key holds the load, so no boundary can relieve it; splitting is not the fix |
-| `kahuna.range.split.no_relief_skips` | no peer was available to host the child, so the split would have added a Raft group and relieved nothing |
+| `kahuna.range.split.indivisible_refusals` | the load is on one key, and no boundary can relieve it; splitting is not the fix |
+| `kahuna.range.split.no_relief_skips` | no peer was available to host the child; the split would have added a Raft group and relieved no load |
 | `kahuna.range.split.settle_skips` | the range split recently and is being left to settle; rising against a low split count means the settle window is long relative to the load |
-| `kahuna.range.merge.warm_skips` | two neighbours are small enough to merge but still too warm; merging would re-trigger a split |
+| `kahuna.range.merge.warm_skips` | two neighbours are small enough to merge but too warm; merging would re-trigger a split |
 
 ## Permissions
 
@@ -134,19 +134,19 @@ engine_metrics_enabled: true   # default
 ```
 
 Observing the meters costs one delegate call and a dictionary lookup per measurement; with the flag off
-no listener is attached and the meters revert to their zero-cost unobserved state. Turn it off only
-when benchmarking that overhead itself.
+no listener is attached and the meters revert to their zero-cost unobserved state. You should turn it
+off only to benchmark that overhead itself.
 
-When collection is disabled the statement **succeeds and returns zero rows** rather than raising, so a
-script polling a fleet does not have to special-case which nodes have it enabled.
+When collection is disabled, the statement **succeeds and returns zero rows**. This means that a script
+polling a fleet does not have to special-case which nodes have it enabled.
 
 This setting is independent of the `diagnostics:` section, which configures OpenTelemetry/Prometheus
-export. Either can be on without the other, and both can read the same meters.
+export. You can enable either one alone, and both can read the same meters.
 
 ### Statement statistics
 
 When [statement statistics](statement-stats.md) have been enabled on the node, two `camusdb` rows
-report the state of their table:
+describe the state of their table.
 
 | metric | tells you |
 |---|---|
@@ -156,8 +156,8 @@ report the state of their table:
 ### Join fallbacks
 
 With `spill_enabled` off, a hash join whose build side passes `hash_join_max_build_rows` rows or
-`hash_join_max_build_bytes` estimated bytes runs as a nested-loop join. That join compares each row of one side with every row of the other, and
-the plan still shows a hash join. One `camusdb` row counts these runs:
+`hash_join_max_build_bytes` estimated bytes is executed as a nested-loop join. That join compares each row of one side with each row of the other.
+However, the plan shows a hash join. One `camusdb` row counts these fallbacks.
 
 | metric | tells you |
 |---|---|
@@ -165,12 +165,12 @@ the plan still shows a hash join. One `camusdb` row counts these runs:
 
 The row is present when `spill_enabled` is off, or when a fallback ran since the process started. With
 spill on, a large build goes to the Grace hash join and the fallback does not run. The count is for
-each run of the join, so a statement that runs one join more than once adds more than one.
+each execution of the join. A statement that executes one join more than once adds more than one.
 
 Each fallback also writes a warning to the server log, at most one each minute. The warning names the
 database, the right side of the join and the limit that the build passed, and gives the number of
 fallbacks since the previous warning.
-It holds no SQL text. To find the statement, run it with [`EXPLAIN (ANALYZE)`](explain.md) and look for
+The warning does not include SQL text. To find the statement, run it with [`EXPLAIN (ANALYZE)`](explain.md) and look for
 `ran=nested-loop-fallback`, or look for slow joins in the [slow query log](slow-query-log.md).
 
 ## Related

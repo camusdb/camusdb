@@ -52,7 +52,7 @@ any of the three is not available to the others.
 
 ### `CYCLE` is refused
 
-`CYCLE` parses and is rejected with `CADB0533`:
+`CYCLE` parses, and the statement returns `CADB0533` with this message.
 
 ```
 CYCLE is not supported. A sequence value is guaranteed unique for the life of the sequence, and
@@ -76,42 +76,42 @@ while giving you one that does not, and you would find out from your data.
 
 ### Where a sequence call is allowed
 
-The engine reserves the values a statement needs in **one** call before the statement runs, rather
-than one call per row. That is what keeps an insert of ten thousand rows to one round trip instead
-of ten thousand — and it means the engine has to know, before the statement starts, how many values
-it will draw.
+Before a statement starts, the engine reserves the values it needs in **one** call. It does not make
+one call per row. This means that an insert of ten thousand rows takes one round trip. It also means
+that the engine has to know, before the statement starts, how many values it will draw.
 
-So a sequence call is accepted only where that count is knowable:
+A sequence call is allowed only in positions where that count is known.
 
-- an `INSERT … VALUES` expression;
-- a column `DEFAULT`, on `INSERT … VALUES` and on `INSERT … SELECT`;
-- a `SELECT` with no `FROM` clause.
+- An `INSERT … VALUES` expression.
+- A column `DEFAULT`, on `INSERT … VALUES` and on `INSERT … SELECT`.
+- A `SELECT` that has no `FROM` clause.
 
-Everywhere else it is refused with `CADB0547`: a `WHERE` clause, an aggregate, a subquery, an
-`ORDER BY`, a projection over a relation, a stored view body, a `CHECK` condition — and, today, an
-`UPDATE … SET` assignment.
+In any other position, the statement returns `CADB0547`. Examples are a `WHERE` clause, an aggregate, a
+subquery, an `ORDER BY`, a projection over a relation, a stored view body, a `CHECK` condition and,
+today, an `UPDATE … SET` assignment.
 
 `UPDATE … SET c = nextval('s')` is a gap in the implementation; the design does not rule it out. The matched-row count
-is not known when the statement is bound, and the update path drains its matched rows in chunks, so
-supporting it means reserving per chunk. It is refused with the same message as every other
-unbounded position, so nobody discovers the gap from their data.
+is not known when the statement is bound, and the update path drains its matched rows in chunks.
+Supporting it means reserving values per chunk. It returns the same message as the other unbounded
+positions. This means that nobody discovers the gap from their data.
 
-`COALESCE`, `IFNULL` and `NVL` stop at the first argument that is not NULL, so a call after it does not
-run and draws nothing. In the accepted positions, a call after a literal or a parameter that holds a
-value is not reserved: `COALESCE(@p, nextval('s'))` draws only when `@p` is NULL. A call after any other
-argument is reserved, because that argument shows its value only when it runs. If the call then does not
-run, the unused value is a gap: `COALESCE(abs(-1), nextval('s'))` returns `1` and uses one value. In a
-refused position, the refusal comes when a row reaches the call, so
-`SELECT COALESCE(n, nextval('s')) FROM t` fails with `CADB0547` in a row where `n` is NULL, and a row where
-`n` holds a value does not fail.
+`COALESCE`, `IFNULL` and `NVL` stop at the first argument that is not NULL. A call after that argument
+is not evaluated and draws no value. In the allowed positions, a call after a non-NULL literal or
+parameter is not reserved. For example, `COALESCE(@p, nextval('s'))` draws a value only if `@p` is
+NULL. A call after any other argument is reserved. That argument's value is known only after it is
+evaluated. If the call is then skipped, the unused value is a gap: `COALESCE(abs(-1), nextval('s'))`
+returns `1` and uses one value. In a position that is not allowed, the error comes when a row reaches
+the call. For example, `SELECT COALESCE(n, nextval('s')) FROM t` returns `CADB0547` in a row where `n`
+is NULL, and a row where `n` is not NULL does not fail.
 
 ### `currval` and `lastval` are scoped to the transaction
 
-PostgreSQL scopes them to a backend connection. CamusDB has no connection to scope them to: the
-REST path is stateless, and defining "session" as the bearer token would make two unrelated
-concurrent requests from one user share a value — wrong in a way that is very hard to debug.
+PostgreSQL scopes them to a backend connection. CamusDB does not have a connection to scope them to,
+because the REST path is stateless. Defining "session" as the bearer token would make two unrelated
+concurrent requests from one user share a value. That would be wrong in a way that is very hard to
+debug.
 
-They are therefore scoped to the **transaction**, which is a real boundary no two callers share:
+They are therefore scoped to the **transaction**, which is a real boundary that no two callers share.
 
 ```sql
 BEGIN;
@@ -120,17 +120,17 @@ SELECT currval('order_no');   -- the value that row got
 COMMIT;
 ```
 
-Outside an explicit transaction each statement is its own transaction, so `currval` in a later
-statement reports `CADB0546`:
+Outside an explicit transaction, each statement is a separate transaction. This means that `currval`
+in a later statement returns `CADB0546`.
 
 ```
 currval('order_no') is not defined: this transaction has not drawn a value from that sequence yet.
 ```
 
-A transaction remembers at most 64 distinct sequences. Past that an entry is dropped, and `currval`
-on a dropped one reports "not defined" rather than a stale number — a refusal being far better here
-than a wrong answer. Which entry goes is unspecified: tracking recency would cost a second
-structure on every draw, to improve a case that has no realistic shape.
+A transaction remembers at most 64 distinct sequences. Past that, an entry is dropped, and `currval`
+on a dropped one returns "not defined". It does not return a stale number, because an error is far
+better here than a wrong answer. Which entry is dropped is unspecified. Tracking recency would cost a
+second structure on each draw, to improve a case that is not realistic.
 
 ### `setval`
 
@@ -139,19 +139,19 @@ SELECT setval('order_no', 5000);          -- next nextval returns 5001
 SELECT setval('order_no', 5000, false);   -- next nextval returns 5000
 ```
 
-`setval` returns the value it was given, not the value that comes next.
+`setval` returns the value it was given. It does not return the value that comes next.
 
-**It is accepted only in that shape**: on its own, as a whole projection of a `SELECT` with no
-`FROM` clause, at most one per statement. Anything else is refused with `CADB0547` — nested in a
-larger expression, inside a `CASE`, twice in one statement, or in an `INSERT … VALUES` row. The
-reason is the same in each case: `setval` moves the counter *before* the statement is evaluated,
-so a call in a branch the statement never takes would still have reset the sequence, irrevocably
-and invisibly.
+**It is allowed only in that shape**: by itself, as the complete projection of a `SELECT` that has no
+`FROM` clause, and at most once per statement. Any other use returns `CADB0547`. For example, `setval`
+cannot be nested in a larger expression or a `CASE`, and it cannot appear twice in one statement or
+in an `INSERT … VALUES` row. The reason is the same in each case. `setval` moves the counter *before*
+the statement is evaluated. A call in a branch that the statement does not take would already have
+reset the sequence, irrevocably and invisibly.
 
 **Moving a counter downwards is the dangerous direction.** It makes the sequence reissue values
 that committed rows may already hold, and a unique index will then reject the insert. PostgreSQL
-permits it and so does CamusDB; the value is not clamped, because a clamp nobody asked for is its
-own surprise. Know what the highest value in the column is before you move the counter below it.
+permits it and so does CamusDB. The value is not clamped. A clamp that nobody asked for would be a
+surprise too. Know what the highest value in the column is before you move the counter below it.
 
 **A `setval` takes about five seconds.** So does `ALTER SEQUENCE … RESTART`. The wait is
 the guarantee: see [Moving a live counter costs one lease](#moving-a-live-counter-costs-one-lease).
@@ -169,7 +169,7 @@ CREATE TABLE tickets  (id oid PRIMARY KEY, n int64 GENERATED ALWAYS AS IDENTITY,
 CREATE TABLE notes    (id oid PRIMARY KEY, n int64 GENERATED BY DEFAULT AS IDENTITY, body string);
 ```
 
-`serial` is a declaration shorthand: the column is stored as `int64`, with no 32-bit range. `bigserial`
+`serial` is a declaration shorthand: the column is stored as `int64`. It does not have a 32-bit range. `bigserial`
 is accepted as a synonym.
 
 The generated sequence is named `{table}_{column}_seq`, with a numeric suffix if that name is
@@ -179,27 +179,27 @@ taken.
 
 The two spellings exist for one difference: whether an `INSERT` may supply a value for the column.
 
-- **`GENERATED ALWAYS AS IDENTITY`** refuses an `INSERT` that supplies a value for the column. The
-  column's values can only ever come from its sequence. This includes the implicit
-  all-columns form, `INSERT INTO t VALUES (…)`, which supplies a value for every column — name the
+- **`GENERATED ALWAYS AS IDENTITY`** returns an error for an `INSERT` that supplies a value for the
+  column. The column's values can only ever come from its sequence. This includes the implicit
+  all-columns form, `INSERT INTO t VALUES (…)`, which supplies a value for each column. Name the
   columns you mean. `OVERRIDING SYSTEM VALUE` (below) is the explicit way to write one anyway.
 - **`GENERATED BY DEFAULT AS IDENTITY`**, and `serial`, accept a supplied value and write it. The
-  sequence supplies one only when the column is omitted.
+  sequence supplies a value if the column is omitted.
 
 A supplied value does **not** advance the sequence, in either spelling. Load rows with explicit
 values and the sequence will hand out numbers those rows already hold; `setval` past them
 afterwards.
 
-The typed row insert (REST `/insert`, gRPC `InsertRow`, and the client libraries' insert calls)
-follows the same rules as `INSERT`. A column left out of the row takes its default: a constant, a
-function such as `gen_id()` or `now()`, a `nextval` default, or the identity sequence. A `GENERATED
-ALWAYS` column supplied in the row is refused. A column supplied with a JSON `null` is a supplied
-NULL, not an omission.
+The typed row insert follows the same rules as `INSERT`. This applies to REST `/insert`, to gRPC
+`InsertRow` and to the insert calls of the client libraries. A column left out of the row takes its
+default. That default can be a constant or a function such as `gen_id()`. It can also be a `nextval`
+default or the identity sequence. A `GENERATED ALWAYS` column supplied in the row returns an error. A
+column supplied with a JSON `null` counts as a supplied NULL. It does not count as an omitted column.
 
 #### `OVERRIDING SYSTEM VALUE` and `OVERRIDING USER VALUE`
 
 An `INSERT` can change how identity columns treat the values it supplies. The clause goes after the
-column list (or after the table name when there is none), before `VALUES` or the source `SELECT`:
+column list (or after the table name when there is none), before `VALUES` or the source `SELECT`.
 
 ```sql
 INSERT INTO tickets (id, n, subject) OVERRIDING SYSTEM VALUE VALUES (gen_id(), 41, 'restored');
@@ -211,21 +211,21 @@ INSERT INTO notes (id, n, body) OVERRIDING USER VALUE VALUES (gen_id(), 999, 'n 
 - **`OVERRIDING SYSTEM VALUE`** lets the statement supply a value for a `GENERATED ALWAYS` column,
   which is otherwise refused. This is how a dump restores such a column: `camus-dump` writes it in
   the `INSERT` statements of a table that has one. Like any supplied value, an overriding value does
-  not advance the sequence, so `setval` the sequence past the loaded values afterwards.
-- **`OVERRIDING USER VALUE`** discards the values the statement supplies for every identity column
-  (`ALWAYS`, `BY DEFAULT` and `serial`), and each of those columns draws from its sequence as if it
-  had been omitted. A column whose default only calls `nextval` is not an identity column, and keeps
-  the value supplied for it.
+  not advance the sequence. Call `setval` afterwards to move the sequence past the loaded values.
+- **`OVERRIDING USER VALUE`** discards the values the statement supplies for all identity columns
+  (`ALWAYS`, `BY DEFAULT` and `serial`). Each of those columns draws from its sequence as if it had
+  been omitted. A column whose default only calls `nextval` is not an identity column. The value
+  supplied for it is written.
 
 These are PostgreSQL's spellings and meanings. The words are case-insensitive, and none of
 `OVERRIDING`, `SYSTEM` or `VALUE` becomes a reserved word. The clause works with `RETURNING`, in a
-prepared statement and inside an explicit transaction. The typed row insert has no equivalent: it
-follows the rules of an `INSERT` without the clause.
+prepared statement and in an explicit transaction. The typed row insert does not support the clause.
+It follows the rules of an `INSERT` that omits the clause.
 
 ### How identity columns and sequence defaults are shown
 
-`SHOW CREATE TABLE` renders an identity column as its clause, after `NOT NULL`, and a sequence
-default as a `nextval` call that names the sequence by its current name:
+`SHOW CREATE TABLE` renders an identity column as its clause, after `NOT NULL`. It renders a
+sequence default as a `nextval` call that names the sequence by its current name.
 
 ```sql
 CREATE TABLE p (id int64 PRIMARY KEY, no int64 DEFAULT(nextval('s1')), n serial);
@@ -238,7 +238,7 @@ SHOW CREATE TABLE p;
 clause names no sequence: running the statement creates a new owned sequence, named as described
 above. After `ALTER SEQUENCE s1 RENAME TO s2`, the default renders as `nextval('s2')`.
 
-`SHOW COLUMNS` keeps its six fields. A `nextval` default shows in `Default` as `nextval('s1')`. An
+`SHOW COLUMNS` has the same six fields. A `nextval` default shows in `Default` as `nextval('s1')`. An
 identity column shows its clause in `Extra`, and `NULL` in `Default`, the way MySQL shows an
 auto-increment column.
 
@@ -246,8 +246,8 @@ auto-increment column.
 
 - A bare `DROP SEQUENCE` on it is refused with `CADB0548`. Drop the column or the table instead.
 - `DROP TABLE … FORCE` and `ALTER TABLE … DROP COLUMN` take it with them.
-- A plain `DROP TABLE` is a *deferred* drop: the relation is retained and can be relinked, so its
-  sequence is kept too. It goes when the garbage collector reclaims the orphan.
+- `DROP TABLE` without `FORCE` is a *deferred* drop. The relation is retained and can be relinked.
+  Its sequence is also retained. It goes when the garbage collector reclaims the orphan.
 - `TRUNCATE … RESTART IDENTITY` returns it to its start value.
 
 A free-standing sequence a column merely defaults from is **not** owned, and none of the above
@@ -258,10 +258,10 @@ naming an identity sequence of `t` is refused with `CADB0548`: that sequence goe
 and the default would be left pointing at a counter that is gone. Create a free-standing sequence
 with `CREATE SEQUENCE` and default from that instead.
 
-**An owned sequence whose relation has left the schema refuses to issue**, also with `CADB0548`.
-That covers a deferred-dropped relation awaiting a `RELINK`, and one whose orphan has already been
-reclaimed. Nothing legitimate draws there — the only column that could is on the relation that is
-no longer present.
+**An owned sequence whose relation has left the schema does not issue values**. A draw returns
+`CADB0548`. That covers a deferred-dropped relation awaiting a `RELINK`, and one whose orphan has
+already been reclaimed. No legitimate caller draws there. The only column that could is on the
+relation that is no longer present.
 
 ---
 
@@ -278,9 +278,10 @@ sequence a column merely defaults from is shared, and silently resetting a count
 draw from would be a data-loss-shaped surprise. That is PostgreSQL's rule too.
 
 The two halves of the statement can come apart. Emptying the relation is a committed schema change
-and cannot be undone; a reset that fails afterwards is reported rather than swallowed, naming the
-sequences that were not restarted. They keep climbing, which is safe — every value they issue is
-above anything the relation held — and `ALTER SEQUENCE … RESTART` on each finishes the job.
+and cannot be undone. If a reset fails afterwards, the error is returned to you and names the
+sequences that were not restarted. Those sequences continue to climb. This is safe, because any value
+they issue is above the values the relation held. Run `ALTER SEQUENCE … RESTART` on each of them to
+finish the job.
 
 ---
 
@@ -296,19 +297,20 @@ ALTER SEQUENCE order_no RENAME TO order_number;
 DROP SEQUENCE order_number;
 ```
 
-**An `ALTER` is checked against the whole definition it produces.** Raising
-`MINVALUE` above the recorded `START`, or lowering `MAXVALUE` below it, is refused with `CADB0545`
-even though the statement named only one number — the same rule `CREATE SEQUENCE` is held to.
-Change both together:
+**An `ALTER` is checked against the complete definition it produces.** Raising
+`MINVALUE` above the recorded `START`, or lowering `MAXVALUE` below it, returns `CADB0545`
+even though the statement named only one number. `CREATE SEQUENCE` follows the same rule.
+To make such a change, change both values in one statement.
 
 ```sql
 ALTER SEQUENCE order_no MINVALUE 100 START WITH 100;
 ```
 
-A rename is metadata only. The counter is named after the sequence's immutable id, so the values
-keep climbing from where they were, and a column default bound to the sequence keeps working.
+A rename is metadata only. The counter is named after the sequence's immutable id. This means that
+the values continue to climb from where they were, and a column default bound to the sequence
+continues to work.
 
-`ALTER SEQUENCE … RESTART` cannot run inside an explicit transaction: moving a counter is
+`ALTER SEQUENCE … RESTART` is not allowed in an explicit transaction. Moving a counter is
 irrevocable, and a later `ROLLBACK` could not undo it.
 
 ---
@@ -322,12 +324,12 @@ SHOW CREATE SEQUENCE order_no;
 COMMENT ON SEQUENCE order_no IS 'one per customer order';
 ```
 
-`SHOW SEQUENCES` reports the name, the sequence's position, the start value, increment, minimum,
+`SHOW SEQUENCES` shows the name, the sequence's position, the start value, increment, minimum,
 maximum, cache, owning column and comment.
 
 ### Reading the `reserved_upto` column
 
-That column is the sequence's position, and **it is a ceiling, not the last value issued**:
+That column is the sequence's position, and **it is a ceiling**. It is not the last value issued.
 
 ```sql
 CREATE SEQUENCE s CACHE 1000;
@@ -339,25 +341,25 @@ SHOW SEQUENCES LIKE 's';        -- reserved_upto is 1000, not 2
 ```
 
 Two values were issued, out of a thousand reserved to issue them from. The number means **"no
-value above this has been issued"** — never "this value was issued". That is why the column is not
-called `last_value`: a name like that is wrong by up to a whole cache block, and readers build on
-it. Under the default `CACHE 1` the two numbers are the same, which is exactly what makes the
+value above this has been issued"**. It does not mean "this value was issued". That is why the column
+is not called `last_value`. A name like that would be wrong by up to a full cache block, and readers
+build on it. Under the default `CACHE 1` the two numbers are the same, which is exactly what makes the
 distinction easy to forget.
 
-Three rules follow:
+This has three consequences.
 
-- **`NULL` means nothing has been drawn** since the sequence was created or last moved. The
-  counter is still sitting on its seed, and the seed is one increment below the first value the
-  sequence will issue — showing it would invite exactly the misreading above.
-- **With `CACHE 1`, the default, the column is exact**, because each value is reserved durably
-  before it is handed out. A sequence that asks for a larger cache gives up that exactness.
+- **`NULL` means no value has been drawn** since the sequence was created or last moved. The
+  counter is at its seed, and the seed is one increment below the first value the sequence will
+  issue. Showing the seed would invite exactly the misreading above.
+- **With `CACHE 1`, the default, the column is exact.** Each value is reserved durably before it is
+  handed out. A sequence that asks for a larger cache gives up that exactness.
 - **Do not compare two readings** to decide whether anything changed. Two readings can be equal
   across hundreds of issued values, and can differ by a thousand across one. Use `currval` for a
   value that was actually issued.
 
-Reading the column costs a routed call per sequence, so the listing reads them in bounded parallel
-batches. A sequence whose partition is momentarily without a leader reports `NULL` rather than
-failing the whole listing.
+Reading the column costs a routed call per sequence. The listing reads them in bounded parallel
+batches. If a sequence's partition momentarily has no leader, its row shows `NULL`, and the rest of
+the listing succeeds.
 
 ---
 
@@ -372,9 +374,10 @@ failing the whole listing.
 | `nextval`, `setval` | `Update` |
 | `currval`, `lastval` | `Select` |
 
-Existing privilege bits are reused rather than a new one added. `ALL PRIVILEGES` is expanded to a
-stored mask at grant time, so a new bit would not be picked up by any grant already issued — every
-account an operator believes has everything would be quietly denied until every grant was re-issued.
+The statements reuse existing privilege bits. A new bit was not added. `ALL PRIVILEGES` is expanded
+to a stored mask at grant time. This means that a new bit would not be picked up by a grant that was
+already issued. An account that an operator believes has all privileges would be quietly denied until
+the grants were re-issued.
 
 ---
 
@@ -386,44 +389,44 @@ by someone who has not read this section.
 ### 1. Gaps are normal above `CACHE 1`
 
 The node that owns a sequence reserves a **block** of values with one durable commit. It then hands
-them out from memory with no storage traffic at all. Whatever is left of that block is abandoned
+them out from memory, and this generates no storage traffic. Whatever is left of that block is abandoned
 when the node restarts, when the sequence's partition changes owner, or when the sequence is
 evicted from memory.
 
-The default is `CACHE 1`, as in PostgreSQL, so a plain sequence has no block to abandon and skips
-nothing:
+The default is `CACHE 1`, as in PostgreSQL. A sequence with the default cache has no reserved values
+to abandon. This means that it does not skip values.
 
 ```sql
 CREATE SEQUENCE invoice_no;   -- 1, 2, 3 ... restart ... 4
 ```
 
 The cost is one Raft commit, with its fsync, per value drawn. That is a large throughput
-difference on an insert path that draws a value per row. Ask for the throughput by name when you
-want it, and accept the gaps that come with it:
+difference on an insert path that draws a value per row. If you want the throughput, ask for it with
+`CACHE`, and accept the gaps that come with it.
 
 ```sql
 CREATE SEQUENCE event_no CACHE 1000;   -- 1, 2, 3 ... restart ... 1001
 ```
 
-The values are still unique; they are just not consecutive. `CACHE` makes exactly the same trade
+The values are unique, but they are not consecutive. `CACHE` makes exactly the same trade
 in PostgreSQL.
 
-A sequence created before this default was introduced recorded no cache of its own and still
-follows the node-wide block size. `SHOW SEQUENCES` prints the size it actually uses, and
+A sequence created before this default was introduced did not record a cache size. It uses the
+node-wide block size. `SHOW SEQUENCES` prints the size it actually uses, and
 `ALTER SEQUENCE <name> CACHE 1` moves it.
 
 ### 2. A sequence value is not an insert order and not a sort key
 
 For up to five seconds after a partition changes owner, a former owner that has not yet learned it
-lost the partition can still be draining the window it already reserved, while the new owner issues
-higher values. During that window a value handed out **later** can be numerically **lower**.
+lost the partition can continue to drain the window it already reserved. At the same time, the new
+owner issues higher values. During that window a value handed out **later** can be numerically **lower**.
 
 The values stay unique. Only their order does not hold. If you sort by a sequence column and get a
 surprising order, this is the cause. Order by a timestamp, or by the row id.
 
 ### 3. An advance does not roll back
 
-A rolled-back transaction consumes the values it drew, and they are never reissued:
+A rolled-back transaction consumes the values it drew. These values are not reissued.
 
 ```sql
 BEGIN;
@@ -432,9 +435,9 @@ ROLLBACK;
 INSERT INTO orders (id, total) VALUES (gen_id(), 1.0);   -- takes 5, not 4
 ```
 
-This is PostgreSQL's behavior and the only workable one. Rolling an advance back would mean either
-holding the sequence's partition under lock for the life of every writing transaction, or reissuing
-values — which would break the one guarantee the whole feature rests on.
+This is PostgreSQL's behavior and the only workable one. Rolling an advance back would mean one of two things. The sequence's partition would be locked for
+the life of each writing transaction, or values would be reissued. Reissuing values would break the one
+guarantee that the feature rests on.
 
 The same applies to a retry. A serializable conflict (`CADB0502`, or `CADB0504` after the batched
 lock-wait deadline) retried to success leaves a row carrying a **higher** number than the first
@@ -442,13 +445,12 @@ attempt drew.
 
 ### 4. The reported value is a ceiling, not the last value issued
 
-Kahuna reports a sequence's **reserved high-water mark**. After four `nextval` calls on a fresh
-sequence declared `CACHE 1000`, that number is 1000: four values were issued, out of a thousand
-reserved to issue them from. Under the default `CACHE 1` it reads 4, because nothing is held
-back.
+Kahuna returns a sequence's **reserved high-water mark**. After four `nextval` calls on a fresh
+sequence declared `CACHE 1000`, that number is 1000. Four values were issued, out of a thousand
+reserved to issue them from. Under the default `CACHE 1` it reads 4. No values are held back.
 
-That is the number `SHOW SEQUENCES` prints in its `reserved_upto` column, and it is why there is
-no `last_value` column: publishing a ceiling under that name is wrong by up to a whole block, and
+That is the number `SHOW SEQUENCES` prints in its `reserved_upto` column. It is also why there is no
+`last_value` column. Publishing a ceiling under that name would be wrong by up to a full block, and
 readers build on it. See [Reading the `reserved_upto` column](#reading-the-reserved_upto-column).
 
 To learn a value that was actually issued, use `currval` on a transaction that drew one. Do not
@@ -459,38 +461,38 @@ across hundreds of issued values, and can differ by a thousand across one.
 
 ## Moving a live counter costs one lease
 
-`setval`, `ALTER SEQUENCE … RESTART`, and `TRUNCATE … RESTART IDENTITY` all wait about five seconds
-before they report success. That interval is the storage layer's block lease, and the wait is the
+`setval`, `ALTER SEQUENCE … RESTART` and `TRUNCATE … RESTART IDENTITY` all wait about five seconds
+before they return success. That interval is the storage layer's block lease, and the wait is the
 guarantee.
 
-A reserved block is served with no storage traffic at all, so a node that has lost the sequence's
-partition without noticing keeps handing out values from the window it already holds. For one lease
-after the record is rewritten there would otherwise be two live streams: the replaced incarnation's
-window on that node, and the new value on the owner. Kahuna closes both sides — it withholds
-success until no stale window can still be served, and it refuses allocations from the new value for
-the same interval — so that when your statement returns, the move is true everywhere.
+Values from a reserved block are served from memory. This means that a node that lost the sequence's
+partition, and did not notice, continues to hand out values from its reserved window. For one lease after
+the record is rewritten, there would otherwise be two live streams. One is the replaced incarnation's
+window on that node, and the other is the new value on the owner. Kahuna closes both sides. It
+withholds success until no stale window can be served, and for the same interval, it does not allow
+allocations from the new value. When your statement returns, the move is true on all nodes.
 
-These statements are operator actions, off the hot path, so a bounded delay is the
-right price. **A client or proxy deadline shorter than five seconds turns a correct `setval` into a
+These statements are operator actions, off the hot path. A bounded delay is the right price for
+them. **A client or proxy deadline shorter than five seconds turns a correct `setval` into a
 timeout.**
 
 ---
 
 ## Lifecycle notes
 
-**Dropping a database** removes its sequences' counters. A counter lives outside every keyspace a
-prefix purge can scan, so the dropper reads the catalog to learn which counters the database owns
-before it deletes that catalog.
+**Dropping a database** removes its sequences' counters. A prefix purge cannot reach the counters,
+because they are stored outside the database's keyspaces. The dropper reads the catalog to learn
+which counters the database owns before it deletes that catalog.
 
-**Branching a database** ([database branching](database-branching.md)) gives the branch its own
-counters, each seeded at the source's reserved ceiling. Seeding from the ceiling is correct:
-it sits above every value the source ever issued, so the branch
-cannot collide with the rows it inherited. The cost is a gap, and a gap is allowed.
+**Branching a database** ([database branching](database-branching.md)) gives the branch separate
+counters, each seeded at the source's reserved ceiling. Seeding from the ceiling is correct. The
+ceiling is above all values that the source issued. This means that the branch cannot collide with
+the rows it inherited. The cost is a gap, and a gap is allowed.
 
 **Backups** ([backups and point-in-time recovery](backups-and-point-in-time-recovery.md)) carry
 sequences. A sequence's record is an ordinary replicated key-value entry in the node's store, and a
-backup covers the whole node, so a restore brings the counters back with the rows — at the reserved
-ceiling, which is above every value the backup's rows hold. No reseeding step is needed.
+backup covers the complete node. This means that a restore brings the counters back with the rows.
+They are restored at the reserved ceiling, which is above all values in the backup's rows. No reseeding step is needed.
 
 ---
 
@@ -500,18 +502,18 @@ ceiling, which is above every value the backup's rows hold. No reseeding step is
 |---|---|
 | `CADB0542` | The name is already taken by a sequence, a table or a view. |
 | `CADB0543` | The named sequence does not exist. |
-| `CADB0544` | The sequence has no value left to issue: the next one would pass `MAXVALUE`. |
+| `CADB0544` | The sequence cannot issue another value: the next one would pass `MAXVALUE`. |
 | `CADB0545` | The definition cannot hold — a non-positive increment, `CACHE` below 1, `MAXVALUE` below `MINVALUE`, `START` outside the two. |
 | `CADB0546` | `currval` or `lastval` called before this transaction drew a value. |
 | `CADB0547` | A sequence call was written where the engine cannot bound how many values it would draw. |
 | `CADB0548` | The sequence is owned by an identity column, or a column default draws from it. |
-| `CADB0535` | The sequence's partition had no confirmed leader for the whole retry window. Transient; re-issue the statement. |
+| `CADB0535` | The sequence's partition had no confirmed leader at any point in the retry window. Transient; re-issue the statement. |
 
 ---
 
 ## See also
 
-- [Data types](data-types.md) — what `int64` holds, and why a sequence column is one.
+- [Data types](data-types.md) — the range of `int64`, and why a sequence column uses it.
 - [Database branching](database-branching.md) — what a fork copies, and what it recreates.
 - [Backups and point-in-time recovery](backups-and-point-in-time-recovery.md).
 - [Configuration](configuration.md) — `sequence_retry_budget_ms`, the wall-clock budget a sequence

@@ -1,12 +1,12 @@
 # Date patterns: `to_char`, `to_timestamp`, `to_date`, `date_format`, `str_to_date`
 
 These functions format a `date` or `datetime` value as text with a pattern, and read text back to a
-value with a pattern. CamusDB accepts two pattern languages:
+value with a pattern. A pattern can be written in either of two pattern languages.
 
 - **PostgreSQL template patterns**, for example `'YYYY-MM-DD HH24:MI:SS'`.
 - **MySQL `%` specifiers**, for example `'%Y-%m-%d %H:%i:%s'`.
 
-Both languages compile to the same fields, so a field formats and parses the same way in both.
+Both languages compile to the same fields. This means that a field formats and parses the same way in both.
 
 | Function | Result | Pattern language |
 |----------|--------|------------------|
@@ -16,13 +16,12 @@ Both languages compile to the same fields, so a field formats and parses the sam
 | `date_format(temporal, pattern)` | `string` | MySQL |
 | `str_to_date(text, pattern)` | `datetime` | MySQL |
 
-Two one-argument forms keep their meaning:
+Two one-argument forms have a different meaning from the pattern forms.
 
 - `to_date(x)` is the cast to `date`, the same as `CAST(x AS date)`.
 - `to_timestamp(seconds)` is the PostgreSQL spelling of `from_unixtime(seconds)`.
 
-A `temporal` argument is a `date`, a `datetime`, or an ISO-8601 string with an explicit offset. This
-is the same rule as the other date functions. A `NULL` argument gives `NULL`.
+A `temporal` argument is a `date`, a `datetime`, or an ISO-8601 string with an explicit offset. This is the same rule as the other date functions. A `NULL` argument gives `NULL`.
 
 ```sql
 SELECT to_char(created, 'FMDay, DD Mon YYYY HH12:MI AM') FROM events;
@@ -38,23 +37,23 @@ SELECT * FROM events WHERE created >= str_to_date('June 17, 2024', '%M %e, %Y');
 
 ## Rules for all patterns
 
-- **All values are UTC**, except for `to_char` with a zone argument. Without a zone, the time zone
+- **All values are UTC**, except for `to_char` with a zone argument. If no zone is given, the time zone
   fields print `UTC` and `+00`.
 - **`to_char` takes an optional time zone.** `to_char(x, pattern, zone)` prints the clock of that
   zone at the instant `x`. `TZ` prints the zone abbreviation in force then, as the IANA database spells
-  it (`EST`, `EDT`, `IST`, or `-05` for a zone that has no letter abbreviation). `OF` prints the offset
+  it (`EST`, `EDT`, `IST`, or `-05` for a zone that lacks a letter abbreviation). `OF` prints the offset
   as PostgreSQL does: the sign and two hour digits, then `:MM` when the offset has minutes (`-05`,
   `+05:30`). `FMOF` drops the zero padding of the hours only (`-5`, `+5:30`, and `+0` for UTC). The zone names and the rules are those of the other date functions; see
   [Time zones](data-types.md#time-zones). `date_format` takes no zone.
 - **Names are English only.** Month and day names do not change with the server culture, and there
   is no locale setting.
-- **The functions are deterministic.** They are not volatile, so a `CHECK` constraint, a column
-  `DEFAULT` and a view body can use them.
+- **The functions are deterministic.** They are not volatile. This means that you can use them in
+  a `CHECK` constraint, a column `DEFAULT` or a view body.
 - **The year range is 1-9999.** A value outside this range is an error. It does not wrap.
 - **The fraction has six digits.** No field prints or reads the seventh fraction digit (100 ns) of a
   `datetime`. `to_char` drops that digit.
-- **Each pattern compiles once.** The engine keeps the compiled form of each distinct pattern text in
-  a small cache. A literal pattern does not compile again for each row.
+- **Each pattern compiles once.** The compiled form of each distinct pattern text is stored in a
+  small cache. A literal pattern does not compile again for each row.
 
 ## PostgreSQL template patterns
 
@@ -91,8 +90,8 @@ the printed name.
 | `FM` prefix | turns off the zero and blank padding of the next field only | `FMMM` prints `3`; `FMMonth` prints `March` |
 | `"text"` | the text as written | Use `\"` for a double quote |
 
-Any other character prints as written. Put letters in double quotes, because a letter can start a
-keyword. For example, write `'YYYY-MM-DD"T"HH24:MI:SS'` for the ISO-8601 form.
+Any other character prints as written. A letter can start a keyword. For this reason, you should put
+letters in double quotes. For example, write `'YYYY-MM-DD"T"HH24:MI:SS'` for the ISO-8601 form.
 
 ## MySQL specifiers
 
@@ -125,58 +124,61 @@ Any other specifier is an error. MySQL prints the letter instead, which hides a 
 
 `to_timestamp`, `to_date` and `str_to_date` read the text strictly. Text that does not match the
 pattern gives an `InvalidInput` error. The error message quotes the text and the pattern, and it
-gives the reason. For example:
+gives the reason. A date that does not exist, such as February 30, gives this message.
 
 ```text
 Function 'to_date' could not parse '02/30/2026' with pattern 'MM/DD/YYYY': day 30 is out of range for February 2026, which has 28 days
 ```
 
-These are the rules:
+A parse follows these rules.
 
 1. A numeric field reads from 1 digit up to its full width. So `3/5/2026` matches `MM/DD/YYYY`,
    and `20260315` matches `YYYYMMDD`.
 2. A fraction field reads the digits after the decimal point. `MS` reads `5` as 500 ms, and `US`
    or `%f` reads `5` as 500000 µs.
-3. A name field matches English names without regard to case. `Mar`, `MAR` and `mar` all match `Mon`.
+3. A name field matches English names in any case. `Mar`, `MAR` and `mar` all match `Mon`.
 4. A run of spaces in the pattern matches a run of one or more spaces in the text. So the blank
    padding that `Month` and `Day` print reads back.
 5. Any other character in the pattern, and quoted text, must match the text exactly.
-6. The whole text must match. An extra character after the end of the pattern is an error.
+6. All of the text must match. An extra character after the end of the pattern is an error.
 7. Each field must be in range. For example, `MM` is 1-12, `HH24` is 0-23, and `SS` is 0-59.
-8. The pattern must have a year field. CamusDB cannot hold a date without a year.
+8. The pattern must have a year field. A CamusDB date must have a year.
 9. A missing month or day is 1. A missing hour, minute, second or fraction is 0.
 10. Two fields that give the same value must agree. For example, `MM` and `Mon` must name the
     same month.
 
-The date comes from one of these sources:
+A parse builds the date from one of three sets of fields.
 
 - the year, the month and the day;
-- the year and `DDD` or `%j` (day of the year), when the pattern has no month and no day;
+- the year and `DDD` or `%j` (day of the year), when the pattern has neither a month nor a day;
 - `IYYY`, `IW` and `ID` (ISO year, ISO week and ISO day). A missing `IW` is week 1, and a missing
   `ID` is Monday.
 
 A pattern with `IYYY` must not also have a Gregorian date field (`YYYY`, `MM`, `DD`, `DDD`).
 
-Some fields only repeat what the date already tells. The parse checks these fields against the
-result: `D`, `ID`, `Dy`, `Day`, `%W`, `%a`, `Q`, `WW`, `IW`, `%u`, `%v`, and `DDD` / `%j` when the
-pattern also has a month or a day. A mismatch is an error, because the text then names two
-different dates.
+Some fields only repeat what the date already tells. The parse checks each of these fields against the
+result.
 
-The clock fields follow these rules:
+- `D`, `ID`, `Dy`, `Day`, `%W`, `%a`, `Q`, `WW`, `IW`, `%u` and `%v`;
+- `DDD` / `%j`, when the pattern also has a month or a day.
 
-- With a 12-hour field (`HH`, `HH12`, `%h`, `%I`), `AM` / `PM` sets the half of the day. Without
-  `AM` / `PM`, the hour is AM, so `12` is midnight.
-- `AM` / `PM` without a 12-hour field is an error.
+A mismatch is an error. The text then names two different dates.
+
+The clock fields have separate rules.
+
+- With a 12-hour field (`HH`, `HH12`, `%h`, `%I`), `AM` / `PM` sets the half of the day. If
+  `AM` / `PM` is missing, the hour is AM. This means that `12` is midnight.
+- `AM` / `PM` with no 12-hour field is an error.
 - When a pattern has both a 12-hour and a 24-hour field, they must give the same hour.
 - When a pattern has both `MS` and `US`, they must agree. `to_char` prints `020` and `020000` for
   20 ms, and that text reads back as 20 ms.
 - `TZ` reads `UTC` and `OF` reads `+00`; `FMOF` also reads `+0`. Any other time zone is an error.
 
-`to_date` reads and checks the time fields, then keeps the date only.
+`to_date` reads and checks the time fields, and then returns the date only.
 
 ### Two-digit and three-digit years
 
-`YYY`, `YY` and `Y` (and `%y`) give the nearest year to 2020, with the PostgreSQL rule:
+`YYY`, `YY` and `Y` (and `%y`) give the nearest year to 2020. This is the PostgreSQL rule.
 
 | Value read | Year |
 |------------|------|
@@ -190,11 +192,11 @@ The clock fields follow these rules:
 ## Result types
 
 `str_to_date` always returns `datetime`. MySQL returns a `date` or a `datetime`, and the pattern
-decides which one. The CamusDB result type comes from the argument types only, not from the pattern
-text.
+decides which one. The CamusDB result type comes from the argument types only. The pattern text does not
+change it.
 
 CamusDB does not compare a `date` with a `datetime`. To compare the result of `str_to_date` with a
-`date` column, cast the result:
+`date` column, cast the result to `date`.
 
 ```sql
 SELECT * FROM events WHERE day = CAST(str_to_date('June 17, 2024', '%M %e, %Y') AS date);
@@ -207,16 +209,16 @@ You can also use `to_date(text, pattern)`, which returns `date`.
 - **Separators.** PostgreSQL lets any separator in the pattern match any separator in the text,
   and it skips extra spaces. CamusDB requires the same character. Only a run of spaces matches a
   run of spaces of a different length.
-- **Quoted text.** PostgreSQL skips the same number of characters without a check. CamusDB requires
+- **Quoted text.** PostgreSQL skips the same number of characters and does not check them. CamusDB requires
   the same text.
 - **Extra text.** PostgreSQL ignores some characters after the end of the pattern. CamusDB gives an
   error.
 - **Checked fields.** PostgreSQL ignores `D`, `Dy`, `Day` and `Q` in a parse, and it uses `WW` to
   find a date. CamusDB checks each of these fields against the date. `WW` does not set the date.
-- **No year.** PostgreSQL gives a date in the year 1 BC when the pattern has no year field.
-  CamusDB gives an error, because it cannot hold that year.
-- **`MS` and `US` together.** PostgreSQL adds the two values. CamusDB requires them to agree, so the
-  text that `to_char` prints reads back.
+- **No year.** PostgreSQL gives a date in the year 1 BC when the pattern lacks a year field.
+  CamusDB gives an error. A CamusDB date cannot be in that year.
+- **`MS` and `US` together.** PostgreSQL adds the two values. CamusDB requires them to agree. This means
+  that the text that `to_char` prints reads back.
 - **`AM` / `PM` with `HH24`.** PostgreSQL ignores the meridian. CamusDB gives an error.
 - **`TZ` and `OF` in a parse.** CamusDB reads only `UTC` and `+00`.
 - **Empty pattern.** PostgreSQL `to_char(x, '')` gives `NULL`. CamusDB gives an empty string.
@@ -226,10 +228,10 @@ You can also use `to_date(text, pattern)`, which returns `date`.
 ## Differences from MySQL
 
 - **Unknown specifiers.** MySQL prints the letter. CamusDB gives an error.
-- **Strict parse.** MySQL accepts some text that does not match the pattern, and it can give a
+- **Strict parse.** MySQL returns a value for some text that does not match the pattern, and it can give a
   zero date (`0000-00-00`). CamusDB gives an error for each mismatch, and it requires a year.
 - **Checked fields.** MySQL does not check `%W`, `%a`, `%u` and `%v` against a year-month-day
   date. CamusDB checks each of them against the date.
 - **Result type.** `str_to_date` always returns `datetime`.
-- **Names do not pad.** `%M` and `%W` print the name without blanks, as in MySQL.
+- **Names do not pad.** `%M` and `%W` print the name with no blank padding, as in MySQL.
 - **Not supported.** `%D`, `%k`, `%l`, `%r`, `%T`, `%U`, `%V`, `%w`, `%X`, `%x`.

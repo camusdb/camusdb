@@ -10,24 +10,25 @@ production data.
 
 ## 1. Why a reimport is necessary
 
-CamusDB stores every row and every index entry in an embedded Kahuna key-value store. The
-shape of those keys is an on-disk format. Storage revision `v2` changed that shape:
+CamusDB stores rows and index entries in an embedded Kahuna key-value store. The shape of those
+keys is an on-disk format. Storage revision `v2` changed that shape by replacing the `:` after
+`{tableId}` with `|`.
 
 ```text
 v1   {dbId}:{tableId}:r/{rowId}            {dbId}:{tableId}:i:{indexId}/{key}
 v2   {dbId}:{tableId}|r/{rowId}            {dbId}:{tableId}|i:{indexId}/{key}
 ```
 
-The `|` is Kahuna's placement-group separator. Under hash routing Kahuna places a key space by
-the prefix before its first `|`. In `v2` a table's rows and every one of its indexes share the
-group `{dbId}:{tableId}`, so they land on the same partition. A transaction that reads an index
-entry and then writes the row it points to now stays on one partition. That is the condition for
-Kahuna's one-phase commit path. In `v1` each key space hashed on its own, so on a cluster with
-more than one partition almost every indexed point read landed on a different partition from the
+The `|` is Kahuna's placement-group separator. Under hash routing, Kahuna places a key space by
+the prefix before its first `|`. In `v2`, a table's rows and all of its indexes share the group
+`{dbId}:{tableId}`. This means that they land on the same partition. A transaction that reads an
+index entry and then writes the row it points to now touches one partition. That is the condition
+for Kahuna's one-phase commit path. In `v1`, each key space hashed separately. On a cluster with
+more than one partition, almost all indexed point reads landed on a different partition from the
 row, and the one-phase path was unreachable.
 
 CamusDB does not read `v1` keys through the `v2` layout, and it does not rewrite a `v1` store in
-place. Kahuna opens the store and the Raft log under a directory named after the revision:
+place. Kahuna opens the store and the Raft log under a directory named after the revision.
 
 ```text
 {data_dir}/kv/v1     {data_dir}/wal/v1     ← written by the previous version, left untouched
@@ -35,53 +36,55 @@ place. Kahuna opens the store and the Raft log under a directory named after the
 ```
 
 A `v2` server that starts over a data directory with `v1` subdirectories starts **empty** and
-logs this warning:
+logs a warning that names the `v1` path.
 
 ```text
 Found storage revision v1 at /opt/camusdb/kv/v1; this version opens revision v2 and starts empty.
 Data crosses revisions by logical dump and reimport only (docs/logical-dump-and-reimport.md).
 ```
 
-The `v1` directories are not deleted. The previous CamusDB version can still open them, which is
-what makes the dump in section 4 possible after an upgrade, and what makes a rollback possible.
+The `v1` directories are not deleted. The previous CamusDB version can open them. This is what
+makes the dump in section 4 possible after an upgrade, and what makes a rollback possible.
 
 ## 2. What a dump carries, and what it does not
 
-`camus-dump` writes SQL. For each database it emits `CREATE DATABASE IF NOT EXISTS`, a `USE`
-line, then for each table a `CREATE TABLE`, the `CREATE INDEX` statements, and `INSERT`
-statements for the rows. The `CREATE TABLE` text comes from `SHOW CREATE TABLE`, so it carries
-column defaults, `CHECK` constraints, foreign keys, `COMMENT` clauses, covering-index `INCLUDE`
-columns, and the row-level TTL configuration of the table.
+`camus-dump` writes SQL. For each database, it emits `CREATE DATABASE IF NOT EXISTS` and a `USE`
+line. Then, for each table, it emits a `CREATE TABLE`, the `CREATE INDEX` statements, and `INSERT`
+statements for the rows. The `CREATE TABLE` text comes from `SHOW CREATE TABLE`. It therefore
+carries column defaults, `CHECK` constraints, foreign keys, `COMMENT` clauses, covering-index
+`INCLUDE` columns, and the row-level TTL configuration of the table.
 
-**Sequences.** The dump restores sequences itself, with their options, comments and positions:
+**Sequences.** The dump restores sequences itself, with their options, comments and positions.
 
-- Every free-standing sequence is written as a `CREATE SEQUENCE` with all of its options, followed
+- Each free-standing sequence is written as a `CREATE SEQUENCE` with all of its options, followed
   by its `COMMENT ON SEQUENCE`, before the first table. A table's `DEFAULT(nextval('s'))` can then
   name it; `SHOW CREATE TABLE` renders that default with the sequence's current name.
-- A sequence owned by an identity column (`serial`, `GENERATED ... AS IDENTITY`) is not created on
-  its own. The column renders as its `GENERATED ALWAYS AS IDENTITY` or
+- A sequence owned by an identity column (`serial`, `GENERATED ... AS IDENTITY`) is not written as a
+  separate `CREATE SEQUENCE`. The column renders as its `GENERATED ALWAYS AS IDENTITY` or
   `GENERATED BY DEFAULT AS IDENTITY` clause, and replaying the `CREATE TABLE` creates a new owned
   sequence named `{table}_{column}_seq`. After the table, the dump writes
   `ALTER SEQUENCE ... RENAME TO` when the source sequence had another name, `ALTER SEQUENCE` for
-  every option that differs from an identity's defaults, and `COMMENT ON SEQUENCE`.
+  each option that differs from an identity's defaults, and `COMMENT ON SEQUENCE`.
 - The `INSERT` statements of a table with a `GENERATED ALWAYS AS IDENTITY` column carry
-  `OVERRIDING SYSTEM VALUE`, so the restored table accepts the dumped values for that column. See
+  `OVERRIDING SYSTEM VALUE`. This lets the restored table take the dumped values for that column. See
   [sequences](sequences.md#always-versus-by-default).
-- After the rows, the dump writes `SELECT setval('name', reserved_upto)` for every sequence that has
-  a position, so the restored counter does not issue a value again that a loaded row already holds.
-  The position is the one the sequence has when the dump reads it, not one as of the dump's point in
-  time: `SHOW SEQUENCES` has no `AS OF` form. On restore, each `setval` takes about five seconds
+- After the rows, the dump writes `SELECT setval('name', reserved_upto)` for each sequence that has
+  a position. This prevents the restored counter from issuing a value again that a loaded row
+  already contains. The position is the one the sequence has when the dump reads it. It can differ
+  from the position at the dump's point in time, since `SHOW SEQUENCES` does not support an `AS OF`
+  form. On restore, each `setval` takes about five seconds
   (see [sequences](sequences.md#moving-a-live-counter-costs-one-lease)).
 
-A dump taken from a server older than this release loses sequence defaults and identity columns:
-that server's `SHOW CREATE TABLE` did not render them, so the restored columns have no default.
+A dump taken from a server older than this release loses sequence defaults and identity columns.
+That server's `SHOW CREATE TABLE` did not render them, which means that the restored columns do not
+get a default.
 
 **C# extensions.** The dump writes `CREATE EXTENSION name VERSION 'version'` for each extension
-installed in the database, before the first table, so the column defaults, CHECK constraints and views
-that call its functions resolve when they are created. It does not write the members: those come from
-the extension file, which the dump never contains. Deploy the same extension files on the new server,
-list them in `extension_assemblies`, and restart it before you load the dump; a server that does not load
-the named version refuses the statement. Reading the installed extensions needs `SHOW EXTENSIONS`, which
+installed in the database, before the first table. The column defaults, CHECK constraints and views
+that call its functions then resolve when they are created. It does not write the members. Those come
+from the extension file, which a dump does not contain. Deploy the same extension files on the new
+server and list them in `extension_assemblies`. Then restart the server before you load the dump. A
+server that does not load the named version returns an error for the statement. Reading the installed extensions needs `SHOW EXTENSIONS`, which
 requires a superuser; a dump taken by another user carries none and says so. With `--add-drop-table`
 the dump also writes `DROP EXTENSION IF EXISTS` for each one, after the tables are dropped; that form needs
 a target server of this release or later. See
@@ -89,13 +92,14 @@ a target server of this release or later. See
 
 **Inline functions.** The dump writes the `CREATE FUNCTION ... LANGUAGE csharp AS $$ ... $$` statement
 of each inline function of the database, as `SHOW CREATE FUNCTION` prints it, after the extensions and
-before the first table, so the CHECK constraints and column defaults that call a function resolve when
-they are created. The source of a function is in the database, so the dump carries the whole function;
-the target server compiles it again. Three things follow:
+before the first table. The CHECK constraints and column defaults that call a function then resolve
+when they are created. The source of a function is stored in the database. This means that the dump
+carries the complete function, and the target server compiles it again. Several conditions apply when
+you load the functions.
 
-- The target server must accept the statement: set `inline_functions_enabled: true` on every node
+- The target server must accept the statement: set `inline_functions_enabled: true` on all nodes
   before you load the dump (see [csharp-extensions.md](csharp-extensions.md#inline-functions)).
-- A user who is not a superuser runs at most `max_inline_definitions_per_user_per_minute` (60)
+- A user who is not a superuser can run at most `max_inline_definitions_per_user_per_minute` (60)
   `CREATE FUNCTION` statements a minute (see
   [Compile rate](csharp-extensions.md#compile-rate)). Load a dump with more functions as a superuser,
   or raise the setting while it loads.
@@ -103,7 +107,7 @@ the target server compiles it again. Three things follow:
   user, the dump also writes `ALTER FUNCTION name OWNER TO user`. That statement needs the user to
   exist on the target, which is why the users are restored first, and the loading user to be a
   superuser.
-- A function body is between dollar quotes and holds semicolons. Load the dump with a client that
+- A function body is between dollar quotes and contains semicolons. Load the dump with a client that
   reads the text between two equal dollar quotes as one statement.
 
 Reading the functions needs `SHOW FUNCTIONS`, which requires `SELECT` or `CREATE` on the database; a
@@ -113,16 +117,16 @@ also writes `DROP FUNCTION IF EXISTS` for each one, after the tables are dropped
 **Triggers.** The dump writes the `CREATE TRIGGER` statement of each row trigger of the dumped
 tables, as `SHOW CREATE TRIGGER` prints it, after the last table and its rows. A trigger that existed
 while the rows load would fire for each one, and its SQL can write a table that comes later in the
-dump. Both forms are carried: a trigger of an extension as `EXTERNAL NAME '...'`, which needs the same
-extension on the target (the dump installs it), and an inline trigger as
-`LANGUAGE csharp AS $$ ... $$` with its whole body. The triggers of one table keep their creation
-order, which is the order they fire in. Two things follow for the inline form:
+dump. Both forms are carried. A trigger of an extension is written as `EXTERNAL NAME '...'`, which
+needs the same extension on the target (the dump installs it). An inline trigger is written as
+`LANGUAGE csharp AS $$ ... $$` with its body. The triggers of one table keep their creation order,
+which is the order they fire in. Two conditions apply to the inline form.
 
-- The target server must accept the statement: set `inline_triggers_enabled: true` on every node
+- The target server must accept the statement: set `inline_triggers_enabled: true` on all nodes
   before you load the dump (see [csharp-extensions.md](csharp-extensions.md#triggers-in-c)).
-- The SQL of an inline trigger runs with its owner's rights, and the user who loads the dump owns the
-  triggers it creates. No statement gives a trigger to another user, so a trigger whose owner was
-  another user changes owner, and the dump warns about it. Load the dump as the user whose rights the
+- The SQL of an inline trigger is executed with its owner's rights, and the user who loads the dump
+  owns the triggers it creates. No statement gives a trigger to another user. A trigger whose owner
+  was another user therefore changes owner, and the dump warns about it. Load the dump as the user whose rights the
   triggers should have, or create those triggers again as their owner.
 
 Reading the triggers needs `SHOW TRIGGERS`, which requires `SELECT` or `ALTER` on the database; a dump
@@ -131,30 +135,30 @@ taken by a user with neither carries no triggers and says so. `--add-drop-table`
 
 **Foreign keys and the load order.** A `CREATE TABLE` with a foreign key fails when its parent table
 does not exist yet, and a child `INSERT` fails when its parent row is not loaded yet. The
-`WITHOUT INDEXES` form, which `--defer-indexes` uses, keeps the foreign keys too. Load a dump with
-foreign keys in one of two ways:
+`WITHOUT INDEXES` form, which `--defer-indexes` uses, also includes the foreign keys. You can load a
+dump with foreign keys in one of two ways.
 
 - **Parents first.** Order the tables so that each parent, with its rows, comes before its
-  children. A self-reference loads in any order inside one table only when each `INSERT`
-  statement holds a row's parent in the same statement or an earlier one.
+  children. A self-reference in one table requires that each `INSERT` statement contain a row's
+  parent in the same statement or an earlier one.
 - **Constraints last.** Remove the `CONSTRAINT ... FOREIGN KEY` clauses from the `CREATE TABLE`
   statements, load all the rows, then add each constraint with `ALTER TABLE ... ADD CONSTRAINT`.
-  The ADD validates the loaded rows and reports the first row without a parent.
+  The ADD validates the loaded rows and identifies the first row whose parent is missing.
 
 See [foreign-keys.md](foreign-keys.md).
 
 Index definitions carry their **per-column sort direction** and their **comment**, both in the
-inline `KEY` clause of the `CREATE TABLE` and in the separate `CREATE INDEX` statements, so a
-descending index restores descending. Dumping from a server older than the release that added them
+inline `KEY` clause of the `CREATE TABLE` and in the separate `CREATE INDEX` statements. A
+descending index therefore restores descending. Dumping from a server older than the release that added them
 loses both silently: the older server does not report the direction, and the tool cannot
 recover it. Check a descending index after reimporting such a dump.
 
-**A revision upgrade empties the user catalog.** Accounts, grants and sessions live in the same
-key-value store the rows do, under the same revision directory, so a `v2` server starting over a `v1`
-data directory starts with no accounts. It then seeds its bootstrap superuser and nothing else.
-Record the accounts and their grants **before** you upgrade, with `SHOW USERS` and
-`SHOW GRANTS FOR *`, and recreate them after the reimport. Passwords cannot be exported, so
-plan to set a new one for every account.
+**A revision upgrade empties the user catalog.** Accounts, grants and sessions are stored in the same
+key-value store as the rows, under the same revision directory. This means that a `v2` server
+starting over a `v1` data directory starts with an empty user catalog. It then seeds its bootstrap
+superuser and no other account. **Before** you upgrade, record the accounts and their grants with
+`SHOW USERS` and `SHOW GRANTS FOR *`. Recreate them after the reimport. Passwords cannot be exported.
+Plan to set a new one for each account.
 
 The dump does **not** carry the objects below. Record them before the upgrade with the
 statements shown, and recreate them after the reimport.
@@ -165,16 +169,16 @@ statements shown, and recreate them after the reimport.
 | Materialized views | `SHOW MATERIALIZED VIEWS;` then `SHOW CREATE MATERIALIZED VIEW name;` | Run the printed statement, then `REFRESH MATERIALIZED VIEW name;` |
 | Users | `SHOW USERS;` as a superuser; passwords cannot be exported | `CREATE USER name IDENTIFIED BY '…';` |
 | Grants | `SHOW GRANTS FOR *;` as a superuser | `GRANT … ON … TO name;` |
-| Triggers of a table the dump leaves out | `SHOW TRIGGERS ON table;` then `SHOW CREATE TRIGGER name ON table;` per trigger. The triggers of the dumped tables are in the dump | Run each printed `CREATE TRIGGER` after the rows are loaded, so the reimport fires no trigger |
+| Triggers of a table the dump leaves out | `SHOW TRIGGERS ON table;` then `SHOW CREATE TRIGGER name ON table;` per trigger. The triggers of the dumped tables are in the dump | Run each printed `CREATE TRIGGER` after the rows are loaded. The reimport then fires no trigger |
 | Cluster settings | `SHOW VARIABLES LIKE '%';` and keep the rows whose source is not the default | `SET CLUSTER SETTING name = value;` |
-| Table statistics | Nothing to record | `ANALYZE table;` per table after the rows are loaded |
+| Table statistics | Not needed | `ANALYZE table;` per table after the rows are loaded |
 | Database branches | `SHOW BRANCHES FROM parent;` | See the note below |
-| Physical backups | Nothing to record | Take a fresh full backup after the reimport |
+| Physical backups | Not needed | Take a fresh full backup after the reimport |
 
-**Branches.** A branch is listed by `SHOW DATABASES` as a database of its own, so `--all-databases`
-dumps it. The dump reads the branch through its lineage and writes every row it sees. The
-reimported copy is therefore a complete, independent database, and the copy-on-write relation
-with the parent is gone. Recreate a branch with `CREATE DATABASE name BRANCH FROM parent` after
+**Branches.** `SHOW DATABASES` lists a branch as a separate database. This means that
+`--all-databases` dumps it. The dump reads the branch through its lineage and writes all rows it
+sees. The reimported copy is therefore an independent database that contains all of the branch's
+rows. The copy-on-write relation with the parent is gone. Recreate a branch with `CREATE DATABASE name BRANCH FROM parent` after
 the parent is reimported if you need the relation and not the diverged contents.
 
 **Physical backups.** A backup chain records the storage revision it was taken under. A `v1`
@@ -185,7 +189,7 @@ and dump it with this procedure. See
 
 ## 3. Install the tools
 
-Both tools are .NET global tools. Install them on a machine that can reach the server:
+Both tools are .NET global tools. Install them on a machine that can reach the server.
 
 ```shell
 dotnet tool install --global CamusDB.Dump      # provides camus-dump
@@ -193,41 +197,42 @@ dotnet tool install --global CamusDB.SqlSh     # provides camus-cli
 ```
 
 `camus-dump` connects over the client gRPC port, `5096` by default. `camus-cli` connects
-through the CamusDB .NET driver; its default endpoint is `https://localhost:5095`, the HTTP port,
-and an endpoint on the client gRPC port (`5096`) also works, in which case the driver speaks gRPC.
-Both tools accept `https://` endpoints. With authentication on, the server refuses a password
-over plaintext to any address other than loopback, so use `https://` against a remote server.
+through the CamusDB .NET driver. Its default endpoint is `https://localhost:5095`, the HTTP port.
+An endpoint on the client gRPC port (`5096`) also works, and the driver then speaks gRPC.
+Both tools accept `https://` endpoints. With authentication on, the server does not accept a
+password sent over plaintext to any address other than loopback. Use `https://` against a remote
+server.
 
 ## 4. Dump every database with the previous version
 
 Do this step **before** you install the new version, or after it with the previous version
 started on the `v1` data directory.
 
-1. Stop the applications that write to the server. The dump reads every table as of one fixed
-   instant, so a dump under live writes is consistent, but the writes after that instant are not
-   in the dump.
-2. Run the dump for every database:
+1. Stop the applications that write to the server. The dump reads all tables as of one fixed
+   instant. A dump under live writes is therefore consistent, but the writes after that instant
+   are not in the dump.
+2. Run the dump for all databases. This command writes one file per database to
+   `/backup/camusdb-v1/`.
 
 ```shell
 camus-dump -e http://db1.internal:5096 --all-databases -b 100 \
   --output-directory /backup/camusdb-v1/
 ```
 
-   Option by option:
-
    - `--all-databases` (`-A`) asks the server for its databases with `SHOW DATABASES` and dumps
      each one. Use `--exclude-database` to skip a database you do not want to carry over.
    - `-b 100` writes 100 rows per `INSERT` statement. **This is the option that matters most.**
      See "Choosing the batch size" below.
    - `--output-directory` writes one `<database>.sql` file per database. Use `-o server.sql`
-     instead to get one file with every database in sequence.
+     to get one file that contains all databases in sequence.
    - `--defer-indexes` is **not** in the command above on purpose. See "Deferring the
      indexes" below; it does not always make the load faster.
 
 ### Choosing the batch size
 
-One row per `INSERT` is the tool default and it is by far the slowest choice. Measured on
-a single node, restoring 20,000 narrow rows, 5,000 rows of about 1 KB, and 1,500 rows of about 8 KB:
+One row per `INSERT` is the tool default, and it is by far the slowest choice. The table shows the
+throughput measured on a single node, restoring 20,000 narrow rows, 5,000 rows of about 1 KB, and
+1,500 rows of about 8 KB.
 
 | Rows per `INSERT` | narrow (~100 B) | ~1 KB rows | ~8 KB rows |
 | --- | --- | --- | --- |
@@ -240,89 +245,89 @@ a single node, restoring 20,000 narrow rows, 5,000 rows of about 1 KB, and 1,500
 | 1,000 | 6,163 | 4,480 | — |
 
 `-b 1` is far slower than a batched load: 41 times on narrow rows, 27 times on 1 KB rows and 12 times
-on 8 KB rows, against the best batch size for each shape. Its own throughput barely depends on row
-width, because the cost is one round trip per statement rather than the data; the gap narrows on wide
-rows only because a batched load of wide rows is itself slower. **Anything above about 100 rows
-recovers most of the difference**, and past that the curve is flat inside the run-to-run noise
-of the measurement, which was about ±20 %.
+on 8 KB rows, against the best batch size for each shape. The throughput of `-b 1` barely depends on
+row width. Its cost is one round trip per statement, and the size of the data matters little. The gap
+narrows on wide rows only because a batched load of wide rows is itself slower. **Anything above about
+100 rows recovers most of the difference.** Past that, the differences are smaller than the
+run-to-run noise of the measurement, which was about ±20 %.
 
-`-b 100` is the recommended starting point because it is at the knee *and* keeps the statement small:
-100 rows of an 8 KB-row table is about 805 KB of SQL, comfortably inside the 4 MiB gRPC message limit.
+`-b 100` is the recommended starting point because it is at the knee *and* produces small statements:
+100 rows of an 8 KB-row table is about 805 KB of SQL, well under the 4 MiB gRPC message limit.
 A larger batch on a wide table breaks: 500 rows of 8 KB rows is a 4.02 MB statement, right at
-the limit. Raise `-b` for narrow tables if you want; do not raise it for wide ones without checking the
-statement size.
+the limit. Raise `-b` for narrow tables if you want. For wide tables, check the statement size before
+you raise it.
 
-Two hard limits bound the batch whatever the throughput says:
+Two hard limits bound the batch whatever the throughput says.
 
 - **The server's mutation limit per transaction**, 20,000 by default. A row costs **two** mutations
-  before any secondary index — its row key and its primary-key index entry — so the ceiling is
-  `floor(20000 / (2 + secondary index entries per row))`: 10,000 rows on a table with no secondary
-  index, 6,666 with one. See [transaction-limits.md](transaction-limits.md).
-- **The transport message size.** gRPC accepts 4 MiB per message; the HTTP API accepts 30 MB per
-  body. A wide-row table reaches the gRPC limit long before the mutation limit.
+  before any secondary index: its row key and its primary-key index entry. The ceiling is therefore
+  `floor(20000 / (2 + secondary index entries per row))`: 10,000 rows on a table that has only a
+  primary key, 6,666 with one secondary index. See [transaction-limits.md](transaction-limits.md).
+- **The transport message size.** A gRPC message can be up to 4 MiB, and an HTTP API body up to
+  30 MB. A wide-row table reaches the gRPC limit long before the mutation limit.
 
 A table with large values needs a small batch. A dump writes each value in full into the SQL, whatever
-form it has in the store, so a table with 1 MB values reaches the gRPC limit at about 3 rows per
-statement. A large value stored out of line also costs one more mutation per row when it is reloaded
+form it has in the store. A table with 1 MB values therefore reaches the gRPC limit at about 3 rows
+per statement. A large value stored out of line also costs one more mutation per row when it is reloaded
 (see [Large values](storage-layout.md#transaction-limits)). A reimported row is written under the
-current storage rules, so a reload also converts the table to the current form.
+current storage rules. This means that a reload also converts the table to the current form.
 
 ### Deferring the indexes
 
-`--defer-indexes` writes each table's `CREATE INDEX` statements after its rows, so the rows load into
-a table with no secondary index and each index is built once at the end instead of being maintained
-row by row.
+`--defer-indexes` writes each table's `CREATE INDEX` statements after its rows. The rows load into a
+table that has only its primary key, and each index is built once at the end. By default, each index
+is maintained row by row.
 
-**It is not automatically faster.** Measured on the same single node, 20,000 rows, comparing total
-restore time including the index build:
+**It is not automatically faster.** The table compares the total restore time, including the index
+build, on the same single node with 20,000 rows.
 
-| Table | Without the flag | With `--defer-indexes` |
+| Table | Default | With `--defer-indexes` |
 | --- | --- | --- |
 | One secondary index | 4.56 s | 4.05 s (**about 10 % faster**) |
 | Four secondary indexes | 9.01 s | 10.00 s (**about 18 % slower**) |
 
-The index build has to read the whole table once per index, and past one index that costs more than
-the per-row maintenance it saves. Use the flag for a table with a single secondary index; skip it for
-a table with several. These figures are from one machine at 20,000 rows. If your tables are far
-larger, measure them, because a bulk build and per-row maintenance do not scale the
-same way.
+The index build reads the table once per index. Past one index, that costs more than the per-row
+maintenance it saves. Use the flag for a table with a single secondary index, and skip it for a table
+with several. These figures are from one machine at 20,000 rows. If your tables are far larger,
+measure them. A bulk build and per-row maintenance do not scale the same way.
 
-Whether or not you use it, **a restore is complete only once every index is built and validated.**
+Whether or not you use it, **a restore is complete only once all indexes are built and validated.**
 Keep the target out of service until then.
 
 If your dump comes from a server older than the release that added
-`SHOW CREATE TABLE … WITHOUT INDEXES`, `--defer-indexes` cannot work: that server renders each index
-inline in the table definition, so the index exists before the first row regardless. `camus-dump`
-detects this and prints a warning rather than producing a file that only looks deferred.
+`SHOW CREATE TABLE … WITHOUT INDEXES`, `--defer-indexes` cannot work. That server renders each index
+inline in the table definition, and the index exists before the first row regardless. `camus-dump`
+detects this and prints a warning. It does not produce a file that only looks deferred.
 
-3. With authentication on, add the user and the password:
+3. With authentication on, the command also needs a user and a password.
 
 ```shell
 CAMUSDB_PASSWORD=app-secret camus-dump -e https://db1.internal:5096 -A -u admin \
   -b 100 --output-directory /backup/camusdb-v1/
 ```
 
-   The dump needs `SELECT` and `SHOW` privileges on every table. Give the password through the
-   environment or `--ask-password`, not on the command line.
+   The dump needs `SELECT` and `SHOW` privileges on all tables. Give the password through the
+   environment or `--ask-password`. Do not put it on the command line.
 
-4. Read the end of the dump output on standard error. `camus-dump` reports every value it could
-   not render exactly, and `--strict` fails the dump instead when such a value exists. A non-finite
+4. Read the end of the dump output on standard error. `camus-dump` lists each value it could
+   not render exactly. With `--strict`, the dump fails when such a value exists. A non-finite
    float (`NaN`, `Infinity`, `-Infinity`) is written as `CAST('NaN' AS float64)`, which a server
    with the PostgreSQL float rule reads back as the same value (see
    [data-types.md](data-types.md#float-values-infinity-nan-and-overflow)); the dump prints a note
-   when it holds one. A `camus-dump` older than that change wrote such a value as `NULL`. Dump
-   over gRPC, the default, when a table holds such values: over REST, CamusDB.Client 0.17.1 reads
+   when it contains one. A `camus-dump` older than that change wrote such a value as `NULL`. Dump
+   over gRPC, the default, when a table contains such values. Over REST, CamusDB.Client 0.17.1 reads
    the value as text, and an array that mixes it with numbers does not load. A later client release
    reads it as the float value.
 
-5. Record the objects that a dump does not carry (section 2). The point in time of the dump is
-   written in the header of each file:
+5. Record the objects that a dump does not carry (section 2). The header of each file records the
+   point in time of the dump.
 
 ```text
 -- Point in time: 2026-09-07 14:10:22.117+00:00
 ```
 
-6. Keep the row count of every table for the verification in section 7:
+6. Save the row count of each table for the verification in section 7. The following command
+   writes one count to a file.
 
 ```shell
 camus-cli -c "Endpoint=http://db1.internal:5095;Database=shop" \
@@ -331,57 +336,57 @@ camus-cli -c "Endpoint=http://db1.internal:5095;Database=shop" \
 
 ## 5. Upgrade the server
 
-1. Stop every CamusDB node. In cluster mode stop all of them: the new version starts a fresh Raft
+1. Stop all CamusDB nodes, including all nodes of a cluster. The new version starts a fresh Raft
    log under `wal/v2`, and a cluster with nodes on two revisions does not form.
-2. Install the new version on every node. Keep `data_dir` as it is.
+2. Install the new version on each node. Keep `data_dir` as it is.
 3. Start the nodes. Each node creates `kv/v2` and `wal/v2`, logs the warning from section 1, and
    serves an empty server. In cluster mode the cluster forms as on a first deployment.
-4. If authentication is on, the users are gone with the `v1` store, so the user catalog is
+4. If authentication is on, the users are gone with the `v1` store, and the user catalog is
    empty again. The server then creates one superuser from `CAMUSDB_BOOTSTRAP_USER` and
-   `CAMUSDB_BOOTSTRAP_PASSWORD`, and it refuses to start when they are not set; see
+   `CAMUSDB_BOOTSTRAP_PASSWORD`. It does not start when they are not set; see
    [sql-authentication.md](sql-authentication.md). Log in as that superuser for the reimport.
 
 Do not set `kahuna.storage_revision` to `v1` to make the new version open the old store. The new
-version cannot read the `v1` key layout, and every table would appear empty.
+version cannot read the `v1` key layout, and all tables would appear empty.
 
 ## 6. Reimport with camus-cli
 
-Restore in this order, so that each step finds what it depends on:
+Restore the objects in the order below. Each step depends on objects that an earlier step creates.
 
-1. Users, so that the objects created later can be granted to them.
+1. Users. The objects created later can then be granted to them.
 2. Databases, tables, indexes and rows, which is the dump. With foreign keys, load the parent
    tables before their children, or add the constraints after the rows (section 2).
 3. Views and materialized views, which reference the tables.
 4. Grants, which reference users and objects.
 5. Cluster settings.
-6. `ANALYZE` on every table.
+6. `ANALYZE` on each table.
 
-Run each dump file with `-f`. A file from `--output-directory` opens with its own
-`CREATE DATABASE IF NOT EXISTS` and `USE`, so the database named on the connection does not
-matter:
+Run each dump file with `-f`. A file from `--output-directory` opens with a
+`CREATE DATABASE IF NOT EXISTS` and a `USE` statement. This means that the database named on the
+connection does not matter.
 
 ```shell
 camus-cli -c "Endpoint=http://db1.internal:5095;Database=test" -f /backup/camusdb-v1/shop.sql
 camus-cli -c "Endpoint=http://db1.internal:5095;Database=test" -f /backup/camusdb-v1/billing.sql
 ```
 
-A single file with every database loads the same way:
+A single file that contains all databases loads the same way.
 
 ```shell
 camus-cli -c "Endpoint=http://db1.internal:5095;Database=test" -f /backup/camusdb-v1/server.sql
 ```
 
-`camus-cli` streams the file, so its size does not matter. It stops at the first statement that
-fails and prints the statement and the line it started on. Fix the cause and run the file again:
-the `CREATE DATABASE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` statements are no-ops on a
-second run, but the `INSERT` statements are not. Drop the partly loaded database before the
-second run:
+`camus-cli` streams the file, which means that its size does not matter. It stops at the first
+statement that fails and prints the statement and the line it started on. Fix the cause and run the
+file again. The `CREATE DATABASE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` statements are
+no-ops on a second run, but the `INSERT` statements are not. Drop the partly loaded database before
+the second run.
 
 ```shell
 camus-cli -c "Endpoint=http://db1.internal:5095;Database=test" -e "drop database shop"
 ```
 
-With authentication on, log in as the superuser:
+With authentication on, log in as the superuser.
 
 ```shell
 CAMUS_PASSWORD=admin-secret camus-cli -u admin \
@@ -389,7 +394,7 @@ CAMUS_PASSWORD=admin-secret camus-cli -u admin \
 ```
 
 Then run the statements you recorded in section 2, in the order listed above. Finish with an
-`ANALYZE` per table so that the planner has fresh statistics:
+`ANALYZE` per table so that the planner has fresh statistics.
 
 ```sql
 ANALYZE orders;
@@ -397,7 +402,7 @@ ANALYZE orders;
 
 ## 7. Verify
 
-1. List the databases and the tables:
+1. List the databases and the tables.
 
 ```sql
 SHOW DATABASES;
@@ -405,14 +410,14 @@ SHOW TABLES;
 SHOW INDEXES FROM orders;
 ```
 
-2. Compare the row count of every table with the count you kept in section 4:
+2. Compare the row count of each table with the count you saved in section 4.
 
 ```sql
 SELECT COUNT(*) FROM orders;
 ```
 
 3. Confirm the placement that the `v2` layout exists for. In cluster mode, the rows and the
-   indexes of one table report the same partition:
+   indexes of one table show the same partition.
 
 ```sql
 SHOW RANGES FROM TABLE orders;
@@ -422,7 +427,7 @@ SHOW RANGES FROM INDEX orders@orders_by_customer;
    Under hash routing both statements return one span each, and the `partition_id` column of
    the two spans is equal. See [show-ranges.md](show-ranges.md) for the columns.
 
-4. Confirm the views, the grants and the settings:
+4. Confirm the views, the grants and the settings.
 
 ```sql
 SHOW VIEWS;
@@ -433,7 +438,7 @@ SHOW VARIABLES LIKE '%';
 ## 8. Reclaim the old store, or roll back
 
 **Reclaim.** When the verification passed and a fresh full backup exists, delete the `v1`
-directories on every node to free the disk:
+directories on all nodes to free the disk.
 
 ```shell
 rm -r /opt/camusdb/kv/v1 /opt/camusdb/wal/v1
@@ -441,7 +446,7 @@ rm -r /opt/camusdb/kv/v1 /opt/camusdb/wal/v1
 
 The warning in section 1 stops at the next start.
 
-**Roll back.** To return to the previous version, stop the nodes, install the previous version,
-and start it. It opens `kv/v1` and `wal/v1`, which the new version did not touch. Data written
+**Roll back.** To return to the previous version, stop the nodes and install the previous version.
+Then start it. It opens `kv/v1` and `wal/v1`, which the new version did not touch. Data written
 to the `v2` store after the upgrade is not in `v1`. Dump it from the new version first if you
 need it; the procedure is the same in the other direction.
