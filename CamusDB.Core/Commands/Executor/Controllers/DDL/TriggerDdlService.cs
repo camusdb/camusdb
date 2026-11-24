@@ -8,6 +8,7 @@
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Apply;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.Catalogs.Transactional;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Extensions;
@@ -38,7 +39,8 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 ///
 /// <para><b>Runs on the schema leader.</b> In cluster mode the statement must reach the database's
 /// schema leader, the same as <c>CREATE VIEW</c> and <c>CREATE SEQUENCE</c>: trigger DDL has no
-/// ticket forwarder. A follower refuses with an error that names the leader.</para>
+/// ticket forwarder. A follower refuses with an error that names the leader. Inside a transaction with a
+/// private schema the statement runs on any node.</para>
 ///
 /// <para><b>Privileges.</b> The table is opened through <see cref="TableOpener"/>, which is where the
 /// per-table check of the ambient required privilege (<c>Alter</c>, mapped by the statement
@@ -308,9 +310,14 @@ internal sealed class TriggerDdlService
         return table;
     }
 
+    /// <summary>
+    /// Refuses the statement on a node that does not lead the database's schema log. Inside a transaction
+    /// with a private schema it runs on any node: its delta joins the change set, which reaches the schema
+    /// leader at the commit, and the commit refuses a change set whose base schema moved.
+    /// </summary>
     private async Task RequireSchemaLeaderAsync(DatabaseDescriptor database, string statement)
     {
-        if (!context.IsClusterMode)
+        if (!context.IsClusterMode || TransactionSchemaScope.OverlayFor(database) is not null)
             return;
 
         if (await database.Kahuna.AmISchemaLeaderAsync(database.Id, CancellationToken.None).ConfigureAwait(false))

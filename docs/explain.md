@@ -17,36 +17,37 @@ EXPLAIN (ANALYZE)  SELECT ...   -- executes the query and adds actual counters
 EXPLAIN [( ... )]  SELECT ... FOR UPDATE [NOWAIT | SKIP LOCKED]   -- a locking read, see below
 ```
 
-`EXPLAIN` without `ANALYZE` builds the physical plan but does **not** open any table cursor
-or read any row data. `EXPLAIN (ANALYZE)` executes the full query, drains the result, and
-reports actual runtime counters alongside the estimated columns.
+When `ANALYZE` is not given, `EXPLAIN` builds the physical plan but does **not** open any table
+cursor or read any row data. `EXPLAIN (ANALYZE)` executes the full query and drains the result. It
+shows the actual runtime counters next to the estimated columns.
 
-An unrecognized option word (e.g. `EXPLAIN (VERBOSE) ...`) is rejected with an error rather
-than silently treated as a plain `EXPLAIN`.
+An unrecognized option word (e.g. `EXPLAIN (VERBOSE) ...`) returns an error. The option is not
+silently ignored.
 
-Every form reads as the query reads: in a Read Committed transaction it runs at one statement
-timestamp, as the `SELECT` does.
+Each form reads data the same way as the query. In a Read Committed transaction, it reads at one
+statement timestamp, as the `SELECT` does.
 
-> **Locking reads.** Every form accepts a [`FOR UPDATE` clause](./select-for-update.md#explain), as
+> **Locking reads.** Each form allows a [`FOR UPDATE` clause](./select-for-update.md#explain), as
 > in PostgreSQL. The plan then has a `lock_rows` row below the `limit` and above the `sort`.
 > - Plain `EXPLAIN` takes no lock. It needs `SELECT` and `UPDATE` on the table, as the statement
 >   does, but it also works in a read-only or optimistic transaction.
-> - `EXPLAIN (ANALYZE)` runs the statement and takes real row locks, which stay until the
->   transaction ends. Every check of the statement applies, and `NOWAIT` fails it as it fails the
->   statement. In autocommit it runs in a writable transaction.
+> - `EXPLAIN (ANALYZE)` executes the statement and takes real row locks. These locks are held until
+>   the transaction ends. All checks of the statement apply, and `NOWAIT` fails it as it fails the
+>   statement. In autocommit, it is executed in a writable transaction.
 
 > **Subquery note:** planning a statement that contains an uncorrelated subquery executes that
-> inner subquery once (it is materialized during planning), so `EXPLAIN` of such a statement
-> does read storage for the inner query. The outer query is never executed by plain `EXPLAIN`.
+> inner subquery once (it is materialized during planning). This means that `EXPLAIN` of such a
+> statement does read storage for the inner query. The outer query is not executed unless
+> `ANALYZE` is given.
 
-> **FROM-less limitation:** a [FROM-less `SELECT`](./fromless-select.md) has no plan tree, so
-> plain `EXPLAIN` renders a fixed `constant-source` → `project` (→ `limit`) shape rather than a
-> costed plan. As for any plan, the rows come parent first (`limit`, `project`, `constant-source`),
-> each with its `depth`, and `EXPLAIN (ANALYZE)` is rejected (there is no table access to measure — use
-> plain `EXPLAIN`). Unlike a real query, `EXPLAIN` of a FROM-less `SELECT` does **not**
+> **FROM-less limitation:** a [FROM-less `SELECT`](./fromless-select.md) does not build a plan
+> tree. `EXPLAIN` renders a fixed, uncosted `constant-source` → `project` (→ `limit`) shape. As for
+> any plan, the rows come parent first (`limit`, `project`, `constant-source`), each with its
+> `depth`. `EXPLAIN (ANALYZE)` returns an error (there is no table access to measure — leave out
+> `ANALYZE`). Unlike a real query, `EXPLAIN` of a FROM-less `SELECT` does **not**
 > pre-materialize its projection subqueries; they appear only as their output column names.
-> A FROM-less `SELECT` with a `WHERE` is different: it runs as a query over one row, so it has a real
-> plan, a `function-scan` of `*single_row*`, and `EXPLAIN (ANALYZE)` works on it.
+> A FROM-less `SELECT` with a `WHERE` is executed as a query over one row. It has a real plan,
+> which is a `function-scan` of `*single_row*`, and `EXPLAIN (ANALYZE)` works on it.
 
 ---
 
@@ -63,35 +64,36 @@ timestamp, as the `SELECT` does.
 | `estimated_cost` | `FLOAT64` | Cost-model weighted cost for the node (unitless; lower is cheaper). `NULL` when not costed. |
 | `depth`          | `INT64`   | The level of the node in the plan tree. The root is `0`, and each child is one level deeper than its parent. `NULL` on the [trailing informational rows](#trailing-informational-rows) and on the span rows. |
 
-`estimated_rows` / `estimated_cost` come from the cost model. Estimates use table statistics —
-row counts, per-column min/max, and (after `ANALYZE`) equi-depth histograms and distinct-value
-counts — when available, and fall back to fixed defaults otherwise, so the exact numbers depend
-on what statistics have been collected and will differ between deployments. When an estimate looks
+`estimated_rows` / `estimated_cost` come from the cost model. When table statistics are
+available, the estimates use them: row counts, per-column min/max, and (after `ANALYZE`)
+equi-depth histograms and distinct-value counts. Otherwise, fixed defaults are used. This means
+that the exact numbers depend on what statistics have been collected and will differ between
+deployments. When an estimate looks
 wrong, [`SHOW STATISTICS FOR <table>`](show-statistics.md) shows the inputs that produced it and
 whether they were collected at all. `estimated_cost` also
 includes a network term (`NetworkFactor`) for range-sharded deployments; it is 0 on a single node.
 Hash, merge and nested-loop join estimates use the distinct-value counts and unique keys of the
 join-key tables; an index-nested-loop join estimates one row for each outer row. For a join over a
 join, the alias qualifier of the left key names its table, and the key's distinct count in that table
-is used; a key unique in its table is not taken as unique there, because an earlier join can repeat
-it. These estimates come from the plan annotation, not from the join-order search, so the two can
-differ. `(LOGICAL)` and `(PHYSICAL)` currently
-render the same physical tree, differing only in the `stage` label. See
-[`docs/query-planner.md` → Part V](./query-planner.md#part-v--the-cost-based-optimizer) for the
-cost model itself.
+is used. A key that is unique in its table is not taken as unique there. An earlier join can
+repeat it. These estimates come from the plan annotation. The join-order search uses separate
+estimates, and the two can differ. `(LOGICAL)` and `(PHYSICAL)` currently
+render the same physical tree, differing only in the `stage` label. For more information about
+the cost model, see
+[`docs/query-planner.md` → Part V](./query-planner.md#part-v--the-cost-based-optimizer).
 
 ### EXPLAIN ANALYZE
 
-All columns from plain `EXPLAIN`, plus:
+`EXPLAIN ANALYZE` returns the same columns as `EXPLAIN` and adds six more.
 
 | Column            | Type       | Description |
 |-------------------|------------|-------------|
 | `actual_rows`     | `INT64`    | Rows emitted (yielded) by this operator to its parent. |
-| `rows_read`       | `INT64`    | Rows fetched and decoded from storage before filtering (scan operators). `0` for pipeline operators (they read from a cursor, not storage). |
-| `actual_time_ms`  | `FLOAT64`  | Inclusive wall-clock milliseconds of the operator, its inputs included. On the root row it is the time of the whole plan. See [Operator times](#operator-times). |
+| `rows_read`       | `INT64`    | Rows fetched and decoded from storage before filtering (scan operators). `0` for pipeline operators (they read from a cursor and do not read storage). |
+| `actual_time_ms`  | `FLOAT64`  | Inclusive wall-clock milliseconds of the operator, its inputs included. On the root row, it is the total time of the plan. See [Operator times](#operator-times). |
 | `kv_lookups`      | `INT64`    | KV point-lookups issued (unique-index lookups). |
 | `kv_scan_entries` | `INT64`    | KV scan entries visited (table or range-index scans). |
-| `estimate_trace`  | `STRING`   | How the node's row estimate was made, as one JSON object: the formula, the rule that dominates it, the input rows and one entry for each factor with the rule, the value and the statistics it read (`ndv`, `rows`, `alternative`, `textbook`, `keyed`). A join the join-order search estimated lists the leaves, the groups and the column classes of its table subset. `NULL` when the node has no estimate. The plan-quality harness records it for every node and reports the estimate errors by rule; see `docs/plan-quality-harness.md`. |
+| `estimate_trace`  | `STRING`   | How the node's row estimate was made, as one JSON object: the formula, the rule that dominates it, the input rows and one entry for each factor with the rule, the value and the statistics it read (`ndv`, `rows`, `alternative`, `textbook`, `keyed`). A join the join-order search estimated lists the leaves, the groups and the column classes of its table subset. `NULL` when the node is not estimated. The plan-quality harness records it for each node and groups the estimate errors by rule; see `docs/plan-quality-harness.md`. |
 
 `actual_rows` ≤ `rows_read` for scan nodes: `rows_read` counts rows decoded from storage
 before predicate evaluation; `actual_rows` counts rows that passed all filters and were
@@ -99,20 +101,20 @@ yielded upstream.
 
 #### Operator times
 
-`EXPLAIN (ANALYZE)` puts a timer on the row cursor of each operator. A plain query has no timer.
+`EXPLAIN (ANALYZE)` puts a timer on the row cursor of each operator. Other queries are not timed.
 
-- The timer runs from each request for a row until the row, or the end of the rows, arrives. A
-  request runs the inputs of the operator, so the time includes their time.
+- Each timing starts at a request for a row and ends when the row, or the end of the rows, arrives.
+  A request executes the inputs of the operator. This means that the time includes their time.
 - The time between two requests is the work of the parent on the row it got. That time belongs to
   the parent and is left out.
-- A parent asks for the rows of its inputs inside its own requests, so no row shows more time than
-  the row it hangs under.
-- The root row shows the time to read the whole plan. A `filter` row runs inside the scan below it,
-  so it shows the time of that scan.
+- A parent asks for the rows of its inputs during its requests. As a result, no row shows more time
+  than the row it hangs under.
+- The root row shows the total time to read the plan. A `filter` row is evaluated in the scan below
+  it and shows the time of that scan.
 - A `derived-table-scan` row whose query is shown under it, and the root row of that query, show the
   time of the requests to that query.
-- An operator that runs more than one time (a hash join fallback reads its build input again) adds
-  up the time of all runs.
+- When an operator is executed more than one time (a hash join fallback reads its build input
+  again), its time is the sum of all executions.
 
 The timers cost two reads of the monotonic clock for each row at each operator. In a Release build
 on an Apple laptop, that is about 18 ns for each row at each operator, plus about 11 ns for the row
@@ -120,97 +122,101 @@ counter that ANALYZE always kept. A render query with 64,000 result rows moves 7
 its operators. For that query the timers add about 13 ms to a run of about 2.4 s, which is less than
 1 %. The worst case is a query whose operators do almost no work for each row. A `count(*)` over a
 filtered derived table of 1,000,000 generated rows ran about 4 % slower under `EXPLAIN (ANALYZE)`
-with the timers. The figure compares the fastest of 7 runs with and without the timers.
+with the timers. The figure compares the best time of 7 tries with the timers on and off.
 
 #### Join plans
 
-A join plan is a chain: each join node has one plan input, its left side, and names its right
-side (a table or a derived table) without a row of its own. `EXPLAIN (ANALYZE)` therefore
-reports a join row this way:
+A join plan is a chain. Each join node has one plan input, which is its left side. The join node
+names its right side (a table or a derived table), and the right side does not get a separate row.
+This changes what the `EXPLAIN (ANALYZE)` counters of a join row count.
 
 - `actual_rows` is the number of rows the join produced.
-- `rows_read`, `kv_lookups` and `kv_scan_entries` count the reads of the **right side**:
-  - `nested-loop-join` reads a base-table right side from storage once, keeps its rows (in
-    memory, or in a spill file when spilling is on), and compares every left row with them. So
-    `rows_read` is the right rows one time. The join reads nothing on the right when the left
-    side is empty. It reads the right side again for every left row (`rows_read` is left rows ×
-    right rows, and the detail shows `ran=nested-loop-rescan`) in two cases: the right-side
+- `rows_read`, `kv_lookups` and `kv_scan_entries` count the reads of the **right side**. What they
+  count depends on the join type.
+  - `nested-loop-join` reads a base-table right side from storage once and compares each left row
+    with those rows. The rows are kept in memory, or in a spill file when spilling is on. This
+    means that `rows_read` is the right rows one time. When the left side is empty, the join does
+    not read the right side. It reads the right side again for each left row (`rows_read` is left
+    rows × right rows, and the detail shows `ran=nested-loop-rescan`) in two cases: the right-side
     filter calls a volatile function, or spilling is off and the right side has more rows than
     `HashJoinMaxBuildRows` or more estimated bytes than `HashJoinMaxBuildBytes`.
-  - A `nested-loop-join` with `lateral` runs its `LATERAL` derived table for each left row. With
+  - A `nested-loop-join` with `lateral` executes its `LATERAL` derived table for each left row. With
     `lateral=expressions(<columns>)` it evaluates the expressions of the derived table, or of each row
-    of its `VALUES` list, on each left row and does not run the derived table. A scalar subquery inside
-    those expressions still runs for each distinct value it reads. The detail shows the runs of the
-    body and their time (`lateral-runs=`, `lateral-ms=`, see below). See [LATERAL](joins.md#lateral).
-  - A `nested-loop-join` with `range-seek=<index>(<bounds>)` keeps nothing in memory. For each left
-    row it reads only the index range that the left row's bounds give, so `kv_scan_entries` counts
-    the index entries of all those ranges and `rows_read` the right rows fetched. See
+    of its `VALUES` list, on each left row and does not run the derived table. However, a scalar
+    subquery in those expressions is executed for each distinct value it reads. The detail shows how
+    many times the body was executed and how long it took (`lateral-runs=`, `lateral-ms=`, see
+    below). See [LATERAL](joins.md#lateral).
+  - A `nested-loop-join` with `range-seek=<index>(<bounds>)` does not store right rows in memory.
+    For each left row, it reads only the index range that the left row's bounds give.
+    `kv_scan_entries` counts the index entries of all those ranges, and `rows_read` counts the
+    right rows fetched. See
     [Range seek](joins.md#range-seek). When the bounds close a range on one right column, the estimate
     is left × right × 0.005 for each such range (rule `join-range`), as in PostgreSQL, in place of the
     0.1 join fallback.
   - `index-nested-loop-join` probes a page of outer rows at a time (`IndexScanFetchBatchSize`
-    rows): the distinct keys of the page cost one index read and one row read for the whole page,
-    and the detail shows the number of pages as `probe-batches=`. Over a unique index it adds one
+    rows): the distinct keys of the page cost one index read and one row read in total, and the
+    detail shows the number of pages as `probe-batches=`. Over a unique index it adds one
     `kv_lookups` for each distinct non-NULL key it probes. Over a non-unique index it adds one
-    `kv_scan_entries` for each index entry it visits; the probe is bounded at the key, so no entry
-    past it is visited, and a key with more entries than one probe page is read on its own, page by
+    `kv_scan_entries` for each index entry it visits. The probe is bounded at the key, and no entry
+    past it is visited. A key with more entries than one probe page is read separately, page by
     page. `rows_read` counts the right rows it fetched, before the right-side filter. A key that an
     earlier outer row probed, or that another outer row of the same page probes, is answered from
-    the join's memo and adds nothing to these counters (`probe-memo-hits=`).
+    the join's memo and does not add to these counters (`probe-memo-hits=`).
   - `hash-join` reads its right side one time, as the build or as the probe.
   - A `hash-join` or `nested-loop-join` whose right table has a pushed filter on an indexed column
     reads that table through the index; the detail shows `right-index=<name>` (or
     `right-in-list=<name>`), and `rows_read` counts only the rows the index returned.
   - `merge-join` adds the reads of its ordered right input (an index walk or a sorted scan).
     That input is a node, but the plan walk does not render it.
-- A leaf row (`table-scan`, `index-range-scan`, `index-in-list`) counts its own reads, as on a
+- A leaf row (`table-scan`, `index-range-scan`, `index-in-list`) counts the reads it makes, as on a
   single-table plan. A `derived-table-scan` row counts the rows of its materialized result, and its
-  own `rows_read` is `0`: the rows of its query under it count the reads (see
-  [Derived tables and CTEs](#derived-tables-and-ctes)). A derived table on the right side adds
-  nothing to the join's `rows_read`. A `function-scan` row reads nothing from storage: its
+  `rows_read` is `0`: the rows of its query under it count the reads (see
+  [Derived tables and CTEs](#derived-tables-and-ctes)). A derived table on the right side does not
+  add to the join's `rows_read`. A `function-scan` row does not read storage: its
   `rows_read`, `kv_lookups` and `kv_scan_entries` are `0`, and `actual_rows` counts the rows it
   generated.
 - `actual_time_ms` is on each row, as on a single-table plan (see [Operator times](#operator-times)).
   A `derived-table-scan` row whose query is shown under it has the time of that query, as the root of
   that query has.
 
-The work after the last join is not a plan node for a join query: the filter that runs after the
-joins, grouping, ordering, `LIMIT` and projection. So the root row is the last join, not the final
-result. A `LIMIT` shows as a join that produced fewer rows, because the cursor is lazy.
+In a join query, the work after the last join is not a plan node. This work is the filter applied
+after the joins, grouping, ordering, `LIMIT` and projection. The root row is therefore the last
+join, and the final result does not get a row. Because the cursor is lazy, a `LIMIT` shows as a
+join that produced fewer rows.
 
-A join row's detail can also show two values that only execution knows:
+The detail of a join row can also show values that are known only after execution.
 
 | Suffix | Meaning |
 |--------|---------|
-| `ran=grace-hash` | The hash build was larger than the spill threshold, so the join ran as a Grace hash join. |
-| `ran=nested-loop-fallback` | The hash build was larger than `HashJoinMaxBuildRows` rows or `HashJoinMaxBuildBytes` estimated bytes with spilling off, so the join ran as a nested-loop join. [`SHOW ENGINE STATS`](engine-stats.md#join-fallbacks) counts these runs, and each run writes a rate-limited warning to the server log. |
-| `ran=nested-loop-rescan` | The nested-loop join read its right side again for every left row, instead of one time (see above). |
-| `ran=broadcast` | The build was small enough to ship, so the join probed the other side span by span. One `broadcast-span` row follows for each span. |
-| `probe-memo-hits=<n>` | The index nested-loop join answered `n` probes from its memo of earlier probes: outer rows whose key an earlier outer row had already probed, or whose key another outer row of the same probe page probes. A hit reads nothing, so `kv_lookups`, `kv_scan_entries` and `rows_read` count the distinct keys only. The marker appears only when `n` is above zero. |
-| `probe-batches=<n>` | The index nested-loop join probed its index in `n` pages of outer rows. Each page costs one batched index read and one batched row read for its distinct keys, instead of one or two reads per outer row. A page whose keys the memo all answered issues no call and is not counted; a non-unique key wider than one probe page is read on its own and is not part of the page's batch. The marker appears only when `n` is above zero. |
-| `join-order-est-rows=<n>` | The join-order search's estimate of the rows of this join. It appears only when the search costed the order (statistics loaded, cost-based join order on). |
-| `lateral-runs=<n>` | The left rows for which the `nested-loop-join` ran its `LATERAL` body. A body of expressions (`lateral=expressions(…)`) runs for each left row. It appears on each join with a `LATERAL` right side, also when `n` is 0. |
-| `lateral-kept-reads=<n>` | The left rows that read the kept rows of an earlier run of the `LATERAL` body with the same left values, instead of a run. So `lateral-runs` plus `lateral-kept-reads` is the left rows. The marker appears only when `n` is above zero. |
-| `lateral-ms=<ms>` | The time of all runs of the `LATERAL` body and of all reads of kept rows, the right-side filter included. It is part of the join's `actual_time_ms`. The rest of the join's time is its left input and its own work on each pair: the pairing of the rows and the `ON` predicate. The plan-quality fingerprint leaves this value out, because it changes on each run. |
+| `ran=grace-hash` | The hash build was larger than the spill threshold, and the join was executed as a Grace hash join. |
+| `ran=nested-loop-fallback` | The hash build was larger than `HashJoinMaxBuildRows` rows or `HashJoinMaxBuildBytes` estimated bytes with spilling off. The join was executed as a nested-loop join. [`SHOW ENGINE STATS`](engine-stats.md#join-fallbacks) counts these fallbacks, and each one writes a rate-limited warning to the server log. |
+| `ran=nested-loop-rescan` | The nested-loop join read its right side again for each left row (see above). |
+| `ran=broadcast` | The build was small enough to ship. The join probed the other side span by span. One `broadcast-span` row follows for each span. |
+| `probe-memo-hits=<n>` | The index nested-loop join answered `n` probes from its memo of earlier probes: outer rows whose key an earlier outer row had already probed, or whose key another outer row of the same probe page probes. A hit does not read anything. This means that `kv_lookups`, `kv_scan_entries` and `rows_read` count the distinct keys only. The marker is left out when `n` is 0. |
+| `probe-batches=<n>` | The index nested-loop join probed its index in `n` pages of outer rows. Each page costs one batched index read and one batched row read for its distinct keys. An unbatched probe costs one or two reads per outer row. A page whose keys the memo all answered issues no call and is not counted; a non-unique key wider than one probe page is read separately and is not part of the page's batch. The marker is left out when `n` is 0. |
+| `join-order-est-rows=<n>` | The join-order search's estimate of the rows of this join. It is shown if the search costed the order (statistics loaded, cost-based join order on), and left out otherwise. |
+| `lateral-runs=<n>` | The left rows for which the `nested-loop-join` executed its `LATERAL` body. A body of expressions (`lateral=expressions(…)`) is evaluated for each left row. It appears on each join with a `LATERAL` right side, also when `n` is 0. |
+| `lateral-kept-reads=<n>` | The left rows that reused the kept rows of an earlier run of the `LATERAL` body with the same left values. This means that `lateral-runs` plus `lateral-kept-reads` is the left rows. The marker is left out when `n` is 0. |
+| `lateral-ms=<ms>` | The time of all executions of the `LATERAL` body and of all reads of kept rows, the right-side filter included. It is part of the join's `actual_time_ms`. The rest of the join's time is its left input and the join's work on each pair: the pairing of the rows and the `ON` predicate. The plan-quality fingerprint leaves this value out. The value changes on each run. |
 
 `estimated_rows` comes from the plan annotation, and the join-order search chose the order with
-its own estimate (`join-order-est-rows`). The two models can disagree. With both next to
+a separate estimate (`join-order-est-rows`). The two models can disagree. With both next to
 `actual_rows`, you can see which one was closer.
 
 A node can run more than one time in one statement. A hash join fallback reads its build input
 again, for example. The counters add up over each run, which is the work the statement did.
 
 The `plan-info` row of `EXPLAIN (ANALYZE)` also shows how long planning took and, on a join plan,
-how the join order was chosen. Plain `EXPLAIN` does not show these values.
+how the join order was chosen. `EXPLAIN` shows these values only with `ANALYZE`.
 
 | Suffix | Meaning |
 |--------|---------|
-| `planning-ms=<ms>` | The time of the bind and plan stages. It includes the subqueries that the bind stage runs to fold into literals. |
+| `planning-ms=<ms>` | The time of the bind and plan stages. It includes the subqueries that the bind stage executes to fold into literals. |
 | `join-order=cost-based` | The cost-based search chose the join order. |
-| `join-order=greedy` | The cost-based search passed its step budget, and the greedy order of the enumerator was built and costed instead: the smallest table first, then at each step the connected table with the smallest estimated result. |
+| `join-order=greedy` | The cost-based search passed its step budget, and the greedy order of the enumerator was built and costed instead. The greedy order starts with the smallest table and, at each step, adds the connected table with the smallest estimated result. |
 | `join-order=heuristic` | The cost-based search did not choose the order. The cause is one of these: the search is off, the statistics are not loaded, the join has more than 30 tables, or no order avoids a cross product. |
 | `join-order=cached` | A plan-cache hit replayed an earlier join order. |
-| `join-steps-costed=<n>` | The number of join steps that the cost-based search costed. It is 0 when the search did not run. For the same query and the same statistics, the count is the same on each run, so you can compare it between versions. You cannot do that with a time. |
+| `join-steps-costed=<n>` | The number of join steps that the cost-based search costed. It is 0 when the search did not run. For the same query and the same statistics, the count is the same on each run. This means that you can compare it between versions, which you cannot do with a time. |
 
 A `broadcast-span` row has the same columns as a `gather-span` row (see the distributed section
 below). The node that owns the probe input counts each probe row that this node decoded, from a
@@ -221,10 +227,10 @@ build. The rows that a peer scanned and did not ship are only in its `broadcast-
 
 ### Derived tables and CTEs
 
-A derived table in `FROM`, an inlined CTE and a view body run a query of their own. `EXPLAIN` and
-`EXPLAIN (ANALYZE)` show the operators of that query under the `derived-table-scan(alias=…)` row, one
-level deeper, and a derived table inside that query shows its own query in the same way. So a chain of
-CTEs shows each level:
+A derived table in `FROM`, an inlined CTE and a view body each execute a separate query. `EXPLAIN`
+and `EXPLAIN (ANALYZE)` show the operators of that query one level deeper, under the
+`derived-table-scan(alias=…)` row. A derived table nested in that query is shown the same way. A
+chain of CTEs therefore shows each level, as in this plan.
 
 ```text
 hash-join(on=g.id=grp, build=g)
@@ -237,26 +243,28 @@ hash-join(on=g.id=grp, build=g)
               table-scan(table=items)         -- rows_read=12
 ```
 
-- A derived table on the right side of a join has no row in the join's input chain, so `EXPLAIN` adds
-  a `derived-table-scan` row for it right under the join row, with its query under it.
-- With `ANALYZE`, the query of a derived table runs from the plan shown, so its rows are the counters
-  of that run. The `derived-table-scan` row and the root row of its query have the time of that run.
+- A derived table on the right side of a join is not in the join's input chain. For this reason,
+  `EXPLAIN` adds a `derived-table-scan` row for it right under the join row, with its query under it.
+- With `ANALYZE`, the query of a derived table is executed from the plan shown. Its rows show the
+  counters of that execution. The `derived-table-scan` row and the root row of its query have the
+  time of that execution.
 - A CTE that the statement computes once shows its query once, under the first reader in the plan.
-  The other readers read the kept rows; their rows show `actual_rows` and the time of their own reads.
+  The other readers read the kept rows; their rows show `actual_rows` and the time of those reads.
 - The `estimated_rows` of a `derived-table-scan` row is the estimate of the root row of its query
-  (rule `derived-plan`), so a chain of CTEs carries its estimates up from the bottom. A set operation, a
-  work table and the reader of a recursive CTE have no single plan and count as 10,000 rows (rule
-  `derived-default`). A function in `FROM` with constant arguments has its exact count (`function-rows`).
+  (rule `derived-plan`). In a chain of CTEs, the estimates are carried up from the bottom. A set
+  operation, a work table and the reader of a recursive CTE have no single plan and count as 10,000
+  rows (rule `derived-default`). A function in `FROM` with constant arguments has its exact count
+  (`function-rows`).
 - A `nested-loop-join` with `lateral=expressions(…)` is estimated at the rows of the body for each left
   row: one for a `SELECT`, one for each row of a `VALUES` list (rule `lateral-rows`). Its right filter and
-  its `ON` condition read computed columns, which have no statistics, so each comparison keeps a fixed
-  share: a third for a range, 0.1 for an equality, 0.9 for `<>`, combined through `AND`, `OR` and `NOT`
-  (factor `predicate-default`).
-- A `LATERAL` derived table runs its query for each left row, and keeps its one row with
-  `lateral` in the join detail. The join detail shows the runs and their time (`lateral-runs=`,
+  its `ON` condition read computed columns, and computed columns do not have statistics. Each
+  comparison is therefore given a fixed selectivity: a third for a range, 0.1 for an equality, 0.9 for
+  `<>`, combined through `AND`, `OR` and `NOT` (factor `predicate-default`).
+- A `LATERAL` derived table executes its query for each left row and is shown as one row, with
+  `lateral` in the join detail. The join detail shows the execution count and time (`lateral-runs=`,
   `lateral-kept-reads=`, `lateral-ms=`). A set operation shows its operands (`operand(left)`,
-  `operand(right)`), a function in `FROM` shows `function-scan`, and a derived table inside a
-  set-operation operand or a subquery keeps its one row.
+  `operand(right)`), and a function in `FROM` shows `function-scan`. A derived table in a
+  set-operation operand or in a subquery is shown as one row.
 
 ### The lock step under EXPLAIN ANALYZE
 
@@ -265,12 +273,12 @@ when they are zero. PostgreSQL does not have them: it shows only the rows in and
 
 | Counter | Meaning |
 |---------|---------|
-| `locked=<n>` | Row locks the step got. This includes the rows that `recheck-dropped` counts, because their locks stay until the transaction ends. |
+| `locked=<n>` | Row locks the step got. This includes the rows that `recheck-dropped` counts. Their locks are held until the transaction ends. |
 | `skipped-held=<n>` | Rows that `SKIP LOCKED` left out because another transaction held them. Always 0 for the other wait policies, which fail the statement on a held row. |
 | `recheck-dropped=<n>` | Rows the step locked and then did not return: a concurrent commit deleted the row, or changed it so that it no longer matches the `WHERE` clause, after the scan chose it. |
 
-`actual_rows` of the step is `locked − recheck-dropped`. Example, with rows 2 and 3 held by another
-transaction:
+`actual_rows` of the step is `locked − recheck-dropped`. In the following example, rows 2 and 3 are
+locked by another transaction.
 
 ```text
 EXPLAIN (ANALYZE) SELECT id FROM jobs ORDER BY id LIMIT 3 FOR UPDATE SKIP LOCKED
@@ -289,14 +297,14 @@ One row is emitted per physical plan node, in depth-first order (parent before c
 `depth` column gives the level of each row. A node can have more than one child: a set operation has
 its two `operand` rows, and a join can have a `derived-table-scan` row for its right input (see
 [Derived tables and CTEs](#derived-tables-and-ctes)) before its left input. The row order alone does
-not show where the subtree of the first child ends, so a client that draws the tree must read `depth`.
+not show where the subtree of the first child ends. A client that draws the tree must read `depth`.
 
 | Node name                | When it appears | Key detail fields |
 |--------------------------|-----------------|-------------------|
 | `table-scan`             | Full table scan or forced-index scan | `table=<name>` (forced-index adds `, forced-index=<name>`) |
 | `index-lookup`           | Equality on a **unique** index | `index=<name>, key=<value>` |
 | `index-range-scan`       | Range predicate (`<`, `>`, `BETWEEN`), or equality on a **non-unique** index | `index=<name>, from>=<val>, to<<val>` |
-| `index-in-list`          | `x IN (v1, v2, …)`, or `x = v1 OR x = v2 OR …`, where `x` is the first column of an index — one index seek per distinct value, results unioned. The index can be a unique index of several columns, such as a composite primary key: each value then seeks every entry that starts with it | `index=<name>, values=<n>` (count of seek values) |
+| `index-in-list`          | `x IN (v1, v2, …)`, or `x = v1 OR x = v2 OR …`, where `x` is the first column of an index — one index seek per distinct value, results unioned. The index can be a unique index of several columns, such as a composite primary key: each value then seeks all entries that start with it | `index=<name>, values=<n>` (count of seek values) |
 
 An index with expression key parts ([expression-indexes.md](expression-indexes.md)) adds
 `, expressions=[<expr>, …]` after `index=<name>` on `index-lookup`, `index-range-scan` and
@@ -314,7 +322,7 @@ An index with expression key parts ([expression-indexes.md](expression-indexes.m
 | `semi-join`              | `IN (subquery)` rewritten to a semi-join over an indexed inner column | `outer=<col>, inner=<table>.<col>, index=<name>` |
 | `anti-join`              | `NOT IN (subquery)` over a **NOT NULL** indexed inner column | `outer=<col>, inner=<table>.<col>, index=<name>` |
 | `null-aware-anti-join`   | `NOT IN (subquery)` over a **nullable** indexed inner column (SQL three-valued semantics) | `outer=<col>, inner=<table>.<col>, index=<name>` |
-| `nested-loop-join`       | Join without a usable index on the right side | `on=<expr>, right=<alias>` |
+| `nested-loop-join`       | Join where no index on the right side can be used | `on=<expr>, right=<alias>` |
 | `index-nested-loop-join` | Join where the right side's join key is indexed | `on=<expr>, index=<name>, left=<col>, right=<col>` |
 | `hash-join`              | Equi-join using an in-memory hash table; chosen over INLJ when the outer side is large relative to the inner | `on=<left>=<right>, build=<alias>` (build-filter appended when a pushed-down filter is present) |
 | `merge-join`             | Equi-join using a streaming two-pointer merge; chosen when both sides have free index ordering on the join key | `on=<left>=<right>, right-order=forced-index=<name>\|sort` (right-filter appended when present) |
@@ -327,20 +335,22 @@ An index with expression key parts ([expression-indexes.md](expression-indexes.m
 | `operand`                | One operand of the set operation above it; the rows that follow are that operand's plan. Under `ANALYZE`, `actual_rows` is the rows the operand returned | `left` or `right` |
 | `lock_rows`              | `SELECT … FOR UPDATE`: locks each candidate row, reads it again and checks the `WHERE` clause again. Under `ANALYZE`, the detail adds `locked=<n>, skipped-held=<n>, recheck-dropped=<n>` (see below) | `for update`, `for update, nowait` or `for update, skip locked` |
 
-Notes:
+Several of these nodes follow rules that the tables do not show.
+
 - A set operation renders each operand's plan under an `operand` row; see
   [`docs/set-operations.md`](./set-operations.md#explain). A FROM-less operand reads a one-row
   `function-scan(*single_row*(), …)`.
 - Uncorrelated `IN`/`NOT IN` over an **indexed** inner column become a `semi-join` /
   `anti-join` / `null-aware-anti-join`. When the inner column is **not** indexed, the subquery
   is materialized instead and no join node appears.
-- A `distinct` row reports `streaming: true` when the input arrives in index order covering
+- A `distinct` row shows `streaming: true` when the input arrives in index order covering
   all (NOT NULL) DISTINCT columns; otherwise `hash`.
 - `hash-join` `build=<alias>` names the side materialised into the in-memory hash table; the
   planner picks the smaller estimated side as the build side to minimise memory. For a left outer
-  join the build side is always the right table, so the preserved side is the probe.
-- Every join node appends `kind=left-outer` for a `LEFT [OUTER] JOIN` (a `RIGHT JOIN` is executed as
-  a left join with the operands swapped). An inner join renders no kind. Example:
+  join, the build side is always the right table. This means that the preserved side is the probe.
+- Each join node appends `kind=left-outer` for a `LEFT [OUTER] JOIN` (a `RIGHT JOIN` is executed as
+  a left join with the operands swapped). An inner join renders no kind. The following plan is a
+  left outer hash join.
 
   ```text
   hash-join(on=e.game_id=id, build=g, kind=left-outer)
@@ -349,30 +359,32 @@ Notes:
 
   See [`docs/joins.md`](./joins.md) for the contract and the pushdown rule the plan reflects.
 - `merge-join` streams both inputs when both arrive pre-ordered (ForcedIndex scan or an upstream
-  sort); only the current equal-key run is buffered — O(run size) memory, not O(n+m).
-- **Where a join predicate appears.** For an inner-join tree the planner places each predicate
-  conjunct at the join where the last of its tables enters, not where the query text writes it
+  sort). Only the current equal-key run is buffered. Memory use is O(run size), and it does not grow
+  to O(n+m).
+- **Where a join predicate appears.** For an inner-join tree, the planner places each predicate
+  conjunct at the join where the last of its tables enters
   ([`query-planner.md` → Cost-based join-order enumeration](./query-planner.md#cost-based-join-order-enumeration)).
-  A conjunct can therefore appear on an earlier join than the `ON` it was written in, and a
-  cross-table `WHERE` conjunct such as `c.z = a.z` can appear on a join instead of after the last
-  join. `nested-loop-join` and `index-nested-loop-join` render the whole `on=` predicate of the join.
+  Where the query text writes the conjunct does not decide its place. A conjunct can therefore
+  appear on an earlier join than the `ON` it was written in. A cross-table `WHERE` conjunct such as
+  `c.z = a.z` can move from the filter after the last join onto a join. `nested-loop-join` and
+  `index-nested-loop-join` render the `on=` predicate of the join in full.
   `hash-join` and `merge-join` render only their key pairs: an equi-conjunct that moved into the join
   shows up as one more key (`on=b.y=y, a.z=z`), and a conjunct that is not a key is evaluated in the
   join but is not shown. A key computed from an expression shows the expression in parentheses
-  (`on=(n.n * 0.5)=f`); see [Expression keys](joins.md#expression-keys). The filter that runs after the last join is not a plan node, so it is not
-  shown either. A `nested-loop-join(on=true, …)` is a cross product: the planner keeps one only when
-  the predicates need it (no conjunct connects the two sides).
+  (`on=(n.n * 0.5)=f`); see [Expression keys](joins.md#expression-keys). The filter applied after the
+  last join is not a plan node and is not shown either. A `nested-loop-join(on=true, …)` is a cross
+  product. The planner uses one only if the predicates need it (no conjunct connects the two sides).
 
 > **The plan reflects the active planner config.** Which access path a table uses, and the order
 > of join nodes, depend on whether the cost-based optimizer is enabled. By default
 > `cost_based_access_path_enabled` and `cost_based_join_order_enabled` are on; with them off, `EXPLAIN`
 > shows the heuristic plan. With statistics collected (run `ANALYZE <table>`) the cost-based passes
-> can show a different (cheaper) index or join order than without — the output is correct for
-> whatever configuration produced it. See
+> can show a different (cheaper) index or join order than before statistics exist. The output is
+> correct for whatever configuration produced it. See
 > [`docs/query-planner.md` → Part V](./query-planner.md#part-v--the-cost-based-optimizer).
 
 The examples below focus on the `stage` / `node` / `detail` columns (the stable part of the
-output). Every row also carries `estimated_rows` / `estimated_cost` as described above; the
+output). Each row also carries `estimated_rows` / `estimated_cost` as described above; the
 `EXPLAIN ANALYZE` examples show the full column set.
 
 ## Trailing informational rows
@@ -385,19 +397,19 @@ operators — `estimated_rows` / `estimated_cost` are `NULL` — but they surfac
 | `plan-info` | When the plan carries a shape id (plan-cache metadata) | `shape=<id>, schema-deps=[table@version, ...]` |
 | `cache`     | When the query carries a `{cache=…}` (or `@{cache=…}`) result-cache hint | `family=<name>, eligible=<true\|false>[, reason=<why>], ttl=<n>ms\|default, strict=<true\|false>` |
 
-The `cache` row reports **whether this result will be cached**, as a static plan property. It does
+The `cache` row shows **whether this result will be cached**, as a static plan property. It does
 **not** probe the cache or reveal whether a live entry currently exists (that is inherently racy;
 the authoritative run-time outcome is in the query response's `cacheStatus`). `eligible=true` means
-the query is a cacheable shape and the feature is on. `eligible=false` names why the hint will be
-ignored:
+the query is a cacheable shape and the feature is on. With `eligible=false`, the `reason` says why
+the hint will be ignored.
 
-- `reason=join` — the query is a join; only single-table results are cached, so the hint is inert.
+- `reason=join` — the query is a join. Only single-table results are cached, and the hint is inert.
 - `reason=cache-disabled` — the result cache is off (`query_result_cache_enabled: false`).
 
 `ttl` and `strict` echo the hint's options (`ttl=default` when no `ttl=` was given). Eligibility
 here is the plan-level view; at run time the cache additionally applies only to autocommit reads —
-an explicit transaction always reads live storage. A query with no `{cache=…}` hint emits no
-`cache` row. See [`docs/query-result-cache.md`](./query-result-cache.md) for the full feature.
+an explicit transaction always reads live storage. The `cache` row is emitted only for a query that
+carries a `{cache=…}` hint. See [`docs/query-result-cache.md`](./query-result-cache.md) for the full feature.
 
 ---
 
@@ -436,8 +448,8 @@ types it is half-open (`>= value`, `< successor(value)`), as shown above. When t
 successor — a **`String`/`Id`/`date`/`datetime`/`float32`/`bytes`** column, a value at its type's
 maximum (`true`, the largest `int64`), or a descending column — it uses an **inclusive
 `[value, value]`** range instead
-(`from>=value, to<=value`); the scan engine appends a high sentinel internally to capture every
-`encode(value)+rowId` index entry and then trims to exact-key matches. Either way the result is the same
+(`from>=value, to<=value`); the scan engine appends a high sentinel internally to capture all
+`encode(value)+rowId` index entries and then trims to exact-key matches. Either way the result is the same
 set of rows — only the bound rendering differs. The `index-lookup` node only appears for **unique** index
 equality (primary key or `UNIQUE` constraint), where at most one row can match.
 
@@ -454,7 +466,7 @@ stage     node          detail
 physical  index-lookup  index=~pk, key='507f1f77bcf86cd799439011'
 ```
 
-Because `~pk` is unique, the planner issues a single point-lookup rather than a range scan.
+Because `~pk` is unique, the planner issues a single point-lookup. A range scan is not needed.
 
 ---
 
@@ -473,8 +485,8 @@ physical  index-range-scan   index=year_idx, from>=2020
 The `year >= 2020` predicate drives an index range scan; `name = 'Bishop'` cannot be pushed into
 the index and appears as a residual `filter` above the scan.
 
-> **Tree depth in result rows:** the `node` column contains the bare node name with no leading
-> spaces. The `depth` column gives the level that the indentation shows here: `0` for the root, `1`
+> **Tree depth in result rows:** the node name in the `node` column is not indented. The `depth`
+> column gives the level that the indentation shows here: `0` for the root, `1`
 > for its child, and so on.
 
 ---
@@ -492,28 +504,28 @@ physical  table-scan  table=robots
 ```
 
 A grouping whose only `ORDER BY` key is an aggregate alias, with a `LIMIT`, adds `top_k` to the
-aggregate row. `k` is `OFFSET + LIMIT`:
+aggregate row, where `k` is `OFFSET + LIMIT`. In the following query, `k` is 6.
 
 ```sql
 EXPLAIN SELECT name, MAX(year) AS m FROM robots GROUP BY name ORDER BY m DESC LIMIT 5 OFFSET 1;
 ```
 
-The aggregate row of that plan:
+The aggregate row of that plan shows the `top_k` detail.
 
 ```
 physical  aggregate   group=[name], aggs=[max(year)], top_k=[m DESC, k: 6]
 ```
 
 The planner shows `top_k` for `COUNT` descending, `MAX` descending, and `MIN` ascending on a NOT NULL
-column, when the query has no `HAVING`. The shape lets the engine read or send fewer groups:
+column, when the query does not use `HAVING`. In two cases, the engine uses this shape to read or
+send fewer groups.
 
-- In a cluster, for `MAX` descending or `MIN` ascending with no other aggregate in the select list,
-  each span sends only its local top k groups to the coordinator.
+- In a cluster, for `MAX` descending or `MIN` ascending when it is the only aggregate in the select
+  list, each span sends only its local top k groups to the coordinator.
 - When a `COUNT` grouping spills to disk, a spill partition that cannot hold a result group is not
   read back.
 
-The query result is the same as without these steps. The detail text is the only change to the
-plan.
+These steps do not change the query result. The detail text is the only change to the plan.
 
 ---
 
@@ -550,15 +562,15 @@ physical  hash-join   on=o.id=order_id, build=li
 physical  table-scan  table=orders
 ```
 
-The plan walk follows the left input of each join, so the right input (`line_items`) has no row
-of its own; the join line names it (`build=li`).
+The plan walk follows the left input of each join. The right input (`line_items`) does not get a
+separate row, and the join line names it (`build=li`).
 
 `build=li` means `line_items` is materialized into the in-memory hash table; `orders` is
 streamed as the probe side. The planner chose `li` as the build side because it estimated
 fewer rows than `orders`. When the build side passes the spill caps (500 000 rows or 256 MiB of
-estimated bytes by default), the join runs as a Grace hash join over spill files. With spill off, a
-build side above `HashJoinMaxBuildRows` (default 1 000 000) or `HashJoinMaxBuildBytes` estimated
-bytes (default 1 GiB) falls back to a nested-loop join.
+estimated bytes by default), the join is executed as a Grace hash join over spill files. With
+spill off, a build side above `HashJoinMaxBuildRows` (default 1 000 000) or `HashJoinMaxBuildBytes`
+estimated bytes (default 1 GiB) makes the join switch to a nested-loop join.
 
 ---
 
@@ -579,8 +591,8 @@ physical  merge-join        on=o.ext_key=order_id, right-order=forced-index=li_o
 physical  table-scan        table=orders, forced-index=orders_ext_key_idx
 ```
 
-Both sides use a `forced-index` scan so their rows arrive in join-key order: the left one has its
-own row, and the right one is named by `right-order` on the join line (`right-order=sort` when the
+Both sides use a `forced-index` scan so their rows arrive in join-key order. The left side has a
+separate row, and the right side is named by `right-order` on the join line (`right-order=sort` when the
 right side is sorted instead). The executor streams
 both sides simultaneously and buffers only the current equal-key run — no full materialization
 of either side. `LeftIsOrdered = RightIsOrdered = true` on the `MergeJoinNode`.
@@ -600,7 +612,7 @@ physical  table-scan  table=robots
 ```
 
 Because the inner column `owners.id` is indexed, the `IN` is executed as an index-probing
-semi-join instead of materializing the subquery. `NOT IN` produces `anti-join`
+semi-join, and the subquery is not materialized. `NOT IN` produces `anti-join`
 (NOT NULL inner column) or `null-aware-anti-join` (nullable inner column). When the inner
 column is not indexed, no join node appears — the subquery is materialized.
 
@@ -617,19 +629,20 @@ stage     node              detail
 physical  index-range-scan  index=year_idx
 ```
 
-No `sort` node appears: the index scan already guarantees the requested ordering, so the sort
+No `sort` node appears. The index scan already guarantees the requested ordering, and the sort
 is elided.
 
-The same holds for streaming grouping and streaming `DISTINCT`. An `aggregate(... streaming: true)`
-emits its groups in the order of the index it reads, so `ORDER BY` on the grouping columns in that
-order and direction (or on their output aliases) needs no sort:
+This also applies to streaming grouping and streaming `DISTINCT`. An `aggregate(... streaming: true)`
+emits its groups in the order of the index it reads. This means that `ORDER BY` on the grouping
+columns in that order and direction (or on their output aliases) does not need a sort, as in this
+query.
 
 ```sql
 EXPLAIN SELECT status, COUNT(*) AS cnt FROM sales GROUP BY status ORDER BY status LIMIT 20;
 ```
 
 There is no `sort` row, and the `LIMIT` stops the scan after 20 groups. `ORDER BY` in the other
-direction, or on an aggregate (`ORDER BY cnt`), keeps the `sort`.
+direction, or on an aggregate (`ORDER BY cnt`), needs a `sort`.
 
 ---
 
@@ -645,7 +658,7 @@ physical  limit       10
 physical  table-scan  table=robots
 ```
 
-The scan stops reading after the first 10 rows rather than scanning the entire table.
+The scan stops reading after the first 10 rows and does not scan the entire table.
 
 ---
 
@@ -660,8 +673,8 @@ stage    node        detail        estimated_rows  estimated_cost  actual_rows  
 analyze  table-scan  table=robots  42              42.0            42           42         3.1             0           42
 ```
 
-The table contains 42 rows, no filter, so `actual_rows` = `rows_read` = `kv_scan_entries` =
-42. `actual_time_ms` is only populated on the **root** node (the outermost operator).
+The table contains 42 rows and there is no filter. This means that `actual_rows` = `rows_read` =
+`kv_scan_entries` = 42. The scan is the root row, so its `actual_time_ms` is the total time of the plan.
 
 ---
 
@@ -676,12 +689,12 @@ EXPLAIN (ANALYZE) SELECT * FROM robots WHERE year = 2022 LIMIT 5;
 ```
 stage    node               detail                                estimated_rows  estimated_cost  actual_rows  rows_read  actual_time_ms  kv_scan_entries  kv_lookups
 analyze  limit              5                                     5               6.0             3            0          14.2             0                0
-analyze  index-range-scan   index=year_idx, from>=2022, to<2023   ...             ...             3            3          NULL             3                0
+analyze  index-range-scan   index=year_idx, from>=2022, to<2023   ...             ...             3            3          13.8             3                0
 ```
 
-- `limit` node: emits 3 rows (fewer than the cap of 5); `actual_time_ms` = 14.2 ms (total
-  plan time, root node only).
-- `index-range-scan` node: 3 `kv_scan_entries` (index entries in `[2022, 2023)`), 3
+- `limit` node: emits 3 rows (fewer than the cap of 5); `actual_time_ms` = 14.2 ms, the total
+  plan time, because `limit` is the root row.
+- `index-range-scan` node: `actual_time_ms` = 13.8 ms, which is part of the 14.2 ms of the `limit` row. 3 `kv_scan_entries` (index entries in `[2022, 2023)`), 3
   `rows_read` (rows fetched), 3 `actual_rows` (all passed; no residual predicate).
 
 (`estimated_*` are cost-model estimates and vary with collected statistics.)
@@ -690,8 +703,8 @@ analyze  index-range-scan   index=year_idx, from>=2022, to<2023   ...           
 
 ### EXPLAIN ANALYZE — a join chain
 
-JOB query 1a on a small synthetic copy of the IMDB data, after `ANALYZE` of every table
-(abridged detail, estimated cost and time columns left out):
+This example is JOB query 1a on a small synthetic copy of the IMDB data, after `ANALYZE` of each
+table. The detail is abridged, and the estimated cost and time columns are left out.
 
 ```sql
 EXPLAIN (ANALYZE)
@@ -717,18 +730,18 @@ table-scan              table=company_type                                      
 ```
 
 Read it from the bottom. One company type passes its filter. The first join probes the
-non-unique `company_type_id_movie_companies` index for it, visits 1163 entries, fetches 1162
-rows and keeps the 54 that pass the right-side filter. The plan annotation estimated 1 row at
-every step, because it estimates one row for each outer row of an index-nested-loop join. The
-join-order search estimated 65, 63, 6 and 6, which is much closer to the actual 54, 88, 6 and 6.
-The `it` join fetches 88 rows by primary key and keeps 6: its filter runs after the fetch.
+non-unique `company_type_id_movie_companies` index for it, visits 1163 entries and fetches 1162
+rows. Of those rows, 54 pass the right-side filter. The plan annotation estimated 1 row at each
+step. It estimates one row for each outer row of an index-nested-loop join. The join-order search
+estimated 65, 63, 6 and 6, which is much closer to the actual 54, 88, 6 and 6. The `it` join
+fetches 88 rows by primary key, and 6 of them pass. Its filter is applied after the fetch.
 
 ---
 
 ## Verbose / distributed-properties mode
 
 `PlanRenderer.Render(plan, includeDistributedProperties: true)` appends distribution
-metadata to each node line:
+metadata to each node line, as in this example.
 
 ```
 table-scan(table=robots) order=[year ASC] decomposable=true dist=partitioned(id)
@@ -738,7 +751,7 @@ table-scan(table=robots) order=[year ASC] decomposable=true dist=partitioned(id)
 |-------------------|---------|
 | `order=[...]`     | The ordering this node guarantees on its output (e.g. an index scan that satisfies `ORDER BY`). Absent when ordering is undefined. |
 | `decomposable=true/false` | Whether the node's work can be split into per-partition local computation plus a coordinator-side merge. Always `false` for sort and limit nodes. `aggregate` is `true` only for `COUNT`/`SUM`/`MIN`/`MAX`; `AVG` is `false`. |
-| `dist=...`        | How this node's output rows are distributed across the cluster: `gathered` (single-node / point lookup / sharding off), `partitioned(col1,col2)` (range-sharded by these key columns), or `replicated`. Set only on scan leaves; absent on pipeline nodes. With key-range sharding off, every scan is `gathered`. |
+| `dist=...`        | How this node's output rows are distributed across the cluster: `gathered` (single-node / point lookup / sharding off), `partitioned(col1,col2)` (range-sharded by these key columns), or `replicated`. Set only on scan leaves; absent on pipeline nodes. With key-range sharding off, all scans are `gathered`. |
 
 This mode is used by internal tooling and tests; it is not exposed through the SQL `EXPLAIN`
 statement.
@@ -746,21 +759,21 @@ statement.
 When `distributed_query_execution` is enabled, ordinary `EXPLAIN` instead shows a `gather`
 node for an eligible multi-span primary-row scan and a `distribution` row with
 `distributed=yes`. If the scan does not qualify, the row says `distributed=no` and gives the
-reason. A gather can run eligible fragments on peer leaders; its presence alone does not mean
-every span was dispatched remotely. `EXPLAIN (ANALYZE)` adds a `gather-span` row per span to
+reason. A gather can run eligible fragments on peer leaders. However, a gather in the plan does
+not by itself mean that all spans were dispatched remotely. `EXPLAIN (ANALYZE)` adds a `gather-span` row per span to
 show which spans ran remotely, how many rows the peer scanned and shipped, and whether the span
 fell back to local execution. A hash join that ran as a broadcast probe adds a `broadcast-span`
-row per probed span, with the same detail; for a remote span, `actual_rows` counts only the
-probe rows that matched, because the peer ships nothing else. Partial aggregation is disabled under `ANALYZE`, so the reported
-plan is the row-gather path that actually ran. See [query planning](query-planner.md#part-iv--distributed-ready-plan-properties)
+row per probed span, with the same detail. For a remote span, `actual_rows` counts only the
+probe rows that matched. The peer ships only those rows. Partial aggregation is disabled under
+`ANALYZE`. This means that the plan shown is the row-gather path that was executed. See [query planning](query-planner.md#part-iv--distributed-ready-plan-properties)
 for eligibility and operator limits.
 
 ---
 
 ## Notes on filter stats in EXPLAIN ANALYZE
 
-A `filter` is **folded into the scan** during execution: the predicate is evaluated inside the
-scan loop, not as a separate pipeline stage. As a result:
+A `filter` is **folded into the scan** during execution. The predicate is evaluated in the scan
+loop, and the filter is not a separate pipeline stage. This changes the counters of a `filter` row.
 
 - `filter` rows in `EXPLAIN ANALYZE` show `actual_rows` equal to the scan's post-filter emit
   count (the rows that passed the predicate).
@@ -768,4 +781,4 @@ scan loop, not as a separate pipeline stage. As a result:
   attributed to the scan node directly below.
 - `actual_time_ms` is `NULL` (filter evaluation time is not separately measured; it is
   included in the scan's wall clock, reported only on the root node). When the filter is the
-  root node, it carries the time of the whole plan, as every root node does.
+  root node, it carries the total time of the plan, as each root node does.

@@ -1,10 +1,10 @@
 # CamusDB .NET gRPC Client (`CamusDB.Grpc.Client`)
 
 `CamusDB.Grpc.Client` is the .NET client library for CamusDB's gRPC API. It is a **multiplexing**
-client: many concurrent operations — including many concurrent transactions — share a small pool of
-long-lived `BatchExecute` streams, so the network stays busy without a stream per call. You work with
-`CamusConnection` and `CamusTransactionSession`; the batching, request/response correlation, stream
-routing, and reconnect are handled for you.
+client: many concurrent operations, including many concurrent transactions, share a small pool of
+long-lived `BatchExecute` streams. Sharing the streams keeps the network busy and avoids opening a
+stream for each call. You work with `CamusConnection` and `CamusTransactionSession`. The library handles
+batching and request/response correlation, as well as stream routing and reconnects.
 
 This guide covers using the library. For the language-agnostic wire contract it speaks (value encoding,
 schema-first streaming, the causal token, the batching handshake, the error taxonomy) see
@@ -35,7 +35,7 @@ Use `http://…` for plaintext HTTP/2 (`h2c`) in local dev, or `https://…` wit
 
 ## Autocommit statements
 
-Each call runs in its own short transaction and commits:
+Each autocommit call is executed and committed in a separate short transaction.
 
 ```csharp
 NonQueryResult insert = await conn.ExecuteNonQueryAsync(
@@ -55,21 +55,21 @@ foreach (ResultRow row in result.Rows)
   schema's `ColumnType` (`Int64Value`, `StringValue`, `IdValue`, `UuidValue`, `DateValue`, …). See the
   protocol doc §2 for the exact encoding (e.g. dates are raw UTC ticks, UUIDs are 16 big-endian bytes).
 - A NUMERIC cell is `NumericValue`, the exact decimal text. `CamusValue.TryGetDecimal(value, out decimal d)`
-  reads it as a `decimal` when a `decimal` holds it exactly. It returns false for a value with more
+  reads it as a `decimal` when a `decimal` can represent it exactly. It returns false for a value with more
   than 28 or 29 significant digits, for example `123456789012345678901.123456789`; keep the text for
-  such a value. A `decimal` parameter binds as NUMERIC with every digit, never through a double.
+  such a value. A `decimal` parameter binds as NUMERIC with all of its digits. It is never converted through a double.
 - A `jsonb` cell is `JsonValue`, the document's JSON text (the PostgreSQL form, numbers exact).
   `CamusValue.TryGetJson(value, out string json)` reads it. A `JsonDocument`, `JsonElement` or
-  `JsonNode` parameter binds as `jsonb` with its text unchanged. A `string` parameter stays a STRING,
+  `JsonNode` parameter binds as `jsonb` with its text unchanged. A `string` parameter binds as a STRING,
   which a `jsonb` column parses when it is written.
 - Autocommit calls run **concurrently** — fire many and `await Task.WhenAll` them; they pipeline over
   the pool.
 
 ### `RETURNING`
 
-`ExecuteNonQueryAsync` never fails because a statement returns rows. For an `INSERT`, `UPDATE` or
+`ExecuteNonQueryAsync` does not fail when a statement returns rows. For an `INSERT`, `UPDATE` or
 `DELETE` with a `RETURNING` list, `NonQueryResult` carries the count as always, and the RETURNING rows
-beside it:
+beside it.
 
 ```csharp
 NonQueryResult inserted = await conn.ExecuteNonQueryAsync(
@@ -80,19 +80,20 @@ string id = inserted.ReturningRows![0].Values[0].IdValue;        // aligns to Re
 ```
 
 - `ReturningSchema` and `ReturningRows` use the same types as `QueryResult.Schema` and
-  `QueryResult.Rows`. Both are null for a statement without RETURNING. `ReturningSchema` is not null,
+  `QueryResult.Rows`. Both are null when the statement has no RETURNING list. `ReturningSchema` is not null,
   with an empty `ReturningRows`, when the statement wrote no rows.
 - `ExecuteQueryAsync` with the same statement returns an ordinary `QueryResult`.
 - To get the count only, use the overload with `discardReturningRows: true`. It exists on
-  `CamusConnection`, `CamusTransactionSession` and `CamusPreparedStatement`. The server still checks
-  the RETURNING list and the SELECT privilege.
-- All rows of a no-rows reply travel in one message. A result larger than 4 MiB fails with
-  `CADB0550` and changes nothing; use `ExecuteQueryAsync` or the count-only overload for it.
+  `CamusConnection`, `CamusTransactionSession` and `CamusPreparedStatement`. Note that the server
+  checks the RETURNING list and the SELECT privilege in this case too.
+- All rows of a no-rows reply travel in one message. A result larger than 4 MiB returns
+  `CADB0550`, and the statement makes no change. For such a result, use `ExecuteQueryAsync` or the
+  count-only overload.
 
 ## Prepared statements
 
-Register a parameterized statement once and execute it with values only — the SQL and the parameter
-names stop travelling per execution, and the server stops re-parsing the statement to route it:
+Register a parameterized statement once and execute it with values only. The SQL and the parameter
+names are not sent with each execution, and the server does not re-parse the statement to route it.
 
 ```csharp
 await using CamusPreparedStatement insert = await conn.PrepareAsync(
@@ -103,12 +104,12 @@ await insert.ExecuteNonQueryAsync(["gadget"]);
 ```
 
 Values bind by ordinal against `insert.ParameterNames`. The statement re-registers itself
-transparently when a pooled stream is rebuilt, so handles and streams never surface to the caller.
-See [prepared-statements.md](prepared-statements.md).
+transparently when a pooled stream is rebuilt. This means that handles and streams are not exposed to
+the caller. For more information, see [prepared-statements.md](prepared-statements.md).
 
 ## DDL
 
-DDL is **not** batched — it goes over the unary RPC — but the API is the same shape:
+DDL is **not** batched. It goes over the unary RPC, with an API of the same shape as the batched calls.
 
 ```csharp
 await conn.ExecuteDdlAsync("", "CREATE DATABASE mydb");
@@ -118,7 +119,7 @@ await conn.ExecuteDdlAsync("mydb", "CREATE TABLE items (id oid PRIMARY KEY, name
 ## Node stats
 
 `GetNodeStatsAsync` returns the disk, CPU and memory of one node (the `GetNodeStats` RPC; see
-[node-stats.md](node-stats.md) for every field). It is a unary call, like DDL:
+[node-stats.md](node-stats.md) for the fields). It is a unary call, like DDL.
 
 ```csharp
 NodeStatsReply stats = await conn.GetNodeStatsAsync();            // the first configured address
@@ -157,16 +158,16 @@ catch (CamusGrpcException ex)
 }
 ```
 
-Rules:
+A transaction session follows these rules.
 
-- **Issue a transaction's statements sequentially** — `await` each before the next. The whole unit of
+- **Issue a transaction's statements sequentially** — `await` each before the next. The unit of
   work (begin → statements → commit) pipelines over one stream, but within a transaction the calls are
   ordered, and that order gives read-your-writes.
 - The library pins a session's ops to a single stream automatically (so the server orders them) and
   threads the causal token forward for you. You don't manage handles or tokens.
 - After `CommitAsync`/`RollbackAsync` the session is finalized; using it again throws.
-- If the connection/stream drops after a `BeginTransactionAsync` without a commit, the server rolls the
-  transaction back — no orphaned transactions.
+- If the connection/stream drops after a `BeginTransactionAsync` and before a commit, the server rolls
+  the transaction back. This means that no transaction is left orphaned.
 
 ## Options (`CamusGrpcOptions`)
 
@@ -200,27 +201,27 @@ await using CamusConnection conn = CamusConnection.Connect("https://host:5096", 
 
 ## Learned multi-endpoint routing (optional)
 
-`Connect` also accepts a list of addresses, and `options.Routing` configures learned statement
+`Connect` can also take a list of addresses, and `options.Routing` configures learned statement
 routing over them: a trust map from server node identities to configured addresses, a mode
 (`Auto` default, `Learned`, `Off`), cache bounds, hint age and endpoint cooldown. With routing on,
 repeated eligible statements are sent straight to the node that leads their data; a transaction
 defers its START to its first statement and sends it on that statement's learned endpoint (or,
 with `BeginTransactionAsync(..., affinity: statement)`, starts at once on the warmed statement's
-endpoint), and stays pinned there. The wire contract, eligibility, and the exact client
-semantics are in [sql-routing-advice.md](sql-routing-advice.md). Routing changes no result and
-adds no retry. Under the `Auto` default the trust map is the opt-in: with no `NodeAddresses`
-(every pre-routing configuration) nothing is negotiated and behavior is exactly pre-routing;
+endpoint). The transaction is then pinned to that endpoint. For the wire contract and the exact
+client semantics, including eligibility, see [sql-routing-advice.md](sql-routing-advice.md). Routing changes no result and
+adds no retry. Under the `Auto` default the trust map is the opt-in. When `NodeAddresses` is empty, as in all
+pre-routing configurations, routing is not negotiated and behavior is exactly pre-routing.
 `Mode = Off` is the explicit kill switch.
 
 ## Errors and retries
 
 A failed call throws `CamusGrpcException` whose **`Code`** is the `CADBxxxx` domain code — branch on the
-code, never the message. The retryable family and how to retry are defined in the protocol doc §8. In
-short:
+code, never the message. The retryable family and how to retry are defined in the protocol doc §8. The
+rules depend on whether the call is part of a transaction.
 
 - Autocommit call, retryable code (`CADB0502` / `CADB0504` / `CADB0505`): re-issue the call.
-- **Transactional** retryable failure kills the transaction — replay the **whole unit of work** under a
-  fresh `BeginTransactionAsync`, not just the failed statement.
+- **Transactional** retryable failure kills the transaction. Replay the **unit of work** from the
+  start, under a fresh `BeginTransactionAsync`. Replaying the failed statement alone is not enough.
 - `CADB0509` on commit: retry the *same* `CommitAsync` on the same session.
 
 The library does not auto-retry (a streaming query may have already surfaced rows); replay is yours to
@@ -228,7 +229,7 @@ decide, matching the "retry only pre-first-write" contract.
 
 ## Causal token (advanced)
 
-Every `QueryResult` / `NonQueryResult` exposes a `CausalToken (N, L, C)`. Within a session it is threaded
+Each `QueryResult` / `NonQueryResult` exposes a `CausalToken (N, L, C)`. Within a session it is threaded
 automatically for read-your-writes. You only need to touch it for causality **across** sessions/
 connections — carry the latest token forward yourself. All three components matter; don't drop `N`
 (see protocol doc §4.2).

@@ -28,8 +28,8 @@ namespace CamusDB.Core.Catalogs.Transactional;
 /// <list type="number">
 /// <item><b>Prepare</b>, before the KV commit request leaves the node. Write the decision key
 /// <c>{dbId}/meta/ddlcommit:{id}</c> = committed into the transaction, after an exclusive lock and a read
-/// that finds it absent; write the history key of every new table layout into the transaction; then
-/// propose a <see cref="SchemaOp.PendingChangeSet"/> entry. Its apply refuses the change set when the
+/// that finds it absent; write the history key of every new table layout into the transaction, each under a
+/// lock with a lease; then propose a <see cref="SchemaOp.PendingChangeSet"/> entry. Its apply refuses the change set when the
 /// schema moved since the transaction's first schema change, and otherwise reserves the schema for it and
 /// fences its tables. The step ends when every live node applied the entry; a quorum is not enough,
 /// because the rows commit next.</item>
@@ -47,9 +47,18 @@ namespace CamusDB.Core.Catalogs.Transactional;
 /// proposes the abort. The transaction's own read under the lock then finds <c>aborted</c> and refuses
 /// its commit. One of the two writes the key, never both.</para>
 ///
+/// <para><b>The locks of the prepare have a lease</b> (<see cref="StagedKeyLeaseMs"/>). The node that
+/// runs the transaction can die between the prepare and the KV commit. A lock tied to its session would then
+/// live as long as a session can, and the change set would stay pending for all of it. With a lease, the resolver gets the
+/// decision key when the lease ran out, and a commit that comes after that is refused for certain
+/// (<see cref="CatalogKeyLock"/>). The other keys of the prepare have the same lease, so that the statements
+/// and the removals that write them next do not wait for a transaction that is gone either.</para>
+///
 /// <para><b>Elements staged on shared tables.</b> The prepare also deletes, in the transaction, the
 /// coordinator job record of every element the transaction staged on a shared table
-/// (<see cref="TransactionSchemaOverlay.OwnedJobs"/>). The KV commit makes the delete permanent together
+/// (<see cref="TransactionSchemaOverlay.OwnedJobs"/>), after it read the record under its lock. A record that
+/// is gone means that the coordinator's resume removed the element, because the transaction lost the DDL
+/// lock, and the commit is refused. The KV commit makes the delete permanent together
 /// with the rows, so a record that names the change set as its owner always means that the transaction
 /// did not commit, and the coordinator's resume removes the element. A transaction whose only schema
 /// changes are staged CHECK or NOT NULL constraints has no delta: those constraints are in the shared
@@ -80,16 +89,26 @@ internal sealed class ChangeSetCommitter
 
     private const int DecisionKeyLockAttempts = 32;
 
+    /// <summary>What the lease of a staged key has left when the pending entry used its whole acknowledgement wait.</summary>
+    private const int StagedKeyLeaseMarginMs = 15_000;
+
+    /// <summary>
+    /// The lease of the locks that a commit's prepare takes. Long enough for the wait for every live node to
+    /// acknowledge the pending entry, which comes between the prepare and the KV commit.
+    /// </summary>
+    internal static int StagedKeyLeaseMs(DatabaseDescriptor database) =>
+        (int)Math.Min(int.MaxValue, database.Kahuna.SchemaAckWaitTimeout.TotalMilliseconds + StagedKeyLeaseMarginMs);
+
     private readonly CatalogsManager catalogs;
 
     private readonly ILogger logger;
 
     /// <summary>
-    /// Test-only: when set, the publish after a KV commit fails with this exception, so a test can drive
-    /// the path where the rows are committed and the publish is not confirmed. Per committer, never
-    /// static. Null in production; a test clears it after use.
+    /// Test-only: awaited at each <see cref="ChangeSetStep"/> of a commit or a rollback. A fault test stops
+    /// the driver here with a task that never ends, fails it with a task that throws, or moves a leader
+    /// while it waits. Per committer, never static. Null in production; a test clears it after use.
     /// </summary>
-    internal Exception? TestPublishFailure;
+    internal Func<ChangeSetStep, Task>? TestAtStep;
 
     internal ChangeSetCommitter(CatalogsManager catalogs, ILogger logger)
     {
@@ -129,13 +148,14 @@ internal sealed class ChangeSetCommitter
         overlay.MarkPreparing();
 
         IKahuna kahuna = database.Kahuna.Kahuna;
+        int leaseMs = StagedKeyLeaseMs(database);
 
         overlay.AllowsCatalogWrites = true;
         try
         {
             string decisionKey = MetaKeys.ChangeSetDecisionKey(database.Id, overlay.ChangeSetId);
 
-            await CatalogKeyLock.AcquireExclusiveAsync(kahuna, tx, decisionKey, DecisionKeyLockAttempts, "decision").ConfigureAwait(false);
+            await CatalogKeyLock.AcquireExclusiveAsync(kahuna, tx, decisionKey, DecisionKeyLockAttempts, "decision", leaseMs).ConfigureAwait(false);
 
             if (await ReadDecisionAsync(kahuna, tx.TransactionId, decisionKey, cancellationToken).ConfigureAwait(false) is not null)
                 throw new CamusDBException(
@@ -143,19 +163,24 @@ internal sealed class ChangeSetCommitter
                     $"The schema changes of transaction {tx.UniqueId} were aborted while it committed; nothing was " +
                     "committed, retry the transaction from BEGIN");
 
-            await MetaKeyWriter.WriteMetaKey(kahuna, tx, decisionKey, CommittedDecision).ConfigureAwait(false);
+            await MetaKeyWriter.WriteMetaKey(kahuna, tx, decisionKey, CommittedDecision, leaseMs).ConfigureAwait(false);
 
             foreach ((string tableId, string elementName) in overlay.OwnedJobs)
-                await MetaKeyWriter.DeleteMetaKey(kahuna, tx, MetaKeys.CoordinatorKey(database.Id, tableId, elementName)).ConfigureAwait(false);
+                await DeleteOwnedJobRecordAsync(database, overlay, tx, tableId, elementName, leaseMs).ConfigureAwait(false);
 
-            await WriteNewLayoutsAsync(database, overlay, tx).ConfigureAwait(false);
+            await WriteNewLayoutsAsync(database, overlay, tx, leaseMs).ConfigureAwait(false);
 
-            await WriteDeferredPurgesAsync(database, overlay, tx).ConfigureAwait(false);
+            await WriteDeferredPurgesAsync(database, overlay, tx, leaseMs).ConfigureAwait(false);
+
+            // Starts the lease again, so the decision key is the last of the staged keys that others get.
+            await CatalogKeyLock.AcquireExclusiveAsync(kahuna, tx, decisionKey, DecisionKeyLockAttempts, "decision", leaseMs).ConfigureAwait(false);
         }
         finally
         {
             overlay.AllowsCatalogWrites = false;
         }
+
+        await AtStepAsync(ChangeSetStep.Staged).ConfigureAwait(false);
 
         // Only staged constraints: nothing to announce, and nothing to publish after the KV commit.
         if (!overlay.HasChanges)
@@ -203,7 +228,20 @@ internal sealed class ChangeSetCommitter
                 database.Schema.ReleaseLock();
             }
 
-            await catalogs.ProposeChangeSetEntryAsync(database, pending).ConfigureAwait(false);
+            try
+            {
+                await catalogs.ProposeChangeSetEntryAsync(database, pending).ConfigureAwait(false);
+            }
+            catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.InvalidInternalOperation && !database.SchemaSubsystemDegraded)
+            {
+                // No leader of the schema log answered, or the entry was not confirmed in time. The KV
+                // commit never starts after this, so the client can run the transaction again.
+                throw new CamusDBException(
+                    CamusDBErrorCodes.TransactionMustRetry,
+                    $"The schema changes of transaction {tx.UniqueId} could not be announced: {ex.Message}; nothing was " +
+                    "committed, retry the transaction from BEGIN",
+                    ex);
+            }
 
             overlay.MarkPending();
         }
@@ -211,6 +249,8 @@ internal sealed class ChangeSetCommitter
         {
             database.SchemaDdlSemaphore.Release();
         }
+
+        await AtStepAsync(ChangeSetStep.Announced).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -246,8 +286,12 @@ internal sealed class ChangeSetCommitter
         {
             try
             {
+                await AtStepAsync(ChangeSetStep.Aborting).ConfigureAwait(false);
+
                 if (overlay.HasChanges && IsPendingInLog(database, overlay.ChangeSetId))
                     await DecideAsync(database, overlay.ChangeSetId, publish: false).ConfigureAwait(false);
+
+                await AtStepAsync(ChangeSetStep.Aborted).ConfigureAwait(false);
 
                 // Before the DDL lock is freed: the rollback work removes the elements the transaction
                 // staged on shared tables, and the coordinator's resume removes them too once the lock is
@@ -309,7 +353,12 @@ internal sealed class ChangeSetCommitter
 
         try
         {
+            await AtStepAsync(ChangeSetStep.RowsCommitted).ConfigureAwait(false);
+
             confirmed = await PublishAndConfirmAsync(database, overlay.ChangeSetId).ConfigureAwait(false);
+
+            if (confirmed)
+                await AtStepAsync(ChangeSetStep.Published).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -350,9 +399,6 @@ internal sealed class ChangeSetCommitter
     /// </summary>
     private async Task<bool> PublishAndConfirmAsync(DatabaseDescriptor database, string changeSetId)
     {
-        if (TestPublishFailure is { } fault)
-            throw fault;
-
         if (IsPendingInLog(database, changeSetId)
             && await DecideAsync(database, changeSetId, publish: true).ConfigureAwait(false))
             return true;
@@ -383,8 +429,12 @@ internal sealed class ChangeSetCommitter
         {
             if (!overlay.OutcomeUnknown)
             {
+                await AtStepAsync(ChangeSetStep.Aborting).ConfigureAwait(false);
+
                 if (overlay.HasChanges && IsPendingInLog(database, overlay.ChangeSetId))
                     await DecideAsync(database, overlay.ChangeSetId, publish: false).ConfigureAwait(false);
+
+                await AtStepAsync(ChangeSetStep.Aborted).ConfigureAwait(false);
 
                 await overlay.RunOnRollbackAsync().ConfigureAwait(false);
             }
@@ -490,6 +540,30 @@ internal sealed class ChangeSetCommitter
             $"The decision key '{decisionKey}' could not be read ({type}); retry");
     }
 
+    /// <summary>
+    /// Deletes in the transaction the job record of an element it staged, and refuses the commit when the
+    /// record is not the transaction's any more. The resume deletes the record only after it removed the
+    /// element, and deletes the decision key after the last record, so a missing record is the proof that
+    /// stays. Its lock keeps the record until the commit has an outcome.
+    /// </summary>
+    private static async Task DeleteOwnedJobRecordAsync(
+        DatabaseDescriptor database, TransactionSchemaOverlay overlay, KvTransaction tx, string tableId, string elementName, int leaseMs)
+    {
+        PersistedCoordinatorJob? job = await CoordinatorJobStore.ReadLockedCoordinatorJobAsync(
+            database, tx, tableId, elementName, leaseMs).ConfigureAwait(false);
+
+        if (job is null || !string.Equals(job.OwnerChangeSetId, overlay.ChangeSetId, StringComparison.Ordinal))
+            throw new CamusDBException(
+                CamusDBErrorCodes.TransactionConflict,
+                $"'{elementName}', which transaction {tx.UniqueId} added to a table of database '{database.Name}', was removed " +
+                "while the transaction was open; nothing was committed, retry the transaction from BEGIN");
+
+        await MetaKeyWriter.DeleteMetaKey(
+            database.Kahuna.Kahuna, tx, MetaKeys.CoordinatorKey(database.Id, tableId, elementName), leaseMs).ConfigureAwait(false);
+    }
+
+    private Task AtStepAsync(ChangeSetStep step) => TestAtStep is { } hook ? hook(step) : Task.CompletedTask;
+
     private static bool IsPendingInLog(DatabaseDescriptor database, string changeSetId) =>
         database.Schema.PendingChangeSet is { } pending
         && string.Equals(pending.ChangeSetId, changeSetId, StringComparison.Ordinal);
@@ -500,7 +574,7 @@ internal sealed class ChangeSetCommitter
     /// the shared one. A node that meets a row of the transaction before it applies the publish loads
     /// the row's layout through this key, under the same commit as the row.
     /// </summary>
-    private static async Task WriteNewLayoutsAsync(DatabaseDescriptor database, TransactionSchemaOverlay overlay, KvTransaction tx)
+    private static async Task WriteNewLayoutsAsync(DatabaseDescriptor database, TransactionSchemaOverlay overlay, KvTransaction tx, int leaseMs)
     {
         Dictionary<string, int> sharedVersions = new(database.Schema.Tables.Count, StringComparer.Ordinal);
 
@@ -537,7 +611,7 @@ internal sealed class ChangeSetCommitter
                     continue;
 
                 byte[] bytes = MetaJsonSerializer.Serialize(layout, MetaJsonContext.Default.TableSchemaHistory);
-                await MetaKeyWriter.WriteMetaKey(kahuna, tx, MetaKeys.HistoryKey(database.Id, tableId, version), bytes).ConfigureAwait(false);
+                await MetaKeyWriter.WriteMetaKey(kahuna, tx, MetaKeys.HistoryKey(database.Id, tableId, version), bytes, leaseMs).ConfigureAwait(false);
             }
         }
     }
@@ -547,7 +621,7 @@ internal sealed class ChangeSetCommitter
     /// the records commit exactly when the transaction does. A run removes the data after the publish; see
     /// <see cref="DeferredPurgeRecord"/>.
     /// </summary>
-    private static async Task WriteDeferredPurgesAsync(DatabaseDescriptor database, TransactionSchemaOverlay overlay, KvTransaction tx)
+    private static async Task WriteDeferredPurgesAsync(DatabaseDescriptor database, TransactionSchemaOverlay overlay, KvTransaction tx, int leaseMs)
     {
         IKahuna kahuna = database.Kahuna.Kahuna;
 
@@ -558,7 +632,7 @@ internal sealed class ChangeSetCommitter
             record.BaseVersion = overlay.BaseVersion;
 
             byte[] bytes = MetaJsonSerializer.Serialize(record, MetaJsonContext.Default.DeferredPurgeRecord);
-            await MetaKeyWriter.WriteMetaKey(kahuna, tx, MetaKeys.PurgeKey(database.Id, record.PurgeId), bytes).ConfigureAwait(false);
+            await MetaKeyWriter.WriteMetaKey(kahuna, tx, MetaKeys.PurgeKey(database.Id, record.PurgeId), bytes, leaseMs).ConfigureAwait(false);
         }
     }
 

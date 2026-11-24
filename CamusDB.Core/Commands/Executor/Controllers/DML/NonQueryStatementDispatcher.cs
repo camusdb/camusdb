@@ -377,7 +377,7 @@ internal sealed class NonQueryStatementDispatcher
 
         // A schema statement this dispatcher runs itself holds the DDL lock for its length, as at the DDL
         // entry point. One that it hands to the DDL entry point takes the lock there instead.
-        await using Catalogs.Transactional.TransactionalDdlLock? statementLock =
+        await using Catalogs.Transactional.StatementDdlLock.Share? statementLock =
             ddlTransaction is null && !StatementScope.IsSchemaDdl(ast.nodeType)
                 ? await ddlDispatcher.AcquireStatementDdlLockAsync(database, ticket, ast).ConfigureAwait(false)
                 : null;

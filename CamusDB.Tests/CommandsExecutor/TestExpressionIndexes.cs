@@ -366,7 +366,6 @@ internal sealed class TestExpressionIndexes : BaseTest
     [TestCase("lower(missing)", Description = "an unknown column")]
     [TestCase("doc->'email'", Description = "a jsonb result")]
     [TestCase("json_value(doc, '$.a')", Description = "a type only the value knows")]
-    [TestCase("CAST(email AS string(10))", Description = "a sized cast")]
     [TestCase("lower(other.email)", Description = "a column of another relation")]
     public async Task RefusedExpression_ReportsInvalidIndexExpression(string expression)
     {

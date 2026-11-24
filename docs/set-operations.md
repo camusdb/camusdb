@@ -15,7 +15,7 @@ q1 EXCEPT [ALL | DISTINCT] q2
 ## What each form returns
 
 Two rows are the same row when their values are equal position by position. Two NULLs are equal
-for this purpose. This is the rule that `DISTINCT` and `GROUP BY` use, not the rule of `=`.
+for this purpose. This is the rule that `DISTINCT` and `GROUP BY` use. It differs from the rule of `=`.
 
 | Form | Rows returned, for a row that the left query returns m times and the right query n times |
 |---|---|
@@ -26,10 +26,10 @@ for this purpose. This is the rule that `DISTINCT` and `GROUP BY` use, not the r
 | `EXCEPT ALL` | max(m − n, 0) copies |
 | `EXCEPT` | one copy if m > 0 and n = 0 |
 
-The default is `DISTINCT`: a plain `UNION`, `INTERSECT` or `EXCEPT` removes duplicate rows.
+The default is `DISTINCT`. This means that `UNION`, `INTERSECT` or `EXCEPT` with no keyword removes duplicate rows.
 `UNION DISTINCT` is accepted and means the same as `UNION`.
 
-Without `ORDER BY`, the order of the rows is not defined. Do not depend on it.
+The order of the rows is defined only by an `ORDER BY`. Do not depend on any other order.
 
 ## Precedence
 
@@ -45,11 +45,11 @@ a UNION b EXCEPT c         -- (a UNION b) EXCEPT c
 
 ## Columns
 
-- Both operands must return the same number of columns. If they do not, the statement fails with
+- Both operands must return the same number of columns. If they do not, the statement returns
   `InvalidInput` before it reads a row.
-- Columns match by **position**, not by name. The output column names come from the leftmost
+- Columns match by **position**. Their names do not matter. The output column names come from the leftmost
   operand.
-- Each output column gets one type, from the types of the two operands at that position:
+- Each output column gets one type, from the types of the two operands at that position. The table shows how the type is chosen.
 
 | Left and right | Output type |
 |---|---|
@@ -61,22 +61,22 @@ a UNION b EXCEPT c         -- (a UNION b) EXCEPT c
 | Two arrays | an array, when the element types are the same or one side is `ARRAY[]`; otherwise error `InvalidInput`, which names both element types (`ARRAY<Integer64>` and `ARRAY<String>`) |
 | Any other pair | error `InvalidInput`, which names the column position and both types |
 
-The array check needs both element types before the statement runs. A table column, a derived
+The array check needs both element types before the statement is executed. A table column, a derived
 column and an `ARRAY[…]` literal give the element type. An array expression whose element type only
 its value carries is not checked.
 
-Each value is converted to its output type before rows are compared. So `SELECT 1 UNION SELECT 1.0`
-returns one row, `1.0`, and a `date` equals the `datetime` at its midnight.
+Each value is converted to its output type before rows are compared. For example, `SELECT 1 UNION SELECT 1.0`
+returns one row, `1.0`. A `date` equals the `datetime` at its midnight.
 
 A quoted string literal in one operand takes the `date` or `datetime` type of the other operand, as
 in GoogleSQL. `SELECT d FROM t UNION SELECT '2026-01-01'` is a `date` column, and the literal
-equals the date it spells, so `UNION`, `INTERSECT` and `EXCEPT` compare it as a date. A literal that
-does not parse fails with `InvalidInput` before any row is read. Only a literal written in the
+equals the date it spells. This means that the set operators compare it as a date. A literal that
+does not parse returns `InvalidInput` before any row is read. Only a literal written in the
 operand's own select list counts: a `string` column fails, and so does the column of a nested set
 operation of two literals, which is a `string`.
 
-A column that is `NULL` in both operands has the declared type `string`, but it stays untyped for a
-set operation that uses it: in `SELECT 1 UNION ALL (SELECT NULL UNION ALL SELECT NULL)` the column
+A column that is `NULL` in both operands has the declared type `string`. However, a set operation that
+uses it treats it as untyped: in `SELECT 1 UNION ALL (SELECT NULL UNION ALL SELECT NULL)` the column
 is `int64`.
 
 ## ORDER BY, LIMIT and OFFSET
@@ -88,54 +88,54 @@ is `int64`.
   (`ORDER BY a + 1`), as in PostgreSQL. To sort by an expression, put the set operation in a derived
   table: `SELECT * FROM (q1 UNION q2) AS s ORDER BY s.a + 1`.
 
-An operand can have its own `ORDER BY`, `LIMIT` and `OFFSET` only in parentheses. Without the
-parentheses, `SELECT a FROM t ORDER BY a UNION SELECT b FROM u` is a syntax error.
+An operand can have an `ORDER BY`, `LIMIT` or `OFFSET` of its own only in parentheses. For example,
+`SELECT a FROM t ORDER BY a UNION SELECT b FROM u` is a syntax error.
 
 A parenthesized query takes one set of these clauses. `(SELECT a FROM t LIMIT 5) ORDER BY a` is
-refused, because it would sort before the limit instead of after it. Put all of the clauses inside
-the parentheses, or wrap the query in a derived table.
+not allowed, because it would sort before the limit instead of after it. Put all of
+the clauses in the parentheses, or wrap the query in a derived table.
 
 ## Where a set operation can appear
 
 - As a statement, and under `EXPLAIN`.
 - In a derived table: `SELECT … FROM (q1 UNION q2) AS s`.
-- In a subquery: `x IN (q1 UNION q2)`, `EXISTS (q1 EXCEPT q2)`, and a scalar subquery
-  `(q1 INTERSECT q2)`. A scalar subquery that returns more than one row is an error, as for any
+- In a subquery, such as `x IN (q1 UNION q2)` or `EXISTS (q1 EXCEPT q2)`. A scalar subquery
+  `(q1 INTERSECT q2)` is also allowed. A scalar subquery that returns more than one row is an error, as for any
   scalar subquery.
 - As the source of `INSERT INTO t SELECT … UNION SELECT …` and of `CREATE TABLE … AS`. A source that
   starts with a parenthesis is also accepted: `INSERT INTO t (SELECT …) UNION SELECT …`.
 
 An operand can be a view. It expands as it does in any `FROM`.
 
-An operand can start with a `WITH` inside its parentheses, and a `WITH` can stand in front of the whole
+An operand can start with a `WITH` in its parentheses, and a `WITH` can stand in front of the
 set operation; see [WITH queries](common-table-expressions.md). The query of a recursive CTE is a
-`UNION` or `UNION ALL` that runs its right operand again for each step; see
+`UNION` or `UNION ALL` that executes its right operand again for each step; see
 [recursive queries](common-table-expressions.md#recursive-queries). `CORRESPONDING BY` is not supported.
 
 ## Views
 
-A view or a materialized view can have a set operation as its body:
+A view or a materialized view can have a set operation as its body.
 
 ```sql
 CREATE VIEW all_ids (id) AS SELECT id FROM a UNION SELECT id FROM b ORDER BY id;
 CREATE MATERIALIZED VIEW shared AS SELECT x FROM a INTERSECT SELECT y FROM b;
 ```
 
-When the view is created:
+When the view is created, its set operation is stored in a fixed form.
 
 - The `*` of each operand is expanded to that operand's columns. A column added later to a table
   that an operand reads does not change the view.
 - The view's column names are stored as aliases on the leftmost operand, which names the columns.
   An unnamed expression there needs an alias, as in any view body.
-- An `ORDER BY` name of the set operation is stored as its position, so a column-alias list does
-  not break it.
-- The columns that every operand reads are recorded. Dropping one of them, or a table that an
+- An `ORDER BY` name of the set operation is stored as its position. This means that a column-alias
+  list does not break it.
+- The columns that each operand reads are recorded. Dropping one of them, or a table that an
   operand reads, is refused with `DependentObjectsExist`. A renamed table or column is followed.
 
 `SHOW CREATE VIEW` prints the body with each nested set operation in parentheses, and with each
-operand in parentheses that has its own `ORDER BY`, `LIMIT` or `OFFSET`.
+operand in parentheses that has an `ORDER BY`, `LIMIT` or `OFFSET` clause.
 
-A set operation can also be inside a derived table or a subquery of a view body. There, its
+A set operation can also appear in a derived table or a subquery of a view body. There, its
 operands cannot use `*`: the view could not expand it at creation, and a column added to one table
 would give the operands different column counts. Such a body is refused with `InvalidInput`.
 
@@ -143,55 +143,55 @@ A view can be an operand of a set operation in a query, like any relation.
 
 ## AS OF SYSTEM TIME
 
-All operands read in the same snapshot of the statement. An operand with its own
-`AS OF SYSTEM TIME` is refused with `InvalidAsOfSystemTime`.
+All operands read in the same snapshot of the statement. An operand with a separate
+`AS OF SYSTEM TIME` clause returns `InvalidAsOfSystemTime`.
 
 ## Privileges
 
-Each operand needs `SELECT` on the tables that it reads. A grant on the tables of one operand gives
-nothing on the tables of the other. A subquery in an operand's `WHERE` reads its table with the same
+Each operand needs `SELECT` on the tables that it reads. A grant on the tables of one operand does not
+apply to the tables of the other. A subquery in an operand's `WHERE` reads its table with the same
 privileges as the operand: the caller's in a statement, the view owner's in a view body.
 
 ## Execution
 
-| Form | How it runs |
+| Form | How it is executed |
 |---|---|
-| `UNION ALL` | Streams the rows of the left operand, then the rows of the right operand. Nothing is held in memory, so a `LIMIT` stops the operands early. |
+| `UNION ALL` | Streams the rows of the left operand, then the rows of the right operand. No rows are buffered in memory. This means that a `LIMIT` stops the operands early. |
 | `UNION` | Streams both operands through the `DISTINCT` operator. |
 | `INTERSECT [ALL]`, `EXCEPT [ALL]` | Counts the rows of the right operand in a hash table, then streams the left operand and returns each row by the count rules. |
 
-Memory for `INTERSECT` and `EXCEPT` is the distinct rows of the right operand. `EXCEPT` also keeps
-the distinct left rows that it returned, so it does not return one twice.
+Memory for `INTERSECT` and `EXCEPT` is the distinct rows of the right operand. `EXCEPT` also stores
+the distinct left rows that it returned. This prevents it from returning a row twice.
 
 ### Spill to disk
 
 With `spill_enabled` on (the default), the hash tables spill to disk by the rules of
-[spill-to-disk.md](./spill-to-disk.md):
+[spill-to-disk.md](./spill-to-disk.md). Each operator spills at a different point.
 
 - `UNION` spills as `DISTINCT` does.
 - `INTERSECT` and `EXCEPT` spill when the hash table of the right operand reaches
   `spill_threshold_rows` distinct rows or `spill_threshold_bytes` bytes. Both operands are then
   written to `spill_merge_fan_in` partition files by row hash, and each pair of files is combined in
-  memory. Equal rows always land in the same partition, so the counts stay exact. A partition is not
+  memory. Equal rows always land in the same partition. This means that the counts are exact. A partition is not
   split again.
 
-With spill off, the hash tables stay in memory.
+With spill off, the hash tables are kept in memory.
 
 ### Long chains
 
 A chain of one associative operator — `UNION ALL`, `UNION`, `INTERSECT` or `INTERSECT ALL` — is
-rebalanced by the parser when it has more than 8 operands. Generated SQL with a thousand
-`UNION ALL` operands therefore runs, and `UNION ALL` still returns the rows in the order of the
-operands.
+rebalanced by the parser when it has more than 8 operands. This means that generated SQL with a thousand
+`UNION ALL` operands can be executed. `UNION ALL` returns the rows in the order of the operands, as
+before.
 
 `EXCEPT` is not associative, and a mix of operators is not one chain. Each of those adds one level
-of nesting. A statement may nest at most 64 set operations; a deeper one fails with
+of nesting. A statement may nest at most 64 set operations; a deeper one returns
 `StatementTooDeeplyNested` (see [statement-nesting-limit.md](./statement-nesting-limit.md)).
 
 ## EXPLAIN
 
 The set operation is one plan node, named for its operator, with each operand's plan under an
-`operand` row:
+`operand` row. The table lists the details that each node shows.
 
 | Node | Detail |
 |---|---|
@@ -199,8 +199,8 @@ The set operation is one plan node, named for its operator, with each operand's 
 | `intersect`, `except` | `hash`, or `all, hash` |
 | `operand` | `left` or `right`; the rows after it are the plan of that operand |
 
-`, spill` follows `hash` when spill is enabled; it means that the hash table can move to disk, not
-that it did.
+`, spill` follows `hash` when spill is enabled. It means that the hash table can move to disk. It
+does not show that the table moved.
 
 ```text
 EXPLAIN SELECT x FROM a WHERE x > 1 UNION SELECT y FROM b ORDER BY 1
@@ -217,8 +217,8 @@ table-scan   table=b
 plan-info    shape=…, schema-deps=[…]
 ```
 
-`EXPLAIN (ANALYZE)` runs the operand plans that it shows, so the counters under each operand are
-real. The `actual_rows` of an `operand` row is the number of rows that the operand returned, and
+`EXPLAIN (ANALYZE)` executes the operand plans that it shows. This means that the counters under each
+operand are real. The `actual_rows` of an `operand` row is the number of rows that the operand returned, and
 the `actual_rows` of the set-operation row is the number of rows that it returned.
 
 The `estimated_rows` of the set-operation row is the default estimate of a derived table. The
@@ -227,6 +227,6 @@ planner does not estimate the result size of a set operation.
 ## Caches
 
 - The plan cache keys each set operation by its operator, its `ALL` flag and the shapes of both
-  operands, so two set operations over different operands never share a plan.
-- The combined result of a set operation is never stored in the query-result cache: like a join, it
+  operands. Two set operations over different operands do not share a plan.
+- The combined result of a set operation is not stored in the query-result cache. Like a join, it
   reads more than one relation, and the cache fences one table per entry.

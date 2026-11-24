@@ -37,8 +37,8 @@ SELECT convert_from(X'C3A9', 'UTF8');        -- é
 
 - **`hex`**. `encode` writes lowercase digits. `decode` reads digits in either case. White space
   between two digit pairs is ignored, as in PostgreSQL. An odd number of digits is an error.
-- **`base64`**. The RFC 4648 alphabet with `=` padding. `decode` ignores white space, so text with
-  line breaks decodes.
+- **`base64`**. The RFC 4648 alphabet with `=` padding. `decode` ignores white space. This means
+  that text with line breaks decodes.
 - **`escape`**. A zero byte and each byte from `0x80` to `0xFF` become a three-digit octal escape
   (`\000`, `\377`). A backslash becomes two backslashes. Each other byte is its ASCII character.
   `decode` reads `\\` as one backslash and `\nnn` as one byte. Any other backslash is an error. A
@@ -47,13 +47,13 @@ SELECT convert_from(X'C3A9', 'UTF8');        -- é
 ### UTF-8 only
 
 `convert_to` and `convert_from` accept the encoding names `UTF8` and `UTF-8`, in any case. Other
-encodings are an error, because CamusDB keeps all text as UTF-8. `convert_from` rejects bytes that are
-not valid UTF-8. It does not put the replacement character U+FFFD in their place.
+encodings are an error, since all text in CamusDB is stored as UTF-8. `convert_from` returns an error for
+bytes that are not valid UTF-8. It does not put the replacement character U+FFFD in their place.
 
 ### Differences from PostgreSQL and MySQL
 
 - `encode(x, 'base64')` adds no line break. PostgreSQL adds a line break after each 76 characters.
-  Text without line breaks is easier to compare and to store, and `decode` accepts both forms.
+  Text on a single line is easier to compare and to store. `decode` reads both forms.
 - `unhex` and `from_base64` give an error for bad text. MySQL gives `NULL`.
 - `unhex` does not accept an odd number of digits. MySQL adds a leading zero.
 - `to_base64` adds no line break. MySQL adds a line break after each 76 characters.
@@ -70,7 +70,7 @@ values, both must have the same type: `contains(bytes, string)` is an error. To 
 | `substring(x, start [, count])`, `substr` | `bytes` | `start` is 1-based. See [the bounds](data-types.md#the-bounds-of-substring). |
 | `strpos(x, part)` | `int64` | The 1-based position of the first `part` in `x`, or `0`. An empty `part` gives `1`. |
 | `position(part IN x)` | `int64` | The SQL-standard form of `strpos(x, part)`. |
-| `trim(x [, set])`, `ltrim`, `rtrim` | `bytes` | Without `set`, remove `0x00` bytes. With `set`, remove each byte in `set`. |
+| `trim(x [, set])`, `ltrim`, `rtrim` | `bytes` | With `set`, remove each byte in `set`. If `set` is omitted, remove `0x00` bytes. |
 | `starts_with(x, part)`, `ends_with`, `contains` | `bool` | |
 
 ```sql
@@ -82,16 +82,16 @@ SELECT trim('xyaxy', 'yx');                   -- a
 ```
 
 `substring` and the trims return the type of their first argument. The query planner knows the result
-type before it runs the query.
+type before the query is executed.
 
-The trims also take a set for a `string` (PostgreSQL `btrim(text, text)`). An empty set removes
-nothing. Without a set, a `string` loses its white space, as before.
+The trims also take a set for a `string` (PostgreSQL `btrim(text, text)`). An empty set leaves
+the value unchanged. If the set is omitted, white space is removed from a `string`, as before.
 
 ### Limits of `position(part IN x)`
 
 `IN` binds more tightly than the arithmetic operators. Put parentheses around a `part` that uses an
 operator: `position((a + b) IN x)`. The value `x` can be a column, a literal, a parameter, a function
-call, a `CAST` or a `CASE`. It cannot start with a parenthesis, because `IN (` starts an `IN` list.
+call, a `CAST` or a `CASE`. It cannot start with a parenthesis: `IN (` starts an `IN` list.
 For any other expression, use `strpos(x, part)`.
 
 ## Read and change bytes and bits
@@ -116,8 +116,8 @@ SELECT set_bit(X'FF', 7, 0);                  -- X'7F'
 SELECT bit_count(X'FF0F');                    -- 12
 ```
 
-An offset below 0 or past the last byte (or bit) is an error. An empty value has no offsets, so each
-offset is an error.
+An offset below 0 or past the last byte (or bit) is an error. An empty value has no
+offsets. This means that each offset is an error.
 
 `set_byte` and `set_bit` do not change their input. To change a stored value, write the result back:
 `UPDATE t SET b = set_byte(b, 0, 1) WHERE id = 1`.
@@ -128,8 +128,8 @@ offset is an error.
 to 1024, the same limit as PostgreSQL's pgcrypto.
 
 The function is volatile. Each call gives new bytes, and a query that uses it does not use the
-query-result cache. You cannot use it as a column `DEFAULT`, because a per-row default must be a call
-with no arguments, such as `gen_uuid_v4()`.
+query-result cache. You cannot use it as a column `DEFAULT`. A per-row default must be a call
+that takes no arguments, such as `gen_uuid_v4()`.
 
 ## Sizes and large values
 

@@ -1114,14 +1114,21 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     /// path: the hosted set can change between the check and the call (a replica move), so the typed
     /// exception is still caught as the final answer.
     /// </summary>
-    private async ValueTask<bool> AmILeaderOfPartitionAsync(int partitionId, CancellationToken cancellationToken)
+    private ValueTask<bool> AmILeaderOfPartitionAsync(int partitionId, CancellationToken cancellationToken)
+        => AmILeaderOfPartitionAsync(Raft, partitionId, cancellationToken);
+
+    /// <summary>
+    /// The same check on a given Raft instance, for a caller that holds the instance and not the node:
+    /// the cluster API asks it before a manual range split.
+    /// </summary>
+    internal static async ValueTask<bool> AmILeaderOfPartitionAsync(IRaft raft, int partitionId, CancellationToken cancellationToken)
     {
-        if (!Raft.HostsPartition(partitionId))
+        if (!raft.HostsPartition(partitionId))
             return false;
 
         try
         {
-            return await Raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false);
+            return await raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false);
         }
         catch (PartitionNotHostedException)
         {

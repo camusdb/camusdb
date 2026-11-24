@@ -50,9 +50,10 @@ public sealed class InProcessSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAc
     /// passed, which is what the HTTP forwarder does with that endpoint.
     /// </summary>
     /// <param name="leaderResolver">
-    /// Replaces that lookup. The cluster test harness passes one so that a forwarded ticket waits
-    /// for a settled schema leader instead of trusting the endpoint the caller resolved, which can
-    /// already be stale under an election.
+    /// Replaces that lookup for a ticket. The cluster test harness passes one so that a forwarded ticket
+    /// waits for a settled schema leader instead of trusting the endpoint the caller resolved, which can
+    /// already be stale under an election. A schema delta keeps the lookup; see
+    /// <see cref="ForwardSchemaDeltaAsync"/>.
     /// </param>
     public InProcessSchemaDdlForwarder(InProcessClusterNodes nodes, InProcessDdlLeaderResolver? leaderResolver = null)
     {
@@ -116,10 +117,19 @@ public sealed class InProcessSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAc
         return (await executor.Comment(ticket).ConfigureAwait(false)).Success;
     }
 
+    /// <summary>
+    /// Runs the delta on the member that holds <paramref name="leader"/>, and never through
+    /// <see cref="InProcessDdlLeaderResolver"/>. The sender of a delta holds its own DDL gate until this
+    /// answers, and a resolver that follows the leadership can name the sender itself, which then waits for
+    /// its own gate for ever. A member that is gone answers "not the leader", as a refused connection does
+    /// in <see cref="HttpSchemaDdlForwarder"/>.
+    /// </summary>
     public async Task<long?> ForwardSchemaDeltaAsync(string leader, SchemaDeltaForward delta, string operationId, CancellationToken cancellationToken)
     {
-        CommandExecutor executor = await LeaderAsync(leader, delta.DatabaseName, cancellationToken).ConfigureAwait(false);
-        return await executor.ApplyForwardedSchemaDeltaAsync(delta).ConfigureAwait(false);
+        if (!nodes.TryGet(leader, out InProcessClusterNode? target))
+            return null;
+
+        return await target.Executor.ApplyForwardedSchemaDeltaAsync(delta).ConfigureAwait(false);
     }
 
     /// <summary>

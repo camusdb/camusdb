@@ -862,11 +862,18 @@ later `ROLLBACK` does not undo it. `TRUNCATE`, `ALTER TABLE … REWRITE STORAGE`
   returns, every live node has the change.
 - `ROLLBACK`, a failed statement (§9.4) and a refused commit undo the change and the rows together.
 
-Inside a transaction, these statements run with the setting on: `CREATE TABLE`, `DROP TABLE` (also
-with `FORCE`, and in a branch database), `ALTER TABLE … RENAME TO`, `RENAME COLUMN`, `RENAME INDEX`,
-`DROP COLUMN`, `DROP INDEX`,
-`ALTER TABLE … SET` and `RESET`, `COMMENT ON TABLE`, `COLUMN` and `INDEX`, and `CREATE`, `CREATE OR
-REPLACE`, `DROP` and `ALTER … RENAME` of a view.
+Inside a transaction, these statements run with the setting on:
+
+- **Tables:** `CREATE TABLE`, `CREATE TABLE … AS`, `DROP TABLE` (also with `FORCE`, and in a branch
+  database), `ALTER TABLE … RENAME TO`, `RENAME COLUMN`, `RENAME INDEX`, `DROP COLUMN`, `DROP INDEX`,
+  `DROP CONSTRAINT`, `ALTER COLUMN … DROP NOT NULL`, `ALTER COLUMN … SET STORAGE`, `ALTER TABLE … SET` and
+  `RESET`.
+- **Views:** `CREATE`, `CREATE OR REPLACE`, `DROP`, `ALTER … RENAME` and `ALTER … OWNER TO` of a view.
+  `ALTER … RENAME` and `DROP` of a materialized view.
+- **Sequences:** `CREATE`, `DROP`, `ALTER … RENAME` and `ALTER SEQUENCE` without `RESTART`.
+- **Code:** `CREATE` and `DROP` of a trigger, `CREATE`, `CREATE OR REPLACE`, `DROP` and `ALTER … OWNER TO`
+  of a function, `CREATE`, `ALTER … UPDATE` and `DROP` of an extension.
+- **Comments:** every `COMMENT ON` except `COMMENT ON DATABASE`.
 
 The statements that read every row of their table run too:
 
@@ -885,8 +892,9 @@ The statements that read every row of their table run too:
   on. `COMMIT` keeps it. `ROLLBACK` removes it. A row that breaks the constraint fails the statement.
 - A nullable `ADD COLUMN` with no default runs on any table and needs no fill.
 
-Every other schema statement is refused with `CADB0538` inside a transaction. Commit or roll back first,
-then run it.
+These statements are refused with `CADB0538` inside a transaction, because a `ROLLBACK` cannot undo them:
+`TRUNCATE`, `ALTER TABLE … REWRITE STORAGE`, `ALTER SEQUENCE … RESTART`, `CREATE MATERIALIZED VIEW`,
+`REFRESH MATERIALIZED VIEW` and `CREATE TABLE … RELINK`. Commit or roll back first, then run them.
 
 What the transaction meets:
 
@@ -894,6 +902,10 @@ What the transaction meets:
   takes the database's DDL lock and holds it until the transaction ends. Another transaction's first
   schema statement, and a schema statement outside a transaction, waits for it. After 30 seconds the
   waiter gets the retryable `CADB0504`.
+- **Schema statements outside a transaction run beside each other.** They share the DDL lock, so a
+  `CREATE TABLE` does not wait for an index build on another table. A transaction waits for all of them:
+  its first schema statement gets `CADB0504` when an index build or a `REFRESH MATERIALIZED VIEW` runs
+  longer than 30 seconds.
 - **A schema change that landed meanwhile refuses the commit.** If the schema of the database moved
   after the transaction's first schema statement, `COMMIT` fails with the retryable `CADB0502` and
   rolls the transaction back. Replay it from `BEGIN`.
@@ -908,8 +920,8 @@ What the transaction meets:
   own commit with the retryable `CADB0502`.
 - **`COMMIT` needs every live node.** The rows commit after every live node fenced the changed tables, and
   `COMMIT` returns after every live node sees the change. A live node that is slow to apply the schema log
-  makes `COMMIT` wait. When the node does not catch up before the timeout, `COMMIT` is refused with the
-  retryable `CADB0504`, and no row was committed.
+  makes `COMMIT` wait. When the node does not catch up before the timeout, or when the schema log has no
+  leader, `COMMIT` is refused with the retryable `CADB0504`, and no row was committed.
 - **A branch is created from a settled schema.** `CREATE DATABASE … BRANCH FROM` waits a few seconds for a
   transaction that is committing its schema changes, and is then refused with the retryable `CADB0504`.
 - **Dropped data leaves the disk after the commit.** A `DROP INDEX`, a `DROP TABLE … FORCE` and a
@@ -929,6 +941,31 @@ What the transaction meets:
   transaction to the table and, for a foreign key, for a parent table that the transaction created,
   changed or wrote. A foreign key with no index to use builds one, so the locks of the transaction on the
   child rows refuse it too.
+- **An online build on a shared table cannot use an uncommitted object.** Other transactions are held to
+  its result before the commit, so it is refused with `CADB0538` when it needs something that only the
+  transaction has: a default that draws from a sequence that the transaction created or renamed, a CHECK
+  or a default that calls a function that the transaction created or replaced (or a member of an extension
+  that it installed or updated), or a foreign key that is free of a cycle only because the transaction
+  removed another one. Commit the change first, then run the statement. A table that the transaction created has
+  no such limit.
+- **A refusal has the same code inside and outside a transaction.** A used name, a missing object, a
+  dependent object, a missing privilege or a row that breaks a new constraint fails the statement as it
+  does outside, judged on what the transaction itself sees. The failure aborts the transaction (§9.4).
+- **The counter of a sequence is not transactional.** `nextval` and `setval` move it at once, and a
+  `ROLLBACK` gives no value back. `CREATE SEQUENCE` makes the counter at once, and a `ROLLBACK` removes it.
+  `DROP SEQUENCE` and `ALTER SEQUENCE` reach the counter after the commit: until then every transaction,
+  also the one that runs the statement, draws with the old definition. `COMMIT` returns after the counter
+  has the new one, which takes about five seconds, as `ALTER SEQUENCE` does outside a transaction. A
+  background sweep finishes it if the committing node fails. When other transactions drew past a new
+  `MAXVALUE` before the commit, the sequence is exhausted after it.
+- **A function, a trigger and an extension run for the transaction only, until it commits.** The body of a
+  function or an inline trigger is compiled at the statement, and an invalid body fails the statement. In
+  a cluster the statement runs on the node that holds the transaction, and not only on the schema leader.
+- **`CREATE TABLE … AS` is atomic.** The rows are writes of the transaction, within its limits
+  (`docs/transaction-limits.md`), so one `COMMIT` publishes the table with its rows.
+- **A materialized view with an unfinished refresh cannot be dropped in a transaction.** The drop must
+  first reclaim the storage the refresh left, for every transaction, so it is refused with `CADB0538`. Run
+  `REFRESH MATERIALIZED VIEW`, or the drop, outside a transaction.
 - **A failed online build leaves nothing after the rollback.** A row that breaks a new unique index
   fails the statement with `CADB0300`, and the index stops being maintained at once. A change of the
   schema leader while the build runs on the leader node fails the statement with the retryable
@@ -937,6 +974,9 @@ What the transaction meets:
 - **An online build of a transaction that disappears is removed.** When the node of the transaction
   fails before `COMMIT`, a background sweep on the schema leader removes the column or index once the
   transaction's DDL lock lapses. After that, the transaction cannot commit.
+- **A node that dies during `COMMIT` holds the changed tables for up to a minute.** Its change set is then
+  ended as its KV commit decided: the whole of it becomes visible, or none of it. Until then a statement
+  on a changed table waits, and other schema changes get the retryable `CADB0504`.
 - **`COMMIT` can fail with `CADB0509` after the rows committed.** This happens when the schema change
   cannot be confirmed on every live node, for example during a leader change. Retry `COMMIT` on the same
   transaction; it waits for the schema change and does not run the transaction again.

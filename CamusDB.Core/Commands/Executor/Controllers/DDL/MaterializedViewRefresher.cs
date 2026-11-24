@@ -887,6 +887,24 @@ internal sealed class MaterializedViewRefresher
     }
 
     /// <summary>
+    /// Refuses a drop of the materialized view <paramref name="name"/> inside a transaction with a private
+    /// schema while an earlier refresh of it left a staging relation behind. The reclaim drops that relation
+    /// and its record for every transaction, at once, which a rollback of this one could not undo. The caller
+    /// holds the refresh fence, as for <see cref="ReclaimAbandonedRefreshAsync"/>.
+    /// </summary>
+    internal static async Task RequireNoAbandonedRefreshAsync(
+        CatalogsManager catalogs, DatabaseDescriptor database, string name, string viewTableId)
+    {
+        if (await catalogs.TryGetRefreshJobAsync(database, viewTableId).ConfigureAwait(false) is null)
+            return;
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.StatementNotAllowedInTransaction,
+            $"Materialized view '{name}' cannot be dropped inside this transaction: an unfinished REFRESH of it left storage " +
+            "behind that must be reclaimed first. Roll back, then run REFRESH MATERIALIZED VIEW or the drop outside a transaction");
+    }
+
+    /// <summary>
     /// Finishes what an interrupted refresh started: reclaims the storage the dead run was building
     /// into and then <b>runs the rebuild again from the beginning</b>, so exactly one node completes
     /// it. Returns whether a record was found and dealt with.

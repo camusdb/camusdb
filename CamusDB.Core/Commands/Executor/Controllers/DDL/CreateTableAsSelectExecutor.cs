@@ -26,7 +26,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// relation inside its own transaction).
 ///
 /// <para><b>The statement is deliberately not atomic across schema and data, and callers must know
-/// it.</b> Creating the table commits its own DDL transaction — in cluster mode replicating through
+/// it</b>, unless it runs inside a transaction with a private schema. Creating the table commits its own DDL transaction — in cluster mode replicating through
 /// Raft — before a single row can be written, so the two cannot be one unit. A failure during the
 /// load therefore drops the table again as a compensating action; if that drop also fails, or the
 /// process dies between the two, an empty table is left behind and the error says so explicitly
@@ -100,6 +100,11 @@ internal sealed class CreateTableAsSelectExecutor
     /// again as a compensating action — but if that drop also fails, or the process dies in between,
     /// an empty table is left behind. The load itself runs in the caller's transaction, so the rows
     /// become durable only when the caller commits, while the table already is.</para>
+    ///
+    /// <para><b>Inside a transaction with a private schema it is atomic.</b> The table joins the
+    /// transaction's change set and the rows are the transaction's writes, so one commit publishes both
+    /// and a rollback leaves neither. A failed load needs no compensation there: the failure leaves the
+    /// transaction to roll back.</para>
     /// </summary>
     /// <returns>
     /// <c>Created</c> is false only when <c>IF NOT EXISTS</c> found the table already present;
@@ -219,7 +224,7 @@ internal sealed class CreateTableAsSelectExecutor
                 }
             }
         }
-        catch (Exception loadError)
+        catch (Exception loadError) when (Catalogs.Transactional.TransactionSchemaScope.OverlayFor(database) is null)
         {
             // The drop below runs after the load failed, which can be because the statement ran out of
             // time; it must not be stopped by the same deadline.

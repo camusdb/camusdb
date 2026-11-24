@@ -4,12 +4,12 @@
 > storage and replication layers.
 > **Scope:** the SQL surface, what is checked and when, how a check meets a concurrent writer, the
 > index that each constraint needs, schema changes, database branches, the cost, the limits, and
-> every error code.
+> the error codes.
 
 A foreign key makes sure that a value in one table (the **child**, or referencing table) exists in
 another table (the **parent**, or referenced table). CamusDB follows the PostgreSQL surface for the
-forms it supports. Each check runs inside the transaction of the statement that writes, at every
-isolation level and in both locking modes.
+forms it supports. A check is part of the transaction of the statement that writes. This applies at
+all isolation levels and in both locking modes.
 
 ---
 
@@ -46,7 +46,7 @@ DELETE FROM cities WHERE name = 'San Francisco';                          -- CAD
 UPDATE cities SET population = 815000 WHERE name = 'San Francisco';       -- accepted: no key change
 ```
 
-The refused INSERT reports:
+The error for the refused INSERT names the constraint and the missing key.
 
 ```text
 Insert or update on table 'weather' violates foreign key constraint 'weather_city_fkey':
@@ -81,7 +81,7 @@ INSERT INTO stores (country, region) VALUES ('us', 7);      -- CADB0304
 
 ### A self-reference, to the primary key
 
-With no column list, `REFERENCES t` references the primary key of `t`.
+When the column list is omitted, `REFERENCES t` references the primary key of `t`.
 
 ```sql
 CREATE TABLE employees (
@@ -102,18 +102,19 @@ ALTER TABLE weather DROP CONSTRAINT weather_city_fkey;
 ALTER TABLE weather ADD CONSTRAINT weather_city_fk FOREIGN KEY (city) REFERENCES cities (name);
 ```
 
-`ADD CONSTRAINT` reads every existing row first. If a row has no parent, the statement fails with
-`CADB0304`, names the first such key, and leaves nothing behind. See section 6.
+`ADD CONSTRAINT` checks all existing rows. If a row is missing its parent, the statement returns
+`CADB0304` and names the first such key. The constraint and any index that it created are removed.
+See section 6.
 
 ### Names
 
-A constraint without `CONSTRAINT name` gets the PostgreSQL default name
+If you omit `CONSTRAINT name`, the constraint gets the PostgreSQL default name
 `{table}_{column}[_{column}…]_fkey`, for example `weather_city_fkey`. When that name is taken, a
 number is added at the end.
 
-CHECK, named NOT NULL and FOREIGN KEY constraints share **one name space** per table, because
-`DROP CONSTRAINT name` finds a constraint by name across the three kinds. Each of these is refused
-with `CADB0400` (`InvalidInput`):
+CHECK, named NOT NULL and FOREIGN KEY constraints share **one name space** per table. This is
+because `DROP CONSTRAINT name` finds a constraint by name across the three kinds. A name collision
+returns `CADB0400` (`InvalidInput`) in the following cases.
 
 - a foreign key with the name of a CHECK or of a named NOT NULL constraint;
 - a CHECK with the name of a foreign key;
@@ -126,12 +127,12 @@ The comparison ignores case.
 
 | Form | Result |
 | --- | --- |
-| Inline `REFERENCES tbl [(col)]`, with or without `CONSTRAINT name` | Accepted |
+| Inline `REFERENCES tbl [(col)]`, optionally with `CONSTRAINT name` | Accepted |
 | Table-level `[CONSTRAINT name] FOREIGN KEY (cols) REFERENCES tbl [(cols)]` | Accepted |
 | `ALTER TABLE ... ADD [CONSTRAINT name] FOREIGN KEY ...` and `DROP CONSTRAINT name` | Accepted. ADD validates the existing rows. |
 | A composite key; a self-reference | Accepted |
 | `ON DELETE` / `ON UPDATE` with `NO ACTION` (the default) or `RESTRICT` | Accepted |
-| `CASCADE`, `SET NULL`, `SET DEFAULT` | Refused, `CADB0533`. The action is stored, so a later version can run it without a migration. |
+| `CASCADE`, `SET NULL`, `SET DEFAULT` | Refused, `CADB0533`. The action is stored. A later version can run it, and no migration will be needed. |
 | `MATCH SIMPLE` | Accepted. It is the default and the only match type. |
 | `MATCH FULL`, `MATCH PARTIAL` | Refused, `CADB0533` |
 | `NOT DEFERRABLE`, `INITIALLY IMMEDIATE` | Accepted |
@@ -152,43 +153,43 @@ lengths can be different.
 
 ### At the end of each statement
 
-Each statement checks its constraints after its last write, in its own transaction. The order of
-the rows inside one statement does not matter:
+Each statement checks its constraints after its last write, in the statement's transaction. The
+order of the rows in one statement does not matter.
 
 - an INSERT can write a child before its parent, as the `employees` example does;
-- a DELETE can remove a whole self-referencing tree;
+- a DELETE can remove all rows of a self-referencing tree;
 - an `INSERT ... SELECT` that writes in pages is checked once, after the last page.
 
-A statement inside an explicit transaction also sees the earlier writes of that transaction. A
+A statement in an explicit transaction also sees the earlier writes of that transaction. A
 parent inserted earlier in the transaction satisfies a later child. A parent deleted earlier in the
 transaction does not.
 
 ### The rules
 
 - **Child side.** An INSERT, or an UPDATE that sets a referencing column, needs the parent key.
-  If the key is missing, the statement fails with `CADB0304` (`ForeignKeyViolation`).
+  If the key is missing, the statement returns `CADB0304` (`ForeignKeyViolation`).
 - **MATCH SIMPLE.** A NULL in **any** referencing column satisfies the constraint, as the
   `('us', NULL)` store shows. No parent is read for such a row.
-- **Parent side.** A DELETE that removes a referenced key, or an UPDATE that changes one, fails
-  when a child row still holds the key: `CADB0305` (`ForeignKeyRestrictDelete`) or `CADB0306`
+- **Parent side.** A DELETE that removes a referenced key, or an UPDATE that changes one, returns
+  an error when a child row references the key: `CADB0305` (`ForeignKeyRestrictDelete`) or `CADB0306`
   (`ForeignKeyRestrictUpdate`).
 - **An UPDATE that does not change a referenced key** does no foreign-key work. It does not read
-  a child, and it never waits for a child transaction.
+  a child or wait for a child transaction.
 - **NO ACTION and RESTRICT.** Under `ON UPDATE NO ACTION`, an UPDATE that removes a key, while
   another row of the same statement takes the same key, is accepted: at the end of the statement
-  the key exists again. `RESTRICT` refuses the same statement. A DELETE cannot bring a key back, so
-  for DELETE the two actions behave the same.
+  the key exists again. With `RESTRICT`, the same statement returns an error. A DELETE cannot bring a
+  key back. This means that the two actions behave the same for DELETE.
 
 ### After a violation in an explicit transaction
 
 A violation is found after the statement wrote its rows, and the engine does not undo the failed
 statement. Its rows stay staged in the transaction.
 
-- **HTTP and gRPC** roll back the whole transaction when a statement fails, so a client of those
-  transports cannot commit the rows.
+- **HTTP and gRPC** roll back the transaction when a statement fails. A client of those transports
+  cannot commit the rows.
 - **A caller of the embedded engine API** that catches the error and commits anyway stores the
-  rows, orphans included. Roll the transaction back after a foreign-key error. CamusDB has no
-  savepoints.
+  rows, orphans included. Roll the transaction back after a foreign-key error. CamusDB does not
+  support savepoints.
 
 An autocommit statement always rolls back.
 
@@ -197,37 +198,37 @@ An autocommit statement always rolls back.
 ## 3. Concurrent writers: the lock rendezvous
 
 A child writer and a parent writer meet on one key: the **parent's unique-index entry for the
-referenced key**. That entry exists while the parent row holds the key.
+referenced key**. The entry exists as long as a parent row has that key.
 
 - A **child** writer takes a **shared lock** on that entry, and then reads it. The lock is a
-  point lock, held to the end of the transaction. It is taken at every isolation level and in
+  point lock, held to the end of the transaction. It is taken at all isolation levels and in
   both locking modes.
 - A **parent** DELETE deletes the entry, and a key UPDATE deletes the old entry. Then the parent
   reads the child's index for the key.
-- A parent UPDATE of other columns does not touch the entry. That is why it never waits.
+- A parent UPDATE of other columns does not touch the entry. For this reason, it does not wait for a child.
 
-The result for each order:
+The result depends on which writer comes first.
 
 | Who comes first | What happens |
 | --- | --- |
-| The child holds the lock | The parent's write of the entry waits for the child. After the child commits, the parent's read sees the new child row and fails with `CADB0305` or `CADB0306`. If the child is still open after `lock_wait_deadline_ms` (500 ms by default), the parent fails with `CADB0504` (`TransactionMustRetry`) or `CADB0502` (`TransactionConflict`). PostgreSQL waits with no limit. |
-| The parent's write is pending | The child cannot take the lock until the parent ends. Then it reads the entry as gone and fails with `CADB0304`. |
+| The child took the lock first | The parent's write of the entry waits for the child. After the child commits, the parent's read sees the new child row, and the parent returns `CADB0305` or `CADB0306`. If the child transaction is open after `lock_wait_deadline_ms` (500 ms by default), the parent returns `CADB0504` (`TransactionMustRetry`) or `CADB0502` (`TransactionConflict`). PostgreSQL waits indefinitely. |
+| The parent's write is pending | The child cannot take the lock until the parent ends. Then it reads the entry as gone and returns `CADB0304`. |
 
 Both retry codes mean "run the transaction again"; see
 [serializable-retry-contract.md](serializable-retry-contract.md).
 
-Notes:
+The rendezvous also covers optimistic writers. Its locks are point locks that do not escalate.
 
-- **An optimistic parent** writer stages its delete without a write intent, so it also takes an
-  exclusive lock on each removed key before its read. A child that holds the shared lock makes it
-  wait. A child that comes later is refused.
-- **An optimistic child** that holds the lock while a pessimistic parent waits for it is aborted
-  at commit with `CADB0502`. This is the usual optimistic trade. The parent then goes on.
-- **The locks never escalate** to a lock on the whole parent index. An escalated lock would block
-  every new parent INSERT until the child transaction ends. One child transaction holds at most
-  one lock per distinct parent key.
-- **The parent reads the child's index without a lock.** No new child can take the shared lock
-  while the parent's write is pending, so the read sees every child there will be.
+- **An optimistic parent** writer does not write an intent when it stages its delete. For this
+  reason, it also takes an exclusive lock on each removed key before its read. If a child has the
+  shared lock, the parent waits. A child that comes later is refused.
+- If **an optimistic child** has the lock while a pessimistic parent waits for it, the child is
+  aborted at commit with `CADB0502`. This is the usual optimistic trade. The parent then goes on.
+- **The locks do not escalate** to a lock on the parent index. An escalated lock would block all
+  new parent INSERTs until the child transaction ends. One child transaction takes at most one
+  lock per distinct parent key.
+- **The parent's read of the child's index takes no lock.** No new child can take the shared lock
+  while the parent's write is pending. This means that the read sees all child rows that will exist.
 
 See [transactions-locking-and-isolation.md](transactions-locking-and-isolation.md) §6.5 for how this
 lock relates to the other locks.
@@ -236,22 +237,22 @@ lock relates to the other locks.
 
 ## 4. The index on the referencing columns
 
-A parent DELETE must find a child row by its key without a scan of the child table. Each
+A parent DELETE must look up a child row by its key in an index of the child table. Each
 constraint therefore has a **backing index** on the child, whose leading columns are the
 referencing columns, in any order.
 
 - CamusDB **reuses** a public index of the child when its leading columns are the referencing
   columns. It prefers an index of exactly that width, then the shortest.
-- A **unique** index qualifies only when it has exactly the referencing columns, or when it is the
-  primary key. A unique index stores no entry for a row with a NULL in any of its columns. A wider
+- A **unique** index qualifies if it has exactly the referencing columns. The primary key also
+  qualifies. No other unique index qualifies. A unique index stores no entry for a row with a NULL in any of its columns. A wider
   unique index would therefore hide a child whose referencing columns are set and whose extra column
   is NULL, and a parent DELETE would not see that child.
 - When no index qualifies, CamusDB **creates** a non-unique index named `~fk_{constraint name}`.
-  The constraint owns it. `SHOW INDEXES` lists it. `SHOW CREATE TABLE` does not, because the
-  constraint creates it again.
-- An index name that starts with `~` belongs to the engine. SQL cannot name it, so the owned index
-  cannot be dropped alone. `DROP CONSTRAINT` drops it.
-- `DROP CONSTRAINT` keeps a reused index. `DROP INDEX` of a reused index is refused while the
+  The constraint owns it. `SHOW INDEXES` lists it. `SHOW CREATE TABLE` does not list it. The
+  constraint in that output creates it again.
+- An index name that starts with `~` belongs to the engine. SQL cannot name it. This means that the
+  owned index cannot be dropped alone. `DROP CONSTRAINT` drops it.
+- A reused index is not dropped by `DROP CONSTRAINT`. `DROP INDEX` of a reused index is refused while the
   constraint exists (section 7).
 
 PostgreSQL does not create this index. MySQL InnoDB does.
@@ -261,15 +262,15 @@ PostgreSQL does not create this index. MySQL InnoDB does.
 ## 5. Introspection, transports and privileges
 
 **SHOW CREATE TABLE** renders each public constraint as a table constraint, with the current names
-of the tables and columns after a rename. `ON DELETE` and `ON UPDATE` appear only when the action is
-not `NO ACTION`:
+of the tables and columns after a rename. `ON DELETE` and `ON UPDATE` are omitted when the action is
+`NO ACTION`, as in this constraint with the default actions.
 
 ```sql
 CONSTRAINT `weather_city_fkey` FOREIGN KEY (`city`) REFERENCES `cities` (`name`)
 ```
 
-A constraint that is still being added (`WriteOnly`, section 6) is not rendered. The
-`SHOW CREATE TABLE ... WITHOUT INDEXES` form keeps the foreign keys. The output can be run again as
+A constraint that is being added (`WriteOnly`, section 6) is not rendered. The
+`SHOW CREATE TABLE ... WITHOUT INDEXES` form includes the foreign keys. The output can be run again as
 SQL.
 
 **HTTP.** `POST /create-table` takes a `foreignKeys` list. Each entry has `name` (required),
@@ -281,9 +282,9 @@ the error table in section 10.
 or a cycle returns `InvalidArgument`. The code is in the `camus-error-code` trailer.
 
 **Privileges.** A constraint needs `SELECT` on the parent table, for CREATE TABLE and for ALTER
-TABLE ADD CONSTRAINT. A child INSERT tells its writer whether a parent key exists, so a constraint
-on a table that the caller cannot read would let the caller read it. Without the privilege the
-statement fails with `CADB0517` (`InsufficientPrivilege`). A self-reference needs no extra grant.
+TABLE ADD CONSTRAINT. A child INSERT tells its writer whether a parent key exists. This means that a
+constraint on a table that the caller cannot read would let the caller read it. If the caller does
+not have the privilege, the statement returns `CADB0517` (`InsufficientPrivilege`). A self-reference needs no extra grant.
 There is no `REFERENCES` privilege.
 
 ---
@@ -292,60 +293,61 @@ There is no `REFERENCES` privilege.
 
 ### ADD CONSTRAINT validates the existing rows
 
-`ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY` runs in these steps:
+`ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY` has six steps.
 
-1. It resolves the definition and refuses a cycle (`CADB0416`), before it does any work.
+1. It resolves the definition. A cycle returns `CADB0416` at this point, before any work is done.
 2. If no index qualifies, it builds the owned `~fk_` index, with the same staged backfill as
    `CREATE INDEX`.
-3. It adds the constraint in the **WriteOnly** state. From this point every INSERT, UPDATE and
-   DELETE checks the constraint.
-4. It waits until every live node acknowledges the WriteOnly state. A node acknowledges only when
-   no commit that wrote the child or the parent before step 3 is still in flight on it.
-5. It reads the backing index in key order, in pages, and checks the distinct keys of each page
+3. It adds the constraint in the **WriteOnly** state. From this point, all INSERT, UPDATE and
+   DELETE statements check the constraint.
+4. It waits until all live nodes acknowledge the WriteOnly state. A node does not acknowledge while
+   a commit that wrote the child or the parent before step 3 is in flight on it.
+5. It reads the backing index page by page in key order. The distinct keys of each page are checked
    against the parent in one batched read.
-6. When every row has its parent, the constraint becomes **Public**.
+6. When all rows have a parent, the constraint becomes **Public**.
 
-If a row has no parent, the statement fails with `CADB0304` and names the first such key in index
-order. The constraint is removed, and so is the owned index. A key found missing is read again,
+If a row is missing its parent, the statement returns `CADB0304` and names the first such key in
+index order. The constraint is removed, and so is the owned index. A key found missing is read again,
 together with its parent, at one snapshot before it is reported. A child deleted, or a parent
 inserted, after the page read therefore does not make the statement fail.
 
 **Why WriteOnly comes before the validation.** While a change rolls out, two schema versions exist
-at the same time. A node on the old version enforces nothing, and it can delete a parent while
-another node inserts its child. The validation starts only after every node enforces the
-constraint, so it sees any orphan from that window, and no new orphan can form after it.
+at the same time. A node on the old version does not enforce the constraint. It can delete a
+parent while another node inserts its child. The validation starts after all nodes enforce the
+constraint. This means that it sees any orphan from that window, and no new orphan can form after it.
 
-**A leader change.** If the leader stops after step 3, the ALTER fails, and the constraint stays
-WriteOnly: it is enforced but not yet trusted. The new leader finishes the validation and makes it
+**A leader change.** If the leader stops after step 3, the ALTER fails. The constraint is left in the
+WriteOnly state, where it is enforced but not yet trusted. The new leader finishes the validation and makes it
 Public.
 
 **A transaction that was open during the ADD.** A transaction that wrote the child table or the
-parent table before step 3 ran no check: the constraint did not exist yet. The validation in step 5
-reads committed rows only, so it cannot see a write that is still staged. The engine therefore
-does not let such a write commit after the validation:
+parent table before step 3 did not check the constraint, which did not exist yet. The validation in
+step 5 reads committed rows only. It cannot see a staged write that has not committed. For this
+reason, the engine does not let such a write commit after the validation.
 
 - A commit that starts after step 3 is refused with `CADB0502` (`TransactionConflict`), and the
   transaction is rolled back. Run the transaction again; the new statements check the constraint.
   An autocommit statement is retried for you.
 - A commit that was already in flight at step 3 cannot be refused any more. Step 4 waits for its
-  outcome, so step 5 sees its rows. If the commit made an orphan, the ADD fails with `CADB0304`.
+  outcome. This means that step 5 sees its rows. If the commit made an orphan, the ADD returns
+  `CADB0304`.
 
-The ADD never waits for an idle open transaction, only for a commit in flight. Both the child and
+The ADD waits for a commit in flight. It does not wait for an idle open transaction. Both the child and
 the parent are covered: a `DELETE` of a parent row that was staged before the ADD is refused at
 commit in the same way. `CREATE TABLE` with a foreign key protects its parents by the same rule. A transaction that only read the tables, or that writes them after step 3,
-is not affected. `CREATE INDEX` uses the same rule, so an index never misses a row.
+is not affected. `CREATE INDEX` uses the same rule. An index built this way does not miss a row.
 
 In standalone mode the same steps run on the one node. `CREATE TABLE` with a constraint goes
 through the same states in a cluster, and is Public at once in standalone mode.
 
 **Other DDL during the ADD.** The statement enters the database's DDL gate for the child table.
-While the index of step 2 is built and the rows of step 5 are read, the gate itself is released:
-DDL on other tables of the database runs at once. DDL on the child table waits until the constraint
-is Public, and the caller of the ADD waits for every step.
+While the index of step 2 is built and the rows of step 5 are read, the gate is released. DDL
+on other tables of the database can start at once. DDL on the child table waits until the constraint
+is Public. The caller of the ADD waits until all steps finish.
 
 ### DROP CONSTRAINT
 
-`DROP CONSTRAINT name` stops the enforcement in one step, because an early stop is always safe.
+`DROP CONSTRAINT name` stops the enforcement in one step. An early stop is always safe.
 Then it drops the owned index, if there is one.
 
 ### Element states
@@ -369,9 +371,9 @@ Then it drops the owned index, if there is one.
 | `TRUNCATE` of a child, or of a table that references only itself | Accepted |
 | `DROP COLUMN` of a referencing or a referenced column | Refused, `CADB0530` |
 | `DROP INDEX` of the referenced index, or of a reused backing index | Refused, `CADB0530` |
-| `RENAME` of a table, a column or an index | Accepted. A constraint stores ids, not names. |
+| `RENAME` of a table, a column or an index | Accepted. A constraint stores ids, and a rename does not change them. |
 | Row-level TTL on a table that a constraint references | Refused, `CADB0533`, in both orders: TTL on a parent, and a constraint to a TTL table. The TTL sweep deletes rows on a path that does no parent-side check. |
-| `RELINK` of a dropped child table | The table comes back **without** its constraints, because its parents can be gone since the drop. The statement returns a warning that names each dropped constraint. Add each one again with `ALTER TABLE ... ADD CONSTRAINT`, which validates the restored rows. A formerly owned index stays as an ordinary index. |
+| `RELINK` of a dropped child table | The table is restored, and its constraints are dropped. Its parents can be gone since the table was dropped. The statement returns a warning that names each dropped constraint. Add each one again with `ALTER TABLE ... ADD CONSTRAINT`, which validates the restored rows. A formerly owned index becomes an ordinary index. |
 | `DROP DATABASE` | No constraint checks |
 | `CREATE TABLE ... AS SELECT` | The new table gets no constraint |
 
@@ -383,16 +385,16 @@ on one node and a `DROP TABLE` of its parent on another: exactly one of them win
 
 ## 8. Database branches
 
-- **A branch inherits every constraint.** A fork keeps the table, column and index ids, and a
-  constraint stores only ids, so each constraint resolves in the branch with no change.
-- **A check stays inside the branch.** It reads the branch's own rows merged with its ancestors
+- **A branch inherits all constraints.** A fork does not change any ids, and a constraint stores
+  only ids. This means that each constraint resolves in the branch unchanged.
+- **A check is scoped to the branch.** It reads the branch's own rows merged with its ancestors
   as of the fork. A row that the branch deleted is hidden, and a row that the branch inherited
-  counts. A write in the source database after the fork never changes a check in the branch.
-- **The rendezvous key is the branch's own key**, so the lock rules of section 3 hold in a branch.
-- **A fork is refused while a constraint is WriteOnly** (`CADB0400`). The branch would inherit a
-  constraint that nothing validates. Wait until the `ADD CONSTRAINT` finishes.
-- `ADD CONSTRAINT` on a branch validates the merged view, so an orphan that only an ancestor holds
-  is found.
+  counts. A write in the source database after the fork does not affect a check in the branch.
+- **The rendezvous key belongs to the branch.** The lock rules of section 3 apply in a branch too.
+- **A fork is refused while a constraint is WriteOnly** (`CADB0400`). The branch would inherit an
+  unvalidated constraint. Wait until the `ADD CONSTRAINT` finishes.
+- `ADD CONSTRAINT` on a branch validates the merged view. It finds an orphan that exists only in an
+  ancestor.
 - A branch cannot reference a table in its source database.
 
 See [database-branching.md](database-branching.md).
@@ -408,7 +410,7 @@ round trip. A test measures zero allocated bytes on this path.
 foreign-key work.
 
 **Child side:** one lock round trip per distinct parent key per transaction, and one batched read of
-the parent keys per statement. A key that the transaction already locked costs nothing. On a branch,
+the parent keys per statement. A key that the transaction already locked adds no cost. On a branch,
 the read adds one batch per ancestry level.
 
 **Parent side:** one probe of the child's index per distinct removed key, per referencing
@@ -432,8 +434,9 @@ is the release before foreign keys.
 
 The children reference 3 parents. The differences are in the noise of the measurement.
 
-**One-phase commit.** A pessimistic child write keeps Kahuna's one-phase commit, also when the parent
-is on another partition: a lock is not a written key, so it does not add a commit participant. An
+**One-phase commit.** A foreign-key check does not stop a pessimistic child write from using Kahuna's
+one-phase commit, also when the parent is on another partition. A lock is not a written key. This
+means that it does not add a commit participant. An
 **optimistic** child loses one-phase commit. It validates its reads at commit, and the rendezvous
 lock is a range lock over one key, which the commit path treats as a predicate read on any
 partition.
@@ -448,37 +451,36 @@ work, tagged by `kind`: `lock_acquired`, `lock_covered`, `parent_lock`, `child_p
 
 | Code | Name | When | HTTP | gRPC |
 | --- | --- | --- | --- | --- |
-| `CADB0304` | `ForeignKeyViolation` | A child INSERT or UPDATE has no parent. ADD CONSTRAINT finds a row without a parent. | 409 | `FailedPrecondition` |
-| `CADB0305` | `ForeignKeyRestrictDelete` | A DELETE removes a parent key that a child still holds. | 409 | `FailedPrecondition` |
-| `CADB0306` | `ForeignKeyRestrictUpdate` | An UPDATE changes a parent key that a child still holds. | 409 | `FailedPrecondition` |
+| `CADB0304` | `ForeignKeyViolation` | A child INSERT or UPDATE writes a key that is missing from the parent. ADD CONSTRAINT finds a row whose parent is missing. | 409 | `FailedPrecondition` |
+| `CADB0305` | `ForeignKeyRestrictDelete` | A DELETE removes a parent key that a child references. | 409 | `FailedPrecondition` |
+| `CADB0306` | `ForeignKeyRestrictUpdate` | An UPDATE changes a parent key that a child references. | 409 | `FailedPrecondition` |
 | `CADB0415` | `InvalidForeignKeyDefinition` | A count or type mismatch; no primary key or unique index over exactly the referenced columns; a view or a materialized view; another database. | 400 | `InvalidArgument` |
 | `CADB0416` | `ForeignKeyCycle` | ADD CONSTRAINT would close a cycle of two or more tables. | 400 | `InvalidArgument` |
 | `CADB0011` | `TableDoesntExist` | The referenced table does not exist. | 500 | `NotFound` |
 | `CADB0400` | `InvalidInput` | A name that another constraint of the table uses; a fork while a constraint is WriteOnly. | 400 | `InvalidArgument` |
 | `CADB0517` | `InsufficientPrivilege` | No `SELECT` on the parent table. | 403 | `PermissionDenied` |
-| `CADB0530` | `DependentObjectsExist` | A schema change that section 7 refuses. | 409 | `FailedPrecondition` |
+| `CADB0530` | `DependentObjectsExist` | A schema change that section 7 lists as refused. | 409 | `FailedPrecondition` |
 | `CADB0533` | `FeatureNotSupported` | An action other than NO ACTION and RESTRICT; MATCH FULL or PARTIAL; DEFERRABLE; row-level TTL on a parent. | 501 | `Internal` |
 | `CADB0504` | `TransactionMustRetry` | A parent write waited for a child transaction longer than `lock_wait_deadline_ms`. | 500 | `Aborted` |
 | `CADB0502` | `TransactionConflict` | An optimistic transaction lost the rendezvous at commit; or the transaction wrote the child or the parent before an `ADD CONSTRAINT` and commits after it started (section 6). | 500 | `Aborted` |
 
 Each violation message names the constraint, the child table, the parent table and the key values.
 
-A code with no HTTP mapping returns 500. A code with no gRPC mapping returns `Internal`. Read the
-code itself, not the status, to decide what to do; the retry codes say "run the transaction
-again".
+An unmapped code returns 500 over HTTP and `Internal` over gRPC. Several codes share a status. Use the error
+code to decide what to do. The retry codes say "run the transaction again".
 
 ---
 
 ## 11. Limitations
 
-**A lagging node in a cluster.** Step 4 of the ADD waits for every *live* node. A node that the
+**A lagging node in a cluster.** Step 4 of the ADD waits for all *live* nodes. A node that the
 schema leader has not heard from for `schema_ack_live_node_lease_ms` (30 s by default) is treated
-as dead and is not waited for. If that node is alive, cut off from the schema leader only, and still
-able to commit to the data partitions, a commit of a write that it planned before the constraint
-can land after the validation. Set the lease to `-1` to make the ADD wait for every configured
-node, at the price of a schema change that stalls while a node is down.
+as dead and is not waited for. If that node is alive and can commit to the data partitions while it is
+cut off from the schema leader, a commit of a write that it planned before the constraint
+can land after the validation. Set the lease to `-1` to make the ADD wait for all configured
+nodes, at the price of a schema change that stalls while a node is down.
 
-**A commit whose outcome is unknown.** A commit that returned `CADB0509` stays in flight until
+**A commit whose outcome is unknown.** A commit that returned `CADB0509` is in flight until
 the client resolves it. While it is in flight on a table, an `ADD CONSTRAINT` or `CREATE INDEX` on
 that table waits, and fails after `schema_ack_wait_timeout_ms`. Retry the COMMIT of that transaction
 until it gives an outcome, then run the schema change again. If the client is gone, the engine stops
@@ -508,24 +510,24 @@ default); until then that node acknowledges no schema change of the database.
 
 ### Invariants
 
-- **A check runs in the statement's own transaction.** A separate transaction would read a stale
+- **A check is part of the statement's transaction.** A separate transaction would read a stale
   state and could leave an orphan.
-- **The parent-side read runs after the parent's write.** Kahuna grants the exclusive key lock
-  without a check of shared range locks; only the write meets the child's lock. A read before the
+- **The parent-side read comes after the parent's write.** Kahuna grants the exclusive key lock
+  and does not check shared range locks. Only the write meets the child's lock. A read before the
   write can miss a child that commits a moment later.
 - **The parent side reads the graph.** It finds its children through the published
-  graph, which is built from every table of the schema. A child table that is not open is still
+  graph, which is built from all tables of the schema. A child table that is not open is also
   checked.
-- **Ids only.** A constraint stores no table or column name except its own name. Names come from the
+- **Ids only.** A constraint stores its name and no table or column names. Names come from the
   graph when SHOW or an error message needs them.
-- **Every related table is opened and pinned before the first write**, by id, without the caller's
-  privilege check. A rename between the open and the write cannot swap a table.
+- **All related tables are opened and pinned before the first write**, by id. The caller's
+  privileges are not checked for this open. A rename between the open and the write cannot swap a table.
 - **No full-table scan** on any enforcement path. The counter `camus.kv.scan_entries` proves it in
   the tests.
 
 ### Where each rule is tested
 
-Every scenario runs on a standalone engine and on a cluster-mode engine.
+Each scenario is tested on a standalone engine and on a cluster-mode engine.
 
 | Rule | Tests |
 | --- | --- |

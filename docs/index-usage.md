@@ -1,6 +1,7 @@
 # Index usage — `SHOW INDEX USAGE`
 
-CamusDB counts, for each index, how often statements read through it and how often writes change it:
+CamusDB counts, for each index, how often statements read through it and how often writes change it.
+The `SHOW INDEX USAGE` statement returns these counts for a database or for one table.
 
 ```sql
 SHOW INDEX USAGE;                -- every index of every table in the context database
@@ -12,35 +13,35 @@ It is the CamusDB form of PostgreSQL's `pg_stat_user_indexes` and CockroachDB's
 
 ## What it is for
 
-An index that no statement reads still costs one write for each row an `INSERT` adds, and more for an
+An index that no statement reads costs one write for each row an `INSERT` adds, and more for an
 `UPDATE` that changes its key. `SHOW INDEXES` lists the indexes, and `SHOW STATISTICS FOR` gives their
 sizes, but neither says whether an index is read. This statement does.
 
-An index is a candidate to drop when, over a long window:
+An index is a candidate to drop when all of these conditions are true over a long window.
 
 - `reads` is 0,
 - `constraint_reads` is 0, and
 - `writes` is not 0.
 
-A unique index or a primary key enforces a constraint, so it is not removable because its reads are 0.
+A unique index or a primary key enforces a constraint. Zero reads alone do not make it removable.
 An index that backs a foreign key shows its use in `constraint_reads`.
 
 ## What is counted
 
 | Counted as | When |
 |---|---|
-| `reads` | A statement opens a read through the index: a unique lookup, a range scan, an `IN`-list seek set (one read for the whole list), a semi-join or `EXISTS` probe, an index nested-loop probe batch, or a forced-index scan. |
+| `reads` | A statement opens a read through the index: a unique lookup, a range scan, an `IN`-list seek set (one read per list), a semi-join or `EXISTS` probe, an index nested-loop probe batch, or a forced-index scan. |
 | `constraint_reads` | A write checks a key through the index: a unique key an `INSERT` or `UPDATE` writes, the parent key a foreign-key check looks up, or the child key a parent delete or update probes. |
 | `entries_read` | The index entries that those reads returned. |
 | `writes` | The index entries that an `INSERT`, `UPDATE` or `DELETE` wrote or removed. An `UPDATE` that changes a key counts 2 (the old entry and the new one). An `UPDATE` that does not change the key of an index counts 0 for it. |
 
-A full table scan reads the rows, not an index, so it counts on no index.
+A full table scan reads the rows directly and does not count on any index.
 
-`EXPLAIN` without `ANALYZE` plans and does not execute, so it counts nothing. `EXPLAIN (ANALYZE)`
-executes the statement, so it counts.
+`EXPLAIN` alone plans the statement and does not execute it. This means that it adds no counts.
+`EXPLAIN (ANALYZE)` executes the statement and is counted.
 
-Writes are counted when the write batch is accepted. A transaction that rolls back later still shows
-the writes it staged.
+Writes are counted when the write batch is accepted. If the transaction rolls back later, the writes
+it staged remain in the counts.
 
 ## Result columns
 
@@ -58,17 +59,17 @@ the writes it staged.
 | `writes` | `INT64` | Index entries written or removed by DML. |
 | `tracked_since` | `STRING` | ISO-8601 UTC time from which this node has counted the index. |
 
-Every readable index has a row, also when every count is 0 — that row is the answer the statement
-exists to give. An index in the middle of a backfill is not listed, the same as in `SHOW INDEXES`: it
+Each readable index has a row, also when all its counts are 0. An index with all-zero counts is the
+case the statement is meant to find. An index in the middle of a backfill is not listed, the same as in `SHOW INDEXES`: it
 takes writes and cannot be read yet.
 
 ### Reading `tracked_since`
 
-The counts are complete from `tracked_since` onward:
+The counts are complete from `tracked_since` onward. Its value depends on when the node first saw the index.
 
 - An index that existed when this node first opened its table counts from the **node start**. A table
-  that this node never opened also reports the node start, with zero reads: a read opens the table, so
-  that is true.
+  that this node has not opened also shows the node start, with zero reads. This is correct, because a
+  read opens the table.
 - An index that appeared later, on a table this node already tracked — the case of `CREATE INDEX`
   after the start — counts from the **time the node first saw it**.
 
@@ -88,8 +89,8 @@ SHOW INDEX USAGE FROM orders;
 | orders_legacy_ref_idx | false | 0 | 0 | 48120 | NULL | 2026-10-12T08:00:01.004Z |
 
 `orders_legacy_ref_idx` took 48,120 writes in two weeks and served no read and no constraint check. It
-is a candidate to drop. Check every node first: the counts are per node, and a report that runs on one
-node only reads through that node.
+is a candidate to drop. Check all nodes first. The counts are per node, and a report from one node
+covers only the reads through that node.
 
 ## Settings
 
@@ -101,21 +102,21 @@ index_usage_enabled: true
 |---|---|---|
 | `index_usage_enabled` | `true` | Runtime-mutable and node-scoped. Off: no new counts, and the counts already taken are kept. |
 
-The cost is a few interlocked additions per index access path and per write batch, never one per row.
+The cost is a few interlocked additions per index access path and per write batch. No cost is added per row.
 
 ## Privileges
 
 `SHOW INDEX USAGE` requires a **superuser**, the same bar as `SHOW ENGINE STATS`. The counts describe
-the whole node's workload, which no per-table grant scopes down.
+the workload of all tables on the node, and a per-table grant cannot narrow them.
 
 ## Limits
 
 1. **It does not survive a restart.** The counts live in memory and start at zero when the node
    starts. Keep readings outside the node if you need a window longer than the node's uptime.
-2. **It is one node's view.** Each node counts the statements it ran. An index is unused only if it
-   is unused on every node.
-3. **Inspection does not load tables.** The index list comes from the database's catalog, so the
-   statement does not make every table of a database resident.
+2. **It is one node's view.** Each node counts the statements it ran. To call an index unused,
+   confirm that it is unused on all nodes.
+3. **Inspection does not load tables.** The index list comes from the database's catalog. The
+   statement does not load all the tables of the database into memory.
 
 ## Related
 

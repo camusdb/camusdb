@@ -58,6 +58,9 @@ internal sealed class InlineFunctionCatalog : IDisposable
 
     private long lastPublished;
 
+    /// <summary>Set by <see cref="Dispose"/>, under <see cref="gate"/>.</summary>
+    private bool disposed;
+
     /// <summary>The function records keyed by name (case-insensitive). An immutable snapshot.</summary>
     public IReadOnlyDictionary<string, InlineFunctionDefinition> Functions => functions;
 
@@ -127,6 +130,15 @@ internal sealed class InlineFunctionCatalog : IDisposable
                 cached.Set.RetireAll();
 
             InlineFunctionSet set = InlineFunctionSet.Build(snapshot, runtime, databaseName, previous);
+
+            // A statement that still resolves after the catalog ended runs its call and keeps no
+            // reference on the code: nothing would retire a set that is kept now.
+            if (disposed)
+            {
+                set.RetireAll();
+                return set;
+            }
+
             resolved = new ResolvedSet(snapshot, runtime, databaseName, set);
             return set;
         }
@@ -174,11 +186,15 @@ internal sealed class InlineFunctionCatalog : IDisposable
             removed = updated;
     }
 
-    /// <summary>Retires every binding, so the engine can unload their code. Called when the database closes.</summary>
+    /// <summary>
+    /// Retires every binding, so the engine can unload their code. Called when the database closes, and
+    /// when a transaction with a private schema ends, for the catalog of that schema.
+    /// </summary>
     public void Dispose()
     {
         lock (gate)
         {
+            disposed = true;
             resolved?.Set.RetireAll();
             resolved = null;
         }

@@ -31,16 +31,10 @@ internal enum DdlStatementClass
 
     /// <summary>
     /// Commits work that a later <c>ROLLBACK</c> cannot undo. Refused inside an explicit transaction
-    /// with <see cref="CamusDBErrorCodes.StatementNotAllowedInTransaction"/>.
+    /// with <see cref="CamusDBErrorCodes.StatementNotAllowedInTransaction"/>, so it never commits apart
+    /// from the transaction while the client expects it to roll back with it.
     /// </summary>
-    Irrevocable,
-
-    /// <summary>
-    /// A schema statement whose transactional form is not built yet. Refused inside an explicit
-    /// transaction when transactional DDL is on, so it never commits apart from the transaction while
-    /// the client expects it to roll back with it.
-    /// </summary>
-    NotYetTransactional
+    Irrevocable
 }
 
 /// <summary>
@@ -64,10 +58,23 @@ internal static class DdlStatementClasses
         NodeType.AlterTableRenameTo or NodeType.AlterTableRenameColumn or NodeType.AlterTableRenameIndex or
         NodeType.AlterTableDropIndex or NodeType.AlterTableDropIndexIfExists or NodeType.AlterTableDropPrimaryKey or
         NodeType.AlterTableSetSetting or NodeType.AlterTableResetSetting or
+        NodeType.AlterTableDropConstraint or NodeType.AlterTableDropNotNull or NodeType.AlterTableSetColumnStorage or
         NodeType.CommentOnTable or NodeType.CommentOnColumn or NodeType.CommentOnIndex or
+        NodeType.CommentOnView or NodeType.CommentOnMaterializedView or NodeType.CommentOnSequence or
         NodeType.CreateView or NodeType.CreateOrReplaceView or
         NodeType.DropView or NodeType.DropViewIfExists or
-        NodeType.AlterViewRenameTo
+        NodeType.AlterViewRenameTo or NodeType.AlterViewOwnerTo or
+        NodeType.DropMaterializedView or NodeType.DropMaterializedViewIfExists or
+        NodeType.AlterMaterializedViewRenameTo or
+        NodeType.CreateSequence or NodeType.CreateSequenceIfNotExists or
+        NodeType.DropSequence or NodeType.DropSequenceIfExists or
+        NodeType.AlterSequence or NodeType.AlterSequenceRenameTo or
+        NodeType.CreateTrigger or NodeType.DropTrigger or
+        NodeType.CreateExtension or NodeType.AlterExtensionUpdate or NodeType.DropExtension or
+        NodeType.CreateFunction or NodeType.CreateOrReplaceFunction or NodeType.DropFunction or NodeType.AlterFunctionOwnerTo or
+        // The table is a metadata change. The rows of CREATE TABLE ... AS are writes of the transaction, as
+        // the rows of an INSERT ... SELECT are.
+        NodeType.CreateTableAsSelect or NodeType.CreateTableAsSelectIfNotExists
             => DdlStatementClass.MetadataOnly,
 
         NodeType.AlterTableAddColumn or
@@ -81,25 +88,11 @@ internal static class DdlStatementClasses
         NodeType.TruncateTable or
         NodeType.AlterTableRewriteStorage or
         NodeType.RefreshMaterializedView or
-        NodeType.CreateMaterializedView or NodeType.CreateMaterializedViewIfNotExists
+        NodeType.CreateMaterializedView or NodeType.CreateMaterializedViewIfNotExists or
+        // Takes the dropped table's recovery record, which the garbage collector may reclaim at any time,
+        // under a fence that lasts as long as the statement and not as long as the transaction.
+        NodeType.CreateTableRelink
             => DdlStatementClass.Irrevocable,
-
-        NodeType.CreateTableRelink or
-        NodeType.CreateTableAsSelect or NodeType.CreateTableAsSelectIfNotExists or
-        NodeType.AlterTableDropConstraint or
-        NodeType.AlterTableDropNotNull or
-        NodeType.AlterTableSetColumnStorage or
-        NodeType.AlterViewOwnerTo or
-        NodeType.CommentOnView or NodeType.CommentOnMaterializedView or NodeType.CommentOnSequence or
-        NodeType.DropMaterializedView or NodeType.DropMaterializedViewIfExists or
-        NodeType.AlterMaterializedViewRenameTo or
-        NodeType.CreateSequence or NodeType.CreateSequenceIfNotExists or
-        NodeType.DropSequence or NodeType.DropSequenceIfExists or
-        NodeType.AlterSequence or NodeType.AlterSequenceRenameTo or
-        NodeType.CreateTrigger or NodeType.DropTrigger or
-        NodeType.CreateExtension or NodeType.AlterExtensionUpdate or NodeType.DropExtension or
-        NodeType.CreateFunction or NodeType.CreateOrReplaceFunction or NodeType.DropFunction or NodeType.AlterFunctionOwnerTo
-            => DdlStatementClass.NotYetTransactional,
 
         _ => null
     };

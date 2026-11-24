@@ -1,34 +1,34 @@
 # Plan-quality harness
 
-The plan-quality harness finds planner changes that make queries do more work. It runs a fixed
-corpus of tagged queries on seeded data. For each query it measures the plan with counters that are
-the same on every run. Then it compares the counters with a baseline file in git.
+The plan-quality harness finds planner changes that make queries do more work. It executes a fixed
+corpus of tagged queries on seeded data. For each query, it measures the plan with counters that
+give the same values on each run. Then it compares the counters with a baseline file in git.
 
 The main test suite checks that results are correct. It does not check that a plan is good. A cost
-change can make a query read ten times more rows and still return the right rows. The harness
+change can make a query read ten times more rows and return the right rows anyway. The harness
 catches that.
 
-The code is in `CamusDB.PlanQuality.Tests/`. It is a separate test project, so it does not add time
-to the main suite.
+The code is in `CamusDB.PlanQuality.Tests/`. It is a separate test project. This means that it does
+not add time to the main suite.
 
 ## What it measures
 
-The harness runs each query two times: one time as `EXPLAIN (ANALYZE)`, for the plan and its
-counters, and one time as a plain query, for the result.
+Each query is executed two times: one time as `EXPLAIN (ANALYZE)`, for the plan and its counters,
+and one time as a normal query, for the result.
 
 | Number | Where it comes from | Role |
 |---|---|---|
 | Result hash | The result rows, sorted, with each row's columns sorted by name. A float has 6 decimals. | **Gate.** Any change fails. |
 | Work | The sum of `rows_read`, `kv_lookups` and `kv_scan_entries` over all plan nodes. | **Gate.** The main quality number. |
-| Statement rows read | The rows the whole statement read, from the slow query log (`rows_read` in `SHOW SLOW QUERIES`). | **Gate.** It also counts reads that are on no plan node, such as a subquery that the bind folds into a literal, or a derived table inside a set operation or a subquery. The query of a view or a derived table in `FROM` has plan nodes of its own, so its reads are in the work too. |
+| Statement rows read | The rows the statement read in total, from the slow query log (`rows_read` in `SHOW SLOW QUERIES`). | **Gate.** It also counts reads that are on no plan node, such as a subquery that the bind folds into a literal, or a derived table in a set operation or a subquery. The query of a view or a derived table in `FROM` has separate plan nodes. This means that its reads are in the work too. |
 | Join steps costed | `join-steps-costed=` on the `plan-info` row of `EXPLAIN (ANALYZE)`. | **Gate.** It shows the work of the join-order search. |
-| Plan fingerprint | One line for each plan node: the node name and its detail, without estimates, costs or the time of a `LATERAL` body (`lateral-ms=`). | Report. It shows what changed. |
+| Plan fingerprint | One line for each plan node: the node name and its detail. Estimates, costs and the time of a `LATERAL` body (`lateral-ms=`) are left out. | Report. It shows what changed. |
 | Join order | `join-order=` on the `plan-info` row: `cost-based`, `heuristic` or `cached`. | Report. |
 | Q-error | For each node, the larger of estimated/actual and actual/estimated (both values at least 1). A value of 1 is a perfect estimate. | Report: the median and the maximum for each query. |
-| Planning time, execution time | `planning-ms=` and the root node's `actual_time_ms`. | Report only. They never go into a baseline. |
+| Planning time, execution time | `planning-ms=` and the root node's `actual_time_ms`. | Report only. They are not written to a baseline. |
 
-The harness does not use `estimated_cost`. The cost model is the thing that changes, so its
-numbers do not compare across versions.
+The harness does not use `estimated_cost`. The cost model is the thing that changes. This means
+that its numbers do not compare across versions.
 
 For a join that the join-order search costed, q-error uses the search's estimate
 (`join-order-est-rows=`). The plan annotation estimates an index-nested-loop join as one row for
@@ -36,7 +36,7 @@ each outer row, which is a different quantity.
 
 ## The gate
 
-A run fails when one of these conditions is true:
+A run fails when one of the following six conditions is true.
 
 1. A query fails or passes the time limit (60 s by default).
 2. A result hash changes.
@@ -56,28 +56,30 @@ first values, to tune after the harness has run for some weeks.
 
 ## Tiers
 
-| Tier | Data | Corpus | When it runs |
+| Tier | Data | Corpus | Schedule |
 |---|---|---|---|
 | Small | Retail data set, scale 1 (about 42,000 rows) | `Corpus/small/*.sql`, 99 queries | Each pull request and each push to `main` (`Plan-Quality` job in `run-tests.yml`) |
 | Small, scale 4 | Retail data set, scale 4 | The same 99 queries | Nightly (`plan-quality-nightly.yml`) |
 | JOB | Synthetic IMDB data from `scripts/plan-quality/job/gen_job.py`, scale 0.003 (about 225,000 rows) | The 113 Join Order Benchmark queries | Nightly |
 
-The **retail data set** (`Data/RetailDataSet.cs`) has 19 tables. It is made to show estimate errors:
+The **retail data set** (`Data/RetailDataSet.cs`) has 19 tables. Its data has features that cause
+estimate errors.
 
-- Foreign keys follow a Zipf distribution, so a few customers, products and cities are very popular.
-- Columns are correlated. Most orders go to a store in the customer's own city, and a product's
+- Foreign keys follow a Zipf distribution. This means that a few customers, products and cities are
+  very popular.
+- Columns are correlated. Most orders go to a store in the customer's city, and a product's
   price depends on its category.
 - Join keys and filter columns have NULLs, and indexed columns have many duplicate values.
 - Some foreign keys have an index and some do not.
 
 The **JOB queries** come from `gregrahn/join-order-benchmark` at a pinned commit. That repository
-has no license, so `scripts/plan-quality/job/prepare.sh` downloads the files at run time. They are
-never committed.
+does not have a license. For this reason, `scripts/plan-quality/job/prepare.sh` downloads the files
+at run time, and they are not committed.
 
 ## Run it locally
 
-Run the pull-request gate (the small tier, the determinism check, the planted regression and the
-unit tests):
+The pull-request gate is the small tier, the determinism check, the planted regression and the unit
+tests. It is started with one command.
 
 ```sh
 dotnet test CamusDB.PlanQuality.Tests/CamusDB.PlanQuality.Tests.csproj --filter TestCategory=PlanQuality
@@ -87,29 +89,29 @@ It takes about 2 minutes. The report is in
 `CamusDB.PlanQuality.Tests/bin/Debug/net10.0/plan-quality/small-sf1-report.md`. Set
 `PLAN_QUALITY_REPORT_DIR` to write it somewhere else.
 
-Run the small tier at another scale:
+The small tier can also be run at another scale.
 
 ```sh
 PLAN_QUALITY_SCALE=4 dotnet test CamusDB.PlanQuality.Tests/CamusDB.PlanQuality.Tests.csproj --filter FullyQualifiedName~SmallTierGate
 ```
 
-Run the JOB tier. It needs `python3` and `curl`:
+The JOB tier needs `python3` and `curl`.
 
 ```sh
 scripts/plan-quality/job/prepare.sh /tmp/job 0.003
 JOB_DIR=/tmp/job JOB_SCALE=0.003 dotnet test CamusDB.PlanQuality.Tests/CamusDB.PlanQuality.Tests.csproj --filter FullyQualifiedName~JobTierGate
 ```
 
-Without `JOB_DIR`, the JOB test is skipped. Baselines exist for scale 0.003 (the nightly scale, about
-4 minutes) and for scale 0.001 (about 40 seconds, for a quick local check). A baseline update of the
-JOB tier also runs the reference engine, which takes about 13 minutes at scale 0.003.
+If `JOB_DIR` is not set, the JOB test is skipped. Baselines exist for scale 0.003 (the nightly scale,
+about 4 minutes) and for scale 0.001 (about 40 seconds, for a quick local check). A baseline update
+of the JOB tier also uses the reference engine, which takes about 13 minutes at scale 0.003.
 
 To look at some queries only, set `PLAN_QUALITY_ONLY` to a comma list of query ids. A partial run
-does not report the queries it left out, and it never writes a baseline.
+does not report the queries it left out, and it does not write a baseline.
 
 ## Read the report
 
-The report starts with the gate result and a summary table. Then it has these sections:
+The report starts with the gate result and a summary table. Six sections follow.
 
 - **Failures**: each failure, with the query id, its tags and the numbers.
 - **Notes**: changes that did not fail the gate.
@@ -119,31 +121,32 @@ The report starts with the gate result and a summary table. Then it has these se
 - **Timings**: total planning and execution time, and the 10 slowest queries. This section is not
   graded.
 
-The run also writes `<tier>-sf<scale>-run.json`, with every counter of every plan node.
+The run also writes `<tier>-sf<scale>-run.json`, with all the counters of all the plan nodes.
 
 ## Update a baseline
 
-When a planner change moves plans on purpose, update the baseline:
+When a planner change moves plans on purpose, you should update the baseline.
 
 ```sh
 PLAN_QUALITY_UPDATE_BASELINE=1 dotnet test CamusDB.PlanQuality.Tests/CamusDB.PlanQuality.Tests.csproj --filter FullyQualifiedName~SmallTierGate
 ```
 
-The update first runs each query on a **reference engine**, with `CostBasedJoinOrderEnabled` and
-`CostBasedAccessPathEnabled` off. If a result is different, it writes nothing. It also writes
-nothing when a query fails.
+The update starts by executing each query on a **reference engine**, with `CostBasedJoinOrderEnabled`
+and `CostBasedAccessPathEnabled` off. If a result is different, the baseline is not written. It is
+also not written when a query fails.
 
 **Put the baseline diff in the same commit as the planner change.** In the pull request, say why each
-plan moved. The diff shows each changed query on its own lines, because the entries are sorted by
-id and each plan node is one line. A baseline that people update without a look measures nothing.
+plan moved. The entries are sorted by id and each plan node is one line. This means that the diff
+shows each changed query on separate lines. A baseline that people update with no review does not
+measure anything.
 
-Each scale has its own file: `Baselines/small-sf1.json`, `Baselines/small-sf4.json`,
-`Baselines/job-sf0.003.json` and `Baselines/job-sf0.001.json`. Update each tier that the change
-moves.
+Each scale has a separate file, such as `Baselines/small-sf1.json` or `Baselines/job-sf0.003.json`.
+The other two are `Baselines/small-sf4.json` and `Baselines/job-sf0.001.json`. Update each tier that
+the change moves.
 
 ## Add a query
 
-Add it to a file in `Corpus/small/`:
+A query goes in a file in `Corpus/small/`, with an id and tags in comments above it.
 
 ```sql
 -- query: jc-3-example
@@ -151,60 +154,61 @@ Add it to a file in `Corpus/small/`:
 SELECT ... ;
 ```
 
-- The id must be unique. It is the key in the baseline, so a rename is a removal and an addition.
+- The id must be unique. It is the key in the baseline. This means that a rename is a removal and an
+  addition.
 - Give at least one tag. Use the tags that exist (`single-table`, `join:chain`, `join:star`,
   `join:cycle`, `join:clique`, `join:snowflake`, `tables:N`, `comma-join`, `outer-join`,
-  `subquery`, and so on), so the report groups the query with similar ones.
-- End each `ORDER BY ... LIMIT` with a unique column, so the kept rows have one right answer.
-- Keep each query under about 1 s. The whole small tier must stay short.
+  `subquery`, and so on). The report then groups the query with similar ones.
+- End each `ORDER BY ... LIMIT` with a unique column. The kept rows then have one right answer.
+- Keep each query under about 1 s. The small tier as a whole must be short.
 
 Then run the baseline update, and commit the new entry with the query.
 
 ## Why the numbers repeat
 
-The gate is useful only if the same plan on the same data gives the same numbers on every run.
-`PlanCountersRepeat` proves this on a sample of the corpus: it builds two engines, each with its own
-load of the data, and compares every counter of every node over two runs and two engines. It also
-compares the statistics.
+The gate is useful only if the same plan on the same data gives the same numbers on each run.
+`PlanCountersRepeat` proves this on a sample of the corpus. It builds two engines and loads the data
+into each of them separately. Then it compares all the counters of all the nodes over two runs and
+two engines. It also compares the statistics.
 
-The harness builds each engine with these options off, because each one can change a counter
-between two runs:
+The harness builds each engine with the options below turned off. Each of them can change a counter
+between two runs.
 
 | Option | Why it is off |
 |---|---|
-| `AutoAnalyzeEnabled` | Its reservoir sample is seeded by the time of the run. The harness runs `ANALYZE` explicitly instead, which reads each table in key order. |
-| `PointReadRowIdCacheEnabled` | A repeated primary-key lookup skips its index read, so a query's counters depend on the queries that ran before it. |
+| `AutoAnalyzeEnabled` | Its reservoir sample is seeded by the time of the run. In its place, the harness executes `ANALYZE` explicitly, which reads each table in key order. |
+| `PointReadRowIdCacheEnabled` | A repeated primary-key lookup skips its index read. This means that a query's counters depend on the queries that ran before it. |
 | `QueryResultCacheEnabled`, `PlanCacheEnabled` | A cache hit skips the work that the harness measures. |
 | `TtlEnabled` | A background job that could delete rows. |
 
-The slow query log is **on**, with a threshold of 0, because it is the source of the statement
-rows read.
+The slow query log is **on**, with a threshold of 0. It is the source of the statement rows read.
 
-All data comes from seeded generators. The retail generator uses its own SplitMix64 generator,
-because the sequence of `System.Random` for a seed is not part of the .NET contract. The tables are
-created and loaded in a fixed order, because table ids come from a sequence and row ids keep
-insertion order. The JOB generator uses Python's seeded `random` module, and the nightly workflow
-pins one Python version.
+All data comes from seeded generators. The retail generator has a SplitMix64 generator of its own.
+It avoids `System.Random`, whose sequence for a seed is not part of the .NET contract. The tables are
+created and loaded in a fixed order. This matters because table ids come from a sequence, and row
+ids follow insertion order.
+The JOB generator uses Python's seeded `random` module, and the nightly workflow pins one Python
+version.
 
 ## Estimate traces and the errors by rule
 
-Under `EXPLAIN (ANALYZE)` every plan node carries an `estimate_trace` column: the rule that made
-its estimate (`equality-ndv`, `equality-heavy`, `range-histogram`, `like-prefix`, `in-list`,
+Under `EXPLAIN (ANALYZE)`, each plan node carries an `estimate_trace` column. It shows the rule that
+made its estimate (`equality-ndv`, `equality-heavy`, `range-histogram`, `like-prefix`, `in-list`,
 `join-skew-pair`, `class-textbook`, …), the formula, and each factor with the value and the
 statistics it read. A join that the join-order search estimated lists the leaves, the groups and
-the column classes of its table subset, so the estimate can be rebuilt from the trace alone. A
-statement and a plain `EXPLAIN` record nothing; only the `ANALYZE` path plans with a tracing
-planner.
+the column classes of its table subset. This means that the estimate can be rebuilt from the trace
+alone. A statement and an `EXPLAIN` without `ANALYZE` record no trace; only the `ANALYZE` path plans
+with a tracing planner.
 
-The harness reads the trace of every node:
+The harness reads the trace of each node and uses it in two outputs.
 
 - Each tier run writes `<tier>-sf<scale>-estimates.json` next to its report: one record for each
   plan node with an estimate and an actual count, with the query, its template (`17f` belongs to
   template `17`), the rule, the formula, both counts and the trace. The file is a measurement of
-  one tree on one data set, not a baseline, and it is never committed.
-- The report gets a section *Estimates by rule*: for the whole run and for each rule, the count of
-  nodes, the count over a q-error of 100, the median and the 95th percentile of the q-error, and
-  the share of nodes without a rule (the target is none). This is where to look first when the
+  one tree on one data set. It is not a baseline and is not committed.
+- The report gets a section *Estimates by rule*. It gives the following numbers for the full run and
+  for each rule: the count of nodes, the count over a q-error of 100, the median and the 95th
+  percentile of the q-error, and the share of nodes that have no rule (the target is none). This is where to look first when the
   *Worst estimates* table names a query: the rule tells which branch of the estimator produced the
   number, and the trace of the node tells what the statistics said.
 
@@ -218,16 +222,16 @@ the error. The trace and this report section are what remains of it.
 ## Known gaps
 
 - **Correlated `EXISTS` on an unindexed key.** The subquery scans the inner table for each outer
-  row, through the store directly. Neither the plan nodes nor the statement probe count those reads,
-  so the work of `sq-exists-correlated` is much lower than the real cost. Its execution time in the
-  report shows the cost.
+  row, through the store directly. Neither the plan nodes nor the statement probe count those reads.
+  This means that the work of `sq-exists-correlated` is much lower than the real cost. Its execution
+  time in the report shows the cost.
 - **Subqueries that the bind stage folds into literals.** An `IN (SELECT ...)` or a scalar subquery
-  runs before the plan, and its reads are not on any plan node.
-- **Q-error under a `LIMIT`.** A scan below a limit stops early, so its actual rows are lower than
-  its estimate. A large q-error on such a node is expected.
-- **Row-id order.** A row id holds a counter that starts at a random value. If the counter wraps
-  inside one second during a load, two rows change order in a full scan. No counter in the corpus
-  depends on scan order, so this matters only for a plan whose early exit depends on it.
-- **Cluster plans.** The harness runs one node. Broadcast joins, gathers and placement are not
-  covered.
+  is executed before the plan, and its reads are not on any plan node.
+- **Q-error under a `LIMIT`.** A scan below a limit stops early. This means that its actual rows are
+  lower than its estimate, and a large q-error on such a node is expected.
+- **Row-id order.** A row id contains a counter that starts at a random value. If the counter wraps
+  within one second during a load, two rows change order in a full scan. No counter in the corpus
+  depends on scan order. This matters only for a plan whose early exit depends on it.
+- **Cluster plans.** The harness uses one node. Broadcast joins and gathers are not covered, and
+  neither is placement.
 - **Wall time** is reported but not graded. The hosted runners are not stable enough to compare times.

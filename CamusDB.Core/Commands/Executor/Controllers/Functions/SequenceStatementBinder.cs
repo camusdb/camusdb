@@ -305,7 +305,7 @@ internal sealed class SequenceStatementBinder
             $"{owner}:{sequence.Id}:{transaction.NextSequenceAllocationOrdinal()}:{count}";
 
         SequenceRun run = await allocator.ReserveAsync(
-            database.Kahuna.Kahuna, database.Id, sequence, count, idempotencyKey, cancellationToken).ConfigureAwait(false);
+            database.Kahuna.Kahuna, database.Id, CounterDefinitionOf(database, sequence), count, idempotencyKey, cancellationToken).ConfigureAwait(false);
 
         lock (parameters)
         {
@@ -316,12 +316,19 @@ internal sealed class SequenceStatementBinder
     }
 
     /// <summary>
+    /// The definition the counter of <paramref name="sequence"/> has, which is the catalog record except in a
+    /// transaction that altered the sequence and did not commit yet.
+    /// </summary>
+    private static SequenceSchema CounterDefinitionOf(DatabaseDescriptor database, SequenceSchema sequence)
+        => Catalogs.Transactional.TransactionSchemaScope.OverlayFor(database)?.CounterDefinitionOf(sequence) ?? sequence;
+
+    /// <summary>
     /// The step between the values of <paramref name="run"/>, derived from the run itself.
     /// </summary>
     /// <remarks>
     /// <para><b>Not the catalog's increment.</b> The counter and the catalog record are changed by
     /// two separate writes — <c>ALTER SEQUENCE</c> moves the counter first and publishes the record
-    /// afterwards — so a reservation can be allocated with one increment while the record still
+    /// afterwards, and inside a transaction the record is published first — so a reservation can be allocated with one increment while the record still
     /// describes another. Stepping a run by the record's number then either overshoots its end
     /// (raising the exhausted-run error on a reservation that was perfectly good) or emits values
     /// between the ones Kahuna allocated. The run's own endpoints cannot disagree with themselves.</para>
@@ -512,15 +519,16 @@ internal sealed class SequenceStatementBinder
                 CamusDBErrorCodes.InvalidSequenceDefinition,
                 $"setval('{sequence.Name}', {request.Value}) is above the sequence's MAXVALUE ({ceiling})");
 
-        long nextIssued = request.IsCalled ? request.Value + sequence.Increment : request.Value;
+        SequenceSchema counter = CounterDefinitionOf(database, sequence);
+        long nextIssued = request.IsCalled ? request.Value + counter.Increment : request.Value;
 
         await allocator.UpdateAsync(
             database.Kahuna.Kahuna,
             database.Id,
-            sequence,
+            counter,
             // The counter holds the reserved ceiling, so seeding it one increment below the value
             // that should come next makes that value the one issued.
-            currentValue: nextIssued - sequence.Increment,
+            currentValue: nextIssued - counter.Increment,
             increment: null,
             initialValue: null,
             maxValue: null,

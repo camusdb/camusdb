@@ -1,7 +1,7 @@
 # Window Functions
 
-A window function computes a value for each row from a set of related rows, the *window*, without
-merging those rows into one. CamusDB supports the ranking functions, the offset and value functions,
+A window function computes a value for each row from a set of related rows, the *window*. Unlike a
+grouped aggregate, it does not merge those rows into one. CamusDB supports the ranking functions, the offset and value functions,
 and the aggregates `count`, `sum`, `avg`, `min` and `max` with an `OVER` clause. The semantics are
 PostgreSQL's, except for the placement of NULL in a sort (see [Order and NULL](#order-and-null)).
 
@@ -34,7 +34,7 @@ frame := { ROWS | RANGE } start
 start, end := UNBOUNDED PRECEDING | n PRECEDING | CURRENT ROW | n FOLLOWING | UNBOUNDED FOLLOWING
 ```
 
-- `OVER ()` makes the whole result one partition.
+- `OVER ()` puts all rows of the result in one partition.
 - `n` is a non-negative integer literal or a placeholder (`@n`). It is allowed with `ROWS` only.
 - A window call is allowed in the select list and in the final `ORDER BY` only. It can be part of a
   larger expression: `v - avg(v) OVER (PARTITION BY g)`, `coalesce(lag(v) OVER (ORDER BY id), 0)`.
@@ -43,9 +43,9 @@ start, end := UNBOUNDED PRECEDING | n PRECEDING | CURRENT ROW | n FOLLOWING | UN
 
 ### `OVER` is a reserved word
 
-`OVER` cannot be a table name, a column name or an alias without quotes. Every other window word —
-`PARTITION`, `ROWS`, `RANGE`, `GROUPS`, `UNBOUNDED`, `PRECEDING`, `FOLLOWING`, `CURRENT`, `ROW`,
-`EXCLUDE` — stays a plain identifier, so a column named `range` or `rows` still works.
+`OVER` cannot be a table name, a column name or an alias unless it is quoted. The other window words
+(`PARTITION`, `ROWS`, `RANGE`, `GROUPS`, `UNBOUNDED`, `PRECEDING`, `FOLLOWING`, `CURRENT`, `ROW`,
+`EXCLUDE`) are not reserved. A column can be named `range` or `rows`.
 
 `OVER` must be reserved because of the grammar. In `OVER (ORDER BY f(x) ROWS …)` the word after
 `f(x)` is a frame word or another `OVER`. The LALR(1) parser reads one word of lookahead, which is
@@ -67,57 +67,59 @@ not enough to tell the two apart. The SQL standard also reserves `OVER`.
 | `last_value(x)` | type of `x` | `x` of the last row of the frame |
 | `nth_value(x, n)` | type of `x` | `x` of row `n` of the frame (from 1), or NULL when the frame is shorter |
 | `count(*)`, `count(x)` | int64 | The rows of the frame, or the rows where `x` is not NULL |
-| `sum(x)`, `avg(x)`, `min(x)`, `max(x)` | the type of the plain aggregate | The aggregate over the frame |
+| `sum(x)`, `avg(x)`, `min(x)`, `max(x)` | the type of the non-window aggregate | The aggregate over the frame |
 
 - The ranking functions, `lag` and `lead` ignore a frame.
 - `ntile` reads `k` from the first row of each partition. `k` must be greater than zero.
-- `lag` and `lead` read `offset` and `default` on the current row, so either can be an expression of
-  the row. A negative offset reads in the other direction. The default must have the type of `x`, or
-  be NULL, or both must be numeric. Two numeric types give the result the type of `x + default`:
-  `lag(int_col, 1, 0.5)` is a float64 column on every row. A placeholder default is checked when the
-  statement runs. It can be narrower than `x` (an int64 default for a float64 `x`), not wider.
+- `lag` and `lead` read `offset` and `default` on the current row. This means that either can be an
+  expression of the row. A negative offset reads in the other direction. The default must have the
+  type of `x` or be NULL, unless both are numeric. Two numeric types give the result the type of
+  `x + default`: `lag(int_col, 1, 0.5)` returns float64 for all rows. A placeholder default is checked
+  at execution time. It can be narrower than `x` (an int64 default for a float64 `x`). A wider
+  placeholder default fails this check.
 - An offset or a frame bound past the end of the partition stops at the end, whatever its size.
 - `nth_value` reads `n` on the current row. `n` must be greater than zero.
-- The aggregates have the result types and the NULL rules of the plain aggregates: `sum` of int64 is
+- The aggregates have the result types and the NULL rules of the non-window aggregates: `sum` of int64 is
   int64, `avg` of int64 is float64, `sum` and `avg` of numeric are numeric. An empty frame gives NULL,
   and 0 for `count`.
-- `sum` of int64 values adds the frame exactly. A frame total outside the int64 range fails with
-  `CADB0420`, and is never wrapped (see [INT64 overflow](data-types.md#int64-overflow)).
-- `sum` and `avg` over float64 values add the exact values of the frame and round once, so a frame's
-  result does not depend on the order of its rows, and a sliding frame costs the same as a running
-  one. A frame total past the float64 range from finite values fails with `CADB0421`; a frame that
-  holds an infinity or a NaN gives the IEEE total (see
-  [Float values](data-types.md#float-values-infinity-nan-and-overflow)). The plain `sum` adds in row order, so `sum(x) OVER ()` and `sum(x)` can differ in the last
-  binary digit of a float64.
+- `sum` of int64 values adds the frame exactly. A frame total outside the int64 range returns the
+  error `CADB0420` and is never wrapped (see [INT64 overflow](data-types.md#int64-overflow)).
+- `sum` and `avg` over float64 values add the exact values of the frame and round once. This
+  means that a frame's result does not depend on the order of its rows, and a sliding frame costs the
+  same as a running one. A frame total past the float64 range from finite values returns the error
+  `CADB0421`. A frame that contains an infinity or a NaN gives the IEEE total (see
+  [Float values](data-types.md#float-values-infinity-nan-and-overflow)). The aggregate form `sum(x)`
+  adds in row order. This means that `sum(x) OVER ()` and `sum(x)` can differ in the last binary digit
+  of a float64.
 
 ## Frames and peers
 
-Rows with equal `ORDER BY` values in the window are *peers*. A window with no `ORDER BY` makes every
-row of the partition a peer of every other row.
+Rows with equal `ORDER BY` values in the window are *peers*. If the window omits `ORDER BY`, all rows
+of the partition are peers.
 
-A window with no frame clause has the default frame `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT
+If the frame clause is omitted, the default frame is `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT
 ROW`. In a `RANGE` frame, `CURRENT ROW` means the first peer at the start and the last peer at the
-end. So:
+end. This means that the default frame of a row ends at its last peer.
 
-- A running `sum(x) OVER (ORDER BY day)` gives the same value to every row of one day.
-- Without `ORDER BY`, the default frame is the whole partition: `sum(x) OVER (PARTITION BY g)` is the
-  total of the partition on every row.
-- `last_value(x) OVER (ORDER BY t)` returns `x` of the last **peer** of the row, not of the last row
-  of the partition. For the last row of the partition, write the frame:
+- A running `sum(x) OVER (ORDER BY day)` gives the same value to all rows of one day.
+- If `ORDER BY` is omitted, the default frame covers all rows of the partition, and
+  `sum(x) OVER (PARTITION BY g)` returns the partition total on each row.
+- `last_value(x) OVER (ORDER BY t)` returns `x` of the last **peer** of the row. A frame that ends at
+  `UNBOUNDED FOLLOWING` returns `x` of the last row of the partition.
 
   ```sql
   last_value(x) OVER (ORDER BY t ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
   ```
 
 A `ROWS` frame counts rows from the current row. `ROWS BETWEEN 2 PRECEDING AND 1 FOLLOWING` covers at
-most four rows: two before the row, the row, and one after it. The frame is cut at the ends of the
+most four rows, from two rows before the current row to one row after it. The frame is cut at the ends of the
 partition.
 
 ## Order and NULL
 
 - The window `ORDER BY` sorts NULL the same way as the query's `ORDER BY`: NULL comes first in
-  ascending order and last in descending order. PostgreSQL does the opposite by default, so a
-  ranking over a nullable column can differ from PostgreSQL. `NULLS FIRST` and `NULLS LAST` are not
+  ascending order and last in descending order. PostgreSQL does the opposite by default. This
+  means that a ranking over a nullable column can differ from PostgreSQL. `NULLS FIRST` and `NULLS LAST` are not
   supported yet. See [NULL in ORDER BY](./postgresql-differences.md#null-in-order-by).
 - `PARTITION BY` puts all rows with a NULL key into one partition, as `GROUP BY` does.
 - `row_number()` over rows with equal `ORDER BY` values numbers them in no defined order. Add a
@@ -125,32 +127,34 @@ partition.
 
 ## Where windows run
 
-SQL computes windows after `WHERE`, `GROUP BY` and `HAVING`, and before the select list, `DISTINCT`,
-`ORDER BY` and `LIMIT`. CamusDB keeps this order by running a windowed `SELECT` in two parts:
+SQL computes windows after `WHERE`, `GROUP BY` and `HAVING`. The select list, `DISTINCT`, `ORDER BY`
+and `LIMIT` come after the windows. A windowed `SELECT` is executed in two parts that preserve this
+order.
 
-1. An inner query computes `FROM`, `WHERE`, `GROUP BY`, `HAVING`, every aggregate, and every value
-   that a window reads.
+1. An inner query computes `FROM`, `WHERE`, `GROUP BY` and `HAVING`. It also computes all aggregates
+   and all values that the windows read.
 2. The window step sorts those rows once for each distinct `(PARTITION BY, ORDER BY)` and computes
-   every window of that group, one partition at a time.
+   all windows of that group, one partition at a time.
 
-The outer query then computes the select list, `DISTINCT`, `ORDER BY` and `LIMIT`. Consequences:
+The outer query then computes the select list, `DISTINCT`, `ORDER BY` and `LIMIT`.
 
 - A filter on a window result is applied after the window. Top-N per group works through a derived
   table or a view:
   `SELECT * FROM (SELECT …, row_number() OVER (PARTITION BY g ORDER BY t) AS rn FROM x) d WHERE rn <= 3`.
-- A `LIMIT` never cuts the rows a window reads. `SELECT …, count(*) OVER () FROM t LIMIT 5` returns
-  five rows, each with the count of the whole table.
+- A `LIMIT` does not reduce the rows a window reads. `SELECT …, count(*) OVER () FROM t LIMIT 5`
+  returns five rows, each with the row count of the table.
 - With distributed query execution, the inner query ships its scans and partial aggregates to the
-  nodes that own the data, as any query does. The window step runs on the node that runs the
-  statement, over the gathered rows.
+  nodes that own the data, as any query does. The window step is computed on the node that
+  executes the statement, over the gathered rows.
 
 ## Spill to disk
 
-With `spill_enabled`, the window step uses the spill path of the sort for its sorts. It also keeps
-the full rows of the current partition in a spill-capable buffer, so a partition larger than the
-spill threshold moves to disk. The values that the windows read (their arguments and their `ORDER BY`
+With `spill_enabled`, the window step uses the spill path of the sort for its sorts. The full rows
+of the current partition are stored in a spill-capable buffer. A partition larger than the spill
+threshold moves to disk. The values that the windows read (their arguments and their `ORDER BY`
 values) and the results stay in memory for the current partition, a few values per row. A single
-partition of tens of millions of rows therefore still needs memory in proportion to its row count.
+partition of tens of millions of rows therefore needs memory in proportion to its row count, even with spill
+enabled.
 
 Spill files are removed when the query ends, fails or is cancelled. See
 [spill-to-disk.md](./spill-to-disk.md).
@@ -158,24 +162,24 @@ Spill files are removed when the query ends, fails or is cancelled. See
 ## EXPLAIN
 
 The windows of a query show as one `window` node, with one entry for each distinct
-`(PARTITION BY, ORDER BY)`:
+`(PARTITION BY, ORDER BY)`.
 
 ```text
 window(partition=[g] order=[id DESC] functions=[row_number(), sum(v) rows between 1 preceding and current row]; partition=[] order=[v] functions=[rank()])
 ```
 
-A function that reads a frame shows its frame. `EXPLAIN (ANALYZE)` adds `partitions=`, `rows=` and
-`spilled=`: the partitions computed and the rows they held, summed over the entries, and the
-partition buffers that moved to disk. See [explain.md](./explain.md).
+A function that reads a frame shows its frame. In `EXPLAIN (ANALYZE)`, `partitions=` is the
+number of partitions computed and `rows=` is the number of rows they held, both summed over the
+entries. `spilled=` is the number of partition buffers that moved to disk. See [explain.md](./explain.md).
 
 ## Not supported
 
-These forms give an error that names them:
+Each form in the following table returns an error that names it.
 
 | Form | Error |
 |---|---|
 | A window call in `WHERE`, `GROUP BY`, `HAVING` or a `JOIN … ON` | InvalidInput: window functions are not allowed in that clause |
-| A window call inside another window call | InvalidInput |
+| A window call nested in another window call | InvalidInput |
 | A window call in `UPDATE … SET`, `INSERT … VALUES` or a `CHECK` | InvalidInput |
 | `RANGE` with `n PRECEDING` or `n FOLLOWING` | InvalidInput: use `ROWS` |
 | `GROUPS` frames, `EXCLUDE` | InvalidInput |

@@ -1,7 +1,7 @@
 # Expression Indexes
 
-An expression index stores the value of an expression, not the value of a column, in each entry.
-A query that filters or sorts on the same expression can then read the index instead of the table.
+Each entry of an expression index stores the value of an expression computed from its row.
+A query that filters or sorts on the same expression can then use the index to find its rows.
 
 ```sql
 CREATE INDEX users_email ON users ((doc->>'email'));
@@ -42,35 +42,38 @@ ALTER TABLE users ADD INDEX users_len ((length(email)));
 CREATE TABLE users (id oid PRIMARY KEY, email string, UNIQUE KEY users_lower_email ((lower(email))));
 ```
 
-`((col))` is the plain column `col`, not an expression. The primary key, the `INCLUDE` list and a GIN
+`((col))` is read as the column `col`. The primary key, the `INCLUDE` list and a GIN
 index take columns only.
 
-`DESC` follows the column rule: a `string` or `bytes` expression cannot be descending, because those
-types have no descending key encoding.
+`DESC` follows the column rule: a `string` or `bytes` expression cannot be descending. Those types do
+not have a descending key encoding.
 
 ## Allowed expressions
 
-The value of the expression goes into every entry, so the expression must give the same value for the
-same row each time it runs, on every node and in every build. An index expression can hold:
+The value of the expression is written into the index entry. This means that the expression must give
+the same value for the same row each time it is evaluated, on any node and in any build. An index
+expression can contain only the elements below.
 
-- literals, and columns of the indexed table (with or without the table name as a qualifier);
+- literals, and columns of the indexed table (the table name as a qualifier is optional);
 - arithmetic, string, bit, comparison and boolean operators, `LIKE`, the regular-expression operators,
   `IS NULL`, `IN` with a list of values, `BETWEEN`, subscripts, `CASE` and `IF`;
-- `CAST` to a type without a size, and the `::` form of it;
+- `CAST` and the `::` form of it, also to a type with a size such as `string(10)`, which keeps the first
+  10 characters (see [Data Types → Cast to a type with a size](data-types.md#cast-to-a-type-with-a-size));
 - calls of the immutable built-in functions.
 
 The immutable built-in functions are listed in `ScalarFunctionRegistry.ImmutableFunctionNames`. The
 list is opt-in: a function that is not on it is refused. A test fails when a new built-in function is
-on neither that list nor `NotImmutableFunctionNames`, so each new function gets a decision. A function
+on neither that list nor `NotImmutableFunctionNames`. This means that each new function gets a decision. A function
 that reads the clock for one of its forms, such as `age` or `unix_timestamp`, is not on the list.
-`lower` and `upper` use the invariant culture, and no session time zone exists, so the date and text
-functions are immutable. The forms of `date_trunc`, `date_part` and `to_char` that take a time zone
-argument are refused: their result depends on the time zone database that ships with the build, so a
-later build could compute another key for the same row.
+`lower` and `upper` use the invariant culture, and no session time zone exists. For this reason, the
+date and text functions are immutable. The forms of `date_trunc`, `date_part` and `to_char` that take a
+time zone argument are refused. Their result depends on the time zone database that ships with the build,
+and a later build could compute another key for the same row.
 
 ## Refused expressions
 
-Each of these gives `CADB0423` (`InvalidIndexExpression`; HTTP 400, gRPC `INVALID_ARGUMENT`):
+Each expression in the following table returns the error `CADB0423` (`InvalidIndexExpression`; HTTP 400,
+gRPC `INVALID_ARGUMENT`).
 
 | Expression | Reason |
 |------------|--------|
@@ -78,7 +81,7 @@ Each of these gives `CADB0423` (`InvalidIndexExpression`; HTTP 400, gRPC `INVALI
 | `random()`, `gen_id()`, `gen_uuid_v4()` | gives a new value each time |
 | `nextval('s')` and the other sequence functions | reads a sequence |
 | `current_user()` and the other session functions | reads the session |
-| `count(x)` and every aggregate | an aggregate has no value for one row |
+| `count(x)` and the other aggregates | an aggregate gives one value for a group of rows |
 | `(SELECT ...)`, `EXISTS`, `IN (SELECT ...)`, `x = ANY (...)` | a subquery |
 | `row_number() OVER ()` | a window function |
 | `lower(@p)` | a parameter |
@@ -90,16 +93,16 @@ Each of these gives `CADB0423` (`InvalidIndexExpression`; HTTP 400, gRPC `INVALI
 | `json_value(doc, '$.a')` | the type is known only from the value |
 | `CAST(email AS string(10))` | a sized cast target |
 
-A sized cast is refused because the stored text of the expression keeps the target type but not its
-size. Cast to a type without a size, or index the column.
+A sized cast is refused because the size of the target type is not saved in the stored text of the
+expression. Cast to the unsized type, or index the column.
 
 ## Result type
 
 The type of the expression is computed from the statement when the index is created, by the same rules
 that type a column of `CREATE TABLE AS SELECT`. It must be known before a row is read and must have an
 ordered key encoding: `id`, `int64`, `string`, `bool`, `float64`, `float32`, `bytes`, `date`,
-`datetime`, `uuid` or `numeric`. Use `->>` to index a text field of a `jsonb` document, and a cast to
-index it as another type:
+`datetime`, `uuid` or `numeric`. Use `->>` to index a text field of a `jsonb` document, and add a cast
+to index the field as another type. The following index stores the field `v` as an `int64`.
 
 ```sql
 CREATE INDEX docs_v ON docs (((doc->>'v')::int64));
@@ -119,9 +122,9 @@ that example). Rebuild it with `DROP INDEX` and `CREATE INDEX`.
 
 ## How the planner uses an expression index
 
-The predicate analysis recognizes `column op constant`. A WHERE term over an expression first stays in
-the residual conjuncts. `ExpressionIndexPredicates.Match` then looks at each residual conjunct of one of
-these shapes:
+The predicate analysis recognizes `column op constant`. A WHERE term over an expression is first left in
+the residual conjuncts. `ExpressionIndexPredicates.Match` then examines each residual conjunct that has
+one of the four shapes below.
 
 - `expr op constant` and `constant op expr`, with `=`, `<`, `<=`, `>` or `>=`;
 - `expr BETWEEN a AND b`;
@@ -129,7 +132,7 @@ these shapes:
 - `expr = a OR expr = b ...`.
 
 It renders `expr` in its canonical text: names in lower case, the table qualifier removed, function
-names in lower case. Parentheses never reach the syntax tree, so they do not change the text. String
+names in lower case. Parentheses are dropped by the parser and do not change the text. String
 literals keep their case. When an index expression has the same canonical text, the term becomes a
 comparison on the hidden key name of that expression. From there the index selector, the bound
 absorption, the constant coercion and the residual filter treat it like a column comparison.
@@ -149,18 +152,18 @@ A term that the scan absorbs leaves the residual filter: each entry key is the v
 for its row, computed by the same evaluator. A term that no scan absorbs is evaluated on each row as it
 was written.
 
-A constant gives one value for the whole statement. A literal, a parameter, a statement-clock function
+A constant has one value for the duration of a statement. A literal, a parameter, a statement-clock function
 such as `now()`, and an immutable function of these are constants. An operand that calls a function
 that can give a new value on each call, such as `random()`, `gen_id()`, `nextval()` or
-`clock_timestamp()`, is no constant. Its term stays in the residual filter and is evaluated for each
-row, so it never becomes a seek bound. The same rule applies to a plain column
+`clock_timestamp()`, is no constant. Its term is left in the residual filter and evaluated for each
+row, and it cannot become a seek bound. The same rule applies to a comparison on a column
 (`PredicateAnalyzer.TryGetConstant`).
 
 `ORDER BY expr` reads the index order when `expr` matches the expression at that key position, and the
-plan then has no sort. An equality on a leading expression lets the next key order the rows:
-`WHERE lower(email) = 'a@x' ORDER BY score` uses an index on `((lower(email)), score)` with no sort.
+plan then skips the sort step. An equality on a leading expression lets the next key order the rows:
+`WHERE lower(email) = 'a@x' ORDER BY score` uses an index on `((lower(email)), score)` and needs no sort.
 
-EXPLAIN names the expressions of an expression index in the `detail` column:
+EXPLAIN lists the expressions of an expression index in the `detail` column of the plan.
 
 ```text
 node           detail
@@ -169,20 +172,21 @@ index-lookup   index=users_lower_email, expressions=[lower(`email`)], key='a@x'
 
 ## Writes and the backfill
 
-At an expression position, the in-memory index holds a hidden key name (`#expr:` and a hash of the
-stored text and type). No SQL identifier can contain `#`, so no column, alias or parameter has that name.
+The in-memory index uses a hidden key name at an expression position (`#expr:` and a hash of the
+stored text and type). No SQL identifier can contain `#`. This means that no column, alias or parameter
+has that name.
 `IndexKeyRows.For` gives each write path a small map of the key positions: the column value at a column
 position, and the expression value under its hidden name at an expression position. The key builders
-read it like a row. The map is for key building only. It is never encoded, returned or given to a
+read it like a row. The map is for key building only. It is not encoded, returned or given to a
 trigger. INCLUDE values come from the row itself.
 
 - `INSERT`, `INSERT ... SELECT` and the insert of `ON CONFLICT` evaluate each expression for the new
   row. A column the statement leaves out reads as NULL.
-- `UPDATE` compares the columns each expression reads between the old and the new row. When each of
-  them holds an identical value, the index is not touched and the expression is not evaluated.
-  Otherwise the old and the new key are compared, so `UPDATE users SET email = 'ANN@x'` on `'ann@x'`
-  keeps the entry of `lower(email)`. The input test is identity of the stored value
-  (`IndexKeyRows.Identical`), not SQL equality: `0.0 = -0.0`, but `atan2(v, -1.0)` gives pi for one and
+- `UPDATE` compares the columns each expression reads between the old and the new row. When all of
+  them have identical values in both rows, the index is not touched and the expression is not evaluated.
+  Otherwise the old and the new key are compared. For example, `UPDATE users SET email = 'ANN@x'` on
+  `'ann@x'` leaves the entry of `lower(email)` unchanged. The input test compares the stored values for
+  identity (`IndexKeyRows.Identical`), which is stricter than SQL equality. For example, `0.0 = -0.0`, but `atan2(v, -1.0)` gives pi for one and
   -pi for the other, and the jsonb documents `{"a": 1}` and `{"a": 1.0}` are equal, but `doc->>'a'`
   gives `1` for one and `1.0` for the other. The INCLUDE values of a covering index use the same test.
 - `DELETE` and the row-level TTL sweep evaluate the expression on the old row to find its entry.
@@ -197,14 +201,15 @@ an `int64` value of a `float64` expression, which is widened.
 ## Unique expression indexes
 
 Duplicate detection uses the unique-index storage semantics and gives `DuplicateUniqueKeyValue`. A row
-whose expression is NULL has no entry, so several such rows can exist, as for a unique column.
-`INSERT ... ON CONFLICT DO NOTHING` without a target, and `ON CONFLICT ON CONSTRAINT name`, treat a unique
+whose expression is NULL does not get an entry. This means that several such rows can exist, as for a
+unique column. `INSERT ... ON CONFLICT DO NOTHING` with the conflict target left out, and `ON CONFLICT ON CONSTRAINT name`, treat a unique
 expression index as an arbiter. A column list target (`ON CONFLICT (email)`) matches only an index on
 those columns.
 
 ## Stored form
 
-`TableIndexSchema.KeyExpressions` holds one `IndexKeyExpression` for each expression position:
+Each expression position is stored as one `IndexKeyExpression` in `TableIndexSchema.KeyExpressions`,
+with the four fields in the following table.
 
 | Field | Value |
 |-------|-------|
@@ -213,8 +218,9 @@ those columns.
 | `Type` | the result type |
 | `ColumnIds` | the ids of the columns the expression reads |
 
-At that position `ColumnIds` holds the marker `~expr`, which matches no column. An index without
-expressions has no `KeyExpressions` field, so its stored form is the same as before.
+At that position, the marker `~expr` is written to `ColumnIds`. It matches no column. The
+`KeyExpressions` field is omitted for an index that contains only columns. This means that the stored
+form of such an index is the same as before.
 
 The text is stored in place of the syntax tree because the tree's wire codec writes node types as
 implicit enum numbers, and a node type added in the middle of the enum would change them.
@@ -224,16 +230,16 @@ name, and builds the in-memory `BoundIndexExpression`: the expression for evalua
 the canonical text and the hidden key name.
 
 A scan decodes index keys with the types of the index that its plan captured
-(`TableDescriptor.IndexKeyType`), so a `DROP INDEX` that commits after planning does not change how an
-open scan decodes the entries that its snapshot still holds. `TableDescriptor.ExpressionKeys` maps each
+(`TableDescriptor.IndexKeyType`). This means that a `DROP INDEX` that commits after planning does not
+change how an open scan decodes the entries in its snapshot. `TableDescriptor.ExpressionKeys` maps each
 hidden key name to its expression, for a planner pass that has only the name. The map is grow-only: a
-`DROP INDEX` leaves its entry, and one name always has one type, because the name is a hash of the
-stored text and the type. The planner matches WHERE terms against the indexes that the table has, not
-against this map.
+`DROP INDEX` leaves its entry in place. The name is a hash of the stored text and the type. This means
+that one name always has one type. The planner matches WHERE terms against the indexes that the table
+has now. It does not match them against this map.
 
 ## Schema changes
 
-- `RENAME COLUMN` needs no change to the index, because the stored text names the column by id.
+- `RENAME COLUMN` needs no change to the index. The stored text names the column by id, and
   SHOW CREATE TABLE and EXPLAIN show the new name.
 - `DROP COLUMN` on a column that an index expression reads is refused, as it is for a key column. Drop
   the index first.
@@ -241,7 +247,7 @@ against this map.
 
 ## SHOW CREATE TABLE, SHOW INDEXES and camus-dump
 
-SHOW CREATE TABLE prints an expression index inline, with each column name quoted:
+SHOW CREATE TABLE prints an expression index inline, with each column name quoted.
 
 ```sql
 UNIQUE KEY `users_lower_email` ((lower(`email`))),
@@ -251,9 +257,9 @@ KEY `users_mixed` (`score` DESC, (jsonb_object_field_text(`doc`, 'email'))),
 `doc->>'email'` prints as `jsonb_object_field_text(doc, 'email')`, the call the operator parses to. The
 statement parses again to the same index.
 
-SHOW INDEXES writes an expression position of `Columns` as `(expr)`. An expression can hold commas, so
-`Columns` cannot be split to rebuild an expression index. The `Key` field holds the key list exactly as
-`CREATE INDEX` takes it:
+SHOW INDEXES writes an expression position of `Columns` as `(expr)`. An expression can include commas.
+This means that `Columns` cannot be split to rebuild an expression index. The `Key` field gives the key
+list in the exact form that `CREATE INDEX` takes.
 
 ```text
 Columns:    score,(jsonb_object_field_text(`doc`, 'email'))
@@ -261,26 +267,27 @@ Directions: DESC,ASC
 Key:        `score` DESC, (jsonb_object_field_text(`doc`, 'email'))
 ```
 
-camus-dump writes `Key` for an index whose `Columns` holds an expression. An older camus-dump refuses
-such an index, because an expression is no identifier, and stops with an error.
+camus-dump writes `Key` for an index whose `Columns` value includes an expression. An older camus-dump
+cannot read an expression as an identifier. It stops with an error on such an index.
 
 ## Cluster mode
 
-`CREATE INDEX` on a cluster runs through the schema-change coordinator, as for any index: the index goes
-from `DeleteOnly` to `WriteOnly`, the backfill runs, and the index becomes `Public`. `IndexBuildInfo`
-and the persisted coordinator job carry the stored expressions, so a job that a new leader resumes
-builds the same keys. A follower forwards the statement to the schema leader with the expression text
+On a cluster, `CREATE INDEX` goes through the schema-change coordinator, as for any index. The index
+moves from `DeleteOnly` to `WriteOnly`, the backfill is done, and then the index becomes `Public`.
+`IndexBuildInfo` and the persisted coordinator job carry the stored expressions. This means that a job
+that a new leader resumes builds the same keys. A follower forwards the statement to the schema leader with the expression text
 in `ColumnIndexInfoRequest.Expression`.
 
 The definition that the coordinator stages is built on the table opened under the DDL gate. A
 `DROP COLUMN` can commit after the statement first read the table and before it entered the gate. The
-index is then refused with the error for a missing column, and nothing is staged. The `AddIndex` delta
-also refuses an index that reads a column id the table does not have (`IndexDeltaApplier`), on the
-proposer and on every node that applies it, so no path can stage such an index.
+index is then refused with the error for a missing column, and no definition is staged. An index that
+reads a column id the table does not have is also refused when the `AddIndex` delta is applied
+(`IndexDeltaApplier`). The check is made on the proposer and on all nodes that apply the delta. This
+means that no path can stage such an index.
 
-Every node of a cluster runs the same build. A build that does not know expression indexes reads the
-`~expr` marker as an unknown column and fails on the first write to the index, instead of writing
-entries over the wrong values.
+The nodes of a cluster are expected to run the same build. A build that does not know expression indexes
+reads the `~expr` marker as an unknown column and fails on the first write to the index. It does not
+write entries over the wrong values.
 
 ## Limits
 
@@ -296,9 +303,9 @@ entries over the wrong values.
   reads, and evaluates the expression again, to check the entry against its row (`IndexEntryCheck`).
   A large value stored out of line, such as a big jsonb document, is fetched for that check even when
   the query does not return it. The cost model does not price the check. Each other plan for the same
-  query evaluates the expression on at least the same rows, so the check does not change which plan is
-  cheaper. A covering index, with an `INCLUDE` of every column the query reads, reads no row and makes no
-  check.
+  query evaluates the expression on at least the same rows. This means that the check does not change
+  which plan is cheaper. A covering index, with an `INCLUDE` of all the columns the query reads, reads no
+  row and makes no check.
 - Partial indexes (`WHERE` on `CREATE INDEX`), expression GIN indexes and computed columns are separate
   features.
 

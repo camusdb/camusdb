@@ -1,7 +1,7 @@
 # PostgreSQL expression syntax
 
-CamusDB accepts these PostgreSQL expression forms, which data-generation and migration scripts use
-often:
+CamusDB supports the PostgreSQL expression forms in the table below. Data-generation and migration
+scripts use them often.
 
 | Form | Example | Meaning |
 |------|---------|---------|
@@ -9,8 +9,8 @@ often:
 | `%` | `i % 3` | The remainder of `i / 3`, the same as `mod(i, 3)` |
 | `::` | `x::text` | The same as `CAST(x AS text)` |
 | Subscript | `tags[1]` | The first element of an array |
-| Quantified comparison | `'news' = ANY (tags)` | `true` when `tags` holds `'news'` |
-| Quantified comparison | `score > ALL (limits)` | `true` when `score` is above every element of `limits` |
+| Quantified comparison | `'news' = ANY (tags)` | `true` when `tags` contains `'news'` |
+| Quantified comparison | `score > ALL (limits)` | `true` when `score` is above each element of `limits` |
 | Unary minus | `-total` | The negative of `total` |
 | Negated predicates | `year NOT BETWEEN 2020 AND 2021` | The same as `NOT (year BETWEEN 2020 AND 2021)` |
 | Concatenation | `first_name \|\| ' ' \|\| last_name` | The two strings joined; `NULL` if one side is `NULL` |
@@ -18,7 +18,7 @@ often:
 | Power | `2 ^ 10` | The same as `pow(2, 10)`; a `float64` |
 | Window functions | `row_number() OVER (PARTITION BY g ORDER BY t)` | A value per row computed from related rows; see [window-functions.md](./window-functions.md) |
 
-Together they run a statement such as:
+A single statement can combine several of these forms.
 
 ```sql
 INSERT INTO orders
@@ -28,9 +28,9 @@ INSERT INTO orders
 
 ## Characters outside a token
 
-A statement can hold only the characters that the SQL grammar uses. Inside a string, a comment or a
+A statement can contain only the characters that the SQL grammar uses. In a string, a comment or a
 quoted identifier, any character can appear, with the limits below. Anywhere else, an unknown
-character is a syntax error that names the character and its position (`CADB0406`):
+character is a syntax error (`CADB0406`). The error message names the character and its position.
 
 ```text
 (line 2, col 3) Syntax error, unexpected character '$'
@@ -41,10 +41,10 @@ character is a syntax error that names the character and its position (`CADB0406
   space (U+00A0) and a byte order mark (U+FEFF) are not whitespace. Text that you copy from a web page
   can hold the first one.
 - A `;` can close a statement, and it can repeat. It cannot appear anywhere else, and a second
-  statement cannot follow it, because the server takes one statement per request.
+  statement cannot follow it. The server takes one statement per request.
 - A string literal or a quoted identifier cannot hold a raw line break or a raw tab. Use an `E'…'`
   string with `\n` or `\t`.
-- An identifier without quotes holds only ASCII letters, digits and `_`.
+- An unquoted identifier can contain only ASCII letters, digits and `_`.
 
 ## Digit separators
 
@@ -58,27 +58,27 @@ SELECT 1e1_0;          -- 1e10
 SELECT id FROM t LIMIT 1_000;
 ```
 
-The rule applies to every place a number is written: values, `LIMIT` and `OFFSET`, and sizes such as
+The rule applies wherever a number is written: values, `LIMIT` and `OFFSET`, and sizes such as
 `string(1_0)`.
 
 An underscore that is not between two digits is a syntax error (`CADB0406`, "Invalid numeric
 literal"). These are all errors: `200_`, `2__0`, `1_.5`, `1.5_`, `1_e5`.
 
-A name that starts with an underscore, such as `_000`, is still an identifier.
+A name that starts with an underscore, such as `_000`, is an identifier.
 
 Hexadecimal integers (`0xFF`) do not accept separators.
 
 ## The `%` operator
 
 `a % b` is the remainder of `a / b`. It has the same precedence as `*` and `/`, and it groups from
-left to right:
+left to right.
 
 ```sql
 SELECT 1 + 7 % 3 * 2;   -- 3, that is 1 + ((7 % 3) * 2)
 SELECT 17 % 5 % 3;      -- 2, that is (17 % 5) % 3
 ```
 
-`%` is a call to the `mod` function, so the two spellings always agree:
+`%` is a call to the `mod` function. This means that the two spellings always give the same result.
 
 - Two `int64` operands give an `int64`. Any other numeric operand gives a `float64`.
 - The result has the sign of the dividend: `-7 % 3` is `-1`.
@@ -88,11 +88,11 @@ SELECT 17 % 5 % 3;      -- 2, that is (17 % 5) % 3
 Because `%` is stored as a call, `SHOW CREATE VIEW`, a CHECK constraint and `EXPLAIN` show
 `mod(a, b)` where you wrote `a % b`. The two forms are equivalent.
 
-A `%` inside a string, such as a `LIKE` pattern, is not an operator.
+A `%` in a string, such as a `LIKE` pattern, is not an operator.
 
 ## NULL operands
 
-A `NULL` operand gives `NULL` for every arithmetic operator:
+A `NULL` operand gives `NULL` for each arithmetic operator.
 
 ```sql
 SELECT NULL + 1;      -- NULL
@@ -100,17 +100,17 @@ SELECT total * 2;     -- NULL for each row where total is NULL
 SELECT NULL / 0;      -- NULL: the NULL check comes before the zero check
 ```
 
-A non-numeric operand, such as `'a' + 1`, is still an error. So is a zero divisor with a
+However, a non-numeric operand, such as `'a' + 1`, is an error. So is a zero divisor with a
 non-`NULL` dividend.
 
 `LIKE`, `ILIKE`, `~`, `~*`, `!~` and `!~*` follow the same rule. A `NULL` value or a `NULL` pattern
-makes the result UNKNOWN, so `WHERE name LIKE 'a%'` skips the rows where `name` is `NULL`.
-`name !~ 'x'` is also UNKNOWN for those rows, not `true`.
+makes the result UNKNOWN. This means that `WHERE name LIKE 'a%'` skips the rows where `name` is
+`NULL`. For those rows `name !~ 'x'` is also UNKNOWN, and a `WHERE` clause with it skips them too.
 
 ## Integer overflow
 
-`+`, `-`, `*` and `/` with two `int64` operands never wrap. A result outside the `int64` range fails
-with `CADB0420`, as PostgreSQL fails with `bigint out of range`:
+`+`, `-`, `*` and `/` with two `int64` operands never wrap. A result outside the `int64` range is an
+error (`CADB0420`), as it is in PostgreSQL (`bigint out of range`).
 
 ```sql
 SELECT 9223372036854775807 + 1;       -- error CADB0420
@@ -123,10 +123,10 @@ SELECT 9223372036854775807 + 0;       -- 9223372036854775807
 
 ## Float overflow, Infinity and NaN
 
-A `float64` or `float32` result that overflows or underflows from finite operands fails with
-`CADB0421`, as PostgreSQL fails with `value out of range: overflow` or `underflow`. It never becomes an
-infinity or a zero. `'Infinity'`, `'-Infinity'` and `'NaN'` written on purpose are values, and an
-operation on them gives the IEEE result:
+A `float64` or `float32` result that overflows or underflows from finite operands is an error
+(`CADB0421`), as it is in PostgreSQL (`value out of range: overflow` or `underflow`). The result does
+not become an infinity or a zero. `'Infinity'`, `'-Infinity'` and `'NaN'` written on purpose are
+values, and an operation on them gives the IEEE result.
 
 ```sql
 SELECT 1e308 * 10;                          -- error CADB0421 (overflow)
@@ -136,14 +136,14 @@ SELECT CAST('Infinity' AS float64) + 1;     -- Infinity
 SELECT CAST('NaN' AS float64) = CAST('NaN' AS float64);   -- true
 ```
 
-`NaN` equals `NaN` and sorts above every number, and `-0` equals `0`. See
+`NaN` equals `NaN` and sorts above all numbers, and `-0` equals `0`. See
 [Float values](data-types.md#float-values-infinity-nan-and-overflow).
 
 ## Unary minus
 
 `-x` negates any numeric expression: a column, a parameter, a call or a parenthesised expression.
-It binds tighter than `*` and `/`, so `-a * b` is `(-a) * b`. A cast binds tighter still, so
-`-x::int` negates the cast value.
+It binds tighter than `*` and `/`: `-a * b` is `(-a) * b`. A cast binds tighter than unary minus,
+and `-x::int` negates the cast value.
 
 ```sql
 SELECT -total, -(price * qty), 3 - -4;   -- 3 - -4 is 7
@@ -154,31 +154,33 @@ SELECT -total, -(price * qty), 3 - -4;   -- 3 - -4 is 7
 - A non-numeric operand is an error.
 - Negating the smallest `int64` value is an overflow error (`CADB0420`).
 
-A minus sign directly before a number, as in `-5` or `- 5`, gives a negative constant, not a
-negation. The planner can then use it as an index bound.
+A minus sign directly before a number, as in `-5` or `- 5`, is part of a negative constant. The
+planner can then use the constant as an index bound.
 
 ## `LIKE` and `ILIKE` patterns
 
-A pattern follows the rule of PostgreSQL:
+A pattern follows the rule of PostgreSQL. Each character in the pattern matches as the table shows.
 
 | In the pattern | What it matches |
 |---|---|
 | `%` | Any run of characters, also an empty one |
-| `_` | One character. It counts a code point, so `'🙂' LIKE '_'` is true |
-| `\` and the character after it | That character as a literal, so `'a%' LIKE 'a\%'` is true and `'ab' LIKE 'a\%'` is false |
+| `_` | One character. It counts a code point: `'🙂' LIKE '_'` is true |
+| `\` and the character after it | That character as a literal: `'a%' LIKE 'a\%'` is true and `'ab' LIKE 'a\%'` is false |
 | Any other character | Itself. `LIKE` compares it exactly, and `ILIKE` ignores case |
 
 A newline is one character like any other. `SHOW ... LIKE` uses the same rule.
 
-A plain string literal keeps a backslash, so `'a\_'` holds three characters. In an `E''` literal, write
-`E'a\\_'` for the same value.
+In a standard string literal, a backslash is an ordinary character: `'a\_'` is three characters long.
+In an `E''` literal, write `E'a\\_'` for the same value.
 
-A pattern that ends with the escape character fails with `CADB0400`, but only when the match reaches that
-character. So `'b' LIKE 'a\'` is `false`, and `'a\' LIKE 'a\'` fails. This is also the rule of PostgreSQL.
+A pattern that ends with the escape character returns an error (`CADB0400`) only if the match reaches that
+character. For example, `'b' LIKE 'a\'` is `false` and `'a\' LIKE 'a\'` returns the error. This is
+also the rule of PostgreSQL.
 
 ### The `ESCAPE` clause
 
-`ESCAPE` selects another escape character:
+`ESCAPE` selects another escape character. With `ESCAPE '#'`, for example, a backslash in the pattern
+is a literal character.
 
 ```sql
 SELECT 'a_' LIKE 'a#_' ESCAPE '#';    -- true
@@ -188,8 +190,8 @@ SELECT 'a\b' LIKE 'a\b' ESCAPE '';    -- true: an empty string means no escape c
 ```
 
 The clause applies to `LIKE`, `ILIKE`, `NOT LIKE` and `NOT ILIKE`. Its value can be a column or a parameter. A
-`NULL` value makes the result UNKNOWN, and a string of more than one character fails with `CADB0400`. `ESCAPE` is
-not a reserved word, so a column can have that name.
+`NULL` value makes the result UNKNOWN, and a string of more than one character is an error (`CADB0400`).
+`ESCAPE` is not a reserved word. A column can have that name.
 
 `x LIKE p ESCAPE e` is the same as `x LIKE like_escape(p, e)`, as in PostgreSQL. `SHOW CREATE VIEW`, a CHECK
 constraint and `EXPLAIN` show that form. `like_escape` returns the pattern in its backslash form, and it can be
@@ -197,21 +199,21 @@ called directly.
 
 ### Definitions stored by an older build
 
-An older build read `_` and a backslash as literals. Nothing rewrites a stored definition, so each one takes the
-rule above when it next runs:
+An older build read `_` and a backslash as literals. A stored definition is not rewritten. Each one
+uses the rule above the next time it is evaluated, with these effects.
 
-- A CHECK constraint can refuse a row that it accepted before. `CHECK (s NOT LIKE 'a_')` accepted `'ab'`, and now
-  refuses it. An old row stays stored, and the next write that checks it fails with `CADB0303`.
-- A view takes the new rule at once, so its rows can change.
-- A materialized view keeps its old rows until `REFRESH MATERIALIZED VIEW`.
+- A CHECK constraint can block a row that it allowed before. `CHECK (s NOT LIKE 'a_')` allowed `'ab'`, and
+  now blocks it. An old row is not removed, and the next write that checks it returns an error (`CADB0303`).
+- A view uses the new rule at once. Its rows can change.
+- A materialized view returns its old rows until `REFRESH MATERIALIZED VIEW`.
 - During a rolling upgrade, two nodes can give different answers for the same pattern.
 
 To keep the old meaning, write `\_` for a literal underscore and `\\` for a literal backslash. Use
-`SHOW CREATE TABLE` and `SHOW CREATE VIEW` to find a pattern that holds either character.
+`SHOW CREATE TABLE` and `SHOW CREATE VIEW` to find a pattern that contains either character.
 
 ## `NOT BETWEEN`, `NOT LIKE` and `NOT ILIKE`
 
-These spellings are the same as `NOT` over the positive predicate:
+These spellings are the same as `NOT` over the positive predicate.
 
 ```sql
 SELECT id FROM orders WHERE year NOT BETWEEN 2020 AND 2021;
@@ -219,8 +221,8 @@ SELECT id FROM fruits WHERE name NOT LIKE 'a%';
 SELECT id FROM fruits WHERE name NOT ILIKE 'a%';
 ```
 
-A `NULL` operand makes the positive predicate UNKNOWN, and `NOT` over UNKNOWN is still UNKNOWN, so a
-row with a `NULL` year or name is not returned. `NOT BETWEEN` binds tighter than `AND`, the same as
+A `NULL` operand makes the positive predicate UNKNOWN, and `NOT` over UNKNOWN is also UNKNOWN. This
+means that a row with a `NULL` year or name is not returned. `NOT BETWEEN` binds tighter than `AND`, the same as
 `BETWEEN`. `SHOW CREATE VIEW`, a CHECK constraint and `EXPLAIN` show the stored form,
 `NOT (year BETWEEN 2020 AND 2021)`.
 
@@ -249,7 +251,7 @@ SELECT 'v=' || X'01ff';                             -- 'v=\x01ff'
 - A `NULL` operand gives `NULL`: `'a' || NULL` is `NULL`. This is the difference from `concat()`,
   which skips a `NULL` argument: `concat('a', NULL)` is `'a'`.
 - Two operands that are not strings, such as `1 || 2` or `X'01' || 2`, are an error.
-- An array operand is an error. CamusDB has no array concatenation.
+- An array operand is an error. Array concatenation is not supported.
 
 ## Bitwise operators
 
@@ -275,35 +277,36 @@ SELECT id FROM items WHERE flags & 4 = 4;
 ```
 
 - A `NULL` operand gives `NULL`.
-- `>>` is an arithmetic shift. It keeps the sign, so `-16 >> 2` is `-4`.
+- `>>` is an arithmetic shift. The sign of the result is the sign of the operand: `-16 >> 2` is `-4`.
 - A shift uses only the low six bits of the count. So the count is taken modulo 64:
   `1 << 64` is `1`, and `1 << -1` is the smallest `int64`. PostgreSQL gives the same results on
   x86-64 and ARM64.
 - Two `bytes` operands of different lengths are an error, as for PostgreSQL `bit` strings.
 - A `float64`, `float32`, `numeric`, `bool` or `string` operand is an error. There is no implicit
   conversion to `int64`.
-- `#` is XOR, as in PostgreSQL. `^` is [power](#power-), also as in PostgreSQL, and not XOR as in
-  MySQL and GoogleSQL.
-- `#-` with no space between the two characters is the jsonb delete-path operator, as in PostgreSQL
+- `#` is XOR, as in PostgreSQL. `^` is [power](#power-), also as in PostgreSQL. In MySQL and
+  GoogleSQL, `^` is XOR.
+- `#-` written as two adjacent characters is the jsonb delete-path operator, as in PostgreSQL
   (see [json.md](json.md#lexer-notes)). So `x #-1` does not mean `x XOR -1`; write `x # -1`.
 
 ### Power `^`
 
-`a ^ b` is the same call as `pow(a, b)`, so the two cannot differ on an error, on overflow or on a
-special value. The result is a `float64`, for every numeric operand type.
+`a ^ b` is the same call as `pow(a, b)`. This means that the two give the same errors (overflow
+included) and the same special values. The result is a `float64` for all numeric operand types.
 
 ```sql
 SELECT 2 ^ 10;             -- 1024
 SELECT id FROM points WHERE x ^ 2 + y ^ 2 < 100;
 ```
 
-The precedence and the grouping are those of PostgreSQL, which differ from those of mathematics:
+The precedence and the grouping are those of PostgreSQL. They differ from those of mathematics, as
+the examples in the table show.
 
 | Expression | Value | Why |
 |------------|-------|-----|
 | `2 * 3 ^ 2` | `18` | `^` binds tighter than `*`, `/` and `%` |
-| `-2 ^ 2` | `4` | Unary minus binds tighter than `^`, so this is `(-2) ^ 2` |
-| `2 ^ 3 ^ 2` | `64` | `^` groups to the left, so this is `(2 ^ 3) ^ 2` |
+| `-2 ^ 2` | `4` | Unary minus binds tighter than `^`. This is `(-2) ^ 2` |
+| `2 ^ 3 ^ 2` | `64` | `^` groups to the left. This is `(2 ^ 3) ^ 2` |
 
 Write `-(2 ^ 2)` for `-4`, and `2 ^ (3 ^ 2)` for `512`.
 
@@ -316,9 +319,9 @@ A `NULL` operand gives `NULL`. For the errors and the special values, see
 regex match. So `name ~ '^A'` is a regex match, `~flags` is a bitwise NOT, and `a ~ ~b` is a regex
 match of `a` against `~b`.
 
-Prefix `~` binds as tightly as unary minus, so `~a + 1` is `(~a) + 1`. This is the C and MySQL
-reading. PostgreSQL reads `~a + 1` as `~(a + 1)`, because it gives a prefix operator the lower
-"any other operator" level. Write the parentheses when a statement must give the same result on
+Prefix `~` binds as tightly as unary minus: `~a + 1` is `(~a) + 1`. This is the C and MySQL
+reading. PostgreSQL gives a prefix operator the lower "any other operator" level, and it reads
+`~a + 1` as `~(a + 1)`. Write the parentheses when a statement must give the same result on
 both systems.
 
 ## Operator precedence
@@ -335,15 +338,15 @@ table is the table of PostgreSQL. The one exception is prefix `~` (see [above](#
 | `^` | left |
 | `*`, `/`, `%` | left |
 | `+`, `-` | left |
-| `\|\|`, `&`, `\|`, `#`, `<<`, `>>`, `~`, `~*`, `!~`, `!~*`, and the jsonb operators (`->`, `->>`, `#>`, `#>>`, `@>`, `<@`, `?`, `?\|`, `?&`, `#-`) | left |
-| `BETWEEN`, `IN`, `LIKE`, `ILIKE`, and their `NOT` forms | no chain |
+| `\|\|`, `&`, `\|`, `#`, `<<`, `>>`, `~`, `~*`, `!~`, `!~*` and the jsonb operators (`->`, `->>`, `#>`, `#>>`, `@>`, `<@`, `?`, `?\|`, `?&`, `#-`) | left |
+| `BETWEEN`, `IN`, `LIKE`, `ILIKE` and their `NOT` forms | no chain |
 | `<`, `>`, `<=`, `>=`, `=`, `<>`, `!=` | no chain |
 | `IS` | no chain |
 | `NOT` | right |
 | `AND` | left |
 | `OR` | left |
 
-Some results of this table:
+The comment on each statement below shows the grouping that the table gives.
 
 ```sql
 SELECT 1 + 2 & 3;            -- 3, that is (1 + 2) & 3
@@ -364,8 +367,8 @@ In C, `&` binds tighter than `|`, and the result is 7.
 ### No chain
 
 A chain of two comparisons is a syntax error, as in PostgreSQL. Also, a `LIKE` cannot directly follow
-another `LIKE`, and `IN` or `BETWEEN` cannot directly follow a `LIKE`. Parentheses write the grouping that you
-mean:
+another `LIKE`, and `IN` or `BETWEEN` cannot directly follow a `LIKE`. Use parentheses to write the grouping
+that you mean.
 
 ```sql
 SELECT a = b = c;     -- CADB0406
@@ -374,35 +377,35 @@ SELECT a < b < c;     -- CADB0406
 SELECT a < b AND b < c;
 ```
 
-A predicate that ends at its own closing token can have another predicate after it, also as in PostgreSQL:
-`x IN (1) IN (TRUE)` is `(x IN (1)) IN (TRUE)`. `BETWEEN` follows this rule too, and PostgreSQL refuses that
-form. See [the differences from PostgreSQL](postgresql-differences.md#operator-precedence).
+A predicate that ends with a closing token can have another predicate after it, also as in PostgreSQL:
+`x IN (1) IN (TRUE)` is `(x IN (1)) IN (TRUE)`. `BETWEEN` follows this rule too. PostgreSQL does not allow
+that form. See [the differences from PostgreSQL](postgresql-differences.md#operator-precedence).
 
 ### Stored definitions
 
-A change of this table does not change a stored definition. CamusDB stores a view body and a `CHECK` condition
-as text that writes each grouping out with parentheses, so `SHOW CREATE VIEW` prints `(a = b) IS NULL`.
+A change of this table does not change a stored definition. A view body and a `CHECK` condition are stored
+as text that writes each grouping out with parentheses. For example, `SHOW CREATE VIEW` prints `(a = b) IS NULL`.
 
-Before this table followed PostgreSQL, `IS` and `IN` bound tighter than every binary operator. A view or a
-`CHECK` from that time keeps the grouping of that time. For example, a view that was created with
-`a = b IS NULL` holds the text `a = (b IS NULL)`, and it continues to read that. To get the PostgreSQL reading,
-create the view again. Use `SHOW CREATE VIEW` and `SHOW CREATE TABLE` to read what a definition holds.
+Before this table followed PostgreSQL, `IS` and `IN` bound tighter than all binary operators. A view or a
+`CHECK` from that time uses the grouping of that time. For example, a view that was created with
+`a = b IS NULL` is stored as the text `a = (b IS NULL)`, and it continues to read that. To get the PostgreSQL
+reading, create the view again. Use `SHOW CREATE VIEW` and `SHOW CREATE TABLE` to read a stored definition.
 
 ## Several aggregates without `GROUP BY`
 
-A `SELECT` without `GROUP BY` can hold any number of aggregates. They all reduce the same single
-group, in one pass over the rows:
+A `SELECT` that omits `GROUP BY` can contain any number of aggregates. They all reduce the same single
+group, in one pass over the rows.
 
 ```sql
 SELECT COUNT(*) AS total, COUNT(amount) AS present, MIN(amount), MAX(amount) FROM sales;
 ```
 
-A bare column next to an aggregate is still an error without `GROUP BY`, because there is no group
-for the column to take its value from.
+However, a bare column next to an aggregate is an error when the query omits `GROUP BY`. There is no
+group for the column to take its value from.
 
 ## The `::` cast
 
-`x::type` is a shorter way to write `CAST(x AS type)`. It accepts the same type names as `CAST`,
+`x::type` is a shorter way to write `CAST(x AS type)`. You can use the same type names as with `CAST`,
 including `text`, `int`, `integer` and `double`.
 
 ```sql
@@ -412,11 +415,11 @@ SELECT @p::int64;             -- casts a bound parameter
 SELECT '42'::text::int64;     -- casts can be chained
 ```
 
-`::` binds tighter than every other operator, as in PostgreSQL. In `a + b::int`, only `b` is cast.
+`::` binds tighter than all other operators, as in PostgreSQL. In `a + b::int`, only `b` is cast.
 To cast a larger expression, put it in parentheses: `(a + b)::text`.
 
-A minus sign written directly before a number is part of the number, so `-1::text` is the string
-`'-1'`. (PostgreSQL applies the cast first and then rejects the minus on a string.)
+A minus sign written directly before a number is part of the number. This means that `-1::text` is
+the string `'-1'`. (PostgreSQL applies the cast first, and the minus on a string is then an error.)
 
 `SHOW CREATE VIEW` and a CHECK constraint show the `CAST(x AS type)` form.
 
@@ -430,9 +433,9 @@ SELECT (ARRAY['paid', 'shipped', 'delivered'])[1 + i % 3] FROM series;
 SELECT ARRAY['a', 'b'][2];    -- 'b'
 ```
 
-These rules follow PostgreSQL:
+Subscripts follow the rules of PostgreSQL.
 
-- An index that is less than 1 or greater than the array length gives `NULL`, not an error.
+- An index that is less than 1 or greater than the array length gives `NULL`.
 - A `NULL` array or a `NULL` index gives `NULL`.
 - An index that is not an integer is an error, even `1.0`.
 - A subscript on a value that is not an array is an error.
@@ -447,7 +450,7 @@ Not supported: slices (`tags[1:2]`) and assignment to an element (`UPDATE t SET 
 
 ## Array elements
 
-Each element of `ARRAY[...]` is a full expression, as in PostgreSQL:
+Each element of `ARRAY[...]` is a full expression, as in PostgreSQL.
 
 ```sql
 SELECT ARRAY[n::string, 'hello'] FROM t;
@@ -492,17 +495,17 @@ These rules differ from PostgreSQL:
 - `ARRAY[1, 2.5]` is an `array(float64)`, where PostgreSQL gives `numeric[]`, because CamusDB reads
   `2.5` as a `float64`. Write `ARRAY[1, NUMERIC '2.5']` for a `numeric` array.
 - A scalar subquery in an element follows the rule of its clause: it can be correlated where a
-  correlated subquery runs. See [Subqueries in expressions](#subqueries-in-expressions).
+  correlated subquery is supported. See [Subqueries in expressions](#subqueries-in-expressions).
 
 See also [Data types → Arrays](data-types.md#arrays).
 
 ## IN lists
 
 An item of `x IN (…)` or `x NOT IN (…)` is a literal, a parameter or a column name. A column item is
-read from the same row as `x`, so `WHERE a.x IN (a.y, 5)` is `a.x = a.y OR a.x = 5` with the usual
-three-valued rules: a match is TRUE, no match next to a NULL item is UNKNOWN, and `NOT IN` negates the
-definite answers. A column item has a value per row, so the planner cannot turn the list into index
-seeks; a list of literals or parameters on an indexed column still can. An item that is an expression
+read from the same row as `x`. This means that `WHERE a.x IN (a.y, 5)` is `a.x = a.y OR a.x = 5` with
+the usual three-valued rules. A match is TRUE, no match next to a NULL item is UNKNOWN, and `NOT IN`
+negates the definite answers. A column item has a value per row, and the planner cannot turn such a
+list into index seeks. A list of literals or parameters on an indexed column can use index seeks. An item that is an expression
 (`CAST(…)`, `y + 1`) is a syntax error; write it as a comparison instead. In a `HAVING`, the tested
 value and the items follow the HAVING scope rule: a group key, a select item or an aggregate.
 
@@ -510,8 +513,8 @@ value and the items follow the HAVING scope rule: a group key, a select item or 
 
 A subquery can stand anywhere an expression can: a `WHERE`, a select list, a `HAVING`, a `JOIN ON`
 predicate, the `WHERE` and `SET` values of `UPDATE` and `DELETE`, the `VALUES` of an `INSERT`, and
-`ON CONFLICT DO UPDATE`. Inside an expression it can sit at any depth: a `CASE` branch, a
-comparison operand, an `IS NULL` test, a `BETWEEN` bound, a function argument.
+`ON CONFLICT DO UPDATE`. In an expression, it can be at any depth: a `CASE` branch, a comparison
+operand, an `IS NULL` test, a `BETWEEN` bound or a function argument.
 
 ```sql
 SELECT id, EXISTS (SELECT 1 FROM audit WHERE level = 'error') AS flagged FROM users;
@@ -523,96 +526,101 @@ INSERT INTO counters (name, value) VALUES ('users', (SELECT COUNT(*) FROM users)
 SELECT * FROM t WHERE CASE WHEN kind = 1 THEN x IN (SELECT x FROM allowed) ELSE x > 0 END;
 ```
 
-The rule that decides what runs where is **correlation**: a subquery is correlated when a name in it
-resolves to the enclosing query. A name resolves to the nearest query that has it, as in PostgreSQL:
+How a subquery is evaluated depends on **correlation**: a subquery is correlated when a name in it
+resolves to the enclosing query. As in PostgreSQL, a name resolves to the nearest query that has it.
 
-- A qualified name resolves to the nearest query whose `FROM` declares its qualifier, so `outer.id` in
-  `EXISTS (SELECT 1 FROM inner WHERE inner.id = outer.id)` reads the enclosing query.
-- A bare name resolves to the nearest query that has a column with that name. So `v` in
-  `SELECT id FROM r WHERE EXISTS (SELECT 1 FROM r2 WHERE w = v)` reads `r.v` when `r2` has no `v`, and a
-  column that both queries have is the column of the subquery, not an ambiguous name.
+- A qualified name resolves to the nearest query whose `FROM` declares its qualifier. For example,
+  `outer.id` in `EXISTS (SELECT 1 FROM inner WHERE inner.id = outer.id)` reads the enclosing query.
+- A bare name resolves to the nearest query that has a column with that name. For example, `v` in
+  `SELECT id FROM r WHERE EXISTS (SELECT 1 FROM r2 WHERE w = v)` reads `r.v` if `r2` doesn't have a column `v`.
+  A column that both queries have is the column of the subquery. It is not an ambiguous name.
 - A name that no query has is an unknown column (`CADB0404`), as before.
 
-The names are read in every clause of the subquery, in the subqueries inside it, and in its derived
-tables and set operations. A derived table cannot read the other items of its own `FROM`, but it can
-read the enclosing query, as in PostgreSQL. A `LATERAL` derived table can also read the items to its
-left in its own `FROM` (see [LATERAL](./joins.md#lateral)).
+The names are read in all clauses of the subquery and in its nested subqueries. Its derived tables
+and set operations follow the same rule. A derived table cannot read the other items of the `FROM` that contains it.
+However, it can read the enclosing query, as in PostgreSQL. A `LATERAL` derived table can also read
+the items to its left in the same `FROM` (see [LATERAL](./joins.md#lateral)).
 
-- An **uncorrelated** subquery runs once, before the statement reads its first row, and its result
-  takes its place: a scalar subquery becomes its value, `EXISTS` becomes `true` or `false`, and
-  `IN`, `NOT IN` and a quantified comparison become a membership test over the rows it returned.
-  This holds in every position listed above.
-- A **correlated** subquery (`EXISTS`, a scalar subquery, `IN`, `NOT IN` or a quantified comparison) is
-  evaluated once per row. CamusDB supports it in the `WHERE` and the select list of a `SELECT`, in the
-  `WHERE` of an `UPDATE` or a `DELETE`, and in the `SET` values of an `UPDATE`, at any depth of the
-  expression, and with any body: a join, a derived table or a view, no `FROM`, an aggregate,
-  `GROUP BY`, `HAVING`, `OFFSET`, a window function, or another subquery. A correlated `EXISTS` whose
-  body reads one table and needs only its `FROM` and `WHERE` reads the inner table directly, with an
-  index seek when one fits. Every other body runs as a whole query for each outer row.
+- An **uncorrelated** subquery is evaluated once, before the statement reads its first row, and its
+  result takes its place. For example, a scalar subquery becomes its value, and `EXISTS` becomes
+  `true` or `false`. `IN`, `NOT IN` and a quantified comparison become a membership test over the
+  rows that the subquery returned. This applies in all the positions listed above.
+- A **correlated** subquery is evaluated once per row. This applies to `EXISTS`, a scalar subquery,
+  `IN`, `NOT IN` and a quantified comparison. It is supported at any depth of an expression in
+  three places.
+  - the `WHERE` and the select list of a `SELECT`
+  - the `WHERE` of an `UPDATE` or a `DELETE`
+  - the `SET` values of an `UPDATE`
+
+  The body can be any query: a join, a derived table or a view, no `FROM`, an aggregate, `GROUP BY`,
+  `HAVING`, `OFFSET`, a window function, or another subquery. A correlated `EXISTS` whose body
+  reads one table and needs only its `FROM` and `WHERE` reads the inner table directly. It uses an
+  index seek when one fits. Any other body is executed as a complete query for each outer row.
 - Within one statement, an outer row with the same outer values as an earlier row gets the earlier
-  result, and the body does not run again. So a correlated subquery under a join, which sees each value
-  of the outer table many times, runs once for each distinct value. The values compare exactly: `'A'`
-  and `'a'` are two values, and so are `0.0` and `-0.0`. A body with a volatile function (`random()`,
-  `nextval`, `clock_timestamp()` and the others) runs for each row. So does a body that reads a
-  value of a query two or more levels up, and a fast-form `EXISTS` with an index seek. An error is not
-  kept, and the kept results have a fixed size limit for each subquery.
-- A scalar subquery gives NULL for no row and fails with `CADB0400` for a second row. `IN`, `NOT IN`
-  and a quantified comparison follow the same three-valued rules as their uncorrelated forms.
+  result, and the body is not evaluated again. This means that a correlated subquery under a join,
+  which sees each value of the outer table many times, is evaluated once for each distinct value. The
+  values compare exactly: `'A'` and `'a'` are two values, and so are `0.0` and `-0.0`. A body with a
+  volatile function such as `random()` or `nextval` is evaluated for each row. So is a body that reads
+  a value of a query two or more levels up, and a fast-form `EXISTS` with an index seek. An error is
+  not cached, and the cached results have a fixed size limit for each subquery.
+- A scalar subquery gives NULL for no row and returns an error (`CADB0400`) for a second row. `IN`,
+  `NOT IN` and a quantified comparison follow the same three-valued rules as their uncorrelated forms.
 - In an `UPDATE` or `DELETE`, the subquery reads the rows as the statement found them, also when it
-  reads the target table, as in PostgreSQL. A subquery of a `SET` value runs when the statement finds
-  the row, before the first write.
-- A subquery in a `CASE` branch that does not run, or in a `COALESCE` argument after the first value,
-  still runs. Its error does not appear, as in PostgreSQL, but it costs time.
-- The `HAVING`, a `JOIN ON`, the select list of a query that groups or aggregates, and
-  `ON CONFLICT DO UPDATE` refuse a correlated subquery with `CADB0533` (`FeatureNotSupported`), because
-  they have no stage that runs once for each row. The message names the clause and the outer name that
-  the subquery reads. PostgreSQL runs these forms; see
-  [differences from PostgreSQL](postgresql-differences.md#correlated-subqueries).
+  reads the target table, as in PostgreSQL. A subquery of a `SET` value is evaluated when the
+  statement finds the row, before the first write.
+- A subquery in a `CASE` branch that is not taken, or in a `COALESCE` argument after the first value,
+  is evaluated anyway. As in PostgreSQL, its error does not appear. However, it costs time.
+- A correlated subquery is not supported in the `HAVING`, a `JOIN ON`, the select list of a query that
+  groups or aggregates, or `ON CONFLICT DO UPDATE`. These clauses have no stage that is executed once
+  for each row, and the statement returns `CADB0533` (`FeatureNotSupported`). The message names the
+  clause and the outer name that the subquery reads. PostgreSQL supports these forms. For more
+  information, see [differences from PostgreSQL](postgresql-differences.md#correlated-subqueries).
 
-Two positions do not take a subquery at all: `ORDER BY` and `GROUP BY` refuse one with `CADB0400`.
+Two positions do not take a subquery at all: a subquery in `ORDER BY` or `GROUP BY` is an error
+(`CADB0400`).
 
 A scalar subquery in a select list names its output column after its single inner column, as in
-PostgreSQL. That name is the alias, the column name, or the name of a nested scalar subquery, so
-`SELECT (SELECT 5 AS id)` has the column `id`. When the inner column is another expression, the
+PostgreSQL. That name is the alias or the column name. It can also be the name of a nested scalar
+subquery. For example, `SELECT (SELECT 5 AS id)` has the column `id`. When the inner column is another expression, the
 subquery column has its position as its name, as any expression column has. PostgreSQL names it
 `?column?`, or after its function.
 
-`EXPLAIN` runs the uncorrelated subqueries of a statement, because folding them is part of
-preparing the plan; see [EXPLAIN](./explain.md).
+`EXPLAIN` executes the uncorrelated subqueries of a statement. Folding them is part of preparing the
+plan. For more information, see [EXPLAIN](./explain.md).
 
 ## Names in ORDER BY
 
-A bare name in `ORDER BY` matches the output names of the select list first, and a column of the
-`FROM` clause only when no output has that name, as in PostgreSQL. An output name is an alias, the
-column name of a column reference without its table name, or the name of a scalar subquery column.
-So `SELECT v AS id FROM r ORDER BY id` sorts by `v`, and `SELECT a.id FROM r a JOIN r b ON a.id = b.id
-ORDER BY id` sorts by `a.id`.
+A bare name in `ORDER BY` matches the output names of the select list first, as in PostgreSQL. It
+matches a column of the `FROM` clause if no output has that name. An output name is an alias or the
+name of a scalar subquery column. A column reference also gives an output name: its column name with
+the table name removed. For example, `SELECT v AS id FROM r ORDER BY id` sorts by `v`, and
+`SELECT a.id FROM r a JOIN r b ON a.id = b.id ORDER BY id` sorts by `a.id`.
 
-- A name that two outputs with different expressions have fails with `CADB0400`
-  (`ORDER BY "id" is ambiguous`). Examples are `SELECT id, v AS id FROM r ORDER BY id`,
-  `SELECT id, (SELECT 5 AS id) FROM r ORDER BY id`, and `SELECT *, v AS id FROM r ORDER BY id`, where
-  `*` puts out `id` too.
+- A name that two outputs with different expressions have is an error (`CADB0400`,
+  `ORDER BY "id" is ambiguous`). One example is `SELECT id, v AS id FROM r ORDER BY id`. Another is
+  `SELECT *, v AS id FROM r ORDER BY id`, where `*` puts out `id` too. So is
+  `SELECT id, (SELECT 5 AS id) FROM r ORDER BY id`.
 - Two outputs with the same expression are one meaning: `SELECT id, id FROM r ORDER BY id` and
   `SELECT r.id, id FROM r ORDER BY id` sort by `id`.
 - A position (`ORDER BY 2`), a qualified name (`ORDER BY r.id`) and an expression (`ORDER BY id + 0`)
-  are not output names, so they are never ambiguous.
+  are not output names. This means that they cannot be ambiguous.
 
 ## Quantified comparisons: `ANY`, `SOME` and `ALL`
 
 A quantified comparison compares a value with each element of an array, or with each row of a
-subquery. CamusDB accepts every comparison operator with every quantifier:
+subquery. All comparison operators work with all three quantifiers.
 
 | Form | Meaning |
 |------|---------|
-| `x op ANY (a)` | `true` when `x op element` holds for one element of `a` |
+| `x op ANY (a)` | `true` when `x op element` is true for one element of `a` |
 | `x op SOME (a)` | A synonym of `ANY` |
-| `x op ALL (a)` | `true` when `x op element` holds for every element of `a` |
+| `x op ALL (a)` | `true` when `x op element` is true for each element of `a` |
 
 `op` is `=`, `<>`, `<`, `<=`, `>` or `>=`. `!=` is the same as `<>`. `ANY`, `SOME` and `ALL` are not
 case-sensitive.
 
-The right operand can be an array literal, an array column, an array parameter, any other expression
-that gives an array, or a subquery:
+The right operand can be any expression that gives an array, such as an array literal or an array
+parameter. It can also be a subquery.
 
 ```sql
 SELECT * FROM posts WHERE 'news' = ANY (tags);
@@ -626,32 +634,32 @@ CREATE TABLE posts (id int64 PRIMARY KEY, tags array(string) CHECK ('banned' <> 
 CREATE TABLE runs (id int64 PRIMARY KEY, scores array(int64) CHECK (0 < ALL (scores)));
 ```
 
-A subquery on the right must not reference a column of the outer query. CamusDB runs the subquery
-once, before the outer scan starts, so an outer column has no value to read. This is the rule that
-`IN (SELECT ...)` already follows.
+A subquery on the right must not reference a column of the outer query. The subquery is evaluated
+once, before the outer scan starts. At that point, an outer column does not have a value to read.
+`IN (SELECT ...)` follows the same rule.
 
 A subquery on the right is not an array, and its rows are not converted to one type. The rows it
-returns can hold more than one type. Each row is compared to the left operand on its own, by the same
-rule the operator uses outside a quantifier. So
+returns can have more than one type. Each row is compared to the left operand
+separately, by the same rule the operator uses outside a quantifier. For example,
 `SELECT 0 < ANY (SELECT CASE WHEN id = 1 THEN 1 ELSE 2.5 END FROM t)` compares `0` to an `int64`
 value and then to a `float64` value, and gives `true`. The same values written as `ARRAY[1, 2.5]`
 form an `array(float64)` (see [Array elements](#array-elements)), and give the same answer.
 
 ### NULL rules
 
-The result is the result of the expansion the form stands for, with three-valued `OR` and `AND`:
+The result is the result of the expansion that the form stands for, with three-valued `OR` and `AND`.
 
 - `x op ANY (a1, a2)` is `(x op a1) OR (x op a2)`.
 - `x op ALL (a1, a2)` is `(x op a1) AND (x op a2)`.
 
-Every rule below follows from that expansion:
+The rules below follow from that expansion.
 
 - `ANY` is `true` when one comparison is `true`. `ALL` is `false` when one comparison is `false`.
   A decided answer wins, even when another element is `NULL`.
-- With no decided answer, a `NULL` element makes the result `NULL`.
+- If no comparison decides the answer, a `NULL` element makes the result `NULL`.
 - A `NULL` `x` gives `NULL`, when the set is not empty.
-- An empty array, or a subquery with no rows, gives `false` for `ANY` and `true` for `ALL`. This is
-  also true for a `NULL` `x`, because no comparison runs.
+- An empty array, or a subquery that returns zero rows, gives `false` for `ANY` and `true` for `ALL`.
+  This is also true for a `NULL` `x`. No comparison is made.
 - A `NULL` array gives `NULL`. A `NULL` array is not an empty array.
 
 One element comparison means exactly what the same operator means outside a quantifier. A mixed
@@ -659,15 +667,16 @@ numeric pair, such as an `int64` value against a `float64` element, compares by 
 the operator cannot compare, such as a number against a string, is the same error it is outside a
 quantifier.
 
-A `WHERE` clause keeps a row only when the result is `true`. A CHECK constraint rejects a row only
-when the result is `false`. So `CHECK ('banned' <> ALL (tags))` accepts a `NULL` array, and it also
-accepts an array that holds a `NULL` element and no `'banned'`.
+A `WHERE` clause returns a row when the result is `true`, and skips it when the result is `false` or
+`NULL`. A CHECK constraint blocks a row when the result is `false`, and allows it when the result is
+`true` or `NULL`. This means that `CHECK ('banned' <> ALL (tags))` allows a `NULL` array. It also allows an
+array with a `NULL` element and no `'banned'` element.
 
 ### How CamusDB stores each form
 
 Three forms are membership tests, and the parser changes each one into the equivalent `IN`,
 `NOT IN` or `array_contains` expression. `SHOW CREATE VIEW`, `SHOW CREATE TABLE` (for a CHECK
-constraint) and `EXPLAIN` then show the changed form, not the text that you wrote:
+constraint) and `EXPLAIN` then show the changed form in place of the text that you wrote.
 
 | You write | CamusDB shows |
 |-----------|---------------|
@@ -678,10 +687,10 @@ constraint) and `EXPLAIN` then show the changed form, not the text that you wrot
 | `x = ANY (SELECT y FROM u)` | `x IN (SELECT y FROM u)` |
 | `x <> ALL (SELECT y FROM u)` | `x NOT IN (SELECT y FROM u)` |
 
-`= SOME` is shown as `= ANY` is shown, because the two are one form.
+`= SOME` is shown as `= ANY` is shown. The two are one form.
 
-Every other operator and quantifier pair keeps its own form, and is shown as you wrote it. Only the
-subquery gains a pair of parentheses:
+Other operator and quantifier pairs are shown as you wrote them. A subquery gains a pair of
+parentheses, and the rest of the text is unchanged.
 
 | You write | CamusDB shows |
 |-----------|---------------|
@@ -691,10 +700,10 @@ subquery gains a pair of parentheses:
 
 ### Index use
 
-An `ARRAY[...]` literal becomes an `IN` list only for a membership form, and only when each element
-is a constant or a parameter. Then the planner can use an index on `x`, as it does for
-`x IN (1, 2)`. Every other array becomes an `array_contains` call, which the query evaluates for
-each row. This includes an empty `ARRAY[]` and an `ARRAY[...]` with an element such as a column or a
+An `ARRAY[...]` literal becomes an `IN` list if two conditions are true: the form is a membership
+form, and each element is a constant or a parameter. Then the planner can use an index on `x`, as it
+does for `x IN (1, 2)`. Any other array becomes an `array_contains` call, which the query evaluates
+for each row. This includes an empty `ARRAY[]` and an `ARRAY[...]` with an element such as a column or a
 calculation.
 
 `x = ANY (@ids)` and `x = ANY (tags)` do not use an index. No form with an ordered operator uses an
@@ -702,13 +711,13 @@ index; each one is evaluated for each row.
 
 ### Not supported
 
-- `ANY`, `SOME` or `ALL` with no argument or with more than one argument. The error is `CADB0406`.
-- The quantifier on the left side, as in `ANY (tags) = x`, or a quantifier in any other position, as
-  in `SELECT any(tags)`. The error is "ANY/SOME/ALL is valid only as the right operand of a
-  comparison".
-- An array text literal on the right, such as `x = ANY ('{a,b}')`. CamusDB has no array text literal.
+- `ANY`, `SOME` or `ALL` with zero arguments or with more than one argument. The error is `CADB0406`.
+- The quantifier on the left side (`ANY (tags) = x`) or in another position (`SELECT any(tags)`). The
+  error is "ANY/SOME/ALL is valid only as the right operand of a comparison".
+- An array text literal on the right, such as `x = ANY ('{a,b}')`. Array text literals are not
+  supported.
 
-PostgreSQL rejects `x = (ANY (tags))`. CamusDB accepts it and reads it as `x = ANY (tags)`.
+`x = (ANY (tags))` is an error in PostgreSQL. CamusDB reads it as `x = ANY (tags)`.
 
-A column can still have the name `any`, `some` or `all`. The words are a quantifier only when a
-parenthesized argument follows them on the right side of a comparison.
+A column can have the name `any`, `some` or `all`. The words are a quantifier if a parenthesized
+argument follows them on the right side of a comparison, and an ordinary name otherwise.

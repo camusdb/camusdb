@@ -93,13 +93,17 @@ internal sealed class TableConstraintAlterer
         AlterConstraintTicket ticket,
         bool isClusterMode)
     {
+        // Inside a transaction with a private schema the change is a delta, which joins the change set, on
+        // a single node too. The other single-node form changes the schema in place and persists it at once.
+        bool replicated = isClusterMode || TransactionSchemaScope.OverlayFor(database) is not null;
+
         return ticket.Operation switch
         {
             AlterConstraintOperation.AddCheck => await AddCheck(catalogs, tableOpener, database, table, ticket, isClusterMode).ConfigureAwait(false),
-            AlterConstraintOperation.DropConstraint => await DropConstraint(catalogs, database, table, ticket, isClusterMode).ConfigureAwait(false),
+            AlterConstraintOperation.DropConstraint => await DropConstraint(catalogs, database, table, ticket, replicated).ConfigureAwait(false),
             AlterConstraintOperation.SetNotNull => await SetNotNull(catalogs, tableOpener, database, table, ticket, isClusterMode).ConfigureAwait(false),
-            AlterConstraintOperation.DropNotNull => await DropNotNull(catalogs, database, table, ticket, isClusterMode).ConfigureAwait(false),
-            AlterConstraintOperation.SetStorage => await SetStorage(catalogs, database, table, ticket, isClusterMode).ConfigureAwait(false),
+            AlterConstraintOperation.DropNotNull => await DropNotNull(catalogs, database, table, ticket, replicated).ConfigureAwait(false),
+            AlterConstraintOperation.SetStorage => await SetStorage(catalogs, database, table, ticket, replicated).ConfigureAwait(false),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown alter constraint operation '{ticket.Operation}'")
         };
     }
@@ -295,7 +299,7 @@ internal sealed class TableConstraintAlterer
         DatabaseDescriptor database,
         TableDescriptor table,
         AlterConstraintTicket ticket,
-        bool isClusterMode)
+        bool replicated)
     {
         // Resolve the constraint name: first against CHECK constraints, then against named NOT NULL.
         bool isCheckConstraint = table.Schema.CheckConstraints?.Any(c =>
@@ -331,10 +335,10 @@ internal sealed class TableConstraintAlterer
                 operation: AlterConstraintOperation.DropNotNull,
                 columnName: notNullColumn.Name
             );
-            return await DropNotNull(catalogs, database, table, notNullTicket, isClusterMode).ConfigureAwait(false);
+            return await DropNotNull(catalogs, database, table, notNullTicket, replicated).ConfigureAwait(false);
         }
 
-        if (isClusterMode)
+        if (replicated)
         {
             await catalogs.ReplicateDropCheckConstraintAsync(
                 database, ticket.TableName, ticket.ConstraintName)
@@ -391,7 +395,7 @@ internal sealed class TableConstraintAlterer
         DatabaseDescriptor database,
         TableDescriptor table,
         AlterConstraintTicket ticket,
-        bool isClusterMode)
+        bool replicated)
     {
         string columnName = ticket.ColumnName!;
         ColumnStorageStrategy storage = ticket.Storage!.Value;
@@ -406,7 +410,7 @@ internal sealed class TableConstraintAlterer
         // Checked here too, so the single-node path refuses before it opens a transaction.
         ConstraintDeltaApplier.WithStorage(column, storage);
 
-        if (isClusterMode)
+        if (replicated)
         {
             await catalogs.ReplicateSetColumnStorageAsync(database, ticket.TableName, columnName, storage).ConfigureAwait(false);
         }
@@ -456,6 +460,9 @@ internal sealed class TableConstraintAlterer
         return true;
     }
 
+    /// <summary>The name that <c>SET NOT NULL</c> gives the constraint of a column: <c>{table}_{column}_not_null</c>.</summary>
+    internal static string NotNullConstraintName(TableDescriptor table, string columnName) => $"{table.Name}_{columnName}_not_null";
+
     private async Task<bool> SetNotNull(
         CatalogsManager catalogs,
         TableOpener tableOpener,
@@ -476,7 +483,7 @@ internal sealed class TableConstraintAlterer
 
         // Auto-name: {table}_{col}_not_null. The generated name must not be one that a CHECK or a
         // foreign key already uses (ConstraintNameRules); checked again under the gate and the lock.
-        string constraintName = $"{table.Name}_{columnName}_not_null";
+        string constraintName = NotNullConstraintName(table, columnName);
         ConstraintNameRules.RequireUnusedForNotNull(table.Schema, constraintName, column.Id);
 
         if (TransactionSchemaScope.OverlayFor(database) is { } overlay)
@@ -721,7 +728,7 @@ internal sealed class TableConstraintAlterer
                         CamusDBErrorCodes.ConcurrentSchemaChange,
                         $"Column '{columnName}' of table '{tableName}' became NOT NULL while the statement started; roll back and retry");
 
-                constraintName = $"{tableName}_{columnName}_not_null";
+                constraintName = NotNullConstraintName(table, columnName);
                 ConstraintNameRules.RequireUnusedForNotNull(table.Schema, constraintName, column.Id);
             }
 
@@ -864,7 +871,7 @@ internal sealed class TableConstraintAlterer
         DatabaseDescriptor database,
         TableDescriptor table,
         AlterConstraintTicket ticket,
-        bool isClusterMode)
+        bool replicated)
     {
         string columnName = ticket.ColumnName!;
 
@@ -877,7 +884,7 @@ internal sealed class TableConstraintAlterer
 
         PrimaryKeyNotNullRule.RejectDropNotNullOnPrimaryKey(table, columnName);
 
-        if (isClusterMode)
+        if (replicated)
         {
             await catalogs.ReplicateSetColumnNotNullAsync(
                 database, ticket.TableName, columnName, notNull: false, constraintName: null)

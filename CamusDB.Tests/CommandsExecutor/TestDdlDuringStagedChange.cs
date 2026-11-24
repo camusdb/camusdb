@@ -44,6 +44,15 @@ internal abstract class DdlDuringStagedChangeScenarios : SharedNodeBaseTest
 
     protected abstract bool ClusterMode { get; }
 
+    /// <summary>
+    /// Whether transactional DDL is on. The schema statements outside a transaction then hold the DDL lock of
+    /// the database, which they share, so they must run beside each other as they do with the setting off.
+    /// </summary>
+    protected virtual bool TransactionalDdl => false;
+
+    protected override CamusDBOptions ConfigureOptions(CamusDBOptions defaults) =>
+        TransactionalDdl ? defaults with { TransactionalDdlEnabled = true } : defaults;
+
     protected override CommandExecutor BuildCommandExecutor(CamusDBOptions options)
     {
         CommandValidator validator = new(options);
@@ -262,4 +271,22 @@ internal sealed class TestDdlDuringStagedChangeClusterMode : DdlDuringStagedChan
 internal sealed class TestDdlDuringStagedChangeStandalone : DdlDuringStagedChangeScenarios
 {
     protected override bool ClusterMode => false;
+}
+
+/// <summary><see cref="DdlDuringStagedChangeScenarios"/> in cluster mode with transactional DDL on.</summary>
+[TestFixture]
+internal sealed class TestDdlDuringStagedChangeClusterModeTransactionalDdl : DdlDuringStagedChangeScenarios
+{
+    protected override bool ClusterMode => true;
+
+    protected override bool TransactionalDdl => true;
+}
+
+/// <summary><see cref="DdlDuringStagedChangeScenarios"/> on a standalone node with transactional DDL on.</summary>
+[TestFixture]
+internal sealed class TestDdlDuringStagedChangeStandaloneTransactionalDdl : DdlDuringStagedChangeScenarios
+{
+    protected override bool ClusterMode => false;
+
+    protected override bool TransactionalDdl => true;
 }

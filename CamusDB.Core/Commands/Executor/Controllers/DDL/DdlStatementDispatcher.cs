@@ -182,10 +182,9 @@ internal sealed class DdlStatementDispatcher
     /// </summary>
     /// <remarks>
     /// <para>With transactional DDL on, a statement of class <see cref="DdlStatementClass.Irrevocable"/>
-    /// or <see cref="DdlStatementClass.NotYetTransactional"/> is refused with
-    /// <see cref="CamusDBErrorCodes.StatementNotAllowedInTransaction"/>, so it never commits apart from a
-    /// transaction whose client expects a ROLLBACK to undo it. TRUNCATE and REWRITE STORAGE keep their own
-    /// refusal, which applies with the setting off too.</para>
+    /// is refused with <see cref="CamusDBErrorCodes.StatementNotAllowedInTransaction"/>, so it never commits
+    /// apart from a transaction whose client expects a ROLLBACK to undo it. TRUNCATE and REWRITE STORAGE
+    /// keep their own refusal, which applies with the setting off too.</para>
     ///
     /// <para>A transaction that already holds schema changes keeps this rule after the setting is turned
     /// off, until it ends: half of its DDL in the change set and half committed apart would be neither
@@ -216,12 +215,6 @@ internal sealed class DdlStatementDispatcher
                     CamusDBErrorCodes.StatementNotAllowedInTransaction,
                     $"{ast.nodeType} cannot run inside an explicit transaction: it commits work that a later ROLLBACK " +
                     "cannot undo. Commit or roll back first, then run it.");
-
-            case DdlStatementClass.NotYetTransactional:
-                throw new CamusDBException(
-                    CamusDBErrorCodes.StatementNotAllowedInTransaction,
-                    $"{ast.nodeType} cannot yet run inside an explicit transaction with transactional_ddl_enabled on: its " +
-                    "change cannot yet roll back with the transaction. Commit or roll back first, then run it.");
         }
 
         if (existing is not null)
@@ -245,11 +238,12 @@ internal sealed class DdlStatementDispatcher
 
     /// <summary>
     /// Takes the DDL lock of <paramref name="database"/> for one schema statement that runs outside a DDL
-    /// transaction, when transactional DDL is on. Null when the setting is off, when the statement is not a
+    /// transaction, when transactional DDL is on. The statement shares it with the other statements of this
+    /// kind (<see cref="StatementDdlLock"/>). Null when the setting is off, when the statement is not a
     /// schema statement on the database, or when it belongs to an explicit transaction (which holds the
     /// lock itself, or is refused). Taken before the DDL gate, as the lock order requires.
     /// </summary>
-    internal async Task<TransactionalDdlLock?> AcquireStatementDdlLockAsync(
+    internal async Task<StatementDdlLock.Share?> AcquireStatementDdlLockAsync(
         DatabaseDescriptor database, ExecuteSQLTicket ticket, NodeAst ast)
     {
         if (!database.Options.TransactionalDdlEnabled)
@@ -261,7 +255,7 @@ internal sealed class DdlStatementDispatcher
         if (ticket.TxnState is { IsSessionOwned: true })
             return null;
 
-        return await TransactionalDdlLock.AcquireAsync(
+        return await database.StatementDdlLock.EnterAsync(
             database, TransactionalDdlLock.DefaultWaitTimeout, context.Logger).ConfigureAwait(false);
     }
 
@@ -436,7 +430,7 @@ internal sealed class DdlStatementDispatcher
 
         // A schema statement outside a DDL transaction holds the same DDL lock for its length, so it waits
         // for a DDL transaction to end instead of moving the base that transaction will commit against.
-        await using TransactionalDdlLock? statementLock = ddlTransaction is null
+        await using StatementDdlLock.Share? statementLock = ddlTransaction is null
             ? await AcquireStatementDdlLockAsync(database, ticket, ast).ConfigureAwait(false)
             : null;
 

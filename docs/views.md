@@ -1,16 +1,19 @@
 # Views
 
-CamusDB supports **views** — named, stored queries expanded at every reference — and **materialized
-views**, which store the query's result as real rows and hand them back until you refresh them. The
-SQL surface follows PostgreSQL; the places where CamusDB deliberately differs are listed in
-[Divergences from PostgreSQL](#divergences-from-postgresql) at the end, and each one says why.
+CamusDB supports **views** and **materialized views**. A view is a named, stored query that is
+expanded at each reference. A materialized view stores the query's result as real rows and returns
+them until you refresh it. The SQL surface follows PostgreSQL. The places where CamusDB deliberately
+differs are listed in [Divergences from PostgreSQL](#divergences-from-postgresql) at the end, and
+each one says why.
 
-Most of this document is about plain views. Materialized views have their own section:
+Most of this document is about views that are not materialized. Materialized views are covered in
 [Materialized views](#materialized-views).
 
 ---
 
 ## Creating a view
+
+The following example creates a view and reads it like a table.
 
 ```sql
 CREATE VIEW open_orders AS
@@ -19,7 +22,7 @@ CREATE VIEW open_orders AS
 SELECT customer, SUM(total) AS spent FROM open_orders GROUP BY customer;
 ```
 
-A view can be given its own column names:
+A view can be given column names that differ from the names in its body.
 
 ```sql
 CREATE VIEW order_summary (order_id, who, amount) AS
@@ -28,8 +31,8 @@ CREATE VIEW order_summary (order_id, who, amount) AS
 
 ### The body is checked when you create it
 
-Every table, column, and function the body references is resolved at `CREATE VIEW` time, so a
-mistake is reported to the author at once, before anyone reads the view:
+The tables, columns and functions that the body references are resolved at `CREATE VIEW` time. A
+mistake is reported to the author at once, before anyone reads the view.
 
 ```sql
 CREATE VIEW v AS SELECT id FROM no_such_table;
@@ -38,7 +41,8 @@ CREATE VIEW v AS SELECT id FROM no_such_table;
 
 ### Every output column needs a name
 
-A projection that is a bare expression has no name to publish, and CamusDB refuses it:
+A projection that is a bare expression does not have a name to publish. CamusDB returns an error for
+it.
 
 ```sql
 CREATE VIEW v AS SELECT total + 1 FROM orders;
@@ -47,11 +51,15 @@ CREATE VIEW v AS SELECT total + 1 FROM orders;
 CREATE VIEW v AS SELECT total + 1 AS total_plus_one FROM orders;   -- OK
 ```
 
-PostgreSQL names such a column `?column?`. CamusDB refuses because that name cannot be referenced —
-it would appear in `SHOW COLUMNS`, in dependent views, and in client column maps as something
-nothing can select, and it would silently renumber if the projection list were reordered.
+PostgreSQL names such a column `?column?`. CamusDB does not allow it, because that name cannot be
+referenced. It would appear in `SHOW COLUMNS`, in dependent views and in client column maps as a
+column that no query can select. It would also silently renumber if the projection list were
+reordered.
 
 ### `SELECT *` is expanded when the view is created
+
+In the following example, the view keeps the four columns that `orders` had when the view was
+created.
 
 ```sql
 CREATE VIEW all_orders AS SELECT * FROM orders;   -- orders has 4 columns
@@ -60,19 +68,19 @@ ALTER TABLE orders ADD COLUMN note string(64);
 SELECT * FROM all_orders;                          -- still 4 columns
 ```
 
-The view's shape is frozen at creation, matching PostgreSQL. Without this, adding a column to a base
-table would silently widen every `SELECT *` view over it, changing what dependent views and clients
-see with no statement having been issued against them.
+The view's shape is frozen at creation, matching PostgreSQL. If it were not, adding a column to a
+base table would silently widen each `SELECT *` view over it. This would change what dependent views
+and clients see, although no statement was issued against them.
 
-A view body may not mix `*` with other projections — the expansion order is not stable across a base
-column being added, so the frozen shape could not be honored.
+A view body may not mix `*` with other projections. The expansion order is not stable when a base
+column is added, and the frozen shape could not be honored.
 
 ---
 
 ## Replacing a view
 
 `CREATE OR REPLACE VIEW` may only **append** columns. Existing column names, types, and order must
-be preserved:
+be preserved. The last two statements in the following example return an error.
 
 ```sql
 CREATE VIEW v AS SELECT id, customer FROM orders;
@@ -82,29 +90,27 @@ CREATE OR REPLACE VIEW v AS SELECT id FROM orders;                    -- ERROR (
 CREATE OR REPLACE VIEW v AS SELECT id, status FROM orders;            -- ERROR (CADB0529)
 ```
 
-A dependent view binds to the column names it saw at its own creation, a
-cached plan binds to positions, and a client binds to both. Silently changing any of them would
-change what those already-created objects mean, and the change would surface later and elsewhere as
-wrong data, with no error. Drop and recreate to change the shape. That forces the dependents into
-the open.
+A dependent view binds to the column names it saw when it was created. A cached plan binds to
+positions, and a client binds to both. Silently changing any of them would change what those
+already-created objects mean. The change would surface later and elsewhere as wrong data, and no
+error would be raised. To change the shape, drop and recreate the view. That forces the dependents
+into the open.
 
-The body itself may change freely:
+The body itself may change freely. The following replacement takes effect on the next read.
 
 ```sql
 CREATE OR REPLACE VIEW v AS SELECT id, customer FROM orders WHERE status = 'closed';
 ```
 
-takes effect on the next read.
-
 ---
 
 ## Dependencies
 
-Views record what they read by **object id**, not by name, so dependencies survive renames.
+Views record what they read by **object id**. This means that dependencies survive renames.
 
 ### Dropping
 
-A drop that would orphan a dependent is refused:
+A drop that would orphan a dependent returns an error. `CASCADE` drops the dependents too.
 
 ```sql
 CREATE VIEW inner_v AS SELECT id, total FROM orders;
@@ -117,7 +123,7 @@ DROP VIEW inner_v;
 DROP VIEW inner_v CASCADE;   -- drops outer_v as well
 ```
 
-The same rule applies to tables:
+The same rule applies to tables.
 
 ```sql
 DROP TABLE orders;
@@ -126,19 +132,21 @@ DROP TABLE orders;
 ```
 
 > **`DROP TABLE` has no `CASCADE` form.** Drop the dependent views first. This makes `DROP TABLE`
-> stricter than it was before views existed; the alternative is a table drop that silently converts
-> every dependent view into a delayed error for whoever reads it next.
+> stricter than it was before views existed. The alternative is a table drop that silently turns
+> each dependent view into a delayed error for whoever reads it next.
 
-The rule holds on every way into a drop: `DROP TABLE … FORCE`, the ticket API, and a statement a
-follower forwards to the schema leader. It is checked before the drop changes anything, and checked
-again in log order when the drop's schema entry is applied, so a view that another node created in
-between still stops the drop. A refused drop, whenever the refusal arrives, leaves the table whole:
-its rows, its indexes and its unique enforcement.
+The rule applies to all ways into a drop, for example `DROP TABLE … FORCE` and a statement that a
+follower forwards to the schema leader. The ticket API is covered too. The rule is checked before
+the drop changes anything. It is checked again in log order when the drop's schema entry is
+applied. This means that a view that another node created in between also stops the drop. A drop
+that returns this error leaves the table intact, whenever the error arrives. Its rows, its indexes
+and its unique enforcement are not changed.
 
 ### Columns a view reads
 
-A body binds the columns it reads by immutable id, just as it binds its relations, so **renaming a
-column is transparent** — and dropping one is refused, so the view cannot fail at its next read:
+A body binds the columns it reads by immutable id, just as it binds its relations. This means that
+**renaming a column is transparent**. Dropping a column that a view reads returns an error. The
+view therefore cannot fail at its next read.
 
 ```sql
 CREATE VIEW open_orders AS SELECT id, total FROM orders WHERE status = 'open';
@@ -151,29 +159,29 @@ ALTER TABLE orders DROP COLUMN amount;
 --                   depend on it: open_orders. Drop or replace them first.
 ```
 
-The view keeps publishing `total`: its output names are frozen at creation and do not follow the
-base column. `SHOW CREATE VIEW` renders the base column's *current* name, so after the rename the
+The view continues to publish `total`. Its output names are frozen at creation and do not follow
+the base column. `SHOW CREATE VIEW` renders the base column's *current* name. After the rename, the
 body reads `... amount AS total ...`.
 
-A column the body reads only in its `WHERE` counts, as do columns read inside a subquery, and a
-materialized view's body protects the columns it reads on every refresh. `DROP COLUMN` has no
-`CASCADE` form, so drop or replace the dependent view first.
+A column that the body reads in its `WHERE` clause and nowhere else also counts. Columns read in a
+subquery count as well. A materialized view's body protects the columns it reads at each refresh.
+`DROP COLUMN` does not have a `CASCADE` form. Drop or replace the dependent view first.
 
-> **A rename is still refused in two cases**, because the body would be stranded:
-> a definition written before columns were bound by id, and a reference in `ORDER BY`,
-> `GROUP BY` or `HAVING` that matches one of the view's own output names. The second is deliberate —
-> those clauses may legally name an output column instead of a relation's, so such a reference is
-> left as written.
+> **A rename returns an error in two cases**, because the body would be stranded. The first case is
+> a definition written before columns were bound by id. The second is a reference in `ORDER BY`,
+> `GROUP BY` or `HAVING` that matches one of the view's output names. The second is deliberate.
+> Those clauses may legally name an output column in place of a relation's column. Such a reference
+> is therefore left as written.
 
-> **This check is a lower bound.** A reference the analysis cannot attribute to one
-> relation with certainty is not recorded, so an unusually shaped body may still let a column be
-> dropped. It errs that way on purpose: a missed refusal leaves the behavior that existed before
-> this check, while a wrong one would block a column change nothing actually depends on.
+> **This check is a lower bound.** A reference that the analysis cannot attribute to one relation
+> with certainty is not recorded. An unusually shaped body may therefore let a column be dropped.
+> The check errs that way on purpose. A missed error leaves the behavior that existed before this
+> check. A wrong error would block a column change that no view depends on.
 
 ### Renaming is transparent
 
-A view's stored body refers to the relations it reads by their **immutable ids**, not by name, so a
-rename changes nothing about the view — there is no stored text to bring up to date:
+A view's stored body refers to the relations it reads by their **immutable ids**. A rename does not
+change the view, and there is no stored text to bring up to date.
 
 ```sql
 CREATE VIEW open_orders AS SELECT id, customer FROM orders WHERE status = 'open';
@@ -184,35 +192,35 @@ SHOW CREATE VIEW open_orders;
 -- CREATE VIEW `open_orders` AS SELECT id, customer FROM sales AS orders WHERE status = 'open'
 ```
 
-This applies to renaming a **view** a view reads, exactly as it does to a table.
+This applies to renaming a **view** that a view reads, exactly as it does to a table.
 
-Names come back when the definition is shown. The original name appears as an alias on purpose:
-qualified column references inside the body resolve through it, so it has to stay fixed for the life
-of the definition. An alias that would merely repeat the relation's current name is not printed, so
-an ordinary view renders as you wrote it.
+Names come back when the definition is shown. The original name appears as an alias on purpose.
+Qualified column references in the body resolve through it, and it must not change for the life of
+the definition. An alias that would repeat the relation's current name is not printed. This means
+that an ordinary view renders as you wrote it.
 
-> **Definitions created by earlier versions** name their relations directly. They keep working and
-> keep rendering unchanged, and the first rename that would otherwise strand one converts it to the
-> id form instead — in the same replicated change as the rename, validated against a single schema
-> snapshot and checkpointed together, so a relation created under the freed name cannot be picked up
-> by a body that has not caught up. After that conversion the view is in the same position as any
-> other: renames stop touching it entirely.
+> **Definitions created by earlier versions** name their relations directly. They continue to work
+> and to render unchanged. The first rename that would strand one converts it to the id form. The
+> conversion is part of the same replicated change as the rename. It is validated against a single
+> schema snapshot and checkpointed together with the rename. This means that a relation created
+> under the freed name cannot be picked up by a body that has not caught up. After that conversion
+> the view behaves like any other view, and renames no longer touch it.
 
 ### Reserved relation names
 
-A table, view or materialized view may not be named with the prefix `__camus_rel_`:
+A table, view or materialized view may not be named with the prefix `__camus_rel_`.
 
 ```sql
 CREATE TABLE __camus_rel_7 (id int64 PRIMARY KEY);
 -- ERROR (CADB0400): Table name '__camus_rel_7' starts with '__camus_rel_', which is reserved
 ```
 
-Stored view definitions use that prefix to refer to a relation by its immutable id, so a relation
-answering to such a name could shadow what a definition points at.
+Stored view definitions use that prefix to refer to a relation by its immutable id. A relation with
+such a name could shadow what a definition points at.
 
 ### Cycles
 
-A view that would depend on itself is rejected when you create it:
+A view that would depend on itself returns an error when you create it.
 
 ```sql
 CREATE VIEW a AS SELECT id FROM b;
@@ -220,14 +228,15 @@ CREATE OR REPLACE VIEW b AS SELECT id FROM a;
 -- ERROR (CADB0528): Infinite recursion detected in the definition of view 'b'
 ```
 
-Nesting is additionally capped at `max_view_expansion_depth` (default 32) as a backstop.
+Nesting is also capped at `max_view_expansion_depth` (default 32) as a backstop.
 
 ### Size limits
 
 Depth does not bound how much a view expands to. When each of ten views reads the one below it
 twice, a read of the top view expands 1024 copies of the bottom one. `max_view_expanded_relations`
-and `max_view_expanded_nodes` bound the expansion of one statement; `CREATE VIEW` expands the views
-its body reads under the same budget, so a definition like that is refused when it is created:
+and `max_view_expanded_nodes` bound the expansion of one statement. `CREATE VIEW` expands the views
+its body reads under the same budget. A definition like that one returns an error when it is
+created.
 
 ```sql
 CREATE VIEW v10 AS SELECT a.id FROM v9 a JOIN v9 b ON a.id = b.id;
@@ -235,44 +244,45 @@ CREATE VIEW v10 AS SELECT a.id FROM v9 a JOIN v9 b ON a.id = b.id;
 --                   references (max_view_expanded_relations) ...
 ```
 
-One definition is also bounded at `CREATE`: its size (`max_view_definition_bytes`,
-`max_view_definition_nodes`), its output columns (`max_view_output_columns`), and the relations it
-reads directly (`max_view_direct_dependencies`). See [Configuration](#configuration).
+One definition is also bounded at `CREATE`. The limits cover its size (`max_view_definition_bytes`,
+`max_view_definition_nodes`) and its output columns (`max_view_output_columns`). They also cover the
+relations it reads directly (`max_view_direct_dependencies`). See [Configuration](#configuration).
 
 ---
 
 ## Reading through a view
 
-A view is expanded into a derived table before the query is planned, so everything that works on a
-subquery works on a view: joins, aggregation, `DISTINCT`, `ORDER BY`, subqueries, the cost-based
-optimizer, spill, and serializable range/predicate locking on the underlying base tables.
+A view is expanded into a derived table before the query is planned. This means that all features
+that work on a subquery also work on a view, for example joins and the cost-based optimizer.
+Serializable range/predicate locking on the underlying base tables works too.
 
 ```sql
 SELECT v.id, c.region
 FROM open_orders v INNER JOIN customers c ON v.customer = c.name;
 ```
 
-There is no "view scan" node in `EXPLAIN` — the plan shows the expanded query, which is what
-runs.
+There is no "view scan" node in `EXPLAIN`. The plan shows the expanded query, which is what is
+executed.
 
-A view is also a source for a statement that writes rows somewhere else: `CREATE TABLE … AS SELECT`
+A view is also a source for a statement that writes rows somewhere else. `CREATE TABLE … AS SELECT`
 (also `WITH NO DATA`), `INSERT … SELECT` and a materialized view body read it in the same way. Each
-column of the new table has the type that a `SELECT` of the view reports, also for a subquery column.
-A write *to* a view is covered in [Writing through a view](#writing-through-a-view).
+column of the new table has the type that a `SELECT` of the view returns, also for a subquery
+column. A write *to* a view is covered in [Writing through a view](#writing-through-a-view).
 
 ```sql
 CREATE TABLE open_copy AS SELECT id, customer FROM open_orders;           -- OK
 INSERT INTO archive (id, customer) SELECT id, customer FROM open_orders; -- OK
 ```
 
-A subquery in the body's `WHERE` — `IN (SELECT …)`, `NOT IN`, a scalar subquery, `EXISTS` and
-`NOT EXISTS`, correlated or not — runs as it would in a top-level statement, and so does one in a
-derived table the statement writes itself: `SELECT COUNT(*) FROM (SELECT … WHERE EXISTS (…)) AS sub`.
-In a view body the subquery reads its tables with the privileges of the view's owner, like the rest
-of the body (see [Ownership and security](#ownership-and-security)); in a hand-written derived table it reads them as the
-caller.
+A subquery in the body's `WHERE` behaves as it would in a top-level statement. This includes
+`IN (SELECT …)`, `NOT IN`, `EXISTS`, `NOT EXISTS` and scalar subqueries, correlated or not. The same is true of a subquery in
+a derived table that the statement writes itself:
+`SELECT COUNT(*) FROM (SELECT … WHERE EXISTS (…)) AS sub`. In a view body the subquery reads its
+tables with the privileges of the view's owner, like the rest of the body (see
+[Ownership and security](#ownership-and-security)). In a hand-written derived table it reads them as
+the caller.
 
-A view may be referenced by its own name or given an alias:
+A view may be referenced by its name or given an alias.
 
 ```sql
 SELECT open_orders.customer FROM open_orders;   -- the view's name is the default alias
@@ -281,33 +291,35 @@ SELECT o.customer FROM open_orders o;           -- an explicit alias wins
 
 ### Restrictions on the body
 
-- **No `AS OF SYSTEM TIME`.** An absolute timestamp would freeze the view to one instant forever; a
-  relative one (`'-2h'`) would mean something different at every reference, so two readers of the
-  same view would legitimately disagree about its contents. Use
+- **No `AS OF SYSTEM TIME`.** An absolute timestamp would freeze the view to one instant forever. A
+  relative one (`'-2h'`) would mean something different at each reference. Two readers of the same
+  view would then legitimately disagree about its contents. Use
   `CREATE TABLE … AS SELECT … AS OF SYSTEM TIME` for a point-in-time copy.
 - **No index or cache hints.** A hint pins a plan choice into the stored definition, where it would
   outlive the statistics it was made against.
-- **No `*` in a set operation inside a derived table or a subquery.** A body that is
-  `UNION`, `INTERSECT` or `EXCEPT` has the `*` of each operand expanded at creation, but one nested
-  deeper cannot be, and a column added to one of its tables would give its operands different column
-  counts. See [set-operations.md](./set-operations.md#views).
+- **No `*` in a set operation in a derived table or a subquery.** A body that is
+  `UNION`, `INTERSECT` or `EXCEPT` has the `*` of each operand expanded at creation. One nested
+  deeper cannot be expanded, and a column added to one of its tables would give its operands
+  different column counts. See [set-operations.md](./set-operations.md#views).
 
-**A query that reads through a view is never served from the query-result cache.** The cache fences one physical table's row keyspace per entry, and a view
-expands to a derived table, which has no keyspace of its own — the same limitation that makes joins
-uncacheable. A `{cache=name}` hint on a view reference is accepted, and the response reports it as a
-bypass (`DerivedSource`), so the outcome of the hint is visible. The rows come from live storage
-every time.
+**A query that reads through a view is never served from the query-result cache.** The cache fences
+one physical table's row keyspace per entry. A view expands to a derived table, which does not have
+a keyspace. The same limitation makes joins uncacheable. A `{cache=name}` hint on a view reference
+is allowed, and the response shows it as a bypass (`DerivedSource`). This means that the outcome of
+the hint is visible. The rows are read from live storage each time.
 
-An **index** hint on a view reference is refused: a view has no indexes of its own, so the hint
-could only be applied to a relation the statement does not name.
+An **index** hint on a view reference returns an error. A view does not have indexes. The hint could
+apply only to a relation that the statement does not name.
 
-A cache hint inside a view *body* is refused at `CREATE VIEW` time, and materialized views are
-unaffected by any of this — a materialized view is a physical relation, so the cache treats it
-exactly as it treats a table.
+A cache hint in a view *body* returns an error at `CREATE VIEW` time. None of this affects
+materialized views. A materialized view is a physical relation, and the cache treats it exactly as it
+treats a table.
 
 ---
 
 ## Introspection
+
+The following statements list views and show their definitions and columns.
 
 ```sql
 SHOW VIEWS;                     -- name and comment
@@ -316,21 +328,21 @@ SHOW CREATE VIEW open_orders;
 SHOW COLUMNS FROM open_orders;
 ```
 
-A view can carry a comment, which `SHOW VIEWS` reports in its `comment` column:
+A view can have a comment, which `SHOW VIEWS` shows in its `comment` column.
 
 ```sql
 COMMENT ON VIEW open_orders IS 'orders not yet shipped';
 COMMENT ON VIEW open_orders IS NULL;   -- removes it; IS '' stores an empty one
 ```
 
-The comment belongs to the view itself: `CREATE OR REPLACE VIEW` and
-`ALTER VIEW … RENAME TO` keep it. Setting it needs the `ALTER` privilege on the view. `SHOW CREATE
-VIEW` does not print it, so its output stays one statement.
+The comment belongs to the view itself. It is not removed by `CREATE OR REPLACE VIEW` or by
+`ALTER VIEW … RENAME TO`. Setting it needs the `ALTER` privilege on the view. `SHOW CREATE VIEW`
+does not print it. This means that its output is one statement.
 
-`SHOW TABLES` lists **tables only** — it does not list views. (PostgreSQL's `\dt` behaves the same
-way, and changing `SHOW TABLES` output would break existing clients.)
+`SHOW TABLES` lists **tables only**. It does not list views. PostgreSQL's `\dt` behaves the same
+way, and changing `SHOW TABLES` output would break existing clients.
 
-`SHOW CREATE VIEW` prints the **normalized** definition, not the text you typed:
+`SHOW CREATE VIEW` prints the **normalized** definition. This can differ from the text you typed.
 
 ```sql
 CREATE VIEW v AS SELECT id,total FROM orders WHERE a OR b AND c;
@@ -338,18 +350,18 @@ SHOW CREATE VIEW v;
 -- CREATE VIEW `v` AS SELECT id, total FROM orders WHERE a OR (b AND c)
 ```
 
-Views are stored re-rendered so that renames can rewrite them as targeted AST edits and so that
-`CREATE OR REPLACE` has a canonical form to compare against. PostgreSQL's `pg_get_viewdef` also never
-returns the original text. The printed DDL is guaranteed to re-parse to the same query, so it can be
-fed straight back to the server.
+Views are stored re-rendered. This lets renames rewrite them as targeted AST edits, and gives
+`CREATE OR REPLACE` a canonical form to compare against. PostgreSQL's `pg_get_viewdef` also does not
+return the original text. The printed DDL is guaranteed to re-parse to the same query. You can send
+it straight back to the server.
 
 ---
 
 ## Writing through a view
 
 `INSERT`, `UPDATE` and `DELETE` can target a view whose body reads one table, as in PostgreSQL. The
-statement is rewritten into the same statement on the table, so it runs in your transaction, under
-the same locks, limits and constraints as a write to the table:
+statement is rewritten into the same statement on the table. It is executed in your transaction,
+under the same locks, limits and constraints as a write to the table.
 
 ```sql
 CREATE VIEW acme_orders AS
@@ -360,23 +372,29 @@ UPDATE acme_orders SET total = total + 1 WHERE TRUE;   -- only acme's rows
 DELETE FROM acme_orders WHERE total < 20;              -- only acme's rows
 ```
 
-An `UPDATE` or `DELETE` reaches only rows the view shows: the body's `WHERE` is added to the
-statement's. A column the view does not expose takes its default on `INSERT`, and cannot be named at
-all — `DELETE FROM acme_orders WHERE status = 'closed'` is refused (`CADB0404`), because naming a
-hidden column would let a write's row count disclose what it holds. `RETURNING` works, and names the
-view's columns.
+An `UPDATE` or `DELETE` reaches only the rows that the view shows. The body's `WHERE` is added to the
+statement's `WHERE`. A column that the view does not expose takes its default on `INSERT`. It also
+cannot be named at all. For example, `DELETE FROM acme_orders WHERE status = 'closed'` returns an
+error (`CADB0404`). If a hidden column could be named, a write's row count could disclose what the
+column contains. `RETURNING` works, and names the view's columns.
 
 ### Which views can be written through
 
 A view can be written through when its body reads **exactly one** table, or one view that can itself
-be written through, and has none of: an aggregate, a window function, `DISTINCT`, `GROUP BY`,
-`HAVING`, `LIMIT`, `OFFSET`, a set operation (`UNION`, `INTERSECT`, `EXCEPT`), or a subquery in its
-`WHERE`. Any other view refuses writes with `CADB0525`, and the message says which rule it breaks.
-CamusDB has no rules and no `INSTEAD OF` triggers, so such a view stays read-only.
+be written through. The body must also not contain any of the following.
 
-An output column that is a plain column of the table can be written. Any other column is computed:
-it can be read, also in a `WHERE` (where it means the expression it stands for), but writing it is
-refused with `CADB0526`:
+- An aggregate or a window function.
+- `DISTINCT`, `GROUP BY` or `HAVING`.
+- `LIMIT` or `OFFSET`.
+- A set operation (`UNION`, `INTERSECT`, `EXCEPT`).
+- A subquery in its `WHERE`.
+
+A write to any other view returns `CADB0525`, and the message says which rule the view breaks.
+CamusDB does not support rules or `INSTEAD OF` triggers. Such a view is therefore read-only.
+
+An output column that is a column of the table, with no expression around it, can be written. All
+other columns are computed. A computed column can be read, also in a `WHERE`, where it means the
+expression it stands for. Writing it returns `CADB0526`.
 
 ```sql
 CREATE VIEW doubled AS SELECT id, total, total * 2 AS twice FROM orders;
@@ -384,14 +402,14 @@ UPDATE doubled SET total = 1 WHERE twice = 60;   -- OK
 UPDATE doubled SET twice = 1 WHERE id = 1;       -- ERROR (CADB0526)
 ```
 
-A materialized view takes no writes, whatever its shape, and neither does a view over one.
-`INSERT … ON CONFLICT`, `UPSERT`, `UPDATE … FROM` and `DELETE … USING` cannot target a view
-(`CADB0533`); write to the table.
+A materialized view cannot be written to, whatever its shape. A view over a materialized view
+cannot be written to either. `INSERT … ON CONFLICT`, `UPSERT`, `UPDATE … FROM` and
+`DELETE … USING` cannot target a view (`CADB0533`). Write to the table.
 
 ### `WITH CHECK OPTION`
 
-With a check option, a row written through the view must be one the view shows; otherwise the
-statement fails with `CADB0527` before anything is written:
+With a check option, a row written through the view must be one that the view shows. If it is not,
+the statement returns `CADB0527` before anything is written.
 
 ```sql
 CREATE VIEW acme_only AS
@@ -402,44 +420,46 @@ INSERT INTO acme_only (id, customer, total) VALUES (11, 'globex', 1);
 -- ERROR (CADB0527): new row violates check option for view "acme_only"
 ```
 
-A row whose condition is NULL is not shown by the view, so it fails too — unlike a `CHECK`
-constraint, where NULL passes. The condition is computed with the types of the base table's columns,
-as a `SELECT` through the view computes it: with an `int64` column `i` and a `float64` column `f`,
-`COALESCE(i, f) / 4` is `0.5` for the row `i = 2, f = NULL`, in the check and in the `SELECT` alike.
-`WITH CASCADED CHECK OPTION` (the meaning of a bare `WITH CHECK OPTION`) checks this view's condition
-and the condition of every view beneath it.
-`WITH LOCAL CHECK OPTION` checks this view's condition, and beneath it only views that have a check
-option of their own.
+The view does not show a row whose condition is NULL. Such a row fails the check too. In a `CHECK`
+constraint, a NULL condition passes. The condition is computed with the types of the base table's
+columns, as a `SELECT` through the view computes it. With an `int64` column `i` and a `float64` column
+`f`, `COALESCE(i, f) / 4` is `0.5` for the row `i = 2, f = NULL`, in the check and in the `SELECT`.
+`WITH CASCADED CHECK OPTION` (the meaning of a bare
+`WITH CHECK OPTION`) checks the condition of this view and of each view beneath it.
+`WITH LOCAL CHECK OPTION` checks this view's condition. Beneath this view, it checks only the views
+that have their own check option.
 
-`CREATE VIEW` refuses a check option on a view that cannot be written through. It checks the view's
-own body only, as PostgreSQL does. When the body reads another view, that view's body is checked at
-the first write: a check-option view over an aggregate view is created, and every write through it
-then fails with `CADB0525`. A later `CREATE OR REPLACE VIEW` of the inner view can have the same
-effect.
+`CREATE VIEW` returns an error for a check option on a view that cannot be written through. As in
+PostgreSQL, it checks the body of the view being created and does not look further. When the body
+reads another view, that view's body is checked at the first write. For example, a check-option
+view over an aggregate view can be created, but each write through it then returns `CADB0525`. A
+later `CREATE OR REPLACE VIEW` of the inner view can have the same effect.
 
 ### Privileges
 
 You need `INSERT`, `UPDATE` or `DELETE` on the **view**, as the statement requires. The view's
 **owner** needs that privilege on what the view reads (and `SELECT` too, for `UPDATE` and `DELETE`),
-as for a read through a view: you need no grant on the table. A subquery you write in the statement
-still reads its tables as you.
+as for a read through a view. You don't need a grant on the table. A subquery that you write in the
+statement reads its tables as you.
 
 ---
 
 ## Renaming a view
 
+Renaming a view changes metadata only.
+
 ```sql
 ALTER VIEW open_orders RENAME TO active_orders;
 ```
 
-Metadata-only; the view's id is unchanged, so dependents keep resolving.
+The view's id is unchanged. This means that dependents continue to resolve.
 
 ---
 
 ## Ownership and security
 
-A view runs its body with the privileges of **its owner**, whoever queries it. That makes a view a
-security boundary:
+A view executes its body with the privileges of **its owner**, whoever queries it. This makes a view
+a security boundary, as the following example shows.
 
 ```sql
 -- as alice, who can read orders
@@ -451,33 +471,33 @@ SELECT * FROM cheap_orders;   -- works: returns exactly the rows the view expose
 SELECT * FROM orders;         -- refused
 ```
 
-The caller is checked on the **view**; the view's owner is checked on everything the body reads. So a
-view can widen access to a slice of a table, and nothing more.
+The caller is checked on the **view**. The view's owner is checked on all objects the body reads.
+This means that a view can widen access to a slice of a table, and to nothing more.
 
-Specifics:
+The following rules give the details.
 
-- **The owner is recorded by immutable id**, not by name. Dropping a user and re-creating the same
-  name does not transfer ownership — the view fails closed instead, and reads refuse until it is
-  recreated or transferred.
-- **`CREATE OR REPLACE VIEW` does not change the owner.** Replacing rewrites the body; it does not
-  re-own the object, or replacing would be a way to seize a view and run it as yourself.
-- **`ALTER VIEW v OWNER TO u`** transfers it. Only a superuser or the current owner may do so — an
-  `ALTER` grant on the view is not enough, because ownership decides whose privileges the body runs
-  with. The new owner must already exist.
-- **The swap is scoped to the view.** A query naming the same table both through a view and directly
-  gets the owner's rights only for the reference that came through the view; the direct one is still
-  checked against the caller.
-- **Each view in a chain runs as its own owner.** When a view's body reads another view, the
-  outer view's owner needs `SELECT` on the inner view, and this is checked on every read, as in
-  PostgreSQL. Revoke that grant and reads of the outer view fail from then on; grant it again and
-  they work, with no need to replace the view. The reader needs no grant on the inner view.
-- **Views are grantable objects**: `GRANT SELECT ON db.my_view TO someone`. Dropping, renaming,
-  replacing and describing one all require a grant on the view, and `SHOW VIEWS` lists only what the
-  caller can reach.
-- **Materialized views are not affected by any of this.** Their rows were computed at refresh time;
-  reading one is an ordinary read of a relation, checked against the caller.
+- **The owner is recorded by immutable id**. Dropping a user and re-creating the same name does not
+  transfer ownership. The view fails closed. Reads return an error until the view is recreated or
+  transferred.
+- **`CREATE OR REPLACE VIEW` does not change the owner.** Replacing rewrites the body and does not
+  re-own the object. Otherwise, replacing would be a way to seize a view and execute it as yourself.
+- **`ALTER VIEW v OWNER TO u`** transfers it. Only a superuser or the current owner may do so. An
+  `ALTER` grant on the view is not enough, because ownership decides whose privileges the body is
+  executed with. The new owner must already exist.
+- **The swap is scoped to the view.** A query can name the same table both through a view and
+  directly. It gets the owner's rights for the reference that came through the view only. The direct
+  reference is checked against the caller.
+- **Each view in a chain is executed as its owner.** When a view's body reads another view, the
+  outer view's owner needs `SELECT` on the inner view. This is checked on each read, as in
+  PostgreSQL. If you revoke that grant, reads of the outer view fail from then on. If you grant it
+  again, they work, and you don't need to replace the view. The reader does not need a grant on the
+  inner view.
+- **Views are grantable objects**: `GRANT SELECT ON db.my_view TO someone`. To drop, rename, replace
+  or describe a view, you need a grant on it. `SHOW VIEWS` lists only the views the caller can reach.
+- **Materialized views are not affected by any of this.** Their rows were computed at refresh time.
+  Reading one is an ordinary read of a relation, checked against the caller.
 
-`security_invoker` (running a view as the caller instead of the owner) is not supported.
+`security_invoker` (executing a view as the caller in place of the owner) is not supported.
 
 ---
 
@@ -493,9 +513,9 @@ Specifics:
 | `max_view_output_columns` | 1600 | Output columns of one view or materialized view, checked at `CREATE`. |
 | `max_view_direct_dependencies` | 1000 | Relations one view body reads directly, checked at `CREATE`. |
 | `materialized_view_refresh_chunk_rows` | 10000 | Rows written per transaction while rebuilding a materialized view. |
-| `materialized_view_refresh_enabled` | true | Set false to refuse refreshes on a node that should not run bulk work. `WITH NO DATA` still works. |
+| `materialized_view_refresh_enabled` | true | Set false to disallow refreshes on a node that should not do bulk work. `WITH NO DATA` works in either case. |
 | `materialized_view_refresh_takeover_attempts` | 3 | How many times a refresh interrupted by a crash or a leadership change is restarted for you. 0 restarts none of them and only reclaims the abandoned storage. |
-| `materialized_view_refresh_hold_lease_ms` | 300000 | Lease on the hold that keeps the history a refresh reads from being garbage-collected. The hold is renewed every lease/3 while the rebuild runs; if renewal stops, the refresh fails and the view keeps its previous contents. Must be at least 5000. |
+| `materialized_view_refresh_hold_lease_ms` | 300000 | Lease on the hold that protects the history a refresh reads from garbage collection. The hold is renewed every lease/3 while the rebuild is in progress. If renewal stops, the refresh fails and the view retains its previous contents. Must be at least 5000. |
 
 All settings appear in `SHOW VARIABLES`.
 
@@ -503,9 +523,9 @@ All settings appear in `SHOW VARIABLES`.
 
 ## Materialized views
 
-A materialized view runs its query **once**, stores the rows, and answers every read from that
-stored copy until you refresh it. Where a plain view trades storage for freshness, a materialized
-view trades freshness for speed.
+A materialized view executes its query **once** and stores the rows. Reads are answered from that
+stored copy until you refresh it. A view that is not materialized trades storage for freshness. A
+materialized view trades freshness for speed.
 
 ```sql
 CREATE MATERIALIZED VIEW customer_totals AS
@@ -516,13 +536,14 @@ SELECT * FROM customer_totals WHERE customer = 'acme';   -- reads stored rows, d
 REFRESH MATERIALIZED VIEW customer_totals;               -- re-runs the query, replaces the contents
 ```
 
-Inserting into `orders` afterwards changes nothing that `customer_totals` returns. **A materialized
-view is a snapshot, and only `REFRESH` moves it forward.** `SHOW MATERIALIZED VIEWS` reports how stale each one is.
+Inserting into `orders` afterwards does not change what `customer_totals` returns. **A
+materialized view is a snapshot, and only `REFRESH` moves it forward.** `SHOW MATERIALIZED VIEWS`
+shows how stale each one is.
 
 ### It is a real relation
 
-A materialized view is stored as an ordinary relation, so almost everything that works on a table
-works on it:
+A materialized view is stored as an ordinary relation. This means that almost all statements that
+work on a table also work on it.
 
 ```sql
 CREATE INDEX customer_totals_customer ON customer_totals (customer);
@@ -531,31 +552,32 @@ COMMENT ON MATERIALIZED VIEW customer_totals IS 'nightly rollup';
 SHOW COLUMNS FROM customer_totals;
 ```
 
-Indexes are kept across refreshes. Backup and point-in-time recovery, database branching, TTL and
-the query planner's statistics all treat it as the relation it is. A refresh carries the row and
-index counts it measured onto the view, so the planner costs it correctly straight away; the
-histograms an `ANALYZE` built are dropped at the same moment, because they describe the contents the
-refresh replaced. [`SHOW STATISTICS FOR <view>`](show-statistics.md) reports what it currently holds.
+Indexes are preserved across refreshes. Backup and point-in-time recovery treat it as the relation
+it is. So do database branching, TTL and the query planner's statistics. A refresh carries the row and index counts it measured onto the view. The
+planner then costs it correctly straight away. The histograms that an `ANALYZE` built are dropped at
+the same moment. They describe the contents that the refresh replaced.
+[`SHOW STATISTICS FOR <view>`](show-statistics.md) shows the statistics it currently has.
 
-You cannot write to it:
+You cannot write to a materialized view.
 
 ```sql
 INSERT INTO customer_totals (customer, total_spent) VALUES ('acme', 1);
 -- ERROR: 'customer_totals' is a materialized view and cannot be written to directly
 ```
 
-A hand-written row would be silently discarded by the next refresh, so the write is refused.
+The next refresh would silently discard a hand-written row. For this reason, the write returns an
+error.
 
 ### Its shape is fixed at creation
 
 The column list is derived from the query when the materialized view is created, and a refresh
-reuses it. Adding a column to a base table therefore does not widen an
-existing materialized view — the same rule plain views follow, and for the same reason: anything
-bound to its shape would otherwise change meaning with no statement having been issued against it.
+reuses it. Adding a column to a base table therefore does not widen an existing materialized view.
+Views that are not materialized follow the same rule, for the same reason. Anything bound to the
+shape would otherwise change meaning, although no statement was issued against it.
 
-As with `CREATE TABLE … AS SELECT`, every output column needs a name, and the relation gets an
-extra generated `id` primary key because a projection carries no uniqueness guarantee of its own.
-An explicit column list renames the stored columns:
+As with `CREATE TABLE … AS SELECT`, each output column needs a name. The relation also gets an
+extra generated `id` primary key, because a projection does not guarantee uniqueness. An explicit
+column list renames the stored columns.
 
 ```sql
 CREATE MATERIALIZED VIEW open_orders (order_id, amount) AS
@@ -564,9 +586,9 @@ CREATE MATERIALIZED VIEW open_orders (order_id, amount) AS
 
 ### `WITH NO DATA`
 
-`WITH NO DATA` creates the materialized view without running the query. **Reading one that has never
-been populated is an error.** An empty result would make a forgotten `REFRESH` indistinguishable
-from a correct answer:
+`WITH NO DATA` creates the materialized view and does not execute the query. **Reading one that
+has not been populated is an error.** An empty result would make a forgotten `REFRESH` look the
+same as a correct answer.
 
 ```sql
 CREATE MATERIALIZED VIEW customer_totals AS SELECT ... WITH NO DATA;
@@ -578,52 +600,56 @@ REFRESH MATERIALIZED VIEW customer_totals;   -- now it reads
 
 `REFRESH MATERIALIZED VIEW … WITH NO DATA` empties one again and returns it to that state.
 
-Without `WITH NO DATA`, the view does not exist for anyone until its rows are in place: the rows are
-loaded into a relation nobody can see, and the view is created on it, populated, in one atomic schema
-change. No other session or node can list, read, grant on, alter or drop it half-created. If the
-load fails, nothing is left behind; if the process dies during the load, the background sweep removes
-what it loaded, and running the statement again starts clean. The name is not held during the load,
-so a relation another statement creates under it in the meantime wins, and the `CREATE` then fails
-with the name taken.
+If you leave out `WITH NO DATA`, the view does not exist for anyone until its rows are in place.
+The rows are loaded into a relation that no one can see. The view is then created on it, already
+populated, in one atomic schema change. No other session or node can use the view while it is
+half-created. For example, it cannot be listed, read or dropped. If the load fails, no data is left behind. If the
+process dies during the load, the background sweep removes what it loaded, and running the statement
+again starts clean. The name is not reserved during the load. If another statement creates a
+relation with that name in the meantime, that statement succeeds, and the `CREATE` then fails
+because the name is taken.
 
 ### What a refresh does to concurrent readers
 
-A refresh does not affect concurrent readers. It builds an entirely new relation, populates it, and then moves the materialized
-view's name onto it in a single atomic schema change. Readers already running keep reading the
-previous contents at their own snapshot; readers that start after the switch see the new contents
-whole. **Nobody blocks, and nobody ever observes a half-built materialized view** — not even briefly,
-and not on any node of a cluster.
+A refresh does not affect concurrent readers. It builds an entirely new relation, populates it, and
+then moves the materialized view's name onto it in a single atomic schema change. Readers that are
+already in progress continue to read the previous contents at their snapshot. Readers that start
+after the switch see all of the new contents. **No reader is blocked, and no reader ever observes a
+half-built materialized view**, even briefly, on any node of a cluster.
 
-This is why `REFRESH MATERIALIZED VIEW CONCURRENTLY` is **refused** and is not a synonym of
-the ordinary form. In PostgreSQL, `CONCURRENTLY` exists because the ordinary form takes an exclusive lock and
-blocks readers; CamusDB's ordinary form already does not. The other thing `CONCURRENTLY` gives —
-writing only the rows that changed — is an optimization that is not implemented, so the statement
-is refused.
+For this reason, `REFRESH MATERIALIZED VIEW CONCURRENTLY` **returns an error**. It is not a synonym
+of the ordinary form. In PostgreSQL, `CONCURRENTLY` exists because the ordinary form takes an
+exclusive lock and blocks readers. CamusDB's ordinary form does not block readers. The other benefit
+of `CONCURRENTLY` is that it writes only the rows that changed. That optimization is not
+implemented, and the statement returns an error.
 
-The rebuild reads its source at **one pinned snapshot** for its whole duration, so the result is
-always a state the database actually was in, however long the rebuild takes and however many rows it
-copies. It writes in chunked transactions (`materialized_view_refresh_chunk_rows`), which
-lets it exceed the per-transaction mutation limit that would otherwise cap the size of a
+The rebuild reads its source at **one pinned snapshot** for its complete duration. This means that
+the result is always a state that the database was in, however long the rebuild takes and however
+many rows it copies. It writes in chunked transactions (`materialized_view_refresh_chunk_rows`).
+This lets it exceed the per-transaction mutation limit, which would otherwise cap the size of a
 materialized view.
 
-If a refresh fails, the materialized view is left exactly as it was — a failed rebuild is discarded,
-never partially published.
+If a refresh fails, the materialized view is left exactly as it was. A failed rebuild is discarded,
+and no part of it is published.
 
-Only one refresh of a given materialized view runs at a time, anywhere in the cluster: a second one
-is refused while the first is in flight, whichever node it was issued on.
+Only one refresh of a given materialized view can be in progress at a time, anywhere in the
+cluster. A second one returns an error while the first is in flight, whichever node it was issued
+on.
 
-A refresh that is **interrupted** rather than failed — the process died, or the node lost leadership
-part-way — is picked up by a background sweep and **run again from the beginning**, up to
-`materialized_view_refresh_takeover_attempts` times. The sweep takes the same cluster fence a
-`REFRESH` takes, so exactly one node finishes the work and no rebuild is ever running twice. The run
-restarts because continuing a half-finished scan would require the body to yield rows in the
-same order on every execution. That is true of a single-relation scan and not promised for a join or
-an aggregate, and resuming one of those would give you a materialized view with duplicated and
-missing rows. Until a restart completes, the view keeps serving its previous contents. When the
-attempts run out the view is left stale, an error is logged naming it, and it is yours to
-`REFRESH` again.
+A refresh can be **interrupted** without failing, for example when the process dies or the node
+loses leadership part-way. A background sweep picks it up and **restarts it from the beginning**,
+up to `materialized_view_refresh_takeover_attempts` times. The sweep takes the same cluster fence
+that a `REFRESH` takes. This means that exactly one node finishes the work and that two rebuilds of
+one view never execute at the same time. The refresh restarts because continuing a half-finished
+scan would require the body to return rows in the same order on each execution. That is true of a
+single-relation scan. It is not promised for a join or an aggregate. Resuming one of those would
+give you a materialized view with duplicated and missing rows. Until a restart completes, the view
+continues to serve its previous contents. When the attempts are used up, the view is left stale and
+an error is logged that names it. You must then issue `REFRESH` again.
 
 ### Dependencies and lifecycle
+
+The following statements rename and drop a materialized view.
 
 ```sql
 ALTER MATERIALIZED VIEW customer_totals RENAME TO totals_by_customer;
@@ -631,8 +657,8 @@ DROP MATERIALIZED VIEW customer_totals;
 DROP MATERIALIZED VIEW IF EXISTS customer_totals CASCADE;
 ```
 
-A plain view may read a materialized view, and a materialized view may read a plain view.
-Dropping a materialized view that something reads is refused unless you say `CASCADE`:
+A view may read a materialized view, and a materialized view may read a view. Dropping a
+materialized view that another view reads returns an error unless you add `CASCADE`.
 
 ```sql
 DROP MATERIALIZED VIEW customer_totals;
@@ -640,23 +666,25 @@ DROP MATERIALIZED VIEW customer_totals;
 --                   on it: big_spenders. Use DROP MATERIALIZED VIEW ... CASCADE to drop them too.
 ```
 
-`CASCADE` — on `DROP MATERIALIZED VIEW` and on `DROP VIEW` alike — drops every view and materialized
-view that reads the object, directly or through other views, before the object itself. You need the
-privilege to drop each of them, and all of them are checked before any is dropped. Renaming a
-materialized view does not affect the views that read it.
+`CASCADE` works the same way on `DROP MATERIALIZED VIEW` and on `DROP VIEW`. It drops all views and
+materialized views that read the object, directly or through other views, before the object itself.
+You need the privilege to drop each of them. All of them are checked before any is dropped. Renaming
+a materialized view does not affect the views that read it.
 
-**A drop waits for no refresh.** `DROP MATERIALIZED VIEW` is refused with `CADB0532`
-(`RefreshAlreadyInProgress`) while a refresh of that view is running anywhere in the cluster. Retry
-it once the refresh has finished. Index and constraint DDL is different: it does not wait either, it
-commits, and the running refresh is the one that fails, with `CADB0534` (`ConcurrentSchemaChange`) —
-retry the refresh.
+**A drop does not wait for a refresh.** `DROP MATERIALIZED VIEW` returns `CADB0532`
+(`RefreshAlreadyInProgress`) while a refresh of that view is in progress anywhere in the cluster.
+Retry it once the refresh has finished. Index and constraint DDL behaves differently. It does not
+wait either, but it commits, and the refresh that is in progress fails with `CADB0534`
+(`ConcurrentSchemaChange`). Retry the refresh.
 
-Tables, views and materialized views share **one namespace**: you cannot have a table and a
-materialized view with the same name, and each kind is dropped and renamed by its own statement —
-`DROP TABLE` and `ALTER TABLE … RENAME TO` refuse a materialized view and tell you which statement
-to use.
+Tables, views and materialized views share **one namespace**. You cannot have a table and a
+materialized view with the same name. Each kind is dropped and renamed by a separate statement.
+`DROP TABLE` and `ALTER TABLE … RENAME TO` return an error for a materialized view, and the error
+tells you which statement to use.
 
 ### Introspection
+
+The following statements list materialized views and show their definitions, columns and indexes.
 
 ```sql
 SHOW MATERIALIZED VIEWS;             -- name, whether it holds data, the snapshot it holds, and its comment
@@ -666,9 +694,9 @@ SHOW COLUMNS FROM customer_totals;
 SHOW INDEXES FROM customer_totals;
 ```
 
-`SHOW TABLES` lists **tables only** — neither views nor materialized views. `SHOW CREATE MATERIALIZED
-VIEW` prints `WITH NO DATA` for an unpopulated one, so its output re-creates the same
-unpopulated object.
+`SHOW TABLES` lists **tables only**. It lists neither views nor materialized views.
+`SHOW CREATE MATERIALIZED VIEW` prints `WITH NO DATA` for an unpopulated one. Its output therefore
+re-creates the same unpopulated object.
 
 ---
 
@@ -676,32 +704,32 @@ unpopulated object.
 
 | Area | CamusDB | Why |
 | --- | --- | --- |
-| Unnamed expression columns | **Refused** | PostgreSQL names them `?column?`, which nothing can reference. Requiring an alias costs one `AS` and produces a usable view. |
-| Rules / `INSTEAD OF` triggers | **Not supported** | CamusDB has neither, so there is no escape hatch that makes a non-auto-updatable view writable. |
-| Subquery in the `WHERE` of a view you write through | **Refused** (`CADB0525`) | The `WHERE` is added to the write, which runs as you, so a subquery there would read its tables as you rather than as the view's owner. |
+| Unnamed expression columns | **Refused** | PostgreSQL names them `?column?`, which no query can reference. Requiring an alias costs one `AS` and produces a usable view. |
+| Rules / `INSTEAD OF` triggers | **Not supported** | CamusDB supports neither. There is no escape hatch that makes a non-auto-updatable view writable. |
+| Subquery in the `WHERE` of a view you write through | **Refused** (`CADB0525`) | The `WHERE` is added to the write, which is executed as you. A subquery there would read its tables as you, and the view's owner would not be used. |
 | `ON CONFLICT`, `UPSERT`, `UPDATE … FROM`, `DELETE … USING` on a view | **Refused** (`CADB0533`) | Write to the table. |
 | `REFRESH … CONCURRENTLY` | **Refused** | The ordinary refresh already leaves readers unblocked, which is what it buys in PostgreSQL; writing only the changed rows is not implemented. |
-| Writing to a materialized view | **Refused** | PostgreSQL refuses too; the row would be discarded by the next refresh either way. |
+| Writing to a materialized view | **Refused** | PostgreSQL also returns an error; the row would be discarded by the next refresh either way. |
 | `DROP TABLE … CASCADE` | **No `CASCADE` form** | Drop the dependent views explicitly. |
 | `security_invoker` views | **Not supported** | Only the owner's-rights model is implemented. |
-| `WITH` in a body | **Stored without the `WITH`** | Each CTE is stored as a derived table where the body reads it, so `SHOW CREATE VIEW` shows no `WITH`, and a CTE that the body reads two times runs two times. See [WITH queries](common-table-expressions.md#views). |
-| `WITH RECURSIVE` in a body | **Stored where it is read** | A recursive CTE cannot become a plain derived table, so it is stored as `(WITH RECURSIVE name AS (…) SELECT * FROM name) AS alias` where the body reads it. See [WITH queries](common-table-expressions.md#views). `CREATE RECURSIVE VIEW` is not supported. |
+| `WITH` in a body | **Stored without the `WITH`** | Each CTE is stored as a derived table where the body reads it. `SHOW CREATE VIEW` therefore does not show a `WITH`, and a CTE that the body reads two times is executed two times. See [WITH queries](common-table-expressions.md#views). |
+| `WITH RECURSIVE` in a body | **Stored where it is read** | A recursive CTE cannot become a simple derived table. It is stored as `(WITH RECURSIVE name AS (…) SELECT * FROM name) AS alias` where the body reads it. See [WITH queries](common-table-expressions.md#views). `CREATE RECURSIVE VIEW` is not supported. |
 | Cross-database views | **Not supported** | Matches the existing single-database restriction on `INSERT … SELECT`. |
-| Temporary views | **Not supported** | CamusDB has no temporary relations. |
-| Mixing `*` with other projections | **Refused** | The expansion order is not stable across a base column being added, so the frozen shape could not be honored. |
-| `AS OF SYSTEM TIME` in a body | **Refused** | Neither an absolute nor a relative timestamp is storable coherently (see above). |
+| Temporary views | **Not supported** | CamusDB does not support temporary relations. |
+| Mixing `*` with other projections | **Refused** | The expansion order is not stable when a base column is added, and the frozen shape could not be honored. |
+| `AS OF SYSTEM TIME` in a body | **Refused** | Neither an absolute nor a relative timestamp can be stored coherently (see above). |
 
 ---
 
 ## What is not implemented
 
-These parse but are **rejected at execution**, so they fail with an error:
+The following features parse but are **rejected at execution**. They return an error.
 
 - **Incremental refresh** (`REFRESH MATERIALIZED VIEW … CONCURRENTLY`), which would write only the
-  rows that changed instead of rebuilding. The plain form works and does not block readers.
+  rows that changed in place of a rebuild. The ordinary form works and does not block readers.
 - **Resuming an interrupted refresh mid-scan.** An interrupted refresh is restarted from the
-  beginning (see above), so the work the dead run did is done again. The materialized view is untouched in the meantime, so nothing is left
-  inconsistent.
+  beginning (see above). The work that the dead run did is done again. The materialized view is not
+  changed in the meantime, and no inconsistent state is left.
 - **Absorbing a column rename into a definition written before columns were bound by id**, or into a
-  reference in `ORDER BY` / `GROUP BY` / `HAVING` that matches one of the view's own output names.
-  Both are refused instead (see *Columns a view reads*).
+  reference in `ORDER BY` / `GROUP BY` / `HAVING` that matches one of the view's output names.
+  Both return an error (see *Columns a view reads*).

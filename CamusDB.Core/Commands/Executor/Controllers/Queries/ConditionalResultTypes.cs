@@ -285,6 +285,11 @@ internal static class ConditionalResultTypes
         if (node.nodeType == NodeType.ExprWindowCall)
             throw SQLExecutorBaseCreator.UnevaluableExpression(NodeType.ExprWindowCall);
 
+        // The size of a string(N) or bytes(N) cast target is part of the statement, so a size that is
+        // not a positive integer fails here, before any row is read.
+        if (node.nodeType == NodeType.ExprCast && node.rightAst?.nodeType is NodeType.TypeStringSized or NodeType.TypeBytesSized)
+            CastScalarFunctions.SizedTargetLength("cast", node.rightAst);
+
         // The left child of a call is the function name, and the right child of a cast is the target
         // type. Neither is an expression.
         ExpressionType? left = node.nodeType == NodeType.ExprFuncCall ? null : Visit(node.leftAst, lookup, recorder, options);

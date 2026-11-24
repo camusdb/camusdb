@@ -2,11 +2,11 @@
 
 Serializable is the **default isolation level** in CamusDB. Serializable+ReadWrite transactions use
 **strict two-phase locking** (S2PL). When two transactions conflict, one is aborted immediately. The
-aborted transaction must be **replayed from `BEGIN`** — retrying a single statement inside the same
+aborted transaction must be **replayed from `BEGIN`** — retrying a single statement in the same
 transaction is not safe.
 
-For single-statement (autocommit) operations, CamusDB automatically retries on your behalf, so
-most applications never see retryable errors in practice. For explicit multi-statement transactions,
+For single-statement (autocommit) operations, CamusDB automatically retries on your behalf. This
+means that most applications do not see retryable errors in practice. For explicit multi-statement transactions,
 the application owns the retry loop.
 
 ---
@@ -14,8 +14,8 @@ the application owns the retry loop.
 ## The replay-from-BEGIN rule
 
 A conflicting transaction is dead in its entirety. Its lock set is released and its writes are
-rolled back. The only correct recovery is to start a new transaction and re-execute every step
-from the beginning:
+rolled back. The only correct recovery is to start a new transaction and re-execute all of its
+steps from the beginning.
 
 ```
 BEGIN
@@ -26,32 +26,32 @@ BEGIN
 COMMIT
 ```
 
-If `WRITE a` fails with `TransactionConflict`, do **not** retry just `WRITE a`. The earlier reads
+If `WRITE a` returns `TransactionConflict`, do **not** retry just `WRITE a`. The earlier reads
 of `a` and `b` were taken under the (now dead) transaction's shared locks. Their values may be
-stale. Replay the whole transaction so the new execution reads current values and acquires fresh
-locks.
+stale. Replay the transaction from `BEGIN`. The new execution will then read current values and acquire
+fresh locks.
 
 ---
 
 ## Retryable error codes
 
-There are two distinct kinds of "retry", and they must not be confused:
+There are two distinct kinds of "retry". Each one needs a different recovery, and they must not be confused.
 
-- **Replay from `BEGIN`** (three codes below): the transaction is dead and nothing it wrote survives,
-  so recovery re-runs the whole business operation on a fresh transaction.
+- **Replay from `BEGIN`** (three codes below): the transaction is dead and none of its writes survive.
+  Recovery re-runs the business operation from the start on a fresh transaction.
 - **Retry the *same* finalize** (`CADB0509`, see the next section): the transaction is **not** dead —
   a commit or rollback has not resolved yet. You re-issue the *same* `COMMIT`/`ROLLBACK` on the
-  *same* transaction. You must **not** replay the operation, because it may already have committed.
+  *same* transaction. You must **not** replay the operation. It may already have committed.
 
-All codes not listed as retryable are permanent and must propagate to the caller without retrying.
+All codes not listed as retryable are permanent. They must propagate to the caller, and the operation must not be retried.
 
 | Code      | Name                       | When raised                                                                                       | Safe to retry? |
 |-----------|----------------------------|---------------------------------------------------------------------------------------------------|----------------|
-| CADB0502  | `TransactionConflict`      | A shared or exclusive lock conflicted with a concurrent holder — or a commit returned a definite `Aborted` — or the transaction wrote a table that gained an index or a constraint before the commit (`CREATE INDEX`, `ADD CONSTRAINT`), so its staged writes do not maintain it — or a table the transaction read or wrote changed its row layout after the statement was planned (a column was added or dropped, a column element changed state, the table was dropped or recreated). The last case is raised at the commit, which rolls the transaction back first, or at the next statement on that table. In every case no write survived. | ✓ replay from `BEGIN` |
+| CADB0502  | `TransactionConflict`      | A shared or exclusive lock conflicted with a concurrent holder — or a commit returned a definite `Aborted` — or the transaction wrote a table that gained an index or a constraint before the commit (`CREATE INDEX`, `ADD CONSTRAINT`), which its staged writes do not maintain — or a table the transaction read or wrote changed its row layout after the statement was planned (a column was added or dropped, a column element changed state, the table was dropped or recreated). The last case is raised at the commit, which rolls the transaction back first, or at the next statement on that table. In all of these cases, no write survived. | ✓ replay from `BEGIN` |
 | CADB0504  | `TransactionMustRetry`     | A **pre-write** transient: a routing failure during start (leader election / partition move) after the bounded start retries, a lock-wait deadline / write conflict in the storage layer, or a DDL statement whose schema-log proposal found that the schema leader moved while it was in flight. **No data was written** when it is raised. | ✓ replay from `BEGIN` |
 | CADB0505  | `TransactionLifetimeExceeded` | The transaction was held open longer than `MaxSerializableTransactionLifetimeMs`. Its staged writes/locks are rolled back through the coordinator before this error is raised. | ✓ replay from `BEGIN` |
-| CADB0509  | `TransactionFinalizeUnresolved` | A `COMMIT`/`ROLLBACK` returned the coordinator's non-terminal `MustRetry` for the whole finalize retry budget (`transaction_finalize_retry_budget_ms`): the outcome is **not known yet** (leadership flip mid-finalize, an in-progress drain, a participant write shed under load, or a durable decision not yet marked complete). | ↻ retry the **same** finalize — **do not** replay |
-| CADB0555  | `LockNotAvailable`         | A `SELECT … FOR UPDATE NOWAIT` found a row that another transaction holds. The statement failed and the transaction ended. It is deliberately outside the retry set: a retry is a wait, and NOWAIT asked not to wait. See [select-for-update.md](select-for-update.md). | ✗ no  |
+| CADB0509  | `TransactionFinalizeUnresolved` | A `COMMIT`/`ROLLBACK` returned the coordinator's non-terminal `MustRetry` until the finalize retry budget (`transaction_finalize_retry_budget_ms`) was used up: the outcome is **not known yet** (leadership flip mid-finalize, an in-progress drain, a participant write shed under load, or a durable decision not yet marked complete). | ↻ retry the **same** finalize — **do not** replay |
+| CADB0555  | `LockNotAvailable`         | A `SELECT … FOR UPDATE NOWAIT` found a row that another transaction has locked. The statement failed and the transaction ended. It is deliberately outside the retry set: a retry is a wait, and NOWAIT asked not to wait. See [select-for-update.md](select-for-update.md). | ✗ no  |
 | CADB0300  | `DuplicateUniqueKeyValue`  | A unique-index constraint was violated.                                                           | ✗ no  |
 | CADB0301  | `NotNullViolation`         | A NOT NULL constraint was violated.                                                               | ✗ no  |
 | CADB0400  | `InvalidInput`             | Bad request (wrong type, missing field, `SET TRANSACTION` after statement, etc.).                | ✗ no  |
@@ -81,26 +81,27 @@ Committing (or rolling back) a transaction asks the Kahuna coordinator for a **t
 `Committed` or `RolledBack`. The coordinator can also answer `MustRetry`, which means *"the final
 outcome is not known yet, or transient cleanup work remains — ask again on the same handle."* This is
 **not** a failure and **not** a rollback. It happens when leadership flips during the finalize, when the
-coordinator is still draining operations that were in flight when finalize began, or (in durable mode)
+coordinator is draining operations that were in flight when finalize began, or (in durable mode)
 when a commit decision has been made but not yet fully acknowledged.
 
 CamusDB retries this automatically on the same transaction with a backing-off loop bounded by a
-wall-clock budget — `transaction_finalize_retry_budget_ms`, 15 s by default. The bound is a duration
-rather than a number of attempts because every condition above resolves on its own schedule: a
-saturated node makes each one take longer without making it take more attempts, so an attempt cap
-would shrink the real budget exactly when the node most needs it. Raise the setting on nodes that run
+wall-clock budget — `transaction_finalize_retry_budget_ms`, 15 s by default. The bound is a duration because each condition above resolves on a
+separate schedule. A saturated node makes each one take longer,
+but it does not make it take more attempts. This means that a cap on attempts would shrink the real
+budget exactly when the node most needs it. Raise the setting on nodes that run
 hot; lower it if you would rather take the unresolved answer sooner and retry it yourself.
 
-If the outcome is *still* unresolved when the budget runs out, `CommitAsync`/`RollbackAsync` throw
-**CADB0509 `TransactionFinalizeUnresolved`** instead of guessing. When this happens:
+If the outcome is unresolved when the budget is used up, `CommitAsync`/`RollbackAsync` throw
+**CADB0509 `TransactionFinalizeUnresolved`**. The engine does not guess the outcome. When this happens,
+the transaction is left unfinished, and only its finalize can be resumed.
 
 - The transaction is left in the `Finalizing` state — **not** `Committed` and **not** `RolledBack`.
-- It stays tracked and its handle stays valid, so the *same* finalize can be resumed.
+- It is tracked and its handle is valid. This means that the *same* finalize can be resumed.
 - No further data operations are accepted on it (the finalize fence is installed).
 
 **The rule:** re-issue the **same** `COMMIT` (or `ROLLBACK`) on the **same**
 transaction. Do **not** start a new transaction and replay the statements — the original commit may have
-already durably committed server-side, so replaying would apply the write twice.
+already durably committed server-side. If so, replaying would apply the write twice.
 
 ```csharp
 // Explicit transaction: resume the SAME finalize, never replay the operation.
@@ -121,7 +122,7 @@ for (int attempt = 0; ; attempt++)
 ```
 
 Over HTTP the same rule applies: a `COMMIT`/`ROLLBACK` request that comes back as CADB0509 should be
-re-sent for the same transaction id, not turned into a fresh `BEGIN` + re-run of the statements.
+re-sent for the same transaction id. Do not turn it into a fresh `BEGIN` + re-run of the statements.
 
 An abandoned transaction left `Finalizing` forever is bounded by the Kahuna session timeout, which
 reclaims the server-side session and releases its locks as the ultimate backstop.
@@ -130,9 +131,9 @@ reclaims the server-side session and releases its locks as the ultimate backstop
 
 ## Auto-retry for autocommit statements
 
-For **single-statement autocommit** operations the entire transaction is that one statement,
-so replaying from `BEGIN` means running the operation again. Use `SerializableRetryHelper.ExecuteAutocommitAsync`
-to get bounded automatic retry with exponential back-off:
+For **single-statement autocommit** operations the entire transaction is that one statement.
+This means that replaying from `BEGIN` is the same as running the operation again. `SerializableRetryHelper.ExecuteAutocommitAsync`
+gives bounded automatic retry with exponential back-off.
 
 ```csharp
 await SerializableRetryHelper.ExecuteAutocommitAsync(async ct =>
@@ -162,8 +163,8 @@ Back-off schedule (default): `min(20 ms × 2^attempt, 400 ms)` ± 25 % jitter pe
 
 ## Explicit multi-statement transactions
 
-For explicit transactions the application is responsible for the retry loop because only the
-application knows which statements to replay:
+For explicit transactions, the application is responsible for the retry loop. Only the
+application knows which statements to replay.
 
 ```csharp
 const int MaxAttempts = 5;
@@ -202,8 +203,9 @@ while (true)
 }
 ```
 
-Key points:
-- The `catch` block rolls back the dead transaction first, then decides whether to retry.
+The example handles a retryable error safely.
+
+- The `catch` block rolls back the dead transaction before it decides whether to retry.
 - `RollbackIfNotCompletedAsync` is safe to call even if the transaction already rolled back
   internally (e.g., `TransactionConflict` — Kahuna aborted server-side).
 - The retry reads `balance` again from scratch: the new read picks up any committed writes made
@@ -222,15 +224,15 @@ access order).
 The `TransactionLifetimeExceeded` error (CADB0505) means the transaction was open for longer than
 `MaxSerializableTransactionLifetimeMs` (default 1 hour). Shorten long-running serializable transactions so they complete within the deadline.
 
-A wait that is not a conflict runs on its own budget. A key whose value is still replicating, or
-whose previous writer has committed but not yet settled, answers the store's `WaitingForReplication`
-instead of a lock refusal: no transaction holds it, so there is no deadlock to resolve, and the
-engine waits up to `replication_wait_deadline_ms` (5 s by default) before it fails the statement
-with `TransactionMustRetry` (CADB0504). A round in which even one key answered a lock refusal
-stays on `lock_wait_deadline_ms`. The CADB0504 message names which budget ran out and how many
+A wait that is not a conflict has a separate budget. A key whose value is replicating, or
+whose previous writer has committed but not yet settled, answers the store's `WaitingForReplication`.
+This answer is distinct from a lock refusal. No transaction has the key locked, and there is no deadlock
+to resolve. The engine waits up to `replication_wait_deadline_ms` (5 s by default). After that, the
+statement returns `TransactionMustRetry` (CADB0504). A round in which even one key answered a lock
+refusal uses `lock_wait_deadline_ms`. The CADB0504 message names which budget ran out and how many
 keys answered each way in the last round.
 
-A commit the Kahuna coordinator refuses (CADB0502) names the refusal class in its message — a
+When the Kahuna coordinator refuses a commit (CADB0502), the error names the refusal class in its message — a
 conflict, a moved staged base, the decision deadline, an exhausted prepare, a lost lock or staged
 intent — with the coordinator's reason, the number of staged mutations and how long the finalize ran.
 

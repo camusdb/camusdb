@@ -310,22 +310,6 @@ internal sealed class TestTransactionalDdl : BaseTest
 
     [Test]
     [NonParallelizable]
-    public async Task StatementThatCannotRollBack_IsRefusedInsideTheTransaction()
-    {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
-
-        KvTransaction tx = await BeginSessionAsync(database);
-
-        CamusDBException? refused = Assert.ThrowsAsync<CamusDBException>(async () =>
-            await Ddl(executor, tx, dbname, "CREATE SEQUENCE s"));
-        Assert.AreEqual(CamusDBErrorCodes.StatementNotAllowedInTransaction, refused!.Code);
-
-        await database.Transactions.RollbackAsync(tx);
-        Assert.IsFalse(database.Schema.Sequences.ContainsKey("s"));
-    }
-
-    [Test]
-    [NonParallelizable]
     public async Task SharedTable_CreateIndexAfterTheTransactionWroteTheTable_IsRefused()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
@@ -928,11 +912,41 @@ internal sealed class TestTransactionalDdl : BaseTest
         Assert.IsFalse(database.Schema.Tables["r"].Indexes!.Exists(i => i.Name == "r_v"), "the sweep removes the index of the vanished owner");
         Assert.AreEqual(0, await CountIndexEntriesAsync(database, indexSpace));
         Assert.AreEqual(0, await CountJobRecordsAsync(database));
+        Assert.AreEqual(0, await CountDecisionKeysAsync(database), "the removal of the last element deletes the decision key");
 
-        // The sweep wrote 'aborted' to the decision key, so a late commit of the owner is refused.
+        // The job record is gone, so a late commit of the owner is refused.
         CamusDBException? late = Assert.ThrowsAsync<CamusDBException>(async () => await database.Transactions.CommitAsync(tx));
         Assert.AreEqual(CamusDBErrorCodes.TransactionConflict, late!.Code);
         Assert.IsNull(database.Schema.PendingChangeSet);
+    }
+
+    /// <summary>
+    /// The resume on the schema leader removed an element of the transaction and deleted its job record, and
+    /// the node of the transaction did not apply the removal yet, so its schema looks unchanged. The missing
+    /// record alone refuses the commit.
+    /// </summary>
+    [TestCase("CREATE INDEX r_v ON r (v)", "r_v", SchemaElementKind.Index)]
+    [TestCase("ALTER TABLE r ADD CONSTRAINT v_positive CHECK (v > 0)", "v_positive", SchemaElementKind.Check)]
+    [NonParallelizable]
+    public async Task Commit_WhoseJobRecordIsGone_IsRefused(string statement, string element, SchemaElementKind kind)
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await CreateSharedTableAsync(executor, database, dbname, 40);
+        string tableId = database.Schema.Tables["r"].Id!;
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, dbname, statement);
+        await Write(executor, tx, dbname, "INSERT INTO r (id, v) VALUES (1000, 1)");
+
+        string owner = ((TransactionSchemaOverlay)tx.SchemaChanges!).ChangeSetId;
+        await executor.Catalogs.DeleteOwnedCoordinatorJobAsync(database, tableId, element, kind, owner);
+
+        CamusDBException? refused = Assert.ThrowsAsync<CamusDBException>(async () => await database.Transactions.CommitAsync(tx));
+        Assert.AreEqual(CamusDBErrorCodes.TransactionConflict, refused!.Code, refused.Message);
+
+        Assert.IsNull(database.Schema.PendingChangeSet, "nothing was announced");
+        Assert.AreEqual(0, await CountDecisionKeysAsync(database));
+        Assert.AreEqual(40, (await QueryOutsideAsync(executor, database, dbname, "SELECT * FROM r")).Count, "no row was committed");
     }
 
     private static Task<int> CountDecisionKeysAsync(DatabaseDescriptor database) =>
@@ -1289,6 +1303,7 @@ internal sealed class TestTransactionalDdl : BaseTest
         Assert.IsTrue(database.Schema.Tables["children"].ForeignKeys is null or { Count: 0 }, "and the foreign key");
         Assert.IsFalse(database.Schema.Tables["children"].Indexes?.Exists(i => i.Name == "~fk_children_parent") == true, "and the backing index");
         Assert.AreEqual(0, await CountJobRecordsAsync(database));
+        Assert.AreEqual(0, await CountDecisionKeysAsync(database), "the removal of the last element deletes the decision key");
 
         CamusDBException? late = Assert.ThrowsAsync<CamusDBException>(async () => await database.Transactions.CommitAsync(tx));
         Assert.AreEqual(CamusDBErrorCodes.TransactionConflict, late!.Code);
@@ -1501,7 +1516,9 @@ internal sealed class TestTransactionalDdl : BaseTest
         await Write(executor, tx, dbname, "INSERT INTO late (id) VALUES (5)");
 
         TransactionSchemaOverlay overlay = (TransactionSchemaOverlay)tx.SchemaChanges!;
-        overlay.Committer.TestPublishFailure = new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "the schema leader is gone");
+        overlay.Committer.TestAtStep = step => step == ChangeSetStep.RowsCommitted
+            ? throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "the schema leader is gone")
+            : Task.CompletedTask;
 
         try
         {
@@ -1513,7 +1530,7 @@ internal sealed class TestTransactionalDdl : BaseTest
         }
         finally
         {
-            overlay.Committer.TestPublishFailure = null;
+            overlay.Committer.TestAtStep = null;
         }
 
         await database.Transactions.CommitAsync(tx);

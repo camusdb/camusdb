@@ -45,7 +45,14 @@ internal sealed class TableIndexAdder
         this.logger = logger;
     }
 
-    private static void Validate(TableDescriptor table, AlterIndexTicket ticket, CamusDBOptions options)
+    /// <summary>
+    /// Checks an index add against <paramref name="table"/>: the name is free, the table stays below
+    /// <see cref="CamusDBOptions.MaxIndexesPerTable"/>, and each key and INCLUDE column exists and has a
+    /// type that the index can hold. Every form of the statement calls it (the standalone build, the
+    /// cluster build and the staged build of an explicit transaction), so the rules and the messages are
+    /// the same in all of them.
+    /// </summary>
+    internal static void Validate(TableDescriptor table, AlterIndexTicket ticket, CamusDBOptions options)
     {
         if (ticket.Operation == AlterIndexOperation.AddPrimaryKey && table.AllIndexes.ContainsKey(ticket.IndexName))
             throw new CamusDBException(

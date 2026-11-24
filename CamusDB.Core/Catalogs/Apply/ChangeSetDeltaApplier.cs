@@ -217,8 +217,8 @@ internal static class ChangeSetDeltaApplier
     /// deltas created, which the caller adds.
     ///
     /// <para>For the deltas of a change set only. Each of them changes at most the table that
-    /// <see cref="TargetTableName"/> names, besides views and sequences, which every copy of a schema owns;
-    /// the publish relies on the same fact when it copies the affected tables.</para>
+    /// <see cref="TargetTableName"/> names, besides views, sequences, extensions and functions, which every
+    /// copy of a schema owns; the publish relies on the same fact when it copies the affected tables.</para>
     /// </summary>
     internal static void CopyTableOnWrite(Schema schema, SchemaChangeLogEntry delta, HashSet<TableSchema> ownTables)
     {
@@ -246,7 +246,9 @@ internal static class ChangeSetDeltaApplier
             SchemaOp.CreateTable when entry.GetPayload<SchemaCreateTablePayload>().AdoptStagingTableId is null or "" => NoTable,
 
             SchemaOp.CreateView or SchemaOp.ReplaceView or SchemaOp.DropView or SchemaOp.RenameView or SchemaOp.SetViewDefinition
-                or SchemaOp.CreateSequence or SchemaOp.DropSequence or SchemaOp.RenameSequence or SchemaOp.AlterSequence => NoTable,
+                or SchemaOp.CreateSequence or SchemaOp.DropSequence or SchemaOp.RenameSequence or SchemaOp.AlterSequence
+                or SchemaOp.CreateExtension or SchemaOp.UpdateExtension or SchemaOp.DropExtension
+                or SchemaOp.CreateFunction or SchemaOp.ReplaceFunction or SchemaOp.DropFunction or SchemaOp.SetFunctionOwner => NoTable,
 
             // The pending entry and the publish work on copies of their own, and the abort changes no table.
             SchemaOp.PendingChangeSet or SchemaOp.PublishChangeSet or SchemaOp.AbortChangeSet => NoTable,
@@ -269,8 +271,11 @@ internal static class ChangeSetDeltaApplier
         SchemaOp.AddIndex or SchemaOp.DropIndex => entry.GetPayload<SchemaIndexPayload>().TableName,
         SchemaOp.SetTableSettings => entry.GetPayload<SchemaSetTableSettingsPayload>().TableName,
         SchemaOp.SetComment => entry.GetPayload<SchemaSetCommentPayload>().TableName,
-        SchemaOp.AddCheckConstraint => entry.GetPayload<SchemaCheckConstraintPayload>().TableName,
+        SchemaOp.AddCheckConstraint or SchemaOp.DropCheckConstraint => entry.GetPayload<SchemaCheckConstraintPayload>().TableName,
         SchemaOp.SetColumnNotNull => entry.GetPayload<SchemaSetColumnNotNullPayload>().TableName,
+        SchemaOp.SetColumnStorage => entry.GetPayload<SchemaSetColumnStoragePayload>().TableName,
+        SchemaOp.CreateTrigger => entry.GetPayload<SchemaCreateTriggerPayload>().TableName,
+        SchemaOp.DropTrigger => entry.GetPayload<SchemaDropTriggerPayload>().TableName,
         SchemaOp.AddForeignKey => entry.GetPayload<SchemaAddForeignKeyPayload>().TableName,
         SchemaOp.SetElementState => entry.GetPayload<SchemaElementStatePayload>().TableName,
         _ => null

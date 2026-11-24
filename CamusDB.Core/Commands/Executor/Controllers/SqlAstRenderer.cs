@@ -16,7 +16,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 ///
 /// <para>This is deliberately distinct from <c>PlanRenderer.RenderExpr</c>, which targets
 /// human-readable EXPLAIN output and is intentionally lossy — it drops parentheses (so precedence
-/// drifts on re-parse), collapses IN-lists to <c>(...)</c>, and abbreviates CAST targets. Everything
+/// drifts on re-parse) and collapses IN-lists to <c>(...)</c>. Everything
 /// rendered here is persisted as text and re-parsed on every node, so a lossy render would silently
 /// mean something other than what the user wrote.</para>
 ///
@@ -375,28 +375,39 @@ internal class SqlAstRenderer
     }
 
     /// <summary>
-    /// Renders a CAST target type node to a keyword that re-parses to the same
-    /// <c>ColumnType</c>. Identifier targets are emitted verbatim; sentinel type nodes use their
-    /// canonical spelling. An unmappable target raises so the caller rejects the statement.
+    /// Renders a CAST target type node to a keyword that re-parses to the same target. An
+    /// unmappable target raises so the caller rejects the statement.
     /// </summary>
-    protected string RenderCastType(NodeAst typeNode) => typeNode.nodeType switch
+    protected string RenderCastType(NodeAst typeNode) => CastTypeText(typeNode) ?? throw Unsupported(typeNode);
+
+    /// <summary>
+    /// The text of a CAST target type node, or null when the node has none. Identifier targets are
+    /// emitted verbatim, and sentinel type nodes use their canonical spelling. A sized target keeps
+    /// its size: <c>string(5)</c> cuts the value, so the stored text of a view, a default or an index
+    /// expression would return other values if it printed plain <c>string</c>. Index matching
+    /// compares this text too, so the size also keeps a <c>string(5)</c> filter off an index on
+    /// plain <c>CAST(x AS string)</c>. EXPLAIN uses the same text.
+    /// </summary>
+    internal static string? CastTypeText(NodeAst typeNode) => typeNode.nodeType switch
     {
-        NodeType.Identifier    => typeNode.yytext ?? throw Unsupported(typeNode),
-        NodeType.TypeString or NodeType.TypeStringSized => "string",
-        NodeType.TypeInteger64 => "int64",
-        NodeType.TypeInteger16 => "smallint",
-        NodeType.TypeInteger32 => "int",
-        NodeType.TypeFloat64   => "float64",
-        NodeType.TypeFloat32   => "float32",
-        NodeType.TypeBool      => "bool",
-        NodeType.TypeObjectId  => "object_id",
-        NodeType.TypeDate      => "date",
-        NodeType.TypeDateTime  => "datetime",
-        NodeType.TypeBytes or NodeType.TypeBytesSized => "bytes",
-        NodeType.TypeUuid      => "uuid",
-        NodeType.TypeNumeric   => "numeric",
-        NodeType.TypeJsonb     => "jsonb",
-        _ => throw Unsupported(typeNode),
+        NodeType.Identifier      => typeNode.yytext,
+        NodeType.TypeString      => "string",
+        NodeType.TypeStringSized => typeNode.yytext is { } size ? $"string({size})" : null,
+        NodeType.TypeInteger64   => "int64",
+        NodeType.TypeInteger16   => "smallint",
+        NodeType.TypeInteger32   => "int",
+        NodeType.TypeFloat64     => "float64",
+        NodeType.TypeFloat32     => "float32",
+        NodeType.TypeBool        => "bool",
+        NodeType.TypeObjectId    => "object_id",
+        NodeType.TypeDate        => "date",
+        NodeType.TypeDateTime    => "datetime",
+        NodeType.TypeBytes       => "bytes",
+        NodeType.TypeBytesSized  => typeNode.yytext is { } size ? $"bytes({size})" : null,
+        NodeType.TypeUuid        => "uuid",
+        NodeType.TypeNumeric     => "numeric",
+        NodeType.TypeJsonb       => "jsonb",
+        _ => null,
     };
 
     /// <summary>

@@ -164,15 +164,16 @@ internal static class CoordinatorJobStore
     /// <summary>
     /// Takes the exclusive lock of one job's key in <paramref name="tx"/> and reads its record, or null when
     /// there is none. A transaction that writes or deletes the record holds the key until its commit has an
-    /// outcome, so the answer already reflects it.
+    /// outcome, so the answer already reflects it. <paramref name="lockLeaseMs"/> is the lease of the lock;
+    /// zero ties it to the transaction (<see cref="CatalogKeyLock"/>).
     /// </summary>
     internal static async Task<PersistedCoordinatorJob?> ReadLockedCoordinatorJobAsync(
-        DatabaseDescriptor database, KvTransaction tx, string tableId, string elementName)
+        DatabaseDescriptor database, KvTransaction tx, string tableId, string elementName, int lockLeaseMs = 0)
     {
         IKahuna kahuna = database.Kahuna.Kahuna;
         string key = MetaKeys.CoordinatorKey(database.Id, tableId, elementName);
 
-        await CatalogKeyLock.AcquireExclusiveAsync(kahuna, tx, key, MetaKeyMaxRetries, "meta").ConfigureAwait(false);
+        await CatalogKeyLock.AcquireExclusiveAsync(kahuna, tx, key, MetaKeyMaxRetries, "meta", lockLeaseMs).ConfigureAwait(false);
         return await ReadCoordinatorJobAsync(kahuna, key).ConfigureAwait(false);
     }
 

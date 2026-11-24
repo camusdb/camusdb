@@ -27,6 +27,8 @@ using Kahuna.Server.KeyValues;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
 
+using static CamusDB.Tests.Cluster.ClusterStatements;
+
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
@@ -43,57 +45,6 @@ public sealed class TestClusterTransactionalDdl
             nodeCount: 3,
             wireLeaderForwarder: true,
             options: options ?? CamusDBOptions.Default with { TransactionalDdlEnabled = true });
-
-    private static async Task<KvTransaction> BeginSessionAsync(InProcessSchemaCluster.Node node)
-    {
-        KvTransaction tx = await node.Database!.Transactions.BeginAsync();
-        tx.MarkSessionOwned();
-        return tx;
-    }
-
-    private static Task Ddl(InProcessSchemaCluster.Node node, KvTransaction tx, string db, string sql) =>
-        node.Executor.ExecuteDDLSQL(new ExecuteSQLTicket(tx, db, sql, null));
-
-    private static Task Write(InProcessSchemaCluster.Node node, KvTransaction tx, string db, string sql) =>
-        node.Executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(tx, db, sql, null));
-
-    private static async Task AutocommitAsync(InProcessSchemaCluster.Node node, string db, string sql, bool ddl)
-    {
-        KvTransaction tx = await node.Database!.Transactions.BeginAsync();
-        try
-        {
-            if (ddl)
-                await Ddl(node, tx, db, sql);
-            else
-                await Write(node, tx, db, sql);
-
-            await node.Database!.Transactions.CommitAsync(tx);
-        }
-        finally
-        {
-            await node.Database!.Transactions.RollbackIfNotCompletedAsync(tx);
-        }
-    }
-
-    private static async Task<List<Dictionary<string, ColumnValue>>> QueryAsync(InProcessSchemaCluster.Node node, string db, string sql)
-    {
-        KvTransaction tx = await node.Database!.Transactions.BeginAsync();
-        try
-        {
-            (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) =
-                await node.Executor.ExecuteSQLQuery(new ExecuteSQLTicket(tx, db, sql, null));
-
-            List<Dictionary<string, ColumnValue>> rows = [];
-            await foreach (QueryResultRow row in cursor)
-                rows.Add(new Dictionary<string, ColumnValue>(row.Row));
-
-            return rows;
-        }
-        finally
-        {
-            await node.Database!.Transactions.RollbackIfNotCompletedAsync(tx);
-        }
-    }
 
     private static async Task<(InProcessSchemaCluster.Node leader, InProcessSchemaCluster.Node follower)> PrepareAsync(
         InProcessSchemaCluster cluster, string db)
@@ -142,6 +93,244 @@ public sealed class TestClusterTransactionalDdl
             Assert.AreEqual(30, rows[2]["w"].LongValue, $"node {node.Index} decodes the row written with the new layout");
 
             Assert.AreEqual(1, (await QueryAsync(node, db, "SELECT * FROM fresh")).Count, $"node {node.Index} reads the new table's row");
+        }
+    }
+
+    /// <summary>
+    /// The schema statements outside a transaction share the DDL lock on every node. While an index build
+    /// that came through one follower is in its backfill, a statement that comes through the other follower
+    /// runs at once, and a transaction that changes the schema waits for the build.
+    /// </summary>
+    [Test]
+    public async Task StatementsOfAllNodesShareTheDdlLock_ATransactionWaitsForThem()
+    {
+        await using InProcessSchemaCluster cluster = await StartClusterAsync();
+        string db = cluster.NextSchemaLogDatabaseName();
+        (InProcessSchemaCluster.Node leader, InProcessSchemaCluster.Node follower) = await PrepareAsync(cluster, db);
+        InProcessSchemaCluster.Node other = cluster.Nodes.First(n => n.Index != leader.Index && n.Index != follower.Index);
+
+        // The seam of the backfill fires after a full batch, which is 500 rows.
+        string rows = string.Join(", ", Enumerable.Range(2, 600).Select(i => $"({i}, 'n{i}')"));
+        await AutocommitAsync(leader, db, "INSERT INTO base (id, name) VALUES " + rows, ddl: false);
+
+        TaskCompletionSource reached = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource proceed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        leader.Executor.TestInterceptAfterBackfillCheckpoint = async () =>
+        {
+            reached.TrySetResult();
+            await proceed.Task;
+        };
+
+        KvTransaction tx = await BeginSessionAsync(other);
+        Task build = AutocommitAsync(follower, db, "CREATE INDEX base_name ON base (name)", ddl: true);
+        Task migration = Task.CompletedTask;
+
+        try
+        {
+            await reached.Task.WaitAsync(TimeSpan.FromSeconds(20));
+
+            await AutocommitAsync(other, db, "CREATE TABLE beside (id int64 PRIMARY KEY)", ddl: true).WaitAsync(TimeSpan.FromSeconds(20));
+            Assert.IsFalse(build.IsCompleted, "the index build is still in its backfill");
+
+            // Kahuna frees the lock for every statement when the last statement of one node ends. The node of
+            // the index build takes it again at its next renewal, so a transaction still waits after that.
+            await Task.Delay(TimeSpan.FromSeconds(4));
+            await using (TransactionalDdlLock? taken = await TransactionalDdlLock.TryAcquireAsync(other.Database!, logger: null))
+                Assert.IsNull(taken, "the index build holds the lock");
+
+            migration = Ddl(other, tx, db, "CREATE TABLE migrated (id int64 PRIMARY KEY)");
+            await Task.WhenAny(migration, Task.Delay(TimeSpan.FromSeconds(2)));
+            Assert.IsFalse(migration.IsCompleted, "the transaction waits for the index build");
+        }
+        finally
+        {
+            proceed.TrySetResult();
+            leader.Executor.TestInterceptAfterBackfillCheckpoint = null;
+        }
+
+        await build.WaitAsync(TimeSpan.FromSeconds(30));
+        await migration.WaitAsync(TimeSpan.FromSeconds(30));
+
+        // An open transaction holds the lock, so a statement through another node waits for it.
+        Task waits = AutocommitAsync(follower, db, "CREATE TABLE after_migration (id int64 PRIMARY KEY)", ddl: true);
+        await Task.WhenAny(waits, Task.Delay(TimeSpan.FromSeconds(1)));
+        Assert.IsFalse(waits.IsCompleted, "the statement waits for the transaction");
+
+        await other.Database!.Transactions.CommitAsync(tx);
+        await waits.WaitAsync(TimeSpan.FromSeconds(30));
+
+        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+        {
+            await cluster.WaitForSchemaConvergenceAsync(db, leader.Database!.Schema.SchemaVersion);
+            CollectionAssert.IsSubsetOf(new[] { "beside", "migrated", "after_migration" }, node.Database!.Schema.Tables.Keys.ToArray(), $"node {node.Index}");
+        }
+    }
+
+    /// <summary>
+    /// The statements of a node lose the DDL lock to a transaction, because the last statement of another node
+    /// freed it. When the transaction ends and a statement of the other node takes it first, the node sees
+    /// that the statements have it again, and its next statement does not wait.
+    /// </summary>
+    [Test]
+    public async Task ALostStatementLock_IsUsableAgain_WhenAnotherNodeTakesItFirst()
+    {
+        await using InProcessSchemaCluster cluster = await StartClusterAsync();
+        string db = cluster.NextSchemaLogDatabaseName();
+        (InProcessSchemaCluster.Node leader, InProcessSchemaCluster.Node follower) = await PrepareAsync(cluster, db);
+
+        TimeSpan wait = TimeSpan.FromSeconds(30);
+        await using StatementDdlLock.Share longStatement = await follower.Database!.StatementDdlLock.EnterAsync(follower.Database!, wait, logger: null);
+
+        TransactionalDdlLock? transaction = null;
+        for (int attempt = 0; attempt < 20 && transaction is null; attempt++)
+        {
+            await (await leader.Database!.StatementDdlLock.EnterAsync(leader.Database!, wait, logger: null)).DisposeAsync();
+            transaction = await TransactionalDdlLock.TryAcquireAsync(leader.Database!, logger: null);
+        }
+
+        Assert.IsNotNull(transaction, "the last statement of the leader frees the lock of every statement");
+
+        // The renewer of the follower runs every two seconds and finds the transaction.
+        await Task.Delay(TimeSpan.FromSeconds(5));
+        Task<StatementDdlLock.Share> waits = follower.Database!.StatementDdlLock.EnterAsync(follower.Database!, wait, logger: null);
+        await Task.Delay(TimeSpan.FromSeconds(1));
+        Assert.IsFalse(waits.IsCompleted, "a new statement of the follower waits for the transaction");
+
+        await transaction!.ReleaseAsync();
+        await using StatementDdlLock.Share first = await leader.Database!.StatementDdlLock.EnterAsync(leader.Database!, wait, logger: null);
+
+        await using StatementDdlLock.Share second = await waits.WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
+    /// <summary>
+    /// A staged change can run with no DDL lock: the next schema leader drives it after a leader change, and a
+    /// statement can lose its lock. A transaction on a follower then changes the same table. It is refused, or
+    /// the staged change ends without it; the table, its rows and the index agree either way.
+    /// </summary>
+    [Test]
+    public async Task AStagedChangeWithoutTheDdlLock_AndATransactionOnItsTable(
+        [Values(
+            "ALTER TABLE base RENAME TO renamed",
+            "DROP TABLE base",
+            "ALTER TABLE base DROP COLUMN extra",
+            "ALTER TABLE base DROP COLUMN name",
+            "DROP INDEX base_name ON base",
+            "ALTER TABLE base RENAME COLUMN name TO title",
+            "ALTER TABLE base ADD COLUMN w int64",
+            "ALTER TABLE base ADD COLUMN f int64 NOT NULL DEFAULT (5)",
+            "CREATE INDEX base_extra ON base (extra)",
+            "ALTER TABLE base ADD CONSTRAINT positive CHECK (id > 0)",
+            "CREATE TABLE unrelated (id int64 PRIMARY KEY)")] string statement)
+    {
+        await using InProcessSchemaCluster cluster = await StartClusterAsync();
+        string db = cluster.NextSchemaLogDatabaseName();
+        (InProcessSchemaCluster.Node leader, InProcessSchemaCluster.Node follower) = await PrepareAsync(cluster, db);
+
+        await AutocommitAsync(leader, db, "ALTER TABLE base ADD COLUMN extra int64", ddl: true);
+        string rows = string.Join(", ", Enumerable.Range(2, 600).Select(i => $"({i}, 'n{i}', {i})"));
+        await AutocommitAsync(leader, db, "INSERT INTO base (id, name, extra) VALUES " + rows, ddl: false);
+
+        TaskCompletionSource reached = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource proceed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        leader.Executor.TestInterceptAfterBackfillCheckpoint = async () =>
+        {
+            reached.TrySetResult();
+            await proceed.Task;
+        };
+
+        // Runs like a resume: the ticket goes to the leader's executor, past the statement's DDL lock.
+        Task build = leader.Executor.AlterIndex(new AlterIndexTicket(
+            databaseName: db, tableName: "base", indexName: "base_name", columns: [new ColumnIndexInfo("name", OrderType.Ascending)],
+            operation: AlterIndexOperation.AddIndex));
+
+        KvTransaction tx = await BeginSessionAsync(follower);
+        string outcome;
+        string entries;
+
+        try
+        {
+            await Task.WhenAny(reached.Task, build).WaitAsync(TimeSpan.FromSeconds(20));
+            Assert.IsTrue(reached.Task.IsCompleted, "the build reaches its backfill");
+
+            TableSchema shared = leader.Database!.Schema.Tables["base"];
+            entries = $"{leader.Database!.Id}:{shared.EffectiveStorageId}|i:{shared.Indexes!.First(ix => ix.Name == "base_name").KvId}";
+            Assert.Greater(await CountKeysAsync(leader.Database!, entries, entries), 0, "the first batch wrote its entries");
+
+            try
+            {
+                await Ddl(follower, tx, db, statement).WaitAsync(TimeSpan.FromSeconds(20));
+                await follower.Database!.Transactions.CommitAsync(tx).WaitAsync(TimeSpan.FromSeconds(20));
+                outcome = "committed";
+            }
+            catch (CamusDBException ex)
+            {
+                outcome = $"{ex.Code} {ex.Message}";
+            }
+            catch (TimeoutException)
+            {
+                outcome = "waits";
+            }
+        }
+        finally
+        {
+            proceed.TrySetResult();
+            leader.Executor.TestInterceptAfterBackfillCheckpoint = null;
+        }
+
+        string built;
+        try
+        {
+            await build.WaitAsync(TimeSpan.FromSeconds(60));
+            built = "built";
+        }
+        catch (Exception ex)
+        {
+            built = $"{ex.GetType().Name} {ex.Message}";
+        }
+
+        await follower.Database!.Transactions.RollbackIfNotCompletedAsync(tx);
+        await TestContext.Progress.WriteLineAsync($"{statement}: transaction {outcome}; index {built}");
+
+        await cluster.WaitForSchemaConvergenceAsync(db, leader.Database!.Schema.SchemaVersion);
+        Assert.AreEqual(0, await CountKeysAsync(
+            leader.Database!, MetaKeys.MetaBucketPrefix(leader.Database!.Id), MetaKeys.CoordinatorKeyPrefix(leader.Database!.Id)), "no job is left");
+
+        bool committed = outcome == "committed";
+        TableSchema? table = leader.Database!.Schema.Tables.GetValueOrDefault("base");
+
+        if (statement.StartsWith("DROP TABLE", StringComparison.Ordinal) && committed)
+        {
+            Assert.IsNull(table, outcome);
+            return;
+        }
+
+        Assert.IsNotNull(table, outcome);
+
+        if (statement.StartsWith("DROP INDEX", StringComparison.Ordinal) && committed)
+        {
+            StringAssert.Contains("Unknown index", built);
+            Assert.IsFalse(table!.Indexes!.Exists(ix => ix.Name == "base_name"));
+
+            int left = 0;
+            for (int attempt = 0; attempt < 100 && (left = await CountKeysAsync(leader.Database!, entries, entries)) > 0; attempt++)
+                await Task.Delay(100);
+
+            Assert.AreEqual(0, left, "the dropped index keeps no entry that the build wrote");
+            return;
+        }
+
+        Assert.AreEqual("built", built, "a change of the table does not end the build");
+        Assert.IsTrue(table!.Indexes!.TrueForAll(ix => ix.State == SchemaElementState.Public), "no element is left half-built");
+        Assert.IsTrue(table.Columns!.TrueForAll(c => c.State == SchemaElementState.Public), "no element is left half-built");
+
+        string name = table.Columns!.Exists(c => c.Name == "title") ? "title" : "name";
+        await AutocommitAsync(leader, db, $"INSERT INTO base (id, {name}) VALUES (5000, 'later')", ddl: false);
+
+        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+        {
+            Assert.AreEqual(602, (await QueryAsync(node, db, "SELECT id FROM base")).Count, $"node {node.Index}");
+            Assert.AreEqual(602, (await QueryAsync(node, db, $"SELECT id FROM base@{{FORCE_INDEX=base_name}} WHERE {name} >= ''")).Count, $"node {node.Index}: one index entry per row");
+            Assert.AreEqual(1, (await QueryAsync(node, db, $"SELECT id FROM base@{{FORCE_INDEX=base_name}} WHERE {name} = 'n601'")).Count, $"node {node.Index}");
         }
     }
 
@@ -289,10 +478,12 @@ public sealed class TestClusterTransactionalDdl
         await Write(leader, tx, db, "INSERT INTO fresh (id) VALUES (1)");
 
         ChangeSetCommitter committer = ((TransactionSchemaOverlay)tx.SchemaChanges!).Committer;
-        committer.TestPublishFailure = new InvalidOperationException("the publish is lost");
+        committer.TestAtStep = step => step == ChangeSetStep.RowsCommitted
+            ? throw new InvalidOperationException("the publish is lost")
+            : Task.CompletedTask;
         CamusDBException? unconfirmed = Assert.ThrowsAsync<CamusDBException>(async () => await leader.Database!.Transactions.CommitAsync(tx));
         Assert.AreEqual(CamusDBErrorCodes.TransactionFinalizeUnresolved, unconfirmed!.Code);
-        committer.TestPublishFailure = null;
+        committer.TestAtStep = null;
 
         foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
             node.Kahuna.SchemaAckQuorumBackstopDelay = TimeSpan.FromMilliseconds(200);
@@ -539,22 +730,6 @@ public sealed class TestClusterTransactionalDdl
             Assert.IsTrue(node.Database!.Schema.Tables.ContainsKey("from_transaction"), $"node {node.Index} sees the table of the transaction");
             Assert.IsTrue(node.Database!.Schema.Tables.ContainsKey("from_leader"), $"node {node.Index} sees the table of the statement");
         }
-    }
-
-    /// <summary>Counts the stored keys under <paramref name="prefix"/> in one key space, with a plain read of the latest committed keys.</summary>
-    private static async Task<int> CountKeysAsync(DatabaseDescriptor database, string keySpace, string prefix)
-    {
-        int count = 0;
-
-        await foreach ((string key, ReadOnlyKeyValueEntry entry) in database.Kahuna.Kahuna.LocateAndScanRange(
-            HLCTimestamp.Zero, keySpace, null, true, null, true, 1000,
-            HLCTimestamp.Zero, KeyValueDurability.Persistent, System.Threading.CancellationToken.None))
-        {
-            if (key.StartsWith(prefix, StringComparison.Ordinal) && entry.Value is not null)
-                count++;
-        }
-
-        return count;
     }
 
     /// <summary>
@@ -890,6 +1065,196 @@ public sealed class TestClusterTransactionalDdl
 
         if (!commit)
             await AutocommitAsync(leader, db, "INSERT INTO kids (id, base_id) VALUES (3, 99)", ddl: false);
+
+        Assert.AreEqual(0, await CountKeysAsync(leader.Database!, MetaKeys.MetaBucketPrefix(leader.Database!.Id), MetaKeys.CoordinatorKeyPrefix(leader.Database!.Id)),
+            "no job record is left");
+    }
+
+    /// <summary>
+    /// Functions, triggers and extensions have no statement forward: outside a transaction a follower refuses
+    /// them. Inside one, every object kind runs on the node that holds the transaction, and the commit
+    /// publishes it on every node.
+    /// </summary>
+    [TestCase(true)]
+    [TestCase(false)]
+    public async Task OtherObjects_FromAFollower_EndWithTheTransactionOnEveryNode(bool commit)
+    {
+        const string db = "txddlobjects";
+
+        await using InProcessSchemaCluster cluster = await StartClusterAsync(
+            CamusDBOptions.Default with { TransactionalDdlEnabled = true, InlineFunctionsEnabled = true, InlineTriggersEnabled = true });
+        (InProcessSchemaCluster.Node leader, InProcessSchemaCluster.Node follower) = await PrepareAsync(cluster, db);
+
+        await AutocommitAsync(leader, db, "ALTER TABLE base ADD CONSTRAINT named CHECK (name <> 'nobody')", ddl: true);
+        await AutocommitAsync(leader, db, "CREATE SEQUENCE old_s CACHE 1", ddl: true);
+        await AutocommitAsync(leader, db, "CREATE VIEW v AS SELECT id FROM base", ddl: true);
+        Assert.AreEqual(1, (await QueryAsync(follower, db, "SELECT nextval('old_s') AS v"))[0]["v"].LongValue);
+        await cluster.WaitForSchemaConvergenceAsync(db, leader.Database!.Schema.SchemaVersion);
+
+        KvTransaction tx = await BeginSessionAsync(follower);
+        await Ddl(follower, tx, db, "CREATE FUNCTION twice(x INT64) RETURNS INT64 LANGUAGE csharp AS $$ return x * 2; $$");
+        await Ddl(follower, tx, db, "CREATE TRIGGER upper_name ON base BEFORE INSERT LANGUAGE csharp AS $$ if (NEW!.name is { } name) NEW.name = name.ToUpperInvariant() + twice(4); $$");
+        await Ddl(follower, tx, db, "ALTER TABLE base DROP CONSTRAINT named");
+        await Ddl(follower, tx, db, "CREATE SEQUENCE new_s START WITH 7 CACHE 1");
+        await Ddl(follower, tx, db, "ALTER SEQUENCE old_s INCREMENT BY 10");
+        await Ddl(follower, tx, db, "COMMENT ON VIEW v IS 'ids'");
+        await Ddl(follower, tx, db, "CREATE TABLE copy AS SELECT id, name FROM base");
+        await Write(follower, tx, db, "INSERT INTO base (id, name) VALUES (2, 'nobody')");
+
+        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+        {
+            Schema schema = node.Database!.Schema;
+            Assert.IsEmpty(schema.Functions, "no node sees the change set before the commit");
+            Assert.IsFalse(schema.Sequences.ContainsKey("new_s"));
+            Assert.IsFalse(schema.Tables.ContainsKey("copy"));
+        }
+
+        if (commit)
+            await follower.Database!.Transactions.CommitAsync(tx);
+        else
+            await follower.Database!.Transactions.RollbackAsync(tx);
+
+        if (commit)
+            await cluster.WaitForSchemaConvergenceAsync(db, follower.Database!.Schema.SchemaVersion);
+
+        long expectedDraw = commit ? 11 : 2;
+        long row = 10;
+
+        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+        {
+            Schema schema = node.Database!.Schema;
+
+            Assert.AreEqual(commit, schema.Functions.ContainsKey("twice"));
+            Assert.AreEqual(commit ? 1 : 0, schema.Tables["base"].Triggers?.Count ?? 0);
+            Assert.AreEqual(commit ? 0 : 1, schema.Tables["base"].CheckConstraints?.Count ?? 0);
+            Assert.AreEqual(commit ? "ids" : null, schema.Views["v"].Comment);
+            Assert.AreEqual(commit, schema.Tables.ContainsKey("copy"));
+            Assert.AreEqual(commit, schema.Sequences.ContainsKey("new_s"));
+
+            Assert.AreEqual(expectedDraw, (await QueryAsync(node, db, "SELECT nextval('old_s') AS v"))[0]["v"].LongValue);
+            expectedDraw += commit ? 10 : 1;
+
+            await AutocommitAsync(node, db, $"INSERT INTO base (id, name) VALUES ({++row}, 'x')", ddl: false);
+            Assert.AreEqual(commit ? "X8" : "x", (await QueryAsync(node, db, $"SELECT name FROM base WHERE id = {row}"))[0]["name"].StrValue);
+
+            if (commit)
+                Assert.AreEqual(1, (await QueryAsync(node, db, "SELECT id FROM copy")).Count);
+        }
+
+        Assert.AreEqual(commit ? 1 : 0, (await QueryAsync(leader, db, "SELECT id FROM base WHERE id = 2")).Count);
+    }
+
+    private static async Task<string> RefusalCode(Func<Task> action, string statement)
+    {
+        try
+        {
+            await action();
+        }
+        catch (CamusDBException refused)
+        {
+            return refused.Code;
+        }
+
+        Assert.Fail($"accepted: {statement}");
+        return "";
+    }
+
+    /// <summary>
+    /// Outside a transaction the schema leader checks a schema statement, and a follower forwards it there.
+    /// Inside a transaction the node that holds the transaction checks it. A transaction on a follower meets
+    /// the refusals of the leader, on committed objects and on its own objects, and its rollback leaves
+    /// nothing on any node.
+    /// </summary>
+    [Test]
+    public async Task ARefusalOfTheLeader_AlsoHappensInATransactionOnAFollower()
+    {
+        const string db = "txddlrefusals";
+
+        await using InProcessSchemaCluster cluster = await StartClusterAsync();
+        (InProcessSchemaCluster.Node leader, InProcessSchemaCluster.Node follower) = await PrepareAsync(cluster, db);
+
+        string[] objects =
+        [
+            "CREATE TABLE p (id int64 PRIMARY KEY, code int64, UNIQUE KEY uk (code))",
+            "CREATE TABLE c (id int64 PRIMARY KEY, p int64, KEY kp (p), CONSTRAINT fk FOREIGN KEY (p) REFERENCES p (id))",
+            "CREATE TABLE t (id int64 PRIMARY KEY, v int64, name string, KEY k (v))",
+            "CREATE VIEW w AS SELECT id, v FROM t",
+        ];
+        const string rows = "INSERT INTO t (id, v) VALUES (1, 1), (2, 1)";
+
+        (string Statement, string Code)[] refusals =
+        [
+            ("CREATE TABLE t (id int64 PRIMARY KEY)", CamusDBErrorCodes.TableAlreadyExists),
+            ("CREATE TABLE d (id int64 PRIMARY KEY, p int64 REFERENCES missing (id))", CamusDBErrorCodes.TableDoesntExist),
+            ("DROP TABLE t", CamusDBErrorCodes.DependentObjectsExist),
+            ("DROP TABLE p", CamusDBErrorCodes.DependentObjectsExist),
+            ("DROP TABLE missing", CamusDBErrorCodes.TableDoesntExist),
+            ("ALTER TABLE t RENAME TO p", CamusDBErrorCodes.TableAlreadyExists),
+            ("ALTER TABLE t RENAME COLUMN v TO id", CamusDBErrorCodes.DuplicateColumn),
+            ("ALTER TABLE t RENAME INDEX missing TO x", CamusDBErrorCodes.InvalidInput),
+            ("ALTER TABLE t ADD COLUMN v int64", CamusDBErrorCodes.InvalidInput),
+            ("ALTER TABLE t ADD COLUMN x int64 NOT NULL", CamusDBErrorCodes.NotNullViolation),
+            ("ALTER TABLE t ADD COLUMN x int64 DEFAULT(nextval('missing'))", CamusDBErrorCodes.SequenceDoesntExist),
+            ("ALTER TABLE t DROP COLUMN v", CamusDBErrorCodes.DependentObjectsExist),
+            ("ALTER TABLE p DROP COLUMN code", CamusDBErrorCodes.InvalidInput),
+            ("CREATE INDEX k ON t (id)", CamusDBErrorCodes.InvalidInput),
+            ("CREATE INDEX x ON t (missing)", CamusDBErrorCodes.InvalidInput),
+            ("CREATE UNIQUE INDEX x ON t (v)", CamusDBErrorCodes.DuplicateUniqueKeyValue),
+            ("DROP INDEX kp ON c", CamusDBErrorCodes.DependentObjectsExist),
+            ("ALTER TABLE t ADD CONSTRAINT x CHECK (v > 5)", CamusDBErrorCodes.CheckConstraintViolation),
+            ("ALTER TABLE c ADD CONSTRAINT fk CHECK (p > 5)", CamusDBErrorCodes.InvalidInput),
+            ("ALTER TABLE t ALTER COLUMN name SET NOT NULL", CamusDBErrorCodes.NotNullViolation),
+            ("ALTER TABLE t ADD CONSTRAINT x FOREIGN KEY (v) REFERENCES p (id)", CamusDBErrorCodes.ForeignKeyViolation),
+            ("ALTER TABLE c ADD CONSTRAINT x FOREIGN KEY (p) REFERENCES w (id)", CamusDBErrorCodes.InvalidForeignKeyDefinition),
+            ("ALTER TABLE p ADD CONSTRAINT x FOREIGN KEY (code) REFERENCES c (id)", CamusDBErrorCodes.ForeignKeyCycle),
+            ("ALTER TABLE t SET (ttl_expiration_expression = 'missing')", CamusDBErrorCodes.UnknownColumn),
+            ("COMMENT ON COLUMN t.missing IS 'x'", CamusDBErrorCodes.UnknownColumn),
+            ("CREATE VIEW t AS SELECT 1 AS a", CamusDBErrorCodes.TableAlreadyExists),
+        ];
+
+        // The objects exist only in the private schema of a transaction on the follower.
+        foreach ((string statement, string code) in refusals)
+        {
+            KvTransaction tx = await BeginSessionAsync(follower);
+            foreach (string sql in objects)
+                await Ddl(follower, tx, db, sql);
+            await Write(follower, tx, db, rows);
+
+            Assert.AreEqual(code, await RefusalCode(() => Ddl(follower, tx, db, statement), statement), $"on objects of the transaction: {statement}");
+            await follower.Database!.Transactions.RollbackAsync(tx);
+        }
+
+        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+            Assert.AreEqual(new[] { "base" }, node.Database!.Schema.Tables.Keys.ToArray(), $"node {node.Index}");
+
+        // The objects are committed.
+        foreach (string sql in objects)
+            await AutocommitAsync(leader, db, sql, ddl: true);
+        await AutocommitAsync(leader, db, rows, ddl: false);
+        await cluster.WaitForSchemaConvergenceAsync(db, leader.Database!.Schema.SchemaVersion);
+
+        foreach ((string statement, string code) in refusals)
+        {
+            Assert.AreEqual(code, await RefusalCode(() => AutocommitAsync(leader, db, statement, ddl: true), statement), $"outside, on the leader: {statement}");
+
+            KvTransaction tx = await BeginSessionAsync(follower);
+            Assert.AreEqual(code, await RefusalCode(() => Ddl(follower, tx, db, statement), statement), $"inside, on a follower: {statement}");
+            await follower.Database!.Transactions.RollbackAsync(tx);
+        }
+
+        await cluster.WaitForSchemaConvergenceAsync(db, leader.Database!.Schema.SchemaVersion);
+
+        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+        {
+            Schema schema = node.Database!.Schema;
+
+            Assert.AreEqual(new[] { "base", "c", "p", "t" }, schema.Tables.Keys.Order().ToArray(), $"node {node.Index}");
+            Assert.AreEqual(new[] { "id", "name", "v" }, schema.Tables["t"].Columns!.Select(c => c.Name).Order().ToArray());
+            Assert.AreEqual(new[] { "k" }, schema.Tables["t"].Indexes!.Select(i => i.Name).Where(n => !n.StartsWith('~')).ToArray());
+            Assert.IsTrue(schema.Tables["t"].Columns!.TrueForAll(c => c.Name == "id" || !c.NotNull));
+            Assert.AreEqual(0, schema.Tables.Values.Sum(t => t.CheckConstraints?.Count ?? 0));
+            Assert.AreEqual(1, schema.Tables.Values.Sum(t => t.ForeignKeys?.Count ?? 0));
+        }
 
         Assert.AreEqual(0, await CountKeysAsync(leader.Database!, MetaKeys.MetaBucketPrefix(leader.Database!.Id), MetaKeys.CoordinatorKeyPrefix(leader.Database!.Id)),
             "no job record is left");

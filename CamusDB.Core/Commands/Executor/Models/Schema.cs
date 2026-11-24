@@ -313,18 +313,27 @@ public sealed class Schema : IDisposable
     }
 
     /// <summary>
-    /// Installs the maps of <paramref name="published"/> (tables, views, sequences) into this schema, as the
-    /// publish of a transaction's change set: the change set applies to a copy, and the copy replaces the
+    /// Installs the maps of <paramref name="published"/> (tables, views, sequences, extensions, functions)
+    /// into this schema, as the publish of a transaction's change set: the change set applies to a copy, and the copy replaces the
     /// live maps here, each with one reference store. Called under <see cref="Semaphore"/>.
     ///
     /// <para>The lookup indexes are rebuilt from the installed maps, and the pending change set is cleared
     /// last: a statement that waits for the change set (<c>TableOpener</c>) resumes only after every
     /// index, the foreign-key graph included, describes the published catalog. A reader that does not
-    /// wait can read the new table map beside the old view map for the few instructions between the two
-    /// stores; every other state between two deltas of the change set is never visible.</para>
+    /// wait can read two maps of different generations for the few instructions between their stores, such
+    /// as the new table map beside the old view map; every other state between two deltas of the change set is never visible.</para>
     /// </summary>
     internal void InstallPublishedCatalog(Schema published)
     {
+        // Extensions and functions are stores of their own, so they go first: a column default or a view
+        // body of the change set can call a function that the change set created. Published only when the
+        // change set changed them, because a publish moves the stamp that the caches key on.
+        if (!ReferenceEquals(Extensions, published.Extensions))
+            ExtensionCatalog.Publish(published.Extensions, published.ExtensionCatalog.LastPublished);
+
+        if (!ReferenceEquals(Functions, published.Functions))
+            FunctionCatalog.Publish(published.Functions, published.FunctionCatalog.LastPublished);
+
         tables = published.tables;
         views = published.views;
         Sequences = published.Sequences;

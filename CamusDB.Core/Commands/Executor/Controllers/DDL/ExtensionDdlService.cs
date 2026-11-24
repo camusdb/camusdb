@@ -7,6 +7,7 @@
 
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.Catalogs.Transactional;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Extensions;
 using CamusDB.Core.SQLParser;
@@ -34,7 +35,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 ///
 /// <para><b>Runs on the schema leader.</b> Like trigger, view and sequence DDL, extension DDL has no
 /// ticket forwarder: in cluster mode it must reach the database's schema leader, and a follower
-/// refuses with the leader's name.</para>
+/// refuses with the leader's name. Inside a transaction with a private schema it runs on any node.</para>
 ///
 /// <para><b>Privileges.</b> Superuser only; the statement authorizer enforces it before this runs.</para>
 /// </summary>
@@ -271,9 +272,14 @@ internal sealed class ExtensionDdlService
     private static string? TargetVersion(NodeAst ast) =>
         ast.rightAst?.yytext is { } literal ? SqlStringLiteral.Decode(literal) : null;
 
+    /// <summary>
+    /// Refuses the statement on a node that does not lead the database's schema log. Inside a transaction
+    /// with a private schema it runs on any node: its delta joins the change set, which reaches the schema
+    /// leader at the commit, and the commit refuses a change set whose base schema moved.
+    /// </summary>
     private async Task RequireSchemaLeaderAsync(DatabaseDescriptor database, string statement)
     {
-        if (!context.IsClusterMode)
+        if (!context.IsClusterMode || TransactionSchemaScope.OverlayFor(database) is not null)
             return;
 
         if (await database.Kahuna.AmISchemaLeaderAsync(database.Id, CancellationToken.None).ConfigureAwait(false))

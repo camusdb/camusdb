@@ -1,29 +1,30 @@
 # Large values: compression and out-of-line storage
 
-CamusDB stores each row as one key-value entry. A `string`, `bytes` or array value can be large: a
-document body, an image, an embedding. This page explains how CamusDB compresses such a value, how
-it moves the value out of its row, how you control that per column, and how data that existed before
-this feature reaches the new form.
+CamusDB stores each row as one key-value entry. A `string`, `bytes` or array value can be large, for
+example a document body or an embedding. This page explains how CamusDB compresses such a value and
+how it moves the value out of its row. It also covers how you control that per column, and how data
+that existed before this feature reaches the new form.
 
-Nothing on this page changes a query result. Compression and out-of-line storage change only the
-physical form of stored bytes, the I/O a query does, and the size of each stored version.
+The features on this page do not change query results. Compression and out-of-line storage change
+only the physical form of stored bytes, the I/O a query does, and the size of each stored version.
 
 ## Why it exists
 
-A row is also the unit of multi-version storage. Two problems follow when a row carries a large
-value:
+A row is also the unit of multi-version storage. When a row carries a large value, this causes two
+problems.
 
-1. **Read I/O.** A query that reads only small columns still pulls the large value from storage.
-2. **Write amplification.** An update of any column rewrites the whole row. A change to a 4-byte
+1. **Read I/O.** A query that reads only small columns also pulls the large value from storage.
+2. **Write amplification.** An update of any column rewrites the full row. A change to a 4-byte
    `status` column on a row with a 10 MB value writes 10 MB and adds a 10 MB version to the history.
 
-Out-of-line storage moves the large value under its own key. The row keeps a 16-byte pointer. A
-query that does not name the column never fetches the value, and an update of another column does
-not rewrite it. Compression makes each stored copy smaller, for values inside the row and outside it.
+Out-of-line storage moves the large value under a separate key, and the row stores a 16-byte
+pointer. A query that does not name the column doesn't fetch the value, and an update of another
+column does not rewrite it. Compression makes each stored copy smaller, for values in the row and
+outside it.
 
 ## How a value is stored
 
-The writer takes these steps for each non-null `string`, `bytes` or array value, in this order:
+The writer takes four steps, in order, for each non-null `string`, `bytes` or array value.
 
 1. Encode the value to its raw bytes.
 2. If the column strategy allows compression and the value has at least 256 bytes, compress it with
@@ -31,18 +32,19 @@ The writer takes these steps for each non-null `string`, `bytes` or array value,
    `large_value_compression_min_saving_percent` (default 12%).
 3. If the column strategy allows out-of-line storage, compare the **result** of step 2 with
    `large_value_threshold_bytes` (default 2048).
-4. If the result is at or above the threshold, store it under its own key and put a pointer in the
-   row. If not, store it inside the row.
+4. If the result is at or above the threshold, store it under a separate key and put a pointer in the
+   row. If not, store it in the row.
 
-Compression runs first, so a value that compresses below the threshold stays in the row, and a
-read of that column costs no second key.
+Compression happens before the threshold check. This means that a value that compresses below the
+threshold remains in the row, and a read of that column costs no second key.
 
-The minimum-saving rule protects data that does not compress, such as float32 embeddings, JPEG images
-and archives. Without the rule, such data would pay a decompression on every read and save nothing.
+The minimum-saving rule protects data that does not compress, such as float32 embeddings and JPEG
+images. If the rule did not exist, such data would pay a decompression on each read for no saving.
 
-Every stored row records, for each variable-length cell, whether the cell is compressed and whether it
-holds a pointer. A reader follows these marks. It never consults the current settings or the column
-strategy. So no change to a setting or a strategy can make an existing row unreadable.
+Each stored row records, for each variable-length cell, whether the cell is compressed and whether it
+contains a pointer. A reader follows these marks. It doesn't consult the current settings or the
+column strategy. This means that a change to a setting or a strategy can't make an existing row
+unreadable.
 
 ## Choosing a storage strategy
 
@@ -52,11 +54,11 @@ PostgreSQL.
 | Strategy | Compresses | Moves out of the row | Use it for |
 | --- | --- | --- | --- |
 | `EXTENDED` (default) | Yes, when it pays | Yes, at or above the threshold | Text, JSON, documents — most large columns |
-| `MAIN` | Yes, when it pays | Never | Compressible values that a typical query reads, where a second key per row costs more than it saves |
-| `EXTERNAL` | Never | Yes, at or above the threshold | Large values that do not compress, which queries often skip: images, archives, embeddings you read rarely |
-| `PLAIN` | Never | Never | Values that every query reads and that do not compress, such as an embedding a KNN query reads for every row |
+| `MAIN` | Yes, when it pays | No | Compressible values that a typical query reads, where a second key per row costs more than it saves |
+| `EXTERNAL` | No | Yes, at or above the threshold | Large values that do not compress, which queries often skip, such as images or embeddings you read rarely |
+| `PLAIN` | No | No | Values that all queries read and that do not compress, such as an embedding a KNN query reads for each row |
 
-Set the strategy when you create the column:
+You set the strategy when you create the column.
 
 ```sql
 CREATE TABLE docs (
@@ -68,35 +70,36 @@ CREATE TABLE docs (
 );
 ```
 
-Change it later:
+You can change it later with `ALTER TABLE`.
 
 ```sql
 ALTER TABLE docs ALTER COLUMN thumbnail SET STORAGE PLAIN;
 ```
 
-`SHOW CREATE TABLE` shows every strategy that was set explicitly. A strategy on a column of any other
+`SHOW CREATE TABLE` shows each strategy that was set explicitly. A strategy on a column of any other
 type is refused with `CADB0414` (`ColumnStorageNotApplicable`).
 
 ### Examples
 
 - **An article body that queries list by title.** Keep the default `EXTENDED`. A listing query
-  (`SELECT id, title FROM docs`) never fetches the bodies. Text usually compresses to a third of its
-  size or less, so bodies of up to about 6 KB often stay inside the row in compressed form.
-- **A product image of 50 KB.** Use `EXTERNAL`. JPEG data does not compress, so an attempt only costs
-  CPU. The image moves out of the row, and a price update does not rewrite it.
+  (`SELECT id, title FROM docs`) doesn't fetch the bodies. Text usually compresses to a third of its
+  size or less. This means that bodies of up to about 6 KB often remain in the row in compressed form.
+- **A product image of 50 KB.** Use `EXTERNAL`. JPEG data does not compress, and an attempt only
+  costs CPU. The image moves out of the row, and a price update does not rewrite it.
 - **A 768-dimension embedding that a KNN query scans.** Use `PLAIN`. The embedding is 3072 bytes,
-  which is above the threshold, and a KNN query reads it on every row. Out of line, each scanned batch
-  would cost one extra fetch. See [Vector search](vector-search.md#storage-strategy-for-embeddings).
+  which is above the threshold, and a KNN query reads it on each row. Out of line, each scanned batch
+  would cost one extra fetch. For more information, see
+  [Vector search](vector-search.md#storage-strategy-for-embeddings).
 - **An embedding that a KNN query does not scan.** If a separate process reads the vectors rarely, use
-  `EXTERNAL`: the rows stay small for every other query.
+  `EXTERNAL`. The rows are then small for all other queries.
 
 ## What a query costs
 
-- A query that does not name a large column never fetches its out-of-line values. `SELECT *` names
-  every column, so it fetches all of them.
+- A query that does not name a large column doesn't fetch its out-of-line values. `SELECT *` names
+  all the columns. This means that it fetches all of them.
 - A query that reads a large column fetches the out-of-line values of a batch of rows in one batched
-  read, not one read per row.
-- A compressed value is decompressed only when a query reads its column.
+  read. It does not do one read per row.
+- A compressed value is decompressed only if a query reads its column.
 - An update that does not assign a large column, and does not use it in an index or a `CHECK`
   constraint, does not fetch or rewrite the value. It rewrites only the small row. This applies to a
   row written under the table's current layout. The first update of a row written before an
@@ -104,13 +107,14 @@ type is refused with `CADB0414` (`ColumnStorageNotApplicable`).
 
 ## Transaction limits
 
-Each out-of-line value is one KV key, so it is one mutation. An insert or a delete of a row with `k`
-out-of-line values costs `k` more mutations than the same row inline. An update that does not change
-a large value costs nothing extra.
+Each out-of-line value is one KV key. This means that it is one mutation. An insert or a delete of a
+row with `k` out-of-line values costs `k` more mutations than the same row inline. An update that does
+not change a large value costs no extra mutations.
 
-Example: a table with a primary key, no secondary index, and 4 large columns stores all 4 out of line.
-Each inserted row costs `1 + 1 + 4 = 6` mutations, so the default limit of 20,000 admits 3,333 rows in
-one transaction, instead of 10,000. See [Transaction limits](transaction-limits.md).
+Example: a table has a primary key and 4 large columns, and no secondary index. All 4 columns are
+stored out of line. Each inserted row costs `1 + 1 + 4 = 6` mutations. This means that the default
+limit of 20,000 admits 3,333 rows in one transaction, compared with 10,000 for inline rows. For more
+information, see [Transaction limits](transaction-limits.md).
 
 ## Settings
 
@@ -119,45 +123,46 @@ All five settings are runtime settings. The first four have cluster scope, and
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `large_value_threshold_bytes` | `2048` | Stored size at or above which a value moves out of the row. `<= 0` keeps every new value inline. |
+| `large_value_threshold_bytes` | `2048` | Stored size at or above which a value moves out of the row. With `<= 0`, all new values are stored inline. |
 | `large_value_compression_enabled` | `true` | Whether the writer may compress. Reads ignore this setting. |
 | `large_value_compression_min_saving_percent` | `12` | Minimum saving for a compressed value to be kept. |
 | `large_value_rewrite_batch_rows` | `200` | Rows per transaction for `ALTER TABLE ... REWRITE STORAGE`. At most half of `max_mutations_per_transaction`. |
 | `large_value_resolve_batch_bytes` | `67108864` (64 MiB) | Decoded bytes of compressed and out-of-line values that one read, or one rewrite batch, resolves at a time. `<= 0` removes the bound. |
 
-A compressed value can be up to 255 times larger than its stored form, so the number of rows in a read
-says little about its memory. A scan, a batch read and a rewrite batch close at
+A compressed value can be up to 255 times larger than its stored form. This means that the number of
+rows in a read says little about its memory. A scan, a batch read and a rewrite batch close at
 `large_value_resolve_batch_bytes`, measured with the lengths each row records, before any value is
 fetched. A single row that is larger than the bound is read alone. The setting changes memory use and
-the number of fetches only. It never changes a result.
+the number of fetches only. It does not change results.
 
 ### Values only the result needs are fetched for surviving rows
 
 A full table scan with a filter reads an out-of-line value in two steps when the filter does not read
-that column. For `SELECT payload FROM events WHERE score > 90`, the scan fetches only the values the
-filter reads, applies the filter, and then fetches `payload` for the rows that passed, in windows of
-16 rows that double up to 512 and close at `large_value_resolve_batch_bytes`. A row the filter rejects
-never fetches its payload. The scan does this only when the filter calls no subquery and no volatile
-function, and every name in it is a column of the table. Under read committed the filter runs again on
-the final row, because the second fetch can find the row changed; a row that no longer passes is not
-returned.
+that column. For `SELECT payload FROM events WHERE score > 90`, the scan first fetches only the values
+the filter reads and applies the filter. Then it fetches `payload` for the rows that passed, in
+windows of 16 rows that double up to 512 and close at `large_value_resolve_batch_bytes`. The payload
+of a row that fails the filter is not fetched. The scan uses this method if the filter calls no
+subquery and no volatile function, and if each name in the filter is a column of the table. Under
+read committed, the filter is evaluated again on the final row, because the second fetch can find the
+row changed. A row that no longer passes is not returned.
 
-A setting change never alters an existing row. It decides the form of rows written after the change.
+A setting change does not alter existing rows. It decides the form of rows written after the change.
 
 ## Data written before this feature
 
-Every row written before this feature is inline and uncompressed. It stays readable, with no operator
-action, for the life of the database. Migration is optional. It is an optimisation.
+All rows written before this feature are inline and uncompressed. They remain readable for the life
+of the database, and the operator does not need to do anything. Migration is optional. It is an
+optimisation.
 
-Existing data reaches the new form in three ways:
+Existing data reaches the new form in three ways.
 
 1. **Writes convert rows.** An `INSERT` or an `UPDATE` stores the row under the current rules. A table
    that receives writes converts itself over time.
 2. **`SET STORAGE` does not rewrite rows.** It changes the form of future writes only, and it returns
-   at once whatever the table size. This is deliberate: a table rewrite hidden inside an `ALTER` would
+   at once whatever the table size. This is deliberate: a table rewrite hidden in an `ALTER` would
    make a metadata change take time proportional to the table.
-3. **An explicit rewrite converts cold data.** Run it when a table receives few writes and you want its
-   existing rows in the current form now:
+3. **An explicit rewrite converts cold data.** Use it when a table receives few writes and you want
+   its existing rows in the current form now.
 
    ```sql
    ALTER TABLE docs REWRITE STORAGE;
@@ -166,54 +171,57 @@ Existing data reaches the new form in three ways:
 ### How the rewrite behaves
 
 - It processes the table in transactions of `large_value_rewrite_batch_rows` rows, in row-id order.
-- It keeps each row's stored schema version, its values, its row id and every index entry. Only the
+- It does not change a row's stored schema version, values, row id or index entries. Only the
   physical form of the row and of its out-of-line values changes.
 - It is **idempotent**. A row that is already in the target form is not written. A second run over a
-  converted table reads the table and writes nothing.
+  converted table reads the table and writes no rows.
 - It is **resumable**. It records the last committed row id with each batch. If the statement stops,
   run it again: it continues after the last committed batch.
-- It **never overwrites a user write**. Each batch is an optimistic transaction that takes no lock
+- It **does not overwrite user writes**. Each batch is an optimistic transaction that takes no lock
   while it reads. If a user transaction commits a change to a row the batch read, the batch fails at
-  commit and the user's write stands. The run retries those rows at its end. Rows that keep changing are
-  left as they are; a write converts them anyway.
+  commit and the user's write stands. The run retries those rows at its end. Rows that change again
+  and again are left as they are; a write converts them anyway.
 - It **can make a concurrent user write retry**. While a batch commits, the rows it writes are locked for
-  a short time. A user transaction that writes one of those rows in that moment fails with the retryable
-  `CADB0502` (`TransactionConflict`). An autocommit statement sent over HTTP or gRPC is retried up to 5
-  times for you; an explicit transaction must retry from its start, as it must for any write conflict. Run the rewrite when writes to the table
-  are few, and keep `large_value_rewrite_batch_rows` small on a busy table.
-- It writes its progress to the server log: rows scanned, rows converted, rows already converted,
-  rows deferred, bytes moved out of line and bytes saved by compression.
-- It is **refused inside an explicit transaction** with `CADB0538` (`StatementNotAllowedInTransaction`),
-  as `TRUNCATE` is. Each batch commits in a transaction of its own, so a `ROLLBACK` of your transaction
-  could not undo it. There is a second reason. A Serializable transaction holds a lock on every row it
-  read or wrote. A batch over those rows waits for the lock, fails, and is deferred. On a large table
-  the statement would spend minutes on that, convert none of those rows, and still report success.
-  Commit or roll back first, then run it.
+  a short time. A user transaction that writes one of those rows in that moment gets the retryable
+  error `CADB0502` (`TransactionConflict`). An autocommit statement sent over HTTP or gRPC is retried
+  up to 5 times for you. An explicit transaction must retry from its start, as it must for any write
+  conflict. Run the rewrite when writes to the table are few, and keep
+  `large_value_rewrite_batch_rows` small on a busy table.
+- It writes its progress to the server log. The log shows rows scanned, rows converted, rows already
+  converted and rows deferred. It also shows bytes moved out of line and bytes saved by compression.
+- It is **refused in an explicit transaction** with `CADB0538` (`StatementNotAllowedInTransaction`),
+  as `TRUNCATE` is. Each batch commits in a separate transaction. This means that a `ROLLBACK` of your
+  transaction could not undo it. There is a second reason. A Serializable transaction has a lock on
+  each row it read or wrote. A batch over those rows waits for the lock and fails, and the rows are
+  deferred. On a large table, the statement would spend minutes on that and convert none of those
+  rows. It would also report success. Commit or roll back your transaction before you run it.
 
 A rewrite is safe for time-travel reads, branches and backups. It writes a new version of each row and
-never modifies an old one. An `AS OF SYSTEM TIME` read before the rewrite, a branch forked before it,
-and a restore to a point before it all read the old versions, which are complete.
+does not modify old versions. An `AS OF SYSTEM TIME` read before the rewrite reads the old versions,
+which are complete. The same is true for a branch forked before it and a restore to a point before it.
 
 ## Downgrade: the one-way door
 
 **A binary that predates this feature cannot read a row that is compressed or has an out-of-line
 value.** Such a row carries a flag in its first four bytes that an older binary does not know.
 
-If you must return to an older version, convert every table back first:
+If you must return to an older version, you will have to convert all tables back before you
+downgrade.
 
 ```sql
 ALTER TABLE docs REWRITE STORAGE INLINE;
 ```
 
-`INLINE` stores every value inside its row, uncompressed, and removes the out-of-line keys. The rows it
-writes are byte-identical to rows an older binary writes. Before you downgrade:
+`INLINE` removes the out-of-line keys and stores all values uncompressed in their rows. The rows it
+writes are byte-identical to rows an older binary writes. Take the following steps before you
+downgrade.
 
-1. Set `large_value_threshold_bytes` to `0` and `large_value_compression_enabled` to `false`, so that
-   new writes stay inline.
-2. Run `ALTER TABLE <table> REWRITE STORAGE INLINE` on every table.
+1. Set `large_value_threshold_bytes` to `0` and `large_value_compression_enabled` to `false`. New
+   writes are then stored inline.
+2. Run `ALTER TABLE <table> REWRITE STORAGE INLINE` on each table.
 3. Confirm that each run logs `0 deferred`. Run it again for a table that did not.
 
-During a rolling upgrade, do not store large values until every node runs the new version. A node on
+During a rolling upgrade, do not store large values until all nodes have the new version. A node on
 the old version cannot read a new-form row, including a row another node sends it for a distributed
 query.
 
@@ -223,12 +231,12 @@ query.
   fork timestamp, like the row itself. A write on the branch stores its values in the branch only; a
   delete writes tombstones. No branch write reaches the parent.
 - **Time-travel reads.** A value is read at the same timestamp as its row.
-- **Backups.** A backup captures the whole store, so out-of-line values are included.
+- **Backups.** A backup captures the full store. This means that out-of-line values are included.
 - **`TRUNCATE TABLE` and `DROP TABLE`.** The retired or dropped contents include the out-of-line values,
   and the purge that reclaims the contents removes them. A table recovered with `RELINK` reads its
   values back.
-- **Indexes.** An index entry holds the column value itself, not a pointer. Out-of-line storage changes
-  only the row.
+- **Indexes.** An index entry contains the column value itself. Out-of-line storage changes only the
+  row.
 - **Distributed queries.** A node that scans a span for another node resolves the values that the query
   reads before it sends the rows.
 
@@ -236,14 +244,14 @@ query.
 
 | Code | Name | Meaning |
 | --- | --- | --- |
-| `CADB0414` | `ColumnStorageNotApplicable` | A storage strategy was given for a column type with no variable-length value. |
-| `CADB0538` | `StatementNotAllowedInTransaction` | `ALTER TABLE ... REWRITE STORAGE` was issued inside an explicit transaction. |
+| `CADB0414` | `ColumnStorageNotApplicable` | A storage strategy was given for a column type that does not have a variable-length value. |
+| `CADB0538` | `StatementNotAllowedInTransaction` | `ALTER TABLE ... REWRITE STORAGE` was issued in an explicit transaction. |
 | `CADB0540` | `LargeValueCorrupt` | A stored value failed to decompress, or did not match the checksum its row recorded at a fixed snapshot. |
 | `CADB0541` | `LargeValueNotResolved` | An engine defect: a read path decoded a cell it did not resolve. Report it. |
 
-A read without a snapshot can see a row and its value at two moments while a concurrent update commits.
-CamusDB detects this with a checksum in the pointer and reads the row again. If the row keeps changing,
-the read fails with the retryable `CADB0504` (`TransactionMustRetry`).
+A read that does not use a snapshot can see a row and its value at two moments while a concurrent
+update commits. CamusDB detects this with a checksum in the pointer and reads the row again. If the
+row changes each time, the read returns the retryable error `CADB0504` (`TransactionMustRetry`).
 
 ## Storage format reference
 
@@ -251,86 +259,89 @@ This section is for contributors. The row layout is owned by `CompiledRowCodec` 
 in `CamusDB.Core/Storage/Kv/`.
 
 - **Flag.** Bit 31 of the leading schema-version word marks a row with a storage-form trailer. The other
-  31 bits are the stored schema version. A row without compressed or out-of-line cells keeps the bit
-  clear and has no trailer, so it is byte-identical to a row written before this feature.
+  31 bits are the stored schema version. In a row that has no compressed or out-of-line cells, the bit
+  is clear and there is no trailer. This means that the row is byte-identical to a row written before
+  this feature.
 - **Trailer.** After the variable area: an out-of-line bitmap and a compressed bitmap, one bit per
   variable column, then the variable column count and the offset of the variable offset directory, as
-  two `u32` values. The trailer is at the end so that no fixed or variable offset moves, and it is
-  self-describing so that the store can resolve cells without the schema.
+  two `u32` values. The trailer is at the end so that no fixed or variable offset moves. It is
+  self-describing so that the store can resolve cells when it does not have the schema.
 - **Compressed inline cell.** A `u32` uncompressed length, then an LZ4 block.
 - **Pointer cell.** 16 bytes: `u32` uncompressed length, `u32` stored length, `u64` XxHash64 of the
   stored bytes.
 - **Out-of-line key.** `{dbId}:{tableId}|v/{rowIdHex24}{ordinalHex4}`, where the ordinal is the cell's
-  variable-column ordinal in the row's stored layout. The key holds one `/`, so all large values of a
-  table share the key space `{dbId}:{tableId}|v` and the table's placement group.
-- **Resolution.** Store reads take a `LargeValueFetch`. The default resolves every marked cell, so any
+  variable-column ordinal in the row's stored layout. The key contains one `/`. This means that all
+  large values of a table share the key space `{dbId}:{tableId}|v` and the table's placement group.
+- **Resolution.** Store reads take a `LargeValueFetch`. The default resolves all marked cells, and any
   caller gets decodable bytes. A caller that decodes a known column set passes the same set, and the
   store resolves only those cells. A decoder that reads an unresolved cell raises `CADB0541`.
 
 ### NUMERIC cells and keys
 
 A NUMERIC value is the signed `Int128` equal to the value × 10⁹. It is stored in a fixed-width form and
-never moves out of line.
+does not move out of line.
 
 - **Compiled row cell.** 16 fixed bytes: the high 64 bits, then the low 64 bits, each a little-endian
   `i64`. This is the layout of a `uuid` cell.
 - **Serializer tag.** `TypeNumeric = 27`, followed by the same two halves. A new tag needed no storage
-  revision: a row without NUMERIC cells is unchanged.
+  revision: a row that has no NUMERIC cells is unchanged.
 - **Index key.** The `Int128` with its sign bit flipped, written as 19 fixed base-125 digits. The flip puts
-  every negative value below every non-negative one, so ordinal key order equals numeric order. A
-  descending index complements the 128 bits. The alphabet has no `/`.
+  all negative values below all non-negative ones. This means that ordinal key order equals numeric
+  order. A descending index complements the 128 bits. The alphabet does not contain `/`.
 
 ### jsonb cells
 
-A `jsonb` cell is a variable-length cell, so the compression and out-of-line rules on this page apply
-to it as to a `bytes` cell. See [json.md](json.md) for the SQL type.
+A `jsonb` cell is a variable-length cell. The compression and out-of-line rules on this page apply
+to it as to a `bytes` cell. For the SQL type, see [json.md](json.md).
 
 - **Serializer tag.** `TypeJsonb = 28`, followed by the `bytes` layout (a length, then the cell bytes).
-  A new tag needed no storage revision: a row without `jsonb` cells is unchanged.
+  A new tag needed no storage revision: a row that has no `jsonb` cells is unchanged.
 - **Cell bytes.** One format byte, `1`, then one CBOR data item (RFC 8949) in canonical form: definite
   lengths, shortest encodings, map keys sorted by encoded length and then by bytes, no duplicate keys.
   For text keys this is the PostgreSQL `jsonb` key order.
 - **Numbers.** An integer in the `int64` range is a CBOR integer. Any other number is a tag 4 decimal
   fraction `[exponent, mantissa]`, whose mantissa is an integer or a bignum (tags 2 and 3). A CBOR
-  float is never written.
-- **Subtrees.** Each nested item is itself a canonical CBOR item, so `->` returns the slice of the
-  parent's bytes behind one new format byte, with no decode and no encode.
-- **Versioning.** A reader that finds another format byte, or bytes that do not decode, fails with
+  float is not written.
+- **Subtrees.** Each nested item is itself a canonical CBOR item. This means that `->` returns the
+  slice of the parent's bytes behind one new format byte, and does not decode or encode anything.
+- **Versioning.** A reader that finds another format byte, or bytes that do not decode, returns error
   `JsonbValueCorrupt` (`CADB0559`). The byte leaves room for a later format, for example one with an
-  offset table for large objects, without a change to existing rows.
-- **No index key.** `KeyEncoder` refuses the type: a `jsonb` column cannot be an ordered index key.
+  offset table for large objects, and existing rows would not need to change.
+- **No index key.** `KeyEncoder` does not support the type: a `jsonb` column cannot be an ordered
+  index key.
 
 ### GIN index entries
 
-A GIN index (`IndexType.Inverted`) stores its entries in the non-unique index shape, in the index's
-own key space:
+A GIN index (`IndexType.Inverted`) stores its entries in the non-unique index shape, in a key space
+that belongs to the index.
 
 ```text
 {dbId}:{tableId}|i:{indexId}/{encodedEntry}{rowIdHex24}  →  rowIdHex24
 ```
 
 The key is the one a non-unique ordered index over one `string` column would write, with the entry
-text as the value. So DROP INDEX, DROP TABLE, TRUNCATE, branches, `SHOW RANGES` and key-range
-registration treat a GIN index as any index, the entries stay in the table's placement group, and no
-storage revision was needed. `JsonbGinIndexKeys` (`CamusDB.Core/Storage/Kv/`) builds every entry key.
+text as the value. For this reason, DROP INDEX, DROP TABLE, TRUNCATE, branches, `SHOW RANGES` and
+key-range registration treat a GIN index as any index. The entries are in the table's placement
+group, and no storage revision was needed. `JsonbGinIndexKeys` (`CamusDB.Core/Storage/Kv/`) builds
+all entry keys.
 
 A document has one entry for each distinct leaf. The entry text is the path from the root, then `=`,
-then the leaf:
+then the leaf. The table shows the form of each part.
 
 | Part | Form |
 |---|---|
 | Object key step | `k<hex of the key's UTF-8 bytes>;` |
 | Array element step | `[` (no position) |
 | Leaf: `null`, `false`, `true` | `n`, `f`, `t` |
-| Leaf: number | `d<digits>`, with trailing zeros of the fraction removed, so `1.0` and `1` are one entry |
+| Leaf: number | `d<digits>`, with trailing zeros of the fraction removed. This means that `1.0` and `1` are one entry |
 | Leaf: string | `s<hex of the UTF-8 bytes>` |
 | Leaf: empty object, empty array | `o`, `a` |
 | Long key (over 64 bytes), long string or number (over 128 characters) | `K`, `S` or `D`, then the first 32 hex digits of the SHA-256 of the bytes |
 
 `{"a": {"b": 1}, "t": ["x"]}` has the entries `k61;k62;=d1` and `k74;[=s78`. The alphabet is ASCII
-with no `/`, and `U+007F` sorts after every character it uses, so a prefix scan reads
-`[prefix, prefix + U+007F)`.
+and does not contain `/`. `U+007F` sorts after all the characters it uses. This means that a prefix
+scan reads `[prefix, prefix + U+007F)`.
 
 The entries lose array positions and structure. A query reads a superset of the matching rows, and
-the planner keeps the full predicate as a filter over the candidates. See
+the planner applies the full predicate as a filter over the candidates. For more information, see
 [query-planner.md](query-planner.md#gin-index-scans).

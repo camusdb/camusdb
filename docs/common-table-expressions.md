@@ -3,7 +3,7 @@
 A `WITH` clause names one or more queries, and the statement after it reads them by name, as it reads a
 table. Each named query is a common table expression (CTE). A `WITH RECURSIVE` query can also read
 itself, to walk a tree or a graph; see [recursive queries](#recursive-queries). CamusDB uses the
-PostgreSQL forms:
+PostgreSQL forms, as in this example.
 
 ```sql
 WITH totals AS (
@@ -24,8 +24,8 @@ SELECT a.name, b.amount
   `WITH s AS (…) UPDATE t SET … WHERE t.id IN (SELECT id FROM s)`.
 - In the source query of `INSERT INTO t WITH s AS (…) SELECT …` and of `CREATE TABLE … AS`.
 - In a view body and a materialized-view body.
-- Inside parentheses: a subquery (`IN`, `EXISTS`, a scalar subquery), a derived table, and an operand of
-  `UNION`, `INTERSECT` or `EXCEPT`.
+- In parentheses: a subquery (`IN`, `EXISTS`, a scalar subquery), a derived table, or an operand of a
+  set operation (`UNION`, `INTERSECT`, `EXCEPT`).
 
 ## The definition
 
@@ -35,43 +35,44 @@ SELECT a.name, b.amount
 - The column list names the columns of the query in order. A shorter list renames the first columns,
   and the later columns keep their names. A longer list is refused (`CADB0400`). A list can give one
   name two times, as in PostgreSQL; a reference to that name is then ambiguous (`CADB0400`).
-- `MATERIALIZED` and `NOT MATERIALIZED` choose how the statement runs the query. See below.
-- The query can be any query: joins, `GROUP BY`, window functions, set operations, `ORDER BY` and
-  `LIMIT`, and a `WITH` of its own.
+- `MATERIALIZED` and `NOT MATERIALIZED` choose how the query is executed. See below.
+- The query can be any query, including joins, `GROUP BY`, window functions, set operations, and `ORDER BY` with
+  `LIMIT`. It can also start with a nested `WITH`.
 
 A derived table takes a column list too: `SELECT a + b FROM (SELECT 1, 2) AS d (a, b)`.
 
 ## Which relation a name reads
 
-- A CTE is visible in the statement after its `WITH`, subqueries included, and in the CTEs after it.
-- A CTE is not visible in its own query or in an earlier CTE. There the name reads the table of that
+- A CTE is visible in the statement after its `WITH`, including subqueries. It is also visible in the
+  CTEs after it.
+- A CTE is not visible in the query that defines it or in an earlier CTE. There the name reads the table of that
   name. So `WITH items AS (SELECT * FROM items WHERE id < 10) SELECT * FROM items` reads the table in
   the CTE and the CTE in the statement.
 - A CTE name hides a table or a view of the same name.
-- A `WITH` inside parentheses hides a CTE of the same name from an enclosing `WITH`.
-- The target of a write is never a CTE: `WITH t AS (…) UPDATE t …` updates the table `t`. A CTE can be
-  read in `UPDATE … FROM`, `DELETE … USING`, and any subquery of the write.
-- An index hint on a CTE reference is refused (`CADB0400`): a CTE has no indexes.
+- A `WITH` in parentheses hides a CTE of the same name from an enclosing `WITH`.
+- A write does not target a CTE: `WITH t AS (…) UPDATE t …` updates the table `t`. A CTE
+  can be read in `UPDATE … FROM` or `DELETE … USING`, and in any subquery of the write.
+- An index hint on a CTE reference is not allowed (`CADB0400`), because a CTE does not have indexes.
 
 ## How the statement runs a CTE
 
-The parser writes each reference to a CTE out as a derived table over a copy of the CTE's query. Every
-later step (privileges, planning, `EXPLAIN`, spill) is then the step of a derived table. See
+The parser writes each reference to a CTE out as a derived table over a copy of the CTE's query. Later
+steps, such as privilege checks, planning, `EXPLAIN` and spill, then treat it as a derived table. See
 [joins](joins.md) for derived tables.
 
-A CTE is **inlined** or **computed once**:
+A CTE is either **inlined** or **computed once**.
 
-- **Inlined.** Each reader runs its own copy of the query, as a derived table it wrote itself. The
-  planner can then push a filter of the reader down. This is the rule for a CTE that the statement reads
-  one time, for `NOT MATERIALIZED`, and for every CTE of a `WITH` inside parentheses.
-- **Computed once.** The first reader runs the query and keeps its rows for the statement, and every
-  other reader reads the kept rows. This is the rule for a CTE of a `WITH` at the start of the
-  statement, or at the start of its source query, that the statement reads two or more times, and for
-  `MATERIALIZED`. A volatile function in such a CTE, such as `random()`, gives every reader the same
-  values.
+- **Inlined.** Each reader executes a separate copy of the query, as a derived table it wrote itself.
+  The planner can then push a filter of the reader down. This is the rule for a CTE that the statement
+  reads one time and for `NOT MATERIALIZED`. It is also the rule for all CTEs of a `WITH` in
+  parentheses.
+- **Computed once.** The first reader executes the query and stores its rows for the statement. The
+  other readers read the stored rows. This is the rule for `MATERIALIZED`, and for a CTE that the
+  statement reads two or more times when its `WITH` is at the start of the statement or of its source
+  query. A volatile function in such a CTE, such as `random()`, gives all readers the same values.
 
-Each reader applies its own filter to the kept rows, so a filter of one reader does not change the
-rows of another. The kept rows are spilled to disk under the rules of
+Each reader applies a separate filter to the stored rows. A filter of one reader does not change the
+rows of another. The stored rows are spilled to disk under the rules of
 [spill to disk](spill-to-disk.md), and the statement deletes them when it ends.
 
 A CTE that is computed once is computed in full before any reader gets a row, also under a `LIMIT`.
@@ -79,8 +80,8 @@ For a large CTE that one reader stops early, `NOT MATERIALIZED` can be faster.
 
 `EXPLAIN` marks each reader of a CTE that is computed once with `computed_once=<name>`.
 
-A `WITH` inside parentheses is always inlined because such a query can read the columns of the query
-around it: one set of rows is then not right for every row of the outer query.
+A `WITH` in parentheses is always inlined. Such a query can read the columns of the query around it,
+and one set of rows would then be wrong for some rows of the outer query.
 
 ## Recursive queries
 
@@ -99,17 +100,18 @@ SELECT id, depth, path FROM walk ORDER BY path;
 
 ### The form
 
-A CTE that reads itself must be `non-recursive term UNION [ALL] recursive term`:
+A CTE that reads itself must have the form `non-recursive term UNION [ALL] recursive term`. The
+terms follow these rules.
 
 - The non-recursive term does not read the CTE. It can be any query, also a chain of `UNION ALL`.
 - The recursive term reads the CTE one time, in its `FROM` or in a derived table in its `FROM`.
-- The `UNION` has no `ORDER BY`, `LIMIT` or `OFFSET` of its own (`CADB0533`). A recursive term in
+- The `UNION` cannot take an `ORDER BY`, `LIMIT` or `OFFSET` clause (`CADB0533`). A recursive term in
   parentheses can have them.
 
-These places of the reference are refused (`CADB0400`), as in PostgreSQL. In each of them, a row of one
-step would depend on rows that a later step adds:
+The reference to the CTE is not allowed in the following places (`CADB0400`), as in PostgreSQL. In
+each of them, a row of one step would depend on rows that a later step adds.
 
-- a subquery in an expression: `IN (SELECT …)`, `EXISTS`, a scalar subquery;
+- a subquery in an expression, such as `IN (SELECT …)`, `EXISTS` or a scalar subquery;
 - the side of an outer join that can be NULL: the right side of `LEFT JOIN`, the left side of
   `RIGHT JOIN`;
 - `INTERSECT ALL`, the right side of `EXCEPT`, and the left side of `EXCEPT ALL`;
@@ -120,50 +122,51 @@ Window functions, `DISTINCT`, `GROUP BY` and `HAVING` are allowed in the recursi
 
 ### Names
 
-Under `WITH RECURSIVE`, every CTE of the list is visible in the query of every other CTE, in any
-order, and in its own query. So a CTE can read a CTE that is written after it. A CTE name hides a table
+Under `WITH RECURSIVE`, each CTE of the list is visible in its own query and in the queries of the
+other CTEs, in any order. This means that a CTE can read a CTE that is written after it. A CTE name hides a table
 of the same name, also in the CTE's own query. Two or more CTEs that read each other are refused
 (`CADB0533`). A CTE of the list that does not read itself is an ordinary CTE.
 
 ### Types
 
 The column types are the types of the non-recursive term. A NULL or a placeholder alone in that term
-has the type STRING. When the recursive term gives a column another type, the whole query has the
-wider type, and the statement fails (`CADB0400`). For example, `SELECT 1 UNION ALL SELECT n + 1.5 …`
-fails, because the rows of the first step are INT64. Cast the non-recursive term to the type of the
-whole query: `SELECT CAST(1 AS FLOAT64) UNION ALL …`.
+has the type STRING. When the recursive term gives a column another type, the query has the
+wider type, and the statement returns an error (`CADB0400`). For example,
+`SELECT 1 UNION ALL SELECT n + 1.5 …` returns an error. The rows of the first step are INT64. Cast the non-recursive term to the
+type of the query: `SELECT CAST(1 AS FLOAT64) UNION ALL …`.
 
 ### How it runs
 
-The query runs in steps, with the work-table method of PostgreSQL:
+The query is executed in steps, with the work-table method of PostgreSQL.
 
-1. Step 0 runs the non-recursive term.
-2. Each next step runs the recursive term again. The reference to the CTE reads only the rows that
+1. Step 0 executes the non-recursive term.
+2. Each next step executes the recursive term again. The reference to the CTE reads only the rows that
    the step before made (the work table).
 3. The query ends after a step that makes no row.
 
-`UNION ALL` keeps every row. `UNION` drops a row that an earlier step or the same step returned, so a
-walk over a graph with a cycle ends when no new row appears. Without `UNION`, such a walk does not end.
+`UNION ALL` returns all rows. `UNION` drops a row that an earlier step or the same step returned. This
+means that a walk over a graph with a cycle ends when no new row appears. If you use `UNION ALL`, such a
+walk does not end.
 
-Each row is returned when its step makes it. So a `LIMIT` over a recursive CTE that the statement reads
-one time stops the recursion, also a recursion with no end:
+Each row is returned when its step makes it. This means that a `LIMIT` over a recursive CTE that the
+statement reads one time stops the recursion. This is also true for an endless recursion.
 
 ```sql
 WITH RECURSIVE t (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t) SELECT n FROM t LIMIT 5;
 ```
 
 A recursive CTE that the statement reads two or more times is computed once, as any CTE is (see
-above). That run makes every row before any reader gets one, so a `LIMIT` in a reader does not stop it.
+above). That run makes all the rows before any reader gets one. A `LIMIT` in a reader does not stop it.
 
 ### Memory
 
 The rows of one step are kept for the next step, and they spill to disk under the rules of
 [spill to disk](spill-to-disk.md). Only the rows of the last two steps are kept at one time. `UNION`
-also keeps one copy of each row that it returned, in memory, to drop a row that comes again.
+also stores one copy of each row that it returned, in memory, to drop a row that comes again.
 
 ### Limits of a recursion
 
-A statement has no time limit by default, so a recursion with no end would run until the disk is full. Two
+By default, a statement does not have a time limit. This means that an endless recursion would continue until the disk is full. Two
 cluster settings stop it with `CADB0560` (`RecursiveQueryLimitExceeded`). The message names the
 setting.
 
@@ -189,15 +192,16 @@ alias, and then the plans of the two terms. The reference to the CTE in the recu
 
 ## Views
 
-A view stores its body with each CTE written out as a derived table, so `SHOW CREATE VIEW` shows the
-derived tables and no `WITH`. The stored text parses again to the same view. Because the stored body
-has no `WITH`, a CTE that the body reads two times runs two times when the view is read.
+A view stores its body with each CTE written out as a derived table. `SHOW CREATE VIEW` shows the
+derived tables, and the `WITH` is gone. The stored text parses again to the same view. Since the
+stored body does not contain a `WITH`, a CTE that the body reads two times is executed two times when
+the view is read.
 
-A recursive CTE cannot become a plain derived table. It is stored where the body reads it, as
+A recursive CTE cannot be written out as a derived table over a copy of its query, as a non-recursive CTE is. It is stored where the body reads it, as
 `(WITH RECURSIVE name (columns) AS (…) SELECT * FROM name) AS alias`. This text also parses again to
 the same view. When the recursive query also reads a table of the CTE's name, the CTE is shown under the
 first free name, such as `name_1`. That happens after a table rename, or when the query reads the table
-through an outer CTE. Its reference keeps the old name as its alias, so the text means the same.
+through an outer CTE. Its reference uses the old name as its alias. This means that the text has the same meaning.
 
 ## Limits
 

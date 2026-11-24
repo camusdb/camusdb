@@ -49,12 +49,13 @@ internal static class MetaKeyWriter
     /// </summary>
     private const int MetaKeyMaxRetries = 32;
 
-    internal static async Task WriteMetaKey(IKahuna kahuna, KvTransaction tx, string key, byte[] value)
+    /// <param name="lockLeaseMs">The lease of the key's lock; zero ties it to the transaction (<see cref="CatalogKeyLock"/>).</param>
+    internal static async Task WriteMetaKey(IKahuna kahuna, KvTransaction tx, string key, byte[] value, int lockLeaseMs = 0)
     {
         if (SkipsCatalogWrite(tx))
             return;
 
-        await CatalogKeyLock.AcquireExclusiveAsync(kahuna, tx, key, MetaKeyMaxRetries, "meta").ConfigureAwait(false);
+        await CatalogKeyLock.AcquireExclusiveAsync(kahuna, tx, key, MetaKeyMaxRetries, "meta", lockLeaseMs).ConfigureAwait(false);
 
         // A stable operation id reused across the retry loop so a replayed call after a lost response
         // folds once into the coordinator working set instead of applying twice. The write must fold, or
@@ -88,12 +89,13 @@ internal static class MetaKeyWriter
         tx.TrackModified(key, KeyValueDurability.Persistent);
     }
 
-    internal static async Task DeleteMetaKey(IKahuna kahuna, KvTransaction tx, string key)
+    /// <param name="lockLeaseMs">The lease of the key's lock; zero ties it to the transaction (<see cref="CatalogKeyLock"/>).</param>
+    internal static async Task DeleteMetaKey(IKahuna kahuna, KvTransaction tx, string key, int lockLeaseMs = 0)
     {
         if (SkipsCatalogWrite(tx))
             return;
 
-        await CatalogKeyLock.AcquireExclusiveAsync(kahuna, tx, key, MetaKeyMaxRetries, "meta").ConfigureAwait(false);
+        await CatalogKeyLock.AcquireExclusiveAsync(kahuna, tx, key, MetaKeyMaxRetries, "meta", lockLeaseMs).ConfigureAwait(false);
 
         // A stable operation id reused across the retry loop (see WriteMetaKey) so the delete folds once
         // into the coordinator working set and the DDL commit persists the removal.

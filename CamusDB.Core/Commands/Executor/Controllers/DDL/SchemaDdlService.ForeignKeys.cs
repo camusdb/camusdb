@@ -12,6 +12,7 @@ using CamusDB.Core.Catalogs.Replication;
 using CamusDB.Core.Catalogs.Transactional;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.SQLParser;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.ObjectIds;
 using Microsoft.Extensions.Logging;
@@ -97,9 +98,22 @@ internal sealed partial class SchemaDdlService
     private Task<bool> StageRowConstraintOnSharedTableAsync(
         DatabaseDescriptor database, TransactionSchemaOverlay overlay, TableDescriptor table, AlterConstraintTicket ticket)
     {
-        string statement = ticket.Operation == AlterConstraintOperation.AddCheck
-            ? "ALTER TABLE ... ADD CONSTRAINT ... CHECK"
-            : "ALTER TABLE ... ALTER COLUMN ... SET NOT NULL";
+        string statement;
+
+        // Against the private schema first, so a definition that the transaction's own view of the table
+        // refuses fails for that reason, also when the staged form cannot run on the table.
+        if (ticket.Operation == AlterConstraintOperation.AddCheck)
+        {
+            statement = "ALTER TABLE ... ADD CONSTRAINT ... CHECK";
+            ConstraintNameRules.RequireUnused(table.Schema, ticket.ConstraintName);
+            TransactionalDdlRules.RequireSharedFunctions(overlay, SQLParserProcessor.ParseCondition(ticket.Expression!), table, statement);
+        }
+        else
+        {
+            statement = "ALTER TABLE ... ALTER COLUMN ... SET NOT NULL";
+            TableColumnSchema column = table.Schema.Columns!.Find(c => string.Equals(c.Name, ticket.ColumnName, StringComparison.OrdinalIgnoreCase))!;
+            ConstraintNameRules.RequireUnusedForNotNull(table.Schema, TableConstraintAlterer.NotNullConstraintName(table, ticket.ColumnName!), column.Id);
+        }
 
         return RunOwnedStagedChangeAsync(database, overlay, table, statement, async () =>
         {
@@ -385,7 +399,24 @@ internal sealed partial class SchemaDdlService
     {
         const string statement = "ALTER TABLE ... ADD FOREIGN KEY";
 
-        TableDescriptor parent = await context.TableOpener.Open(database, info.ReferencedTable).ConfigureAwait(false);
+        // Against the private schema first, so a definition that the transaction's own view of the two
+        // tables refuses fails for that reason, also when the staged form cannot run on them.
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+        try
+        {
+            ForeignKeyAlterPlan privatePlan = ForeignKeyDefinitionBuilder.ResolveForAlter(database.Schema, child.Schema, info, options);
+            ForeignKeyDefinitionRules.RequireNoCycle(database.Schema, child.Schema, privatePlan.ToSchema(privatePlan.BackingIndexId ?? ""));
+        }
+        finally
+        {
+            database.Schema.ReleaseLock();
+        }
+
+        // The statement's privilege is on the child. The parent needs SELECT only, which was checked.
+        TableDescriptor parent;
+        using (AuthorizationContext.SuspendTableCheck())
+            parent = await context.TableOpener.Open(database, info.ReferencedTable).ConfigureAwait(false);
+
         TransactionalDdlRules.RequireStageableParent(overlay, parent, statement);
 
         return await RunOwnedStagedChangeAsync(database, overlay, child, statement, async () =>
@@ -403,6 +434,10 @@ internal sealed partial class SchemaDdlService
                 {
                     plan = ForeignKeyDefinitionBuilder.ResolveForAlter(database.Schema, table.Schema, info, options);
                     ForeignKeyDefinitionRules.RequireNoCycle(database.Schema, table.Schema, plan.ToSchema(plan.BackingIndexId ?? ""));
+                }
+                catch (CamusDBException refused) when (refused.Code == CamusDBErrorCodes.ForeignKeyCycle)
+                {
+                    throw TransactionalDdlRules.CycleOfSharedSchema(statement, child, refused);
                 }
                 finally
                 {
@@ -595,8 +630,11 @@ internal sealed partial class SchemaDdlService
             ).ConfigureAwait(false);
 
             // A constraint dropped during its rollout leaves a job behind. A resume would find the
-            // constraint Absent and delete it anyway; this only saves it the work.
-            await DeleteForeignKeyJobAsync(database, table.Id, foreignKey.Name).ConfigureAwait(false);
+            // constraint Absent and delete it anyway; this only saves it the work. Never inside a transaction
+            // with a private schema: the drop is not decided yet, and the record of a constraint that the
+            // transaction itself staged is what removes it after a rollback. The commit deletes that one.
+            if (TransactionSchemaScope.OverlayFor(database) is null)
+                await DeleteForeignKeyJobAsync(database, table.Id, foreignKey.Name).ConfigureAwait(false);
 
             if (ownedIndexName is not null)
                 await DropIndexAfterFailureAsync(database, tableName, ownedIndexName).ConfigureAwait(false);

@@ -260,6 +260,55 @@ internal sealed class SequenceAllocator
     }
 
     /// <summary>
+    /// Gives the counter of <paramref name="sequence"/> the definition that the record has: increment,
+    /// maximum and cache size, and the start value when <paramref name="setsStartValue"/> is true. The
+    /// position does not move, so running it twice has the same result.
+    ///
+    /// <para>The sequencer refuses a maximum below the values the counter already reserved. Such a counter
+    /// has nothing left to issue, so its maximum becomes what it reserved, and the next draw reports an
+    /// exhausted sequence, as the record says.</para>
+    /// </summary>
+    internal async Task AlignAsync(IKahuna kahuna, string dbId, SequenceSchema sequence, bool setsStartValue, CancellationToken cancellationToken)
+    {
+        long? maxValue = sequence.MaxValue;
+
+        for (int attempt = 1; ; attempt++)
+        {
+            try
+            {
+                await UpdateAsync(
+                    kahuna,
+                    dbId,
+                    sequence,
+                    currentValue: null,
+                    increment: sequence.Increment,
+                    initialValue: setsStartValue ? sequence.StartValue : null,
+                    maxValue: maxValue,
+                    removeMaxValue: maxValue is null,
+                    blockSize: sequence.CacheSize,
+                    removeBlockSize: sequence.CacheSize is null,
+                    cancellationToken).ConfigureAwait(false);
+
+                return;
+            }
+            catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.InvalidSequenceDefinition
+                                               && maxValue is { } refused
+                                               && attempt < MaxAlignAttempts)
+            {
+                long? ceiling = await ReadReservedCeilingAsync(kahuna, dbId, sequence.Id!, cancellationToken).ConfigureAwait(false);
+
+                if (ceiling is not { } reserved || reserved <= refused)
+                    throw;
+
+                maxValue = reserved;
+            }
+        }
+    }
+
+    /// <summary>A draw between the read of the ceiling and the update can move it, so the update is tried again.</summary>
+    private const int MaxAlignAttempts = 4;
+
+    /// <summary>
     /// Reads the counter's <b>reserved high-water mark</b> — an upper bound on the values issued,
     /// not the last value issued. After four <c>nextval</c> calls on a fresh sequence with the
     /// default block size this reads 1000, because a thousand values were reserved to issue four.
