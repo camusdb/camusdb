@@ -1290,6 +1290,49 @@ public sealed class TestTransactionalDdlObjects : InlineFunctionTestBase
         }
     }
 
+    /// <summary>
+    /// A CHECK on a committed table is checked and enforced with the functions that other transactions see, and
+    /// other transactions fill a new column with the function of its default. So neither can call a member of
+    /// an extension that only the transaction installed. Each can once the extension is committed, and a change
+    /// of an extension that the statement does not name has no effect on it.
+    /// </summary>
+    [TestCase("ADD CONSTRAINT c CHECK (fx_add(v, 1) > 0)")]
+    [TestCase("ADD CONSTRAINT c CHECK (good.fx_add(v, 1) > 0)")]
+    [TestCase("ADD COLUMN n INT64 DEFAULT (fx_counter())")]
+    public async Task AStatementOnACommittedTable_ThatCallsAMemberOfAnExtensionOfTheTransaction_IsRefused(string change)
+    {
+        (string db, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await ExecDdl(executor, db, T);
+        await ExecNonQuery(executor, db, "INSERT INTO t (id, v) VALUES (1, 5)");
+        string statement = $"ALTER TABLE t {change}";
+        long versionBefore = database.Schema.SchemaVersion;
+
+        KvTransaction tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, db, "CREATE EXTENSION good");
+        Assert.AreEqual(CamusDBErrorCodes.StatementNotAllowedInTransaction, await Code(() => Ddl(executor, tx, db, statement)));
+        await database.Transactions.RollbackAsync(tx);
+        AssertNoTrace(database, versionBefore);
+
+        tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, db, "CREATE EXTENSION good");
+        await Ddl(executor, tx, db, "ALTER TABLE t ADD CONSTRAINT other CHECK (abs(v) > 0)");
+        await database.Transactions.CommitAsync(tx);
+
+        tx = await BeginSessionAsync(database);
+        await Ddl(executor, tx, db, "CREATE SEQUENCE s");
+        await Ddl(executor, tx, db, statement);
+        await database.Transactions.CommitAsync(tx);
+
+        if (database.Schema.Tables["t"].CheckConstraints!.Count == 2)
+        {
+            Assert.AreEqual(CamusDBErrorCodes.CheckConstraintViolation, await Code(() => ExecNonQuery(executor, db, "INSERT INTO t (id, v) VALUES (2, -9)")));
+            return;
+        }
+
+        await ExecNonQuery(executor, db, "INSERT INTO t (id, v) VALUES (2, 6)");
+        Assert.AreEqual(2, (await ExecQuery(executor, db, "SELECT DISTINCT n FROM t WHERE n IS NOT NULL")).Count);
+    }
+
     [TestCase("CREATE MATERIALIZED VIEW mv2 AS SELECT id FROM t")]
     [TestCase("REFRESH MATERIALIZED VIEW mv")]
     [TestCase("CREATE TABLE back RELINK TO 'abc'")]

@@ -968,4 +968,120 @@ public sealed class TestClusterTransactionalDdl
 
         Assert.AreEqual(commit ? 1 : 0, (await QueryAsync(leader, db, "SELECT id FROM base WHERE id = 2")).Count);
     }
+
+    private static async Task<string> RefusalCode(Func<Task> action, string statement)
+    {
+        try
+        {
+            await action();
+        }
+        catch (CamusDBException refused)
+        {
+            return refused.Code;
+        }
+
+        Assert.Fail($"accepted: {statement}");
+        return "";
+    }
+
+    /// <summary>
+    /// Outside a transaction the schema leader checks a schema statement, and a follower forwards it there.
+    /// Inside a transaction the node that holds the transaction checks it. A transaction on a follower meets
+    /// the refusals of the leader, on committed objects and on its own objects, and its rollback leaves
+    /// nothing on any node.
+    /// </summary>
+    [Test]
+    public async Task ARefusalOfTheLeader_AlsoHappensInATransactionOnAFollower()
+    {
+        const string db = "txddlrefusals";
+
+        await using InProcessSchemaCluster cluster = await StartClusterAsync();
+        (InProcessSchemaCluster.Node leader, InProcessSchemaCluster.Node follower) = await PrepareAsync(cluster, db);
+
+        string[] objects =
+        [
+            "CREATE TABLE p (id int64 PRIMARY KEY, code int64, UNIQUE KEY uk (code))",
+            "CREATE TABLE c (id int64 PRIMARY KEY, p int64, KEY kp (p), CONSTRAINT fk FOREIGN KEY (p) REFERENCES p (id))",
+            "CREATE TABLE t (id int64 PRIMARY KEY, v int64, name string, KEY k (v))",
+            "CREATE VIEW w AS SELECT id, v FROM t",
+        ];
+        const string rows = "INSERT INTO t (id, v) VALUES (1, 1), (2, 1)";
+
+        (string Statement, string Code)[] refusals =
+        [
+            ("CREATE TABLE t (id int64 PRIMARY KEY)", CamusDBErrorCodes.TableAlreadyExists),
+            ("CREATE TABLE d (id int64 PRIMARY KEY, p int64 REFERENCES missing (id))", CamusDBErrorCodes.TableDoesntExist),
+            ("DROP TABLE t", CamusDBErrorCodes.DependentObjectsExist),
+            ("DROP TABLE p", CamusDBErrorCodes.DependentObjectsExist),
+            ("DROP TABLE missing", CamusDBErrorCodes.TableDoesntExist),
+            ("ALTER TABLE t RENAME TO p", CamusDBErrorCodes.TableAlreadyExists),
+            ("ALTER TABLE t RENAME COLUMN v TO id", CamusDBErrorCodes.DuplicateColumn),
+            ("ALTER TABLE t RENAME INDEX missing TO x", CamusDBErrorCodes.InvalidInput),
+            ("ALTER TABLE t ADD COLUMN v int64", CamusDBErrorCodes.InvalidInput),
+            ("ALTER TABLE t ADD COLUMN x int64 NOT NULL", CamusDBErrorCodes.NotNullViolation),
+            ("ALTER TABLE t ADD COLUMN x int64 DEFAULT(nextval('missing'))", CamusDBErrorCodes.SequenceDoesntExist),
+            ("ALTER TABLE t DROP COLUMN v", CamusDBErrorCodes.DependentObjectsExist),
+            ("ALTER TABLE p DROP COLUMN code", CamusDBErrorCodes.InvalidInput),
+            ("CREATE INDEX k ON t (id)", CamusDBErrorCodes.InvalidInput),
+            ("CREATE INDEX x ON t (missing)", CamusDBErrorCodes.InvalidInput),
+            ("CREATE UNIQUE INDEX x ON t (v)", CamusDBErrorCodes.DuplicateUniqueKeyValue),
+            ("DROP INDEX kp ON c", CamusDBErrorCodes.DependentObjectsExist),
+            ("ALTER TABLE t ADD CONSTRAINT x CHECK (v > 5)", CamusDBErrorCodes.CheckConstraintViolation),
+            ("ALTER TABLE c ADD CONSTRAINT fk CHECK (p > 5)", CamusDBErrorCodes.InvalidInput),
+            ("ALTER TABLE t ALTER COLUMN name SET NOT NULL", CamusDBErrorCodes.NotNullViolation),
+            ("ALTER TABLE t ADD CONSTRAINT x FOREIGN KEY (v) REFERENCES p (id)", CamusDBErrorCodes.ForeignKeyViolation),
+            ("ALTER TABLE c ADD CONSTRAINT x FOREIGN KEY (p) REFERENCES w (id)", CamusDBErrorCodes.InvalidForeignKeyDefinition),
+            ("ALTER TABLE p ADD CONSTRAINT x FOREIGN KEY (code) REFERENCES c (id)", CamusDBErrorCodes.ForeignKeyCycle),
+            ("ALTER TABLE t SET (ttl_expiration_expression = 'missing')", CamusDBErrorCodes.UnknownColumn),
+            ("COMMENT ON COLUMN t.missing IS 'x'", CamusDBErrorCodes.UnknownColumn),
+            ("CREATE VIEW t AS SELECT 1 AS a", CamusDBErrorCodes.TableAlreadyExists),
+        ];
+
+        // The objects exist only in the private schema of a transaction on the follower.
+        foreach ((string statement, string code) in refusals)
+        {
+            KvTransaction tx = await BeginSessionAsync(follower);
+            foreach (string sql in objects)
+                await Ddl(follower, tx, db, sql);
+            await Write(follower, tx, db, rows);
+
+            Assert.AreEqual(code, await RefusalCode(() => Ddl(follower, tx, db, statement), statement), $"on objects of the transaction: {statement}");
+            await follower.Database!.Transactions.RollbackAsync(tx);
+        }
+
+        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+            Assert.AreEqual(new[] { "base" }, node.Database!.Schema.Tables.Keys.ToArray(), $"node {node.Index}");
+
+        // The objects are committed.
+        foreach (string sql in objects)
+            await AutocommitAsync(leader, db, sql, ddl: true);
+        await AutocommitAsync(leader, db, rows, ddl: false);
+        await cluster.WaitForSchemaConvergenceAsync(db, leader.Database!.Schema.SchemaVersion);
+
+        foreach ((string statement, string code) in refusals)
+        {
+            Assert.AreEqual(code, await RefusalCode(() => AutocommitAsync(leader, db, statement, ddl: true), statement), $"outside, on the leader: {statement}");
+
+            KvTransaction tx = await BeginSessionAsync(follower);
+            Assert.AreEqual(code, await RefusalCode(() => Ddl(follower, tx, db, statement), statement), $"inside, on a follower: {statement}");
+            await follower.Database!.Transactions.RollbackAsync(tx);
+        }
+
+        await cluster.WaitForSchemaConvergenceAsync(db, leader.Database!.Schema.SchemaVersion);
+
+        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+        {
+            Schema schema = node.Database!.Schema;
+
+            Assert.AreEqual(new[] { "base", "c", "p", "t" }, schema.Tables.Keys.Order().ToArray(), $"node {node.Index}");
+            Assert.AreEqual(new[] { "id", "name", "v" }, schema.Tables["t"].Columns!.Select(c => c.Name).Order().ToArray());
+            Assert.AreEqual(new[] { "k" }, schema.Tables["t"].Indexes!.Select(i => i.Name).Where(n => !n.StartsWith('~')).ToArray());
+            Assert.IsTrue(schema.Tables["t"].Columns!.TrueForAll(c => c.Name == "id" || !c.NotNull));
+            Assert.AreEqual(0, schema.Tables.Values.Sum(t => t.CheckConstraints?.Count ?? 0));
+            Assert.AreEqual(1, schema.Tables.Values.Sum(t => t.ForeignKeys?.Count ?? 0));
+        }
+
+        Assert.AreEqual(0, await CountKeysAsync(leader.Database!, MetaKeys.MetaBucketPrefix(leader.Database!.Id), MetaKeys.CoordinatorKeyPrefix(leader.Database!.Id)),
+            "no job record is left");
+    }
 }

@@ -937,6 +937,16 @@ What the transaction meets:
   transaction to the table and, for a foreign key, for a parent table that the transaction created,
   changed or wrote. A foreign key with no index to use builds one, so the locks of the transaction on the
   child rows refuse it too.
+- **An online build on a shared table cannot use an uncommitted object.** Other transactions are held to
+  its result before the commit, so it is refused with `CADB0538` when it needs something that only the
+  transaction has: a default that draws from a sequence that the transaction created or renamed, a CHECK
+  or a default that calls a function that the transaction created or replaced (or a member of an extension
+  that it installed or updated), or a foreign key that is free of a cycle only because the transaction
+  removed another one. Commit the change first, then run the statement. A table that the transaction created has
+  no such limit.
+- **A refusal has the same code inside and outside a transaction.** A used name, a missing object, a
+  dependent object, a missing privilege or a row that breaks a new constraint fails the statement as it
+  does outside, judged on what the transaction itself sees. The failure aborts the transaction (§9.4).
 - **The counter of a sequence is not transactional.** `nextval` and `setval` move it at once, and a
   `ROLLBACK` gives no value back. `CREATE SEQUENCE` makes the counter at once, and a `ROLLBACK` removes it.
   `DROP SEQUENCE` and `ALTER SEQUENCE` reach the counter after the commit: until then every transaction,

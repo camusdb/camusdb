@@ -460,6 +460,9 @@ internal sealed class TableConstraintAlterer
         return true;
     }
 
+    /// <summary>The name that <c>SET NOT NULL</c> gives the constraint of a column: <c>{table}_{column}_not_null</c>.</summary>
+    internal static string NotNullConstraintName(TableDescriptor table, string columnName) => $"{table.Name}_{columnName}_not_null";
+
     private async Task<bool> SetNotNull(
         CatalogsManager catalogs,
         TableOpener tableOpener,
@@ -480,7 +483,7 @@ internal sealed class TableConstraintAlterer
 
         // Auto-name: {table}_{col}_not_null. The generated name must not be one that a CHECK or a
         // foreign key already uses (ConstraintNameRules); checked again under the gate and the lock.
-        string constraintName = $"{table.Name}_{columnName}_not_null";
+        string constraintName = NotNullConstraintName(table, columnName);
         ConstraintNameRules.RequireUnusedForNotNull(table.Schema, constraintName, column.Id);
 
         if (TransactionSchemaScope.OverlayFor(database) is { } overlay)
@@ -725,7 +728,7 @@ internal sealed class TableConstraintAlterer
                         CamusDBErrorCodes.ConcurrentSchemaChange,
                         $"Column '{columnName}' of table '{tableName}' became NOT NULL while the statement started; roll back and retry");
 
-                constraintName = $"{tableName}_{columnName}_not_null";
+                constraintName = NotNullConstraintName(table, columnName);
                 ConstraintNameRules.RequireUnusedForNotNull(table.Schema, constraintName, column.Id);
             }
 

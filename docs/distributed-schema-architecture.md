@@ -1613,6 +1613,27 @@ the table do, because the check cannot see them. A foreign key that must build i
 each child row, so the transaction's locks on them refuse it before anything is staged. A foreign key is also refused when the transaction
 created, changed or wrote the parent table (`TransactionalDdlRules.RequireStageableParent`).
 
+**Definition checks.** A statement with a staged form on a shared table checks its definition twice. The
+first check reads the private schema, before the rules of the paragraph above, so a name, a column, a type
+or a cycle that the transaction's own view refuses fails with the code it has outside a transaction. The
+second check is the one of the steps themselves, under the DDL gate, on the shared schema. An object that
+only the private schema has cannot be used by the steps, because other transactions are held to their
+result before the commit. The statement is refused with `CADB0538` when:
+
+- the default of a new column draws from a sequence that the transaction created or renamed
+  (`TransactionalDdlRules.RequireSharedSequence`). The sequence of a new identity column is created in the
+  shared schema, with a name that is free in the private schema too;
+- a CHECK, or the default of a new column, calls a function that the transaction created or replaced, or a
+  member of an extension that it installed or moved to another version
+  (`TransactionalDdlRules.RequireSharedFunctions`). The rows are checked or filled with the function of the
+  shared schema, so the commit would put another function under a constraint whose rows were never checked
+  with it;
+- a new foreign key closes a cycle only with a foreign key that the transaction removed, which other
+  transactions still enforce (`TransactionalDdlRules.CycleOfSharedSchema`).
+
+The parent table of a foreign key is opened without the privilege check of the statement: the statement
+needs `ALTER` on the child and `SELECT` on the parent, and the `SELECT` was checked before.
+
 #### Commit
 
 `KvTransactionsManager.CommitAsync` calls the `ITransactionSchemaChanges` hooks (`ChangeSetCommitter`):

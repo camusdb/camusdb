@@ -543,13 +543,18 @@ internal sealed partial class SchemaDdlService
     /// The caller's compensation list. The name of a sequence this call creates is appended before
     /// the call returns, so the caller can drop it when a later step fails.
     /// </param>
+    /// <param name="alsoFreeIn">
+    /// A second schema in which the name of a new sequence must be free: the private schema of the explicit
+    /// transaction that stages the column on a shared table. Null when there is none.
+    /// </param>
     private async Task<ColumnInfo> ResolveSequenceColumnAsync(
         DatabaseDescriptor database,
         string tableName,
         string tableId,
         ColumnInfo column,
         List<string> created,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Schema? alsoFreeIn = null)
     {
         if (column.Identity is null && column.DefaultSequenceName is null)
             return column;
@@ -558,7 +563,7 @@ internal sealed partial class SchemaDdlService
 
         if (column.Identity is not null)
         {
-            string sequenceName = BuildOwnedSequenceName(database, tableName, column.Name);
+            string sequenceName = BuildOwnedSequenceName(database.Schema, alsoFreeIn, tableName, column.Name);
 
             SequenceSchema owned = await sequenceDdl.CreateOwnedAsync(
                 database,
@@ -579,23 +584,7 @@ internal sealed partial class SchemaDdlService
         }
         else
         {
-            if (!database.Schema.Sequences.TryGetValue(column.DefaultSequenceName!, out SequenceSchema? existing))
-                throw new CamusDBException(
-                    CamusDBErrorCodes.SequenceDoesntExist,
-                    $"Column '{column.Name}' defaults from sequence '{column.DefaultSequenceName}', which does not exist");
-
-            // An owned sequence belongs to its identity column and goes when that column goes,
-            // with no dependency check on the way out. A default in a second column would
-            // therefore be left pointing at a counter that is gone the moment the owner is
-            // dropped — so the reference is refused here rather than allowed to dangle later.
-            if (existing.OwnedByTableId is { Length: > 0 })
-                throw new CamusDBException(
-                    CamusDBErrorCodes.SequenceInUse,
-                    $"Column '{column.Name}' cannot default from sequence '{existing.Name}': that sequence is " +
-                    $"owned by an identity column of another relation, and is dropped with it. " +
-                    "Create a free-standing sequence with CREATE SEQUENCE and default from that instead.");
-
-            sequenceId = existing.Id!;
+            sequenceId = RequireDefaultSequence(database.Schema, column).Id!;
         }
 
         return new ColumnInfo(
@@ -617,8 +606,33 @@ internal sealed partial class SchemaDdlService
     }
 
     /// <summary>
+    /// The sequence of <paramref name="schema"/> that the default of <paramref name="column"/> draws from.
+    /// Refuses a sequence that does not exist, and one that an identity column owns.
+    /// </summary>
+    private static SequenceSchema RequireDefaultSequence(Schema schema, ColumnInfo column)
+    {
+        if (!schema.Sequences.TryGetValue(column.DefaultSequenceName!, out SequenceSchema? existing))
+            throw new CamusDBException(
+                CamusDBErrorCodes.SequenceDoesntExist,
+                $"Column '{column.Name}' defaults from sequence '{column.DefaultSequenceName}', which does not exist");
+
+        // An owned sequence belongs to its identity column and goes when that column goes,
+        // with no dependency check on the way out. A default in a second column would
+        // therefore be left pointing at a counter that is gone the moment the owner is
+        // dropped — so the reference is refused here rather than allowed to dangle later.
+        if (existing.OwnedByTableId is { Length: > 0 })
+            throw new CamusDBException(
+                CamusDBErrorCodes.SequenceInUse,
+                $"Column '{column.Name}' cannot default from sequence '{existing.Name}': that sequence is " +
+                $"owned by an identity column of another relation, and is dropped with it. " +
+                "Create a free-standing sequence with CREATE SEQUENCE and default from that instead.");
+
+        return existing;
+    }
+
+    /// <summary>
     /// The name an identity column's own sequence gets: <c>{table}_{column}_seq</c>, with a numeric
-    /// suffix when that name is taken.
+    /// suffix when that name is taken in <paramref name="schema"/> or in <paramref name="alsoFreeIn"/>.
     /// </summary>
     /// <remarks>
     /// The availability check and the create that follows are not one atomic step, so two
@@ -626,18 +640,20 @@ internal sealed partial class SchemaDdlService
     /// here. The loser does not overwrite the winner: the create is refused under the schema lock
     /// with "relation already exists", which fails that statement rather than corrupting the other.
     /// </remarks>
-    private static string BuildOwnedSequenceName(DatabaseDescriptor database, string tableName, string columnName)
+    private static string BuildOwnedSequenceName(Schema schema, Schema? alsoFreeIn, string tableName, string columnName)
     {
         string baseName = $"{tableName}_{columnName}_seq";
 
-        if (!IsRelationNameTaken(database, baseName))
+        bool IsTaken(string name) => IsRelationNameTaken(schema, name) || (alsoFreeIn is not null && IsRelationNameTaken(alsoFreeIn, name));
+
+        if (!IsTaken(baseName))
             return baseName;
 
         for (int suffix = 1; suffix < 1000; suffix++)
         {
             string candidate = $"{baseName}{suffix}";
 
-            if (!IsRelationNameTaken(database, candidate))
+            if (!IsTaken(candidate))
                 return candidate;
         }
 
@@ -647,10 +663,10 @@ internal sealed partial class SchemaDdlService
             "variant of it are taken. Create the sequence yourself and use DEFAULT nextval('...').");
     }
 
-    private static bool IsRelationNameTaken(DatabaseDescriptor database, string name)
-        => database.Schema.Tables.ContainsKey(name)
-           || database.Schema.Views.ContainsKey(name)
-           || database.Schema.Sequences.ContainsKey(name);
+    private static bool IsRelationNameTaken(Schema schema, string name)
+        => schema.Tables.ContainsKey(name)
+           || schema.Views.ContainsKey(name)
+           || schema.Sequences.ContainsKey(name);
 
     /// <summary>
     /// Removes the sequences a failed <c>CREATE TABLE</c> had already created, so the statement
@@ -776,7 +792,7 @@ internal sealed partial class SchemaDdlService
         if (TransactionSchemaScope.OverlayFor(database) is { } overlay)
             return await AddColumnInOwnerTransactionAsync(database, overlay, table, ticket).ConfigureAwait(false);
 
-        await AddColumnStagedAsync(database, table, ticket, ownerChangeSetId: null).ConfigureAwait(false);
+        await AddColumnStagedAsync(database, table, ticket, owner: null).ConfigureAwait(false);
         return true;
     }
 
@@ -785,11 +801,13 @@ internal sealed partial class SchemaDdlService
 
     /// <summary>
     /// The staged body of <see cref="AddColumnAsync"/>: the NOT NULL check, the identity sequence, and the
-    /// coordinator job that adds, fills and publishes the column. With <paramref name="ownerChangeSetId"/>
-    /// the job belongs to that explicit transaction and stops after the fill with the column
-    /// <c>WriteOnly</c>; the caller then adds the step to <c>Public</c> to the transaction's change set.
+    /// coordinator job that adds, fills and publishes the column. With <paramref name="owner"/> the job
+    /// belongs to that explicit transaction and stops after the fill with the column <c>WriteOnly</c>; the
+    /// caller then adds the step to <c>Public</c> to the transaction's change set. The name of a new
+    /// sequence is then free in the private schema of the transaction too, because the publish adds both to
+    /// one schema.
     /// </summary>
-    private async Task<StagedColumn> AddColumnStagedAsync(DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket, string? ownerChangeSetId)
+    private async Task<StagedColumn> AddColumnStagedAsync(DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket, TransactionSchemaOverlay? owner)
     {
         ColumnInfo requested = ticket.Column;
 
@@ -811,14 +829,14 @@ internal sealed partial class SchemaDdlService
             RequireColumnCanBeAdded(gated, requested, options);
 
             resolved = await ResolveSequenceColumnAsync(
-                database, gated.Name, gated.Id, requested, createdSequences, CancellationToken.None).ConfigureAwait(false);
+                database, gated.Name, gated.Id, requested, createdSequences, CancellationToken.None, alsoFreeIn: owner?.Schema).ConfigureAwait(false);
 
             SchemaChangeCoordinator coordinator = NewColumnCoordinator();
 
             // The gate is released while the rows are filled; see SchemaChangeCoordinator.RunJobAsync.
             await coordinator.RunJobAsync(
                 database,
-                new SchemaChangeJob(database.Name, gated.Name, gated.Id, resolved.Name, SchemaElementState.Public, SchemaElementKind.Column, ownerChangeSetId),
+                new SchemaChangeJob(database.Name, gated.Name, gated.Id, resolved.Name, SchemaElementState.Public, SchemaElementKind.Column, owner?.ChangeSetId),
                 columnDefinition: resolved,
                 gateHeldByCaller: true
             ).ConfigureAwait(false);
@@ -927,15 +945,27 @@ internal sealed partial class SchemaDdlService
     /// schema with the column, and the removal of the column releases it.
     /// </summary>
     private Task<bool> StageColumnOnSharedTableAsync(
-        DatabaseDescriptor database, TransactionSchemaOverlay overlay, TableDescriptor table, AlterTableTicket ticket) =>
-        RunOwnedStagedChangeAsync(database, overlay, table, "ALTER TABLE ... ADD COLUMN with a default value, an identity or NOT NULL", async () =>
+        DatabaseDescriptor database, TransactionSchemaOverlay overlay, TableDescriptor table, AlterTableTicket ticket)
+    {
+        const string statement = "ALTER TABLE ... ADD COLUMN with a default value, an identity or NOT NULL";
+
+        // The steps resolve the sequence and the function of the default in the shared schema, so each must
+        // be the one that the private schema has under that name.
+        if (ticket.Column is { Identity: null, DefaultSequenceName: not null })
+            TransactionalDdlRules.RequireSharedSequence(overlay, RequireDefaultSequence(database.Schema, ticket.Column), table, statement);
+
+        if (ticket.Column.DefaultFunction is { } function)
+            TransactionalDdlRules.RequireSharedFunction(overlay, function, table, statement);
+
+        return RunOwnedStagedChangeAsync(database, overlay, table, statement, async () =>
         {
             TableDescriptor shared = await context.TableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
-            StagedColumn staged = await AddColumnStagedAsync(database, shared, ticket, overlay.ChangeSetId).ConfigureAwait(false);
+            StagedColumn staged = await AddColumnStagedAsync(database, shared, ticket, overlay).ConfigureAwait(false);
 
             return new OwnedStagedElement(staged.TableId, staged.TableName, staged.StepsTaken, [staged.Column.Name], [(staged.Column.Name, SchemaElementKind.Column)]);
         });
+    }
 
     /// <summary>
     /// Refuses a column that <paramref name="table"/> cannot take: a name that is taken in any state, a
@@ -1232,12 +1262,10 @@ internal sealed partial class SchemaDdlService
     /// </summary>
     private static IndexBuildInfo? BuildClusterIndexInfo(TableDescriptor table, AlterIndexTicket ticket, CamusDBOptions currentOptions)
     {
-        if (table.AllIndexes.ContainsKey(ticket.IndexName))
-        {
-            if (ticket.IfNotExists)
-                return null;
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Index '{ticket.IndexName}' already exists on table '{table.Name}'");
-        }
+        if (ticket.IfNotExists && table.AllIndexes.ContainsKey(ticket.IndexName))
+            return null;
+
+        TableIndexAdder.Validate(table, ticket, currentOptions);
 
         IndexType indexType = ticket.Operation switch
         {
@@ -1245,14 +1273,6 @@ internal sealed partial class SchemaDdlService
             AlterIndexOperation.AddInvertedIndex => IndexType.Inverted,
             _ => IndexType.Multi,
         };
-
-        IndexColumnOrder.RejectDescendingOnUnsupportedType(
-            ticket.Columns,
-            ticket.IndexName,
-            name => table.Schema.Columns!.Find(c => string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase))?.Type);
-
-        TableIndexAdder.RejectUnorderedKeyColumns(table, ticket);
-        TableIndexAdder.ValidateIncludeColumns(table, ticket, currentOptions);
 
         // Column positions keep their own checks (GetColumnIdsForIndex); expression positions are
         // resolved by the binder, which gives them the marker id and the hidden key name.
@@ -1390,7 +1410,7 @@ internal sealed partial class SchemaDdlService
             bool found = false;
             foreach (TableColumnSchema column in table.Schema.Columns!)
             {
-                if (column.Name != columnIndex.Name)
+                if (!string.Equals(column.Name, columnIndex.Name, StringComparison.OrdinalIgnoreCase))
                     continue;
 
                 if (!SchemaElementStateRules.IsReadable(column) || !SchemaElementStateRules.IsWritable(column))
@@ -1647,13 +1667,10 @@ internal sealed partial class SchemaDdlService
     private Task<bool> StageIndexOnSharedTableAsync(
         DatabaseDescriptor database, TransactionSchemaOverlay overlay, TableDescriptor table, AlterIndexTicket ticket)
     {
-        if (table.AllIndexes.ContainsKey(ticket.IndexName))
-        {
-            if (ticket.IfNotExists)
-                return Task.FromResult(false);
-
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Index '{ticket.IndexName}' already exists on table '{table.Name}'");
-        }
+        // Against the private table first, so a definition that the transaction's own view of the table
+        // refuses fails for that reason, also when the staged form cannot run on the table.
+        if (BuildClusterIndexInfo(table, ticket, options) is null)
+            return Task.FromResult(false);
 
         return RunOwnedStagedChangeAsync(database, overlay, table, "CREATE INDEX", async () =>
         {
