@@ -346,8 +346,8 @@ value too long for column 'name' (max 64, got 71)
 ```
 
 This mirrors PostgreSQL's default behavior (`SQLSTATE 22001`). Unlike PostgreSQL, CamusDB does **not**
-silently truncate trailing whitespace, and does **not** truncate on an explicit `CAST` to a narrower
-bound — an overflowing cast raises the same error.
+silently truncate trailing whitespace. An explicit `CAST` to `string(N)` or `bytes(N)` cuts the value
+instead of raising an error, as in PostgreSQL; see [Cast to a type with a size](#cast-to-a-type-with-a-size).
 
 ### Large values
 
@@ -595,6 +595,31 @@ coerce to the column's declared element type the same way scalars do. For exampl
 `CAST` works for all scalar types, e.g. `CAST('2026-01-01' AS date)`, `CAST(x AS float32)`,
 `CAST('0xFF00' AS bytes)`. The PostgreSQL shorthand `x::type` is the same as `CAST(x AS type)`; see
 [PostgreSQL expression syntax](sql-expression-syntax.md#the--cast).
+
+#### Cast to a type with a size
+
+`CAST(x AS string(N))` keeps the first `N` characters of the text, and `CAST(x AS bytes(N))` keeps the
+first `N` bytes. This is the PostgreSQL rule for an explicit cast to `varchar(N)`. A shorter value and
+`NULL` do not change. `x::string(N)`, `varchar(N)` and `char(N)` follow the same rule. `char(N)` does not
+pad a shorter value with blanks; see [Differences from PostgreSQL](postgresql-differences.md).
+
+| Statement | Result |
+|---|---|
+| `CAST('abcdefgh' AS string(5))` | `abcde` |
+| `CAST('abc' AS string(5))` | `abc` |
+| `CAST(12345 AS string(3))` | `123` |
+| `'x🙂yz'::string(2)` | `x🙂` |
+| `CAST(X'01020304' AS bytes(2))` | `\x0102` |
+
+- A character is a code point, the unit of `length` and `substr`, so `CAST(x AS string(N))` gives the
+  same text as `substr(x, 1, N)` and never cuts `🙂` in half. See
+  [Characters and code points](#characters-and-code-points).
+- `N` must be a positive integer. `CAST(x AS string(0))` fails with `CADB0400` before any row is read.
+- Only an explicit cast cuts. Writing a value longer than the size of a `string(N)` or `bytes(N)` column
+  fails with `CADB0302`, as described in [String and bytes length bounds](#string-and-bytes-length-bounds).
+- A view, a `CHECK` constraint and an index expression keep the size in their stored text. A view or a
+  `CHECK` constraint created before this rule stored the cast without its size, so it uses the whole
+  value. Create it again to apply the size.
 
 #### Cast to `int64`
 

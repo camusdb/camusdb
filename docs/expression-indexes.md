@@ -57,7 +57,8 @@ expression can contain only the elements below.
 - literals, and columns of the indexed table (the table name as a qualifier is optional);
 - arithmetic, string, bit, comparison and boolean operators, `LIKE`, the regular-expression operators,
   `IS NULL`, `IN` with a list of values, `BETWEEN`, subscripts, `CASE` and `IF`;
-- `CAST` to an unsized type, and the `::` form of it;
+- `CAST` and the `::` form of it, also to a type with a size such as `string(10)`, which keeps the first
+  10 characters (see [Data Types → Cast to a type with a size](data-types.md#cast-to-a-type-with-a-size));
 - calls of the immutable built-in functions.
 
 The immutable built-in functions are listed in `ScalarFunctionRegistry.ImmutableFunctionNames`. The

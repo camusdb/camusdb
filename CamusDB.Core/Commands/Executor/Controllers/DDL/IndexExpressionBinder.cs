@@ -401,7 +401,6 @@ internal static class IndexExpressionBinder
                     continue;
 
                 case NodeType.ExprCast:
-                    RequireUnsizedCastTarget(node.rightAst);
                     if (node.leftAst is not null)
                         pending.Push(node.leftAst);
                     continue;
@@ -455,14 +454,6 @@ internal static class IndexExpressionBinder
         // The zone rules come with the build, so a later build can compute another key for the same row.
         if (ScalarFunctionEvaluator.IsTimeZoneDependentCall(call))
             throw Refused(null, $"the function '{name}' with a time zone argument cannot be part of an index expression: its result depends on the time zone rules of the build");
-    }
-
-    private static void RequireUnsizedCastTarget(NodeAst? target)
-    {
-        // The renderer prints a sized target without its size, so the stored text would cast to
-        // another type than the statement did.
-        if (target?.nodeType is NodeType.TypeStringSized or NodeType.TypeBytesSized)
-            throw Refused(null, "a CAST to a type with a size cannot be part of an index expression; cast to a type without a size");
     }
 
     /// <summary>

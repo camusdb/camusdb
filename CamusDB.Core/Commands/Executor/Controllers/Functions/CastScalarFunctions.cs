@@ -75,6 +75,13 @@ internal static class CastScalarFunctions
         });
     }
 
+    /// <summary>
+    /// Evaluates <c>CAST(x AS type)</c> and <c>x::type</c>. The target node can carry more than its
+    /// <see cref="ColumnType"/>: <c>smallint</c> and <c>int</c> refuse a value past their width, and
+    /// <c>string(N)</c> and <c>bytes(N)</c> cut the value to N characters or N bytes, as an explicit
+    /// cast to <c>varchar(N)</c> does in PostgreSQL. A write past a column's size is still an error;
+    /// only the explicit cast cuts.
+    /// </summary>
     public static ColumnValue CastExpression(string castName, ColumnValue input, NodeAst targetTypeAst)
     {
         ColumnType targetType = ResolveTargetType(castName, targetTypeAst);
@@ -84,8 +91,53 @@ internal static class CastScalarFunctions
         {
             NodeType.TypeInteger16 => IntegerWidth.EnforceOnCast(IntegerWidth.SmallIntBits, result),
             NodeType.TypeInteger32 => IntegerWidth.EnforceOnCast(IntegerWidth.IntBits, result),
+            NodeType.TypeStringSized => CutString(result, SizedTargetLength(castName, targetTypeAst)),
+            NodeType.TypeBytesSized => CutBytes(result, SizedTargetLength(castName, targetTypeAst)),
             _ => result,
         };
+    }
+
+    /// <summary>
+    /// The N of a <c>string(N)</c> or <c>bytes(N)</c> cast target. The grammar accepts any number
+    /// token there, so zero, a negative number, hex and a value past the <c>int</c> range reach this
+    /// point and fail with <see cref="CamusDBErrorCodes.InvalidInput"/>, as a column declared with the
+    /// same size does.
+    /// </summary>
+    internal static int SizedTargetLength(string castName, NodeAst targetTypeAst)
+    {
+        if (!int.TryParse(targetTypeAst.yytext, NumberStyles.None, CultureInfo.InvariantCulture, out int length) || length <= 0)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Function '{castName}' invalid size '{targetTypeAst.yytext}' for type {SizedTypeName(targetTypeAst)}: the size must be a positive integer");
+
+        return length;
+    }
+
+    private static string SizedTypeName(NodeAst targetTypeAst)
+        => targetTypeAst.nodeType == NodeType.TypeBytesSized ? "bytes" : "string";
+
+    /// <summary>
+    /// Keeps the first <paramref name="length"/> code points of a string, the unit of <c>length</c>
+    /// and <c>substr</c>, so the cut never splits a surrogate pair. A shorter value and NULL pass
+    /// through unchanged. A string with no more UTF-16 units than the limit has no more code points
+    /// either, so the common case returns without a search.
+    /// </summary>
+    private static ColumnValue CutString(ColumnValue value, int length)
+    {
+        if (value.Type != ColumnType.String || value.StrValue is not { } text || text.Length <= length)
+            return value;
+
+        int units = TextCodePoints.UnitOffset(text, length);
+        return units == text.Length ? value : new ColumnValue(ColumnType.String, text[..units]);
+    }
+
+    /// <summary>Keeps the first <paramref name="length"/> bytes. A shorter value and NULL pass through unchanged.</summary>
+    private static ColumnValue CutBytes(ColumnValue value, int length)
+    {
+        if (value.Type != ColumnType.Bytes || value.BytesValue is not { } bytes || bytes.Length <= length)
+            return value;
+
+        return new ColumnValue(bytes.AsSpan(0, length).ToArray());
     }
 
     public static ColumnType InferCastReturnType(NodeAst targetTypeAst)
@@ -267,11 +319,22 @@ internal static class CastScalarFunctions
             NodeType.TypeUuid      => ColumnType.Uuid,
             NodeType.TypeNumeric   => ColumnType.Numeric,
             NodeType.TypeJsonb     => ColumnType.Jsonb,
-            NodeType.TypeStringSized => ColumnType.String,
-            NodeType.TypeBytesSized  => ColumnType.Bytes,
+            NodeType.TypeStringSized => SizedTargetType(castName, targetTypeAst, ColumnType.String),
+            NodeType.TypeBytesSized  => SizedTargetType(castName, targetTypeAst, ColumnType.Bytes),
             NodeType.Identifier    => ResolveIdentifierTargetType(castName, targetTypeAst.yytext!),
             _ => throw UnknownTargetType(castName, targetTypeAst.nodeType.ToString()),
         };
+    }
+
+    /// <summary>
+    /// The type of a sized target, after its size is checked. The static statement check
+    /// (<see cref="Queries.ConditionalResultTypes"/>) checks the size too, so a statement with
+    /// <c>string(0)</c> fails before any row is read.
+    /// </summary>
+    private static ColumnType SizedTargetType(string castName, NodeAst targetTypeAst, ColumnType type)
+    {
+        SizedTargetLength(castName, targetTypeAst);
+        return type;
     }
 
     private static ColumnType ResolveIdentifierTargetType(string castName, string identifier)
