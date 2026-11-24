@@ -883,6 +883,9 @@ public class ConfigDefinition
 
     public bool SerializableOptimisticPointLocks { get; set; } = false;
 
+    /// <summary>Whether an UPDATE or DELETE of a Serializable optimistic transaction takes a row from the transaction's own earlier read by key and does not read it again. Default true.</summary>
+    public bool TransactionReadReuseEnabled { get; set; } = true;
+
     /// <summary>Wall-clock cap per lock-acquire retry loop for Serializable conflicts. Default 500 ms.</summary>
     public int LockWaitDeadlineMs { get; set; } = 500;
 

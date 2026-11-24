@@ -340,6 +340,9 @@ public sealed partial class KvTableStore
     /// <inheritdoc cref="KvRowAccessor.BatchReadCalls"/>
     internal long PrimaryRowBatchReadCalls => rows.BatchReadCalls;
 
+    /// <inheritdoc cref="KvRowAccessor.ReusedMutationReads"/>
+    internal long PrimaryRowReusedMutationReads => rows.ReusedMutationReads;
+
     /// <inheritdoc cref="KvLargeValueReader.FetchCalls"/>
     internal long LargeValueFetchCalls => largeValues.FetchCalls;
 
@@ -390,9 +393,9 @@ public sealed partial class KvTableStore
     /// <see cref="KvRowAccessor.GetRowsBatchLockedForMutation"/>. With <paramref name="aborts"/>, a
     /// retryable abort is recorded there instead of thrown and the rows answered are all null.
     /// </summary>
-    public async Task<ReadOnlyMemory<byte>?[]> GetRowsBatchLockedForMutation(KvTransaction tx, IReadOnlyList<ObjectIdValue> rowIds, CancellationToken cancellationToken = default, LargeValueFetch? largeValues = null, RetryableAbortSink? aborts = null)
+    public async Task<ReadOnlyMemory<byte>?[]> GetRowsBatchLockedForMutation(KvTransaction tx, IReadOnlyList<ObjectIdValue> rowIds, CancellationToken cancellationToken = default, LargeValueFetch? largeValues = null, RetryableAbortSink? aborts = null, bool mayReuseReads = false)
     {
-        ReadOnlyMemory<byte>?[] result = await rows.GetRowsBatchLockedForMutation(tx, rowIds, cancellationToken, aborts).ConfigureAwait(false);
+        ReadOnlyMemory<byte>?[] result = await rows.GetRowsBatchLockedForMutation(tx, rowIds, cancellationToken, aborts, mayReuseReads).ConfigureAwait(false);
         if (aborts is { HasAbort: true })
             return result;
 
@@ -439,7 +442,9 @@ public sealed partial class KvTableStore
         if (aborts is { HasAbort: true })
             return new ReadOnlyMemory<byte>?[rowIds.Count];
 
-        return await GetRowsBatchLockedForMutation(tx, rowIds, cancellationToken, largeValues, aborts).ConfigureAwait(false);
+        // The write phase computes from these rows and writes them back, so a row this transaction
+        // already read by key can stand in for the read (KvRangeLockManager.ReusesPointReadsForWrites).
+        return await GetRowsBatchLockedForMutation(tx, rowIds, cancellationToken, largeValues, aborts, mayReuseReads: true).ConfigureAwait(false);
     }
 
     /// <summary>

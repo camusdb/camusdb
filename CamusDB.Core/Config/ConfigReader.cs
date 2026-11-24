@@ -128,6 +128,7 @@ public class ConfigReader
         "lock_wait_deadline_ms",
         "optimistic_intent_wait_ms",
         "serializable_optimistic_point_locks",
+        "transaction_read_reuse_enabled",
         "replication_wait_deadline_ms",
         "key_range_sharding",
         "distributed_query_execution",

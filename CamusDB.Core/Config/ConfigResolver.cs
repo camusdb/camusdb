@@ -355,6 +355,7 @@ public static class ConfigResolver
         LockWaitDeadlineMs = config.LockWaitDeadlineMs,
         OptimisticIntentWaitMs = config.OptimisticIntentWaitMs,
         SerializableOptimisticPointLocks = config.SerializableOptimisticPointLocks,
+        TransactionReadReuseEnabled = config.TransactionReadReuseEnabled,
         ReplicationWaitDeadlineMs = config.ReplicationWaitDeadlineMs,
 
         KeyRangeShardingEnabled = keyRangeSharding,

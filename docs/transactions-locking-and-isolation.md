@@ -347,6 +347,13 @@ What changes for an application: a reader no longer blocks a writer of the row. 
 would refuse at the writer's statement can instead be refused at the reader's next read or at its commit.
 Every such refusal is retryable from the start of the transaction.
 
+Such a transaction also reads a row once. When it reads a row by key and then updates or deletes that
+row, the write takes the row from the read and does not read it again. The transaction is held to the
+row version of its first read, so a second read would return the same row, or an error if another
+transaction changed the row in between. Without the second read that change is refused by the write or
+by the commit. A row the transaction has written is always read again, so a statement sees the
+transaction's own writes. `transaction_read_reuse_enabled: false` restores the second read.
+
 `serializable_optimistic_point_locks: true` restores the earlier form, in which a Serializable read takes
 a shared lock on each key it reads and a following write upgrades it to exclusive, even when the
 transaction is optimistic. That form blocks writers behind readers, and every commit of such a

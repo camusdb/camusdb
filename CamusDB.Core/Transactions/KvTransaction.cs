@@ -219,6 +219,18 @@ public sealed class KvTransaction
     /// </summary>
     private Dictionary<string, (int Points, int Total)>? rangeLockCounts;
     private HashSet<(string key, KeyValueDurability durability)>? modifiedKeys;
+
+    /// <summary>
+    /// The stored bytes of rows this transaction read by key and has not written since, by row key.
+    /// Guarded by <see cref="trackSync"/>. See <see cref="RememberPointRead"/>.
+    /// </summary>
+    private Dictionary<string, ReadOnlyMemory<byte>>? rememberedPointReads;
+
+    /// <summary>
+    /// How many rows <see cref="rememberedPointReads"/> holds at most. A transaction that reads more
+    /// rows by key keeps the first ones; the others are read again by a write, as before.
+    /// </summary>
+    private const int MaxRememberedPointReads = 64;
     private Dictionary<string, SchemaVersionPin>? schemaPins;
 
     // Write-shape fence state, guarded by trackSync. See PinWriteShape and TryEnterCommit. The first
@@ -1526,6 +1538,69 @@ public sealed class KvTransaction
     }
 
     /// <summary>
+    /// Keeps the stored bytes a read by key returned for <paramref name="key"/>, so that a write phase
+    /// of this transaction can use them and not read the row again
+    /// (<see cref="TryGetRememberedPointReads"/>).
+    ///
+    /// <para>Only the caller knows that the read can stand in for a later one: it must be a read of the
+    /// latest committed row by a transaction that proves its reads at commit (see
+    /// <c>KvRangeLockManager.ReusesPointReadsForWrites</c>). A key this transaction already wrote is not
+    /// kept, and every later write of a key drops it (<see cref="TrackModified"/>): after a write the
+    /// row of the transaction is the written one.</para>
+    /// </summary>
+    internal void RememberPointRead(string key, ReadOnlyMemory<byte> payload)
+    {
+        lock (trackSync)
+        {
+            if (modifiedKeys is not null
+                && (modifiedKeys.Contains((key, KeyValueDurability.Persistent)) || modifiedKeys.Contains((key, KeyValueDurability.Ephemeral))))
+                return;
+
+            rememberedPointReads ??= new Dictionary<string, ReadOnlyMemory<byte>>(StringComparer.Ordinal);
+
+            if (rememberedPointReads.Count >= MaxRememberedPointReads && !rememberedPointReads.ContainsKey(key))
+                return;
+
+            rememberedPointReads[key] = payload;
+        }
+    }
+
+    /// <summary>True when this transaction holds at least one row from a read by key.</summary>
+    internal bool HasRememberedPointReads
+    {
+        get
+        {
+            lock (trackSync)
+                return rememberedPointReads is { Count: > 0 };
+        }
+    }
+
+    /// <summary>
+    /// Fills <paramref name="rows"/> with the bytes this transaction read for every key of
+    /// <paramref name="keys"/>, in order, and returns true. Returns false, and leaves
+    /// <paramref name="rows"/> unspecified, when the transaction holds no read for one of them: the
+    /// caller then reads the whole batch.
+    /// </summary>
+    internal bool TryGetRememberedPointReads(IReadOnlyList<string> keys, ReadOnlyMemory<byte>?[] rows)
+    {
+        lock (trackSync)
+        {
+            if (rememberedPointReads is null)
+                return false;
+
+            for (int i = 0; i < keys.Count; i++)
+            {
+                if (!rememberedPointReads.TryGetValue(keys[i], out ReadOnlyMemory<byte> payload))
+                    return false;
+
+                rows[i] = payload;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
     /// The coordinator key a point read of <paramref name="key"/> registers under, or empty for an
     /// unregistered read.
     ///
@@ -1574,6 +1649,7 @@ public sealed class KvTransaction
         {
             modifiedKeys ??= [];
             modifiedKeys.Add((key, durability));
+            rememberedPointReads?.Remove(key);
         }
     }
 
@@ -1593,6 +1669,12 @@ public sealed class KvTransaction
             modifiedKeys.EnsureCapacity(modifiedKeys.Count + keys.Count);
             for (int i = 0; i < keys.Count; i++)
                 modifiedKeys.Add((keys[i].key, durability));
+
+            if (rememberedPointReads is { Count: > 0 })
+            {
+                for (int i = 0; i < keys.Count; i++)
+                    rememberedPointReads.Remove(keys[i].key);
+            }
         }
     }
 
@@ -1610,6 +1692,12 @@ public sealed class KvTransaction
             modifiedKeys.EnsureCapacity(modifiedKeys.Count + keys.Count);
             for (int i = 0; i < keys.Count; i++)
                 modifiedKeys.Add((keys[i], durability));
+
+            if (rememberedPointReads is { Count: > 0 })
+            {
+                for (int i = 0; i < keys.Count; i++)
+                    rememberedPointReads.Remove(keys[i]);
+            }
         }
     }
 

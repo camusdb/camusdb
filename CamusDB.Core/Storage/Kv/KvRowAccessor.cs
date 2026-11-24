@@ -53,6 +53,7 @@ internal sealed class KvRowAccessor
 
     private long pointReadCalls;
     private long batchReadCalls;
+    private long reusedMutationReads;
 
     // The wording of a failed row scan, built on the first scan: every scan hands it to the failure
     // translator, which reads it only when a scan fails.
@@ -73,6 +74,13 @@ internal sealed class KvRowAccessor
     /// ceil(M / B) here and nothing to <see cref="PointReadCalls"/>. An empty batch is not counted.
     /// </summary>
     internal long BatchReadCalls => Interlocked.Read(ref batchReadCalls);
+
+    /// <summary>
+    /// How many write-phase reads (<see cref="GetRowsBatchLockedForMutation"/>) this accessor answered
+    /// from rows the transaction had read by key, with no call to Kahuna. Such a read adds nothing to
+    /// <see cref="BatchReadCalls"/>.
+    /// </summary>
+    internal long ReusedMutationReads => Interlocked.Read(ref reusedMutationReads);
 
     internal KvRowAccessor(
         IKahuna kahuna,
@@ -119,7 +127,16 @@ internal sealed class KvRowAccessor
             return null;   // explicitly deleted at this level
 
         if (probe.HasPayload)
+        {
+            // A row found at this level by a read of the latest committed value is the row a write
+            // phase of this transaction would read again. Kept only for a transaction whose reads are
+            // proved at commit, and only for the latest view: a statement-snapshot read leaves no pin,
+            // so a later read of the key may return another version.
+            if (view == tx.LatestReadView && locks.ReusesPointReadsForWrites(tx))
+                tx.RememberPointRead(key, probe.Payload);
+
             return probe.Payload;              // found at this level
+        }
 
         // Miss at level-0: walk ancestry levels until a hit or a tombstone (stop walking).
         foreach ((KvKeyBuilder ancestorKeys, KvBranchReader ancestorReader, HLCTimestamp forkTimestamp) in branch.Levels)
@@ -315,6 +332,13 @@ internal sealed class KvRowAccessor
     /// </para>
     ///
     /// <para>
+    /// With <paramref name="mayReuseReads"/>, a transaction that proves its single-key reads at commit
+    /// skips the read for rows it already read by key (<see cref="KvTransaction.RememberPointRead"/>):
+    /// the batch then costs no round trip. Only the write phase of an UPDATE or DELETE passes it. A
+    /// locking read and a join leaf return the rows to the caller and read them again.
+    /// </para>
+    ///
+    /// <para>
     /// A read-only caller uses this method too, for the same reason: a join leaf fetches the rows its
     /// index walk found, and the per-row shared point lock is the lock a per-row <see cref="GetRow"/>
     /// would have left on each of them, so batching the reads must not drop it. The name records where
@@ -325,7 +349,8 @@ internal sealed class KvRowAccessor
         KvTransaction tx,
         IReadOnlyList<ObjectIdValue> rowIds,
         CancellationToken cancellationToken = default,
-        RetryableAbortSink? aborts = null)
+        RetryableAbortSink? aborts = null,
+        bool mayReuseReads = false)
     {
         if (rowIds.Count == 0)
             return [];
@@ -336,6 +361,20 @@ internal sealed class KvRowAccessor
 
         if (KvRangeLockManager.IsSerializableReadWrite(tx))
             await locks.AcquireSharedPointLocksAsync(tx, keys.RowBucketPrefix, BuildRowKeys(rowIds), cancellationToken).ConfigureAwait(false);
+
+        // Rows this transaction already read by key, and has not written since, are the rows the read
+        // below would return (see KvRangeLockManager.ReusesPointReadsForWrites). All of the batch or
+        // none: a batch with one unknown row is read whole.
+        if (mayReuseReads && tx.HasRememberedPointReads && locks.ReusesPointReadsForWrites(tx))
+        {
+            ReadOnlyMemory<byte>?[] remembered = new ReadOnlyMemory<byte>?[rowIds.Count];
+
+            if (tx.TryGetRememberedPointReads(BuildRowKeys(rowIds), remembered))
+            {
+                Interlocked.Increment(ref reusedMutationReads);
+                return remembered;
+            }
+        }
 
         return await GetRowsBatch(tx, rowIds, cancellationToken, aborts, latest: true).ConfigureAwait(false);
     }

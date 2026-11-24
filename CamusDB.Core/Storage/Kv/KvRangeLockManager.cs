@@ -148,6 +148,23 @@ internal sealed class KvRangeLockManager
             && tx.FoldReads;
 
     /// <summary>
+    /// True when a write phase of <paramref name="tx"/> may take a row from the transaction's own earlier
+    /// read by key (<see cref="KvTransaction.RememberPointRead"/>) and not read it again.
+    ///
+    /// <para>It holds for a transaction that proves its single-key reads at commit
+    /// (<see cref="ValidatesPointReadsAtCommit"/>). Kahuna holds such a transaction to the row version
+    /// of its first read of a key: a second read returns that version, or an abort when another
+    /// transaction committed the key in between. The first read is in the read set the commit checks,
+    /// and it is the base of a write of the key, which the commit checks too. So a write computed from
+    /// the first read commits only when the row did not change, with or without the second read.</para>
+    ///
+    /// <para>A transaction that locks its reads, or reads at a statement timestamp, gets its guarantee
+    /// from the order of the lock and the read, and must read again.</para>
+    /// </summary>
+    internal bool ReusesPointReadsForWrites(KvTransaction tx)
+        => options.TransactionReadReuseEnabled && ValidatesPointReadsAtCommit(tx);
+
+    /// <summary>
     /// Returns <c>true</c> if <paramref name="tx"/> holds a singleton <b>Shared</b> point lock
     /// <c>[key, key]</c> for the given <paramref name="bucketPrefix"/>. Used by write paths
     /// to detect the read-then-write pattern and trigger the S→X upgrade.

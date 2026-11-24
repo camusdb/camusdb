@@ -27,6 +27,9 @@ if (args.Length > 1 && args[0] == "probe" && args[1] == "inlinefn")
 if (args.Length > 1 && args[0] == "probe" && args[1] == "spill")
     return await SpillDefaultProbes.RunAsync(args);
 
+if (args.Length > 1 && args[0] == "probe" && args[1] == "pointstmt")
+    return await PointStatementProbes.RunAsync(args);
+
 if (args.Length > 0 && args[0] == "probe")
     return await InsertRestoreProbes.RunAsync(args);
 

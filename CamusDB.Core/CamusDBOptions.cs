@@ -1607,6 +1607,18 @@ public sealed record CamusDBOptions
     public bool SerializableOptimisticPointLocks { get; init; } = false;
 
     /// <summary>
+    /// Whether the write phase of an <c>UPDATE</c> or <c>DELETE</c> takes a row from the transaction's
+    /// own earlier read by key and does not read the row again. It applies to a Serializable read-write
+    /// transaction with optimistic locking that proves its single-key reads at commit
+    /// (<see cref="SerializableOptimisticPointLocks"/> false), and to a row the transaction read by key
+    /// and has not written since. Such a transaction is held to the row version of its first read, so
+    /// the second read returns the same row, or reports that the row changed. With the reuse a changed
+    /// row is reported by the write or by the commit. False reads the row again.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
+    public bool TransactionReadReuseEnabled { get; init; } = true;
+
+    /// <summary>
     /// Wall-clock cap, in milliseconds, for a single lock-acquire retry loop during Serializable
     /// conflicts. Bounds deadlock and persistent lock-conflict latency per operation.
     /// Default: 500 ms.
