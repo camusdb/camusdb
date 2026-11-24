@@ -39,6 +39,13 @@ public sealed class TestSchemaAckGate
     private static Func<System.Collections.Generic.IReadOnlyCollection<string>> Members(params string[] members)
         => () => members;
 
+    private static Func<System.Collections.Generic.IReadOnlyCollection<string>> CountedMembers(Action onEvaluation)
+        => () =>
+        {
+            onEvaluation();
+            return ["A"];
+        };
+
     // ── Verdicts ─────────────────────────────────────────────────────────────────────────────
 
     /// <summary>Every live member acked: full convergence, returned without waiting.</summary>
@@ -287,6 +294,100 @@ public sealed class TestSchemaAckGate
         Assert.Less(
             watch.ElapsedMilliseconds, 1_000,
             "The gate must re-resolve the rebuilt entry promptly, not at its overall timeout");
+    }
+
+    /// <summary>
+    /// A gate whose database is closed under it has no entry and so no signal to sleep on. It must sleep
+    /// on its timer until it times out. A gate that re-evaluates without a pause allocates a timer per
+    /// iteration and floods the thread pool, which stalls every other database on the node.
+    ///
+    /// <para>The number of evaluations is the assertion: the verdict is the same with or without the
+    /// pause. The bound leaves room for a slow host, and is thousands of times below what an unpaused
+    /// loop reaches in the same time.</para>
+    /// </summary>
+    [Test]
+    public async Task AGateWhoseDatabaseIsForgottenSleepsBetweenEvaluations()
+    {
+        SchemaAckTracker tracker = new();
+        tracker.RecordApplied("db", "A", 4); // behind, so the gate is open
+
+        int evaluations = 0;
+        Task<SchemaAckOutcome> gate = Task.Run(() => tracker.WaitForAllLiveAsync(
+            "db", 5, TimeSpan.FromSeconds(1), CountedMembers(() => Interlocked.Increment(ref evaluations)),
+            NoLease, NoBackstop, CancellationToken.None));
+
+        await Task.Delay(100);
+        tracker.Forget("db");
+
+        Assert.AreEqual(SchemaAckOutcome.Timeout, await gate, "a forgotten database must never read as converged");
+        Assert.Less(evaluations, 50, "the gate must sleep between evaluations while its database has no entry");
+    }
+
+    /// <summary>
+    /// The last part of a wait, shorter than one millisecond, is a sleep like any other. The timer cannot
+    /// express it, so a gate that asks for it unchanged re-evaluates without a pause until the deadline
+    /// passes. Both fixed deadlines are covered: the overall timeout and the quorum backstop.
+    /// </summary>
+    [Test]
+    public async Task TheLastFractionOfAMillisecondBeforeADeadlineIsNotSpun()
+    {
+        SchemaAckTracker tracker = new();
+        tracker.RecordApplied("db", "A", 4); // behind, and never catches up
+
+        int evaluations = 0;
+
+        // A timeout between two whole milliseconds, repeated, so some waits end inside the fraction.
+        for (int i = 0; i < 50; i++)
+        {
+            SchemaAckOutcome outcome = await tracker.WaitForAllLiveAsync(
+                "db", 5, TimeSpan.FromMilliseconds(2.9), CountedMembers(() => Interlocked.Increment(ref evaluations)),
+                NoLease, TimeSpan.FromMilliseconds(1.4), CancellationToken.None);
+
+            Assert.AreEqual(SchemaAckOutcome.Timeout, outcome);
+        }
+
+        // Start, backstop, up to two short sleeps to the deadline, and the final evaluation.
+        Assert.LessOrEqual(evaluations, 50 * 6, "each gate must evaluate a handful of times, not spin to its deadline");
+    }
+
+    /// <summary>
+    /// A gate on a database that never had an entry sleeps too, and stays responsive to cancellation
+    /// and to the first record, which creates the entry the gate then waits on.
+    /// </summary>
+    [Test]
+    public async Task AGateOnADatabaseWithNoEntrySleepsAndPicksUpTheFirstRecord()
+    {
+        SchemaAckTracker tracker = new();
+
+        int evaluations = 0;
+        Task<SchemaAckOutcome> gate = Task.Run(() => tracker.WaitForAllLiveAsync(
+            "db", 5, TimeSpan.FromSeconds(10), CountedMembers(() => Interlocked.Increment(ref evaluations)),
+            NoLease, NoBackstop, CancellationToken.None));
+
+        await Task.Delay(600);
+        Assert.IsFalse(gate.IsCompleted, "no record at all must hold the gate");
+        Assert.Less(Volatile.Read(ref evaluations), 50, "the gate must sleep between evaluations");
+
+        Stopwatch watch = Stopwatch.StartNew();
+        tracker.RecordApplied("db", "A", 5);
+
+        Assert.AreEqual(SchemaAckOutcome.FullConvergence, await gate);
+        Assert.Less(watch.ElapsedMilliseconds, 1_000, "the first record must be seen at the next re-check, not at the timeout");
+    }
+
+    /// <summary>Cancelling a gate that has no entry to wait on propagates, rather than running to its timeout.</summary>
+    [Test]
+    public void CancellationPropagatesWhileTheDatabaseHasNoEntry()
+    {
+        SchemaAckTracker tracker = new();
+        using CancellationTokenSource cts = new();
+
+        Task<SchemaAckOutcome> gate = tracker.WaitForAllLiveAsync(
+            "db", 1, TimeSpan.FromSeconds(30), Members("A"), NoLease, NoBackstop, cts.Token);
+
+        cts.CancelAfter(100);
+
+        Assert.CatchAsync<OperationCanceledException>(async () => await gate);
     }
 
     // ── A member that answers "not open" ─────────────────────────────────────────────────────

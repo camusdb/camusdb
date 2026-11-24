@@ -286,11 +286,15 @@ internal sealed class TestJoinFallbackMetrics
         long now = 0;
         JoinFallbackMetrics metrics = new(() => Interlocked.Read(ref now));
         int warnings = 0;
+        long countedByTheFirstWarning = 0;
 
         Parallel.For(0, 8000, new ParallelOptions { MaxDegreeOfParallelism = 8 }, _ =>
         {
-            if (metrics.NoteNestedLoopFallback(out _))
-                Interlocked.Increment(ref warnings);
+            if (!metrics.NoteNestedLoopFallback(out long notLoggedBefore))
+                return;
+
+            Interlocked.Increment(ref warnings);
+            Interlocked.Add(ref countedByTheFirstWarning, notLoggedBefore);
         });
 
         Assert.That(warnings, Is.EqualTo(1));
@@ -298,7 +302,10 @@ internal sealed class TestJoinFallbackMetrics
 
         Interlocked.Exchange(ref now, JoinFallbackMetrics.LogIntervalMs);
         Assert.That(metrics.NoteNestedLoopFallback(out long notLogged), Is.True);
-        Assert.That(notLogged, Is.EqualTo(7999));
+
+        // A thread that loses the interval can count before the thread that won it reads the count, so the
+        // first warning can report some of them. Each one is reported once.
+        Assert.That(countedByTheFirstWarning + notLogged, Is.EqualTo(7999));
     }
 
     [Test]

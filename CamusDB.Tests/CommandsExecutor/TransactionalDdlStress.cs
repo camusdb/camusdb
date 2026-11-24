@@ -445,6 +445,10 @@ internal sealed class TransactionalDdlStress(string db, IReadOnlyList<StressNode
         await AssertModelsAsync(models);
     }
 
+    /// <summary>The refusal of <c>ADD COLUMN</c> for a name that is taken: the invalid-input code, with the name in the message.</summary>
+    private static bool IsDuplicateColumn(CamusDBException ex, string column) =>
+        ex.Code == CamusDBErrorCodes.InvalidInput && ex.Message.Contains($"Duplicate column '{column}'", StringComparison.Ordinal);
+
     /// <summary>In each round every worker adds the same column in a transaction. Exactly one commits.</summary>
     public async Task SameColumnAsync(int workers, int rounds)
     {
@@ -481,7 +485,7 @@ internal sealed class TransactionalDdlStress(string db, IReadOnlyList<StressNode
                             return;
                         }
                     }
-                    catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.DuplicateColumn)
+                    catch (CamusDBException ex) when (IsDuplicateColumn(ex, column))
                     {
                         return;
                     }
