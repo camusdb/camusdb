@@ -119,9 +119,16 @@ internal abstract class SchemaChangeHandoverScenarios : SharedNodeBaseTest
     private static async Task<bool> CompletesWithin(Task task, TimeSpan within)
         => ReferenceEquals(await Task.WhenAny(task, Task.Delay(within)), task);
 
-    /// <summary>Waits until no staged change holds <c>items</c>: the driver gave the job up.</summary>
-    private static async Task WaitForTableReleasedAsync(DatabaseDescriptor database)
+    /// <summary>
+    /// Waits until the driver gave the job up: until the record carries the successor's term
+    /// (<paramref name="stamped"/>), and then until no staged change holds <c>items</c>. The table is also
+    /// free before the driver takes its hold. A successor that starts then can read the job while the driver
+    /// holds the table; its resume skips a held table, and no later resume of the newer term follows.
+    /// </summary>
+    private static async Task WaitForHandOverAsync(DatabaseDescriptor database, Task stamped)
     {
+        await stamped.WaitAsync(Soon);
+
         DateTime deadline = DateTime.UtcNow.Add(Soon);
         while (database.DdlGate.IsTableHeld("items"))
         {
@@ -220,6 +227,7 @@ internal abstract class SchemaChangeHandoverScenarios : SharedNodeBaseTest
         Assert.That(term, Is.GreaterThan(0), "the node reads a term it can fence with");
 
         int fires = 0;
+        TaskCompletionSource stamped = new(TaskCreationOptions.RunContinuationsAsynchronously);
         executor.TestInterceptBeforeFillBatchLock = async () =>
         {
             if (Interlocked.Increment(ref fires) != 1)
@@ -232,6 +240,7 @@ internal abstract class SchemaChangeHandoverScenarios : SharedNodeBaseTest
             record.LeaderTerm = term + 1;
             record.Attempts = 1;
             await executor.Catalogs.PersistCoordinatorJobAsync(database, record);
+            stamped.SetResult();
 
             // The driver's fill stops, as it does when the leadership-lost callback cancels it.
             throw new OperationCanceledException("the schema leadership moved");
@@ -245,7 +254,7 @@ internal abstract class SchemaChangeHandoverScenarios : SharedNodeBaseTest
 
             successor = Task.Run(async () =>
             {
-                await WaitForTableReleasedAsync(database);
+                await WaitForHandOverAsync(database, stamped.Task);
                 await Successor(executor, term).ResumeJobsAsync(database);
             });
 
@@ -346,6 +355,7 @@ internal abstract class SchemaChangeHandoverScenarios : SharedNodeBaseTest
         const string reason = "column \"qty\" of table \"items\" contains null values (the successor found a row it could not fill)";
 
         int fires = 0;
+        TaskCompletionSource stamped = new(TaskCreationOptions.RunContinuationsAsynchronously);
         executor.TestInterceptBeforeFillBatchLock = async () =>
         {
             if (Interlocked.Increment(ref fires) != 1)
@@ -360,6 +370,7 @@ internal abstract class SchemaChangeHandoverScenarios : SharedNodeBaseTest
             record.FailureCode = CamusDBErrorCodes.NotNullViolation;
             record.FailureMessage = reason;
             await executor.Catalogs.PersistCoordinatorJobAsync(database, record);
+            stamped.SetResult();
 
             throw new OperationCanceledException("the schema leadership moved");
         };
@@ -383,7 +394,7 @@ internal abstract class SchemaChangeHandoverScenarios : SharedNodeBaseTest
 
             successor = Task.Run(async () =>
             {
-                await WaitForTableReleasedAsync(database);
+                await WaitForHandOverAsync(database, stamped.Task);
                 await Successor(executor, term).ResumeJobsAsync(database);
             });
 
