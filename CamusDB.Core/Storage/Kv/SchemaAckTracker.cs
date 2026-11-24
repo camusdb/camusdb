@@ -105,6 +105,9 @@ internal sealed class SchemaAckTracker
     /// </summary>
     private static readonly TimeSpan LivenessRecheckInterval = TimeSpan.FromMilliseconds(250);
 
+    /// <summary>The shortest sleep of the gate: the resolution of <see cref="Task.Delay(TimeSpan)"/>.</summary>
+    private static readonly TimeSpan MinimumSleep = TimeSpan.FromMilliseconds(1);
+
     /// <summary>
     /// Waits until every endpoint returned by <paramref name="getLiveMembers"/> has acked
     /// <paramref name="schemaVersion"/> (full convergence), OR — when
@@ -120,7 +123,8 @@ internal sealed class SchemaAckTracker
     ///
     /// <para>The entry is re-resolved every iteration rather than captured once, so a database whose
     /// state is forgotten and rebuilt underneath an in-flight gate is picked up rather than waited on
-    /// forever.</para>
+    /// forever. Between the two there is no entry and so no signal: the gate sleeps on the timer alone
+    /// and sees the rebuilt entry within <see cref="LivenessRecheckInterval"/>.</para>
     /// </summary>
     /// <param name="quorumBackstopDelay">
     /// How long to wait for full convergence before accepting quorum. Pass
@@ -155,7 +159,8 @@ internal sealed class SchemaAckTracker
             // before the await completes this task, so the wait returns at once and re-evaluates.
             // Capturing it afterwards would drop exactly that ack and sleep through it.
             databases.TryGetValue(database, out DatabaseAcks? acks);
-            Task ackArrived = acks?.AckArrived ?? Task.CompletedTask;
+            // Null while the database has no entry: there is no signal to capture, only the timer.
+            Task? ackArrived = acks?.AckArrived;
 
             IReadOnlyCollection<string> liveMembers = getLiveMembers();
             DateTime now = DateTime.UtcNow;
@@ -195,12 +200,19 @@ internal sealed class SchemaAckTracker
             if (LivenessRecheckInterval < delay)
                 delay = LivenessRecheckInterval;
 
-            if (delay > TimeSpan.Zero)
-            {
-                // A no-op when the ack signal wins the race; the delay task is abandoned to the
-                // timer queue either way, which is why the interval is coarse rather than 25 ms.
-                await Task.WhenAny(ackArrived, Task.Delay(delay, cancellationToken)).ConfigureAwait(false);
-            }
+            // Task.Delay drops the fraction of a millisecond, so a shorter wait would not wait at all and
+            // the loop would run without a pause through the last part of the time to a deadline.
+            if (delay < MinimumSleep)
+                delay = MinimumSleep;
+
+            // A no-op when the ack signal wins the race; the delay task is abandoned to the timer queue
+            // either way, which is why the interval is coarse rather than 25 ms.
+            Task recheck = Task.Delay(delay, cancellationToken);
+
+            // Every wait must include a task that is still pending. A completed stand-in for the missing
+            // signal would end each wait at once, and the loop would run without a pause until its
+            // deadline, leaving one timer behind per iteration.
+            await Task.WhenAny(ackArrived ?? recheck, recheck).ConfigureAwait(false);
         }
     }
 
@@ -239,8 +251,9 @@ internal sealed class SchemaAckTracker
     /// the database re-records this node's applied version (see
     /// <c>EmbeddedKahuna.RecordAndPublishSchemaApplied</c>, called from schema-replicator
     /// registration), and a DDL gate consults live Raft membership for who must ack. Forgetting a
-    /// database with a gate in flight would only make that gate wait for acks to be re-reported, which
-    /// is why eviction never runs while DDL is in flight.</para>
+    /// database with a gate in flight makes that gate wait for acks to be re-reported, up to its
+    /// timeout. Eviction never runs while DDL is in flight for that reason. An explicit close does not
+    /// check, so a gate must stay cheap while its database has no entry.</para>
     /// </summary>
     public void Forget(string database)
     {
