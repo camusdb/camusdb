@@ -232,9 +232,9 @@ public sealed class ExecuteSQLController : CommandsController
         // can subtract it from its own observed latency to isolate network/connection overhead.
         Stopwatch stopwatch = Stopwatch.StartNew();
 
-        // The client's disconnect signal. It reaches the query through the ticket, and nothing
-        // else: the transaction lifecycle below deliberately keeps its own token, because a
-        // cancelled commit or rollback abandons locks that only a lease expiry can reclaim.
+        // The client's disconnect signal. It reaches the query through the ticket, and the begin and
+        // the retries of an autocommit statement. The commit and the rollback never observe it: a
+        // finalize that a disconnect cuts leaves its locks to expire.
         CancellationToken requestAborted = HttpContext.RequestAborted;
 
         // Set once the statement is resolved. A write answered here (a RETURNING list) must not
@@ -345,8 +345,6 @@ public sealed class ExecuteSQLController : CommandsController
                         sql: sql,
                         parameters: resolved.Parameters,
                         principal: principal,
-                        // The query observes the client's disconnect; the surrounding begin/commit/
-                        // rollback keep `ct`, which the serializable retry owns.
                         cancellationToken: requestAborted,
                         routing: routingCollector,
                         discardReturningRows: request.DiscardReturningRows
@@ -357,7 +355,7 @@ public sealed class ExecuteSQLController : CommandsController
                     // collector refuses a result too large to hold, before the commit.
                     (DatabaseDescriptor? db, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket, cacheMeta, schemaHolder).ConfigureAwait(false);
                     List<QueryResultRow> rows = await BufferedResultCollector.CollectAsync(cursor, options).ConfigureAwait(false);
-                    causalToken = await transactions.CommitOrReleaseAsync(db, tx, ct).ConfigureAwait(false);
+                    causalToken = await transactions.CommitOrReleaseAsync(db, tx, CancellationToken.None).ConfigureAwait(false);
                     resultRows = rows;
                     resultColumns = ColumnSchemaDto.FromSchema(schemaHolder.Schema, rows, request.JsonbAsText);
                     resultSchema = schemaHolder.Schema;
@@ -365,16 +363,16 @@ public sealed class ExecuteSQLController : CommandsController
                 }
                 catch
                 {
-                    await transactions.RollbackIfNotCompletedAsync(tx, ct).ConfigureAwait(false);
+                    await transactions.RollbackIfNotCompletedAsync(tx, CancellationToken.None).ConfigureAwait(false);
                     throw;
                 }
             }
 
             CamusIsolationLevel resolvedLevel = reqLevel ?? options.DefaultIsolationLevel;
             if (resolvedLevel == CamusIsolationLevel.Serializable)
-                await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitBody).ConfigureAwait(false);
+                await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitBody, cancellationToken: requestAborted).ConfigureAwait(false);
             else
-                await AutocommitBody(CancellationToken.None).ConfigureAwait(false);
+                await AutocommitBody(requestAborted).ConfigureAwait(false);
 
             PositionalRowSet resultSet = new(resultRows, resultSchema, request.JsonbAsText);
             ExecuteSQLQueryResponse queryResponse = new("ok", resultSet.Count, resultColumns, resultSet)
@@ -423,6 +421,10 @@ public sealed class ExecuteSQLController : CommandsController
             LogCommandFailure(new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, e.Message));
 
             return new JsonResult(new ExecuteSQLQueryResponse("failed", CamusDBErrorCodes.TransactionMustRetry, e.Message) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds }) { StatusCode = CamusDBErrorCodes.GetHttpStatus(CamusDBErrorCodes.TransactionMustRetry) };
+        }
+        catch (OperationCanceledException) when (ClientClosedRequest)
+        {
+            return new JsonResult(new ExecuteSQLQueryResponse("failed", UnclassifiedErrorCode, LogClientClosedRequest()) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds }) { StatusCode = StatusCodes.Status499ClientClosedRequest };
         }
         catch (Exception e)
         {
@@ -474,6 +476,11 @@ public sealed class ExecuteSQLController : CommandsController
             resolved = Resolve(request, principal);
             sql = resolved.Sql;
             LogExecutingSqlRedacted(sql);
+        }
+        catch (OperationCanceledException) when (ClientClosedRequest)
+        {
+            EndClosedStream();
+            return;
         }
         catch (Exception e)
         {
@@ -593,6 +600,10 @@ public sealed class ExecuteSQLController : CommandsController
             });
             await Response.BodyWriter.FlushAsync(ct).ConfigureAwait(false);
         }
+        catch (OperationCanceledException) when (ClientClosedRequest)
+        {
+            EndClosedStream();
+        }
         catch (Exception e)
         {
             logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
@@ -636,7 +647,8 @@ public sealed class ExecuteSQLController : CommandsController
     /// Runs an autocommit write with a RETURNING list for the stream endpoint and returns its schema, its
     /// rows and the commit's causal token. Every row is buffered and the transaction is committed
     /// before this returns, so a Serializable conflict can be retried from a fresh transaction with
-    /// nothing on the wire. The rows come from the attempt that committed.
+    /// nothing on the wire. The rows come from the attempt that committed. The client's disconnect
+    /// reaches the begin, the statement and the retries, and never the commit or the rollback.
     /// </summary>
     private async Task<(IReadOnlyList<DerivedColumnSchema> Schema, List<QueryResultRow> Rows, Kommander.Time.HLCTimestamp CausalToken)>
         ExecuteAutocommitWriteReturningAsync(ExecuteSQLRequest request, ResolvedSql resolved, Principal? principal, CancellationToken requestAborted)
@@ -669,21 +681,21 @@ public sealed class ExecuteSQLController : CommandsController
                     await executor.ExecuteSQLQuery(ticket, schemaOut: schemaHolder).ConfigureAwait(false);
                 List<QueryResultRow> attemptRows = await BufferedResultCollector.CollectAsync(cursor, options).ConfigureAwait(false);
 
-                causalToken = await transactions.CommitOrReleaseAsync(db, tx, ct).ConfigureAwait(false);
+                causalToken = await transactions.CommitOrReleaseAsync(db, tx, CancellationToken.None).ConfigureAwait(false);
                 schema = schemaHolder.Schema;
                 rows = attemptRows;
             }
             catch
             {
-                await transactions.RollbackIfNotCompletedAsync(tx, ct).ConfigureAwait(false);
+                await transactions.RollbackIfNotCompletedAsync(tx, CancellationToken.None).ConfigureAwait(false);
                 throw;
             }
         }
 
         if ((level ?? options.DefaultIsolationLevel) == CamusIsolationLevel.Serializable)
-            await SerializableRetryHelper.ExecuteAutocommitAsync(Body).ConfigureAwait(false);
+            await SerializableRetryHelper.ExecuteAutocommitAsync(Body, cancellationToken: requestAborted).ConfigureAwait(false);
         else
-            await Body(CancellationToken.None).ConfigureAwait(false);
+            await Body(requestAborted).ConfigureAwait(false);
 
         return (schema, rows, causalToken);
     }
@@ -746,6 +758,18 @@ public sealed class ExecuteSQLController : CommandsController
         }
 
         return (database, count);
+    }
+
+    /// <summary>
+    /// Ends a streaming request whose client closed it. There is nobody to send a trailer or an error
+    /// body to; the status is set for the access log when the response did not start.
+    /// </summary>
+    private void EndClosedStream()
+    {
+        LogClientClosedRequest();
+
+        if (!Response.HasStarted)
+            Response.StatusCode = StatusCodes.Status499ClientClosedRequest;
     }
 
     /// <summary>
@@ -881,7 +905,7 @@ public sealed class ExecuteSQLController : CommandsController
                         discardReturningRows: request.DiscardReturningRows
                     );
                     ExecuteNonSQLResult r = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
-                    causalToken2 = await transactions.CommitOrReleaseAsync(r.Database, tx, ct).ConfigureAwait(false);
+                    causalToken2 = await transactions.CommitOrReleaseAsync(r.Database, tx, CancellationToken.None).ConfigureAwait(false);
                     modifiedRows = r.ModifiedRows;
                     warning = r.Warning;
                     committed = r;
@@ -889,16 +913,19 @@ public sealed class ExecuteSQLController : CommandsController
                 }
                 catch
                 {
-                    await transactions.RollbackIfNotCompletedAsync(tx, ct).ConfigureAwait(false);
+                    await transactions.RollbackIfNotCompletedAsync(tx, CancellationToken.None).ConfigureAwait(false);
                     throw;
                 }
             }
 
+            // The client's disconnect reaches the begin and the retries, and never the commit or the
+            // rollback: a finalize that a disconnect cuts leaves its locks to expire.
+            CancellationToken requestAborted = HttpContext.RequestAborted;
             CamusIsolationLevel resolvedLevel2 = reqLevel2 ?? options.DefaultIsolationLevel;
             if (resolvedLevel2 == CamusIsolationLevel.Serializable)
-                await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitDmlBody).ConfigureAwait(false);
+                await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitDmlBody, cancellationToken: requestAborted).ConfigureAwait(false);
             else
-                await AutocommitDmlBody(CancellationToken.None).ConfigureAwait(false);
+                await AutocommitDmlBody(requestAborted).ConfigureAwait(false);
 
             return new JsonResult(WithReturning(new ExecuteNonSQLQueryResponse("ok", modifiedRows)
             {
@@ -913,6 +940,10 @@ public sealed class ExecuteSQLController : CommandsController
             LogCommandFailure(e);
 
             return new JsonResult(new ExecuteNonSQLQueryResponse("failed", e.Code, e.Message) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds }) { StatusCode = CamusDBErrorCodes.GetHttpStatus(e.Code) };
+        }
+        catch (OperationCanceledException) when (ClientClosedRequest)
+        {
+            return new JsonResult(new ExecuteNonSQLQueryResponse("failed", UnclassifiedErrorCode, LogClientClosedRequest()) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds }) { StatusCode = StatusCodes.Status499ClientClosedRequest };
         }
         catch (Exception e)
         {
@@ -965,7 +996,8 @@ public sealed class ExecuteSQLController : CommandsController
                         isolationLevel: reqLevel3,
                         transactionMode: reqMode3,
                         locking: reqLocking3,
-                        priority: reqPriority3
+                        priority: reqPriority3,
+                        cancellationToken: HttpContext.RequestAborted
                     ).ConfigureAwait(false);
                 }
 
@@ -1004,6 +1036,10 @@ public sealed class ExecuteSQLController : CommandsController
             {
                 StatusCode = CamusDBErrorCodes.GetHttpStatus(e.Code)
             };
+        }
+        catch (OperationCanceledException) when (ClientClosedRequest)
+        {
+            return new JsonResult(new ExecuteDDLSQLResponse("failed", UnclassifiedErrorCode, LogClientClosedRequest())) { StatusCode = StatusCodes.Status499ClientClosedRequest };
         }
         catch (Exception e)
         {

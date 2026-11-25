@@ -32,7 +32,7 @@ public sealed class DeleteController : CommandsController
     {
         try
         {
-            DeleteRequest? request = await JsonSerializer.DeserializeAsync<DeleteRequest>(Request.Body, jsonOptions).ConfigureAwait(false);
+            DeleteRequest? request = await JsonSerializer.DeserializeAsync<DeleteRequest>(Request.Body, jsonOptions, HttpContext.RequestAborted).ConfigureAwait(false);
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Delete request is not valid");
 
@@ -82,20 +82,23 @@ public sealed class DeleteController : CommandsController
                         filters: request.Filters ?? new()
                     );
                     DeleteResult r = await executor.Delete(ticket).ConfigureAwait(false);
-                    causalToken = await transactions.CommitAsync(r.Database, tx, ct).ConfigureAwait(false);
+                    causalToken = await transactions.CommitAsync(r.Database, tx, CancellationToken.None).ConfigureAwait(false);
                     deletedRows = r.DeletedRows;
                 }
                 catch
                 {
-                    await transactions.RollbackIfNotCompletedAsync(tx, ct).ConfigureAwait(false);
+                    await transactions.RollbackIfNotCompletedAsync(tx, CancellationToken.None).ConfigureAwait(false);
                     throw;
                 }
             }
 
+            // The client's disconnect reaches the begin and the retries, and never the commit or the
+            // rollback: a finalize that a disconnect cuts leaves its locks to expire.
+            CancellationToken requestAborted = HttpContext.RequestAborted;
             if (options.DefaultIsolationLevel == CamusIsolationLevel.Serializable)
-                await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitBody).ConfigureAwait(false);
+                await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitBody, cancellationToken: requestAborted).ConfigureAwait(false);
             else
-                await AutocommitBody(CancellationToken.None).ConfigureAwait(false);
+                await AutocommitBody(requestAborted).ConfigureAwait(false);
 
             return new JsonResult(new DeleteResponse("ok", deletedRows) { CausalToken = causalToken.IsNull() ? null : causalToken });
         }
@@ -104,6 +107,10 @@ public sealed class DeleteController : CommandsController
             LogCommandFailure(e);
 
             return new JsonResult(new DeleteResponse("failed", e.Code, e.Message)) { StatusCode = CamusDBErrorCodes.GetHttpStatus(e.Code) };
+        }
+        catch (OperationCanceledException) when (ClientClosedRequest)
+        {
+            return new JsonResult(new DeleteResponse("failed", UnclassifiedErrorCode, LogClientClosedRequest())) { StatusCode = StatusCodes.Status499ClientClosedRequest };
         }
         catch (Exception e)
         {

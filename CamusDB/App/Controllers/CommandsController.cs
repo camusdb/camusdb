@@ -133,6 +133,26 @@ public abstract class CommandsController : ControllerBase
         return $"An internal error occurred. Reference: {requestId}";
     }
 
+    /// <summary>
+    /// True when the client of this request is gone. An <see cref="OperationCanceledException"/> is then
+    /// the cancel that its disconnect caused, and not a failure of the node.
+    /// </summary>
+    protected bool ClientClosedRequest => HttpContext.RequestAborted.IsCancellationRequested;
+
+    /// <summary>
+    /// Records that the request ended because its client closed it, and returns the message of the
+    /// response. The level is debug: a disconnect is ordinary traffic, and at error level one client that
+    /// times out often would fill the operator's log. The response itself has no reader; its status 499 is
+    /// for the access log.
+    /// </summary>
+    protected string LogClientClosedRequest()
+    {
+        if (logger.IsEnabled(LogLevel.Debug))
+            logger.LogDebug("The client closed the request on {Path} [{RequestId}]", Request.Path.Value, HttpContext.TraceIdentifier);
+
+        return "The client closed the request";
+    }
+
     protected async Task<Principal?> ResolveRequestPrincipalAsync()
     {
         if (!options.AuthenticationEnabled)

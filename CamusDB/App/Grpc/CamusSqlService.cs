@@ -493,22 +493,24 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                     await executor.ExecuteSQLQuery(ticket, schemaOut: schemaHolder).ConfigureAwait(false);
                 List<QueryResultRow> attemptRows = await BufferedResultCollector.CollectAsync(cursor, options).ConfigureAwait(false);
 
-                commitToken = await transactions.CommitOrReleaseAsync(db, tx, innerCt).ConfigureAwait(false);
+                commitToken = await transactions.CommitOrReleaseAsync(db, tx, CancellationToken.None).ConfigureAwait(false);
                 committedDb = db;
                 schema = schemaHolder.Schema;
                 rows = attemptRows;
             }
             catch
             {
-                await transactions.RollbackIfNotCompletedAsync(tx, innerCt).ConfigureAwait(false);
+                await transactions.RollbackIfNotCompletedAsync(tx, CancellationToken.None).ConfigureAwait(false);
                 throw;
             }
         }
 
+        // The call's token reaches the begin and the retries, and never the commit or the rollback: a
+        // finalize that a disconnect cuts leaves its locks to expire.
         if (retry)
-            await SerializableRetryHelper.ExecuteAutocommitAsync(Attempt).ConfigureAwait(false);
+            await SerializableRetryHelper.ExecuteAutocommitAsync(Attempt, cancellationToken: ct).ConfigureAwait(false);
         else
-            await Attempt(CancellationToken.None).ConfigureAwait(false);
+            await Attempt(ct).ConfigureAwait(false);
 
         await sink.WriteSchemaAsync(schema, ct).ConfigureAwait(false);
         foreach (QueryResultRow row in rows)
@@ -614,7 +616,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                     ExecuteNonSQLResult r = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
                     NonQueryReply attemptReply = new();
                     AttachReturning(attemptReply, r);
-                    causalToken = await transactions.CommitOrReleaseAsync(r.Database, tx, innerCt).ConfigureAwait(false);
+                    causalToken = await transactions.CommitOrReleaseAsync(r.Database, tx, CancellationToken.None).ConfigureAwait(false);
                     modifiedRows = r.ModifiedRows;
                     warning = r.Warning;
                     routingDb = r.Database;
@@ -622,17 +624,18 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                 }
                 catch
                 {
-                    await transactions.RollbackIfNotCompletedAsync(tx, innerCt).ConfigureAwait(false);
+                    await transactions.RollbackIfNotCompletedAsync(tx, CancellationToken.None).ConfigureAwait(false);
                     throw;
                 }
             }
 
-            // Never the call's token: a commit or rollback that a disconnect cuts leaves its locks to expire.
+            // The call's token reaches the begin and the retries, and never the commit or the rollback: a
+            // finalize that a disconnect cuts leaves its locks to expire.
             CamusIsolationLevel resolvedLevel = reqLevel ?? options.DefaultIsolationLevel;
             if (resolvedLevel == CamusIsolationLevel.Serializable)
-                await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitDml).ConfigureAwait(false);
+                await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitDml, cancellationToken: ct).ConfigureAwait(false);
             else
-                await AutocommitDml(CancellationToken.None).ConfigureAwait(false);
+                await AutocommitDml(ct).ConfigureAwait(false);
 
             NonQueryReply reply = returningReply;
             reply.AffectedRows = modifiedRows;
@@ -1652,7 +1655,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             (CamusIsolationLevel? reqLevel, CamusTransactionMode? reqMode, KeyValueTransactionLocking? reqLocking, EnginePriority? reqPriority) =
                 ParseLevelMode(request);
             KvTransaction tx = await transactions.StartAsync(
-                resolved.Database, reqLevel, reqMode, reqLocking, priority: reqPriority, cancellationToken: CancellationToken.None).ConfigureAwait(false);
+                resolved.Database, reqLevel, reqMode, reqLocking, priority: reqPriority, cancellationToken: ct).ConfigureAwait(false);
             IReadOnlyList<DerivedColumnSchema> schema;
             List<QueryResultRow> rows = [];
             try

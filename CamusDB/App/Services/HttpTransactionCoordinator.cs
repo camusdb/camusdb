@@ -78,6 +78,11 @@ public sealed class HttpTransactionCoordinator
     /// server-side transaction wrapped around one autocommit statement: the request owns that one and
     /// must finalize it on every path, because the idle reaper takes it only after a finalize failed.
     /// </param>
+    /// <param name="cancellationToken">
+    /// Ends the begin. A token that is cancelled before the begin refuses it, and nothing was written yet.
+    /// Do not use the token of a call for the commit or the rollback of the transaction: a finalize that a
+    /// disconnect cuts leaves the locks of the transaction to expire.
+    /// </param>
     /// <param name="causalToken">
     /// The causal token of the client's last commit, or null. Every Read Committed SELECT of the
     /// transaction reads at a statement timestamp at least this value; see
@@ -94,6 +99,10 @@ public sealed class HttpTransactionCoordinator
         CancellationToken cancellationToken = default,
         HLCTimestamp? causalToken = null)
     {
+        // The begin itself looks at the token only where it waits, for example for a remote leader. A
+        // caller that is already gone must not start a transaction on any node.
+        cancellationToken.ThrowIfCancellationRequested();
+
         if (string.IsNullOrEmpty(databaseName))
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "DatabaseName is required to start a transaction");
 

@@ -79,6 +79,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
     public override Task<NonQueryReply> InsertRow(InsertRowRequest request, ServerCallContext context)
         => InvokeAsync(context, Privilege.Insert, async () =>
         {
+            CancellationToken ct = context.CancellationToken;
             KeyValueTransactionLocking? reqLocking = ToLocking(request.Locking);
             EnginePriority? reqPriority = ToPriority(request.Priority);
             Dictionary<string, ColumnValue> values = ToColumnValueMap(request.Values);
@@ -123,21 +124,22 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
                         values: [values]
                     );
                     InsertResult r = await executor.Insert(ticket).ConfigureAwait(false);
-                    causalToken = await transactions.CommitAsync(r.Database, tx, innerCt).ConfigureAwait(false);
+                    causalToken = await transactions.CommitAsync(r.Database, tx, CancellationToken.None).ConfigureAwait(false);
                     insertedRows = r.InsertedRows;
                 }
                 catch
                 {
-                    await transactions.RollbackIfNotCompletedAsync(tx, innerCt).ConfigureAwait(false);
+                    await transactions.RollbackIfNotCompletedAsync(tx, CancellationToken.None).ConfigureAwait(false);
                     throw;
                 }
             }
 
-            // Never the call's token: a commit or rollback that a disconnect cuts leaves its locks to expire.
+            // The call's token reaches the begin and the retries, and never the commit or the rollback: a
+            // finalize that a disconnect cuts leaves its locks to expire.
             if (options.DefaultIsolationLevel == CamusIsolationLevel.Serializable)
-                await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitInsert).ConfigureAwait(false);
+                await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitInsert, cancellationToken: ct).ConfigureAwait(false);
             else
-                await AutocommitInsert(CancellationToken.None).ConfigureAwait(false);
+                await AutocommitInsert(ct).ConfigureAwait(false);
 
             NonQueryReply reply = new() { AffectedRows = insertedRows };
             if (!causalToken.IsNull())
@@ -297,6 +299,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
     public override Task<NonQueryReply> UpdateRows(UpdateRowsRequest request, ServerCallContext context)
         => InvokeAsync(context, Privilege.Update, async () =>
         {
+            CancellationToken ct = context.CancellationToken;
             KeyValueTransactionLocking? reqLocking = ToLocking(request.Locking);
             EnginePriority? reqPriority = ToPriority(request.Priority);
             Dictionary<string, ColumnValue> plainValues = ToColumnValueMap(request.Values);
@@ -354,21 +357,22 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
                         parameters: null
                     );
                     UpdateResult r = await executor.Update(ticket).ConfigureAwait(false);
-                    causalToken = await transactions.CommitAsync(r.Database, tx, innerCt).ConfigureAwait(false);
+                    causalToken = await transactions.CommitAsync(r.Database, tx, CancellationToken.None).ConfigureAwait(false);
                     updatedRows = r.UpdatedRows;
                 }
                 catch
                 {
-                    await transactions.RollbackIfNotCompletedAsync(tx, innerCt).ConfigureAwait(false);
+                    await transactions.RollbackIfNotCompletedAsync(tx, CancellationToken.None).ConfigureAwait(false);
                     throw;
                 }
             }
 
-            // Never the call's token: a commit or rollback that a disconnect cuts leaves its locks to expire.
+            // The call's token reaches the begin and the retries, and never the commit or the rollback: a
+            // finalize that a disconnect cuts leaves its locks to expire.
             if (options.DefaultIsolationLevel == CamusIsolationLevel.Serializable)
-                await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitUpdate).ConfigureAwait(false);
+                await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitUpdate, cancellationToken: ct).ConfigureAwait(false);
             else
-                await AutocommitUpdate(CancellationToken.None).ConfigureAwait(false);
+                await AutocommitUpdate(ct).ConfigureAwait(false);
 
             NonQueryReply reply = new() { AffectedRows = updatedRows };
             if (!causalToken.IsNull())
@@ -386,6 +390,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
     public override Task<NonQueryReply> UpdateById(UpdateByIdRequest request, ServerCallContext context)
         => InvokeAsync(context, Privilege.Update, async () =>
         {
+            CancellationToken ct = context.CancellationToken;
             KeyValueTransactionLocking? reqLocking = ToLocking(request.Locking);
             EnginePriority? reqPriority = ToPriority(request.Priority);
             Dictionary<string, ColumnValue> plainValues = ToColumnValueMap(request.Values);
@@ -443,21 +448,22 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
                         parameters: null
                     );
                     UpdateResult r = await executor.Update(ticket).ConfigureAwait(false);
-                    causalToken = await transactions.CommitAsync(r.Database, tx, innerCt).ConfigureAwait(false);
+                    causalToken = await transactions.CommitAsync(r.Database, tx, CancellationToken.None).ConfigureAwait(false);
                     updatedRows = r.UpdatedRows;
                 }
                 catch
                 {
-                    await transactions.RollbackIfNotCompletedAsync(tx, innerCt).ConfigureAwait(false);
+                    await transactions.RollbackIfNotCompletedAsync(tx, CancellationToken.None).ConfigureAwait(false);
                     throw;
                 }
             }
 
-            // Never the call's token: a commit or rollback that a disconnect cuts leaves its locks to expire.
+            // The call's token reaches the begin and the retries, and never the commit or the rollback: a
+            // finalize that a disconnect cuts leaves its locks to expire.
             if (options.DefaultIsolationLevel == CamusIsolationLevel.Serializable)
-                await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitUpdateById).ConfigureAwait(false);
+                await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitUpdateById, cancellationToken: ct).ConfigureAwait(false);
             else
-                await AutocommitUpdateById(CancellationToken.None).ConfigureAwait(false);
+                await AutocommitUpdateById(ct).ConfigureAwait(false);
 
             NonQueryReply reply = new() { AffectedRows = updatedRows };
             if (!causalToken.IsNull())
@@ -473,6 +479,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
     public override Task<NonQueryReply> DeleteRows(DeleteRowsRequest request, ServerCallContext context)
         => InvokeAsync(context, Privilege.Delete, async () =>
         {
+            CancellationToken ct = context.CancellationToken;
             KeyValueTransactionLocking? reqLocking = ToLocking(request.Locking);
             EnginePriority? reqPriority = ToPriority(request.Priority);
             List<EngineQueryFilter>? filters = ToFilters(request.Filters);
@@ -523,21 +530,22 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
                         filters: filters
                     );
                     DeleteResult r = await executor.Delete(ticket).ConfigureAwait(false);
-                    causalToken = await transactions.CommitAsync(r.Database, tx, innerCt).ConfigureAwait(false);
+                    causalToken = await transactions.CommitAsync(r.Database, tx, CancellationToken.None).ConfigureAwait(false);
                     deletedRows = r.DeletedRows;
                 }
                 catch
                 {
-                    await transactions.RollbackIfNotCompletedAsync(tx, innerCt).ConfigureAwait(false);
+                    await transactions.RollbackIfNotCompletedAsync(tx, CancellationToken.None).ConfigureAwait(false);
                     throw;
                 }
             }
 
-            // Never the call's token: a commit or rollback that a disconnect cuts leaves its locks to expire.
+            // The call's token reaches the begin and the retries, and never the commit or the rollback: a
+            // finalize that a disconnect cuts leaves its locks to expire.
             if (options.DefaultIsolationLevel == CamusIsolationLevel.Serializable)
-                await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitDelete).ConfigureAwait(false);
+                await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitDelete, cancellationToken: ct).ConfigureAwait(false);
             else
-                await AutocommitDelete(CancellationToken.None).ConfigureAwait(false);
+                await AutocommitDelete(ct).ConfigureAwait(false);
 
             NonQueryReply reply = new() { AffectedRows = deletedRows };
             if (!causalToken.IsNull())
@@ -554,6 +562,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
     public override Task<NonQueryReply> DeleteById(RowByIdRequest request, ServerCallContext context)
         => InvokeAsync(context, Privilege.Delete, async () =>
         {
+            CancellationToken ct = context.CancellationToken;
             KeyValueTransactionLocking? reqLocking = ToLocking(request.Locking);
             EnginePriority? reqPriority = ToPriority(request.Priority);
 
@@ -604,21 +613,22 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
                         filters: filters
                     );
                     DeleteResult r = await executor.Delete(ticket).ConfigureAwait(false);
-                    causalToken = await transactions.CommitAsync(r.Database, tx, innerCt).ConfigureAwait(false);
+                    causalToken = await transactions.CommitAsync(r.Database, tx, CancellationToken.None).ConfigureAwait(false);
                     deletedRows = r.DeletedRows;
                 }
                 catch
                 {
-                    await transactions.RollbackIfNotCompletedAsync(tx, innerCt).ConfigureAwait(false);
+                    await transactions.RollbackIfNotCompletedAsync(tx, CancellationToken.None).ConfigureAwait(false);
                     throw;
                 }
             }
 
-            // Never the call's token: a commit or rollback that a disconnect cuts leaves its locks to expire.
+            // The call's token reaches the begin and the retries, and never the commit or the rollback: a
+            // finalize that a disconnect cuts leaves its locks to expire.
             if (options.DefaultIsolationLevel == CamusIsolationLevel.Serializable)
-                await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitDeleteById).ConfigureAwait(false);
+                await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitDeleteById, cancellationToken: ct).ConfigureAwait(false);
             else
-                await AutocommitDeleteById(CancellationToken.None).ConfigureAwait(false);
+                await AutocommitDeleteById(ct).ConfigureAwait(false);
 
             NonQueryReply reply = new() { AffectedRows = deletedRows };
             if (!causalToken.IsNull())

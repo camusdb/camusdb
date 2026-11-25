@@ -7,15 +7,21 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 
 using Grpc.Core;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 using NUnit.Framework;
 using Microsoft.Extensions.Logging;
 
+using CamusDB.App.Controllers;
 using CamusDB.App.Grpc;
+using CamusDB.App.Models;
 using CamusDB.App.Services;
 using CamusDB.Core;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -25,12 +31,13 @@ using CamusDB.Grpc;
 using CamusDB.Tests.Grpc;
 using CamusDB.Tests.Utils;
 
+using CoreColumnType = CamusDB.Core.Catalogs.Models.ColumnType;
 using QueryFilter = CamusDB.Grpc.QueryFilter;
 
 namespace CamusDB.Tests.Cluster;
 
 /// <summary>
-/// A gRPC client that disconnects while its write runs, on every node of a three-node cluster. A table's
+/// A client that disconnects while its write runs, on every node of a three-node cluster. A table's
 /// rows live on one partition, so on two of the nodes the transaction coordinator is remote, and the
 /// commit and the rollback go through the leader lookup. That lookup refuses a cancelled token. A finalize
 /// on the token of the dropped call would therefore be cut there: the transaction would keep its row lock,
@@ -114,6 +121,8 @@ public sealed class TestClusterClientDisconnect
     [TestCase("batch")]
     [TestCase("unary")]
     [TestCase("typed row")]
+    [TestCase("rest sql")]
+    [TestCase("rest typed row")]
     public async Task AutocommitWriteOfAClientThatLeft_CommitsAndLeavesNoLock(string transport)
     {
         (InProcessSchemaCluster cluster, string db) = await StartAsync();
@@ -195,6 +204,17 @@ public sealed class TestClusterClientDisconnect
         }
     }
 
+    private static ControllerContext RestContext(object body, CancellationToken aborted)
+    {
+        byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(body);
+        DefaultHttpContext http = new() { RequestAborted = aborted };
+        http.Request.Body = new MemoryStream(bytes);
+        http.Request.ContentLength = bytes.Length;
+        http.Request.IsHttps = true;
+        http.Response.Body = new MemoryStream();
+        return new ControllerContext { HttpContext = http };
+    }
+
     private static async Task WriteThroughAsync(
         InProcessSchemaCluster.Node gateway,
         HttpTransactionCoordinator coordinator,
@@ -228,6 +248,32 @@ public sealed class TestClusterClientDisconnect
                     Filters = { new QueryFilter { ColumnName = "k", Op = "=", Value = new Value { Int64Value = 1 } } },
                 }, new TestServerCallContext(ct));
                 break;
+
+            case "rest sql":
+            {
+                JsonResult result = await new ExecuteSQLController(gateway.Executor, coordinator, new PreparedStatementRegistry(Options), logger, Options)
+                {
+                    ControllerContext = RestContext(new { databaseName = db, sql = update.Sql }, ct),
+                }.ExecuteNonSQLQuery();
+                Assert.AreEqual("ok", ((ExecuteNonSQLQueryResponse)result.Value!).Status);
+                break;
+            }
+
+            case "rest typed row":
+            {
+                JsonResult result = await new UpdateController(gateway.Executor, coordinator, logger, Options)
+                {
+                    ControllerContext = RestContext(new
+                    {
+                        databaseName = db,
+                        tableName = "kv",
+                        values = new { n = new { type = (int)CoreColumnType.Integer64, longValue = value } },
+                        filters = new[] { new { columnName = "k", op = "=", value = new { type = (int)CoreColumnType.Integer64, longValue = 1L } } },
+                    }, ct),
+                }.Update();
+                Assert.AreEqual("ok", ((UpdateResponse)result.Value!).Status);
+                break;
+            }
 
             default:
                 throw new ArgumentOutOfRangeException(nameof(transport), transport, null);

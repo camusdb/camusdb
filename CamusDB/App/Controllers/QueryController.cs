@@ -39,9 +39,9 @@ public sealed class QueryController : CommandsController
     [Route("/query")]
     public async Task<JsonResult> Query()
     {
-        // The client's disconnect signal. It reaches the scan through the ticket only: the
-        // transaction lifecycle below keeps its own token, because a cancelled commit or rollback
-        // abandons locks that only a lease expiry reclaims.
+        // The client's disconnect signal. It reaches the scan through the ticket, and the retries. The
+        // commit and the rollback never observe it: a finalize that a disconnect cuts leaves its locks
+        // to expire.
         CancellationToken requestAborted = HttpContext.RequestAborted;
 
         try
@@ -108,20 +108,20 @@ public sealed class QueryController : CommandsController
                     );
                     (DatabaseDescriptor db, IAsyncEnumerable<QueryResultRow> cursor) = await executor.Query(ticket).ConfigureAwait(false);
                     List<IReadOnlyDictionary<string, ColumnValue>> rows = RowsOf(await BufferedResultCollector.CollectAsync(cursor, options).ConfigureAwait(false));
-                    causalToken = await transactions.CommitAsync(db, tx, ct).ConfigureAwait(false);
+                    causalToken = await transactions.CommitAsync(db, tx, CancellationToken.None).ConfigureAwait(false);
                     resultRows = rows;
                 }
                 catch
                 {
-                    await transactions.RollbackIfNotCompletedAsync(tx, ct).ConfigureAwait(false);
+                    await transactions.RollbackIfNotCompletedAsync(tx, CancellationToken.None).ConfigureAwait(false);
                     throw;
                 }
             }
 
             if (options.DefaultIsolationLevel == CamusIsolationLevel.Serializable)
-                await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitBody).ConfigureAwait(false);
+                await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitBody, cancellationToken: requestAborted).ConfigureAwait(false);
             else
-                await AutocommitBody(CancellationToken.None).ConfigureAwait(false);
+                await AutocommitBody(requestAborted).ConfigureAwait(false);
 
             return new JsonResult(new QueryResponse("ok", resultRows.Count, resultRows) { CausalToken = causalToken.IsNull() ? null : causalToken });
         }
@@ -130,6 +130,10 @@ public sealed class QueryController : CommandsController
             LogCommandFailure(e);
 
             return new JsonResult(new QueryResponse("failed", e.Code, e.Message)) { StatusCode = CamusDBErrorCodes.GetHttpStatus(e.Code) };
+        }
+        catch (OperationCanceledException) when (ClientClosedRequest)
+        {
+            return new JsonResult(new QueryResponse("failed", UnclassifiedErrorCode, LogClientClosedRequest())) { StatusCode = StatusCodes.Status499ClientClosedRequest };
         }
         catch (Exception e)
         {
@@ -176,6 +180,10 @@ public sealed class QueryController : CommandsController
             LogCommandFailure(e);
 
             return new JsonResult(new QueryResponse("failed", e.Code, e.Message)) { StatusCode = CamusDBErrorCodes.GetHttpStatus(e.Code) };
+        }
+        catch (OperationCanceledException) when (ClientClosedRequest)
+        {
+            return new JsonResult(new QueryResponse("failed", UnclassifiedErrorCode, LogClientClosedRequest())) { StatusCode = StatusCodes.Status499ClientClosedRequest };
         }
         catch (Exception e)
         {

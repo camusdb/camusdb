@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -20,6 +21,7 @@ using NUnit.Framework;
 using Grpc.Core;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
 
 using CamusDB.Core;
 using CamusDB.Core.Catalogs.Models;
@@ -143,6 +145,32 @@ internal sealed class TestIdleReaperRunningStatements : SharedNodeBaseTest
         }
     }
 
+    /// <summary>Test-only: a request body that reports when the server has read all of it.</summary>
+    private sealed class SignallingBody(byte[] bytes, Action onEnd) : MemoryStream(bytes)
+    {
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            int read = await base.ReadAsync(buffer, cancellationToken);
+            if (read == 0)
+                onEnd();
+
+            return read;
+        }
+    }
+
+    /// <summary>Test-only: records the levels a controller logs at.</summary>
+    private sealed class RecordingLogger : ILogger<ICamusDB>
+    {
+        public ConcurrentQueue<(LogLevel Level, string Message)> Entries { get; } = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+            Entries.Enqueue((logLevel, formatter(state, exception)));
+    }
+
     // ─── Entry points ─────────────────────────────────────────────────────────
 
     private static ControllerContext Context(object body, Stream? responseBody = null, CancellationToken aborted = default)
@@ -158,6 +186,62 @@ internal sealed class TestIdleReaperRunningStatements : SharedNodeBaseTest
 
     private ExecuteSQLController Sql(object body, Stream? responseBody = null, CancellationToken aborted = default) =>
         new(executor, coordinator, prepared, logger, Options) { ControllerContext = Context(body, responseBody, aborted) };
+
+    private static readonly string[] RestWrites =
+        ["non-query", "returning", "stream returning", "ddl", "insert", "update", "delete"];
+
+    /// <summary>
+    /// Sends one autocommit write to a REST endpoint and returns the HTTP status. With
+    /// <paramref name="leaveAfterBody"/> the client of the request leaves when the server has read the
+    /// whole body, so before the transaction begins.
+    /// </summary>
+    private async Task<int> RestWriteAsync(
+        string endpoint, RecordingLogger log, CancellationTokenSource client, bool leaveAfterBody = false)
+    {
+        const string update = "UPDATE items SET v = 11 WHERE v = 10";
+
+        object body = endpoint switch
+        {
+            "non-query" => new { databaseName = db, sql = update },
+            "returning" or "stream returning" => new { databaseName = db, sql = update + " RETURNING v" },
+            "ddl" => new { databaseName = db, sql = "ALTER TABLE items ADD COLUMN extra INT64" },
+            "insert" => new { databaseName = db, tableName = "items", values = new { id = new { type = (int)ColumnType.Id, strValue = "000000000000000000000009" }, v = Int64(40) } },
+            "update" => new { databaseName = db, tableName = "items", values = new { v = Int64(11) }, filters = VEquals(10) },
+            "delete" => new { databaseName = db, tableName = "items", filters = VEquals(10) },
+            _ => throw new ArgumentOutOfRangeException(nameof(endpoint), endpoint, null),
+        };
+
+        ControllerContext context = Context(body, aborted: client.Token);
+        if (leaveAfterBody)
+            context.HttpContext.Request.Body = new SignallingBody(
+                Encoding.UTF8.GetBytes(JsonSerializer.Serialize(body, WireJson)), client.Cancel);
+
+        ExecuteSQLController sqlController = new(executor, coordinator, prepared, log, Options) { ControllerContext = context };
+
+        if (endpoint == "stream returning")
+        {
+            await sqlController.ExecuteSQLQueryStream();
+            return context.HttpContext.Response.StatusCode;
+        }
+
+        JsonResult result = endpoint switch
+        {
+            "non-query" => await sqlController.ExecuteNonSQLQuery(),
+            "returning" => await sqlController.ExecuteSQLQuery(),
+            "ddl" => await sqlController.ExecuteSQLDDL(),
+            "insert" => await new InsertController(executor, coordinator, log, Options) { ControllerContext = context }.Insert(),
+            "update" => await new UpdateController(executor, coordinator, log, Options) { ControllerContext = context }.Update(),
+            _ => await new DeleteController(executor, coordinator, log, Options) { ControllerContext = context }.Delete(),
+        };
+        return result.StatusCode ?? StatusCodes.Status200OK;
+    }
+
+    /// <summary>A disconnect is ordinary traffic, so it must not reach the operator's log.</summary>
+    private static void AssertQuiet(RecordingLogger log)
+    {
+        List<string> loud = log.Entries.Where(e => e.Level >= LogLevel.Warning).Select(e => e.Message).ToList();
+        Assert.IsEmpty(loud, string.Join("; ", loud));
+    }
 
     private object SqlBody(string statement, KvTransaction? tx) => new
     {
@@ -195,15 +279,15 @@ internal sealed class TestIdleReaperRunningStatements : SharedNodeBaseTest
 
     /// <summary>
     /// Runs one statement through the named entry point and asserts that it succeeded. A null
-    /// <paramref name="tx"/> is autocommit.
+    /// <paramref name="tx"/> is autocommit. <paramref name="ct"/> is the token of a unary gRPC call.
     /// </summary>
-    private async Task RunAsync(string entryPoint, KvTransaction? tx)
+    private async Task RunAsync(string entryPoint, KvTransaction? tx, CancellationToken ct = default)
     {
         // A row-returning autocommit statement is tracked only when it writes.
         const string update = "UPDATE items SET v = 11 WHERE v = 10";
         string query = tx is null ? update + " RETURNING v" : "SELECT v FROM items";
         TxnHandle? handle = tx is null ? null : HandleOf(tx);
-        TestServerCallContext call = new();
+        TestServerCallContext call = new(ct);
 
         object Row(object body) => JsonSerializer.Deserialize<Dictionary<string, object>>(
             JsonSerializer.Serialize(body, WireJson))!
@@ -726,12 +810,12 @@ internal sealed class TestIdleReaperRunningStatements : SharedNodeBaseTest
     /// The finalize of an autocommit write does not observe the disconnect either: a commit or rollback
     /// that is cut leaves its locks to expire. The write of a client that left commits.
     /// </summary>
-    [TestCase("rest")]
-    [TestCase("grpc")]
-    [TestCase("batch")]
-    public async Task ClientThatDisconnectsInAnAutocommitWrite_LeavesNothing(string transport)
+    [Test]
+    public async Task ClientThatDisconnectsInAnAutocommitWrite_LeavesNothing(
+        [Values("rest", "grpc", "batch")] string transport,
+        [Values(CamusIsolationLevel.ReadCommitted, CamusIsolationLevel.Serializable)] CamusIsolationLevel level)
     {
-        await SetUpEngineAsync(Options with { DefaultIsolationLevel = CamusIsolationLevel.ReadCommitted });
+        await SetUpEngineAsync(Options with { DefaultIsolationLevel = level });
         TableGate gate = await TableGate.InstallAsync(database, "items");
         using CancellationTokenSource disconnect = new();
 
@@ -765,6 +849,188 @@ internal sealed class TestIdleReaperRunningStatements : SharedNodeBaseTest
                     new CapturingStreamWriter<BatchExecuteResponse>(), new TestServerCallContext(ct));
                 break;
         }
+    }
+
+    /// <summary>The typed and unary gRPC writes, which begin their own autocommit transaction.</summary>
+    private static readonly string[] UnaryGrpcWrites =
+    [
+        "grpc non-query", "grpc query", "grpc insert row", "grpc update rows", "grpc update by id",
+        "grpc delete rows", "grpc delete by id",
+    ];
+
+    /// <summary>
+    /// A write whose call was cancelled before its transaction began does not start. Nothing was written,
+    /// so this is the one point where a cancel of a write is safe.
+    /// </summary>
+    [Test]
+    public async Task WriteOfACallCancelledBeforeItsBegin_DoesNotStart(
+        [ValueSource(nameof(UnaryGrpcWrites))] string entryPoint,
+        [Values(CamusIsolationLevel.ReadCommitted, CamusIsolationLevel.Serializable)] CamusIsolationLevel level)
+    {
+        await SetUpEngineAsync(Options with { DefaultIsolationLevel = level });
+
+        // The service hands a cancel to the gRPC runtime as it is, and the runtime answers CANCELLED.
+        Assert.CatchAsync<OperationCanceledException>(
+            () => RunAsync(entryPoint, tx: null, new CancellationToken(canceled: true)));
+
+        Assert.AreEqual(0, coordinator.ActiveCount);
+        CollectionAssert.AreEqual(new long[] { 10, 20, 30 }, await StoredAsync());
+    }
+
+    /// <summary>
+    /// A Serializable write that lost a conflict is replayed from its begin. For a client that left in the
+    /// meantime there is no replay: the attempt is rolled back and the call ends as cancelled.
+    /// </summary>
+    [TestCase("grpc non-query")]
+    [TestCase("grpc query")]
+    [TestCase("grpc update rows")]
+    public async Task SerializableWriteThatLostAConflict_IsNotRetriedForAClientThatLeft(string entryPoint)
+    {
+        await SetUpEngineAsync(Options with { DefaultIsolationLevel = CamusIsolationLevel.Serializable });
+
+        KvTransaction holder = await database.Transactions.BeginAsync();
+        await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(holder, db, "UPDATE items SET v = 99 WHERE v = 10", null));
+
+        TableGate gate = await TableGate.InstallAsync(database, "items");
+        using CancellationTokenSource disconnect = new();
+        Task statement = Task.Run(() => RunAsync(entryPoint, tx: null, disconnect.Token), CancellationToken.None);
+        try
+        {
+            await gate.Reached;
+            disconnect.Cancel();
+        }
+        finally
+        {
+            gate.Open();
+        }
+
+        // A retry loop that goes on ends with the conflict instead, as an RpcException.
+        Assert.CatchAsync<OperationCanceledException>(() => statement.WaitAsync(Deadline));
+        Assert.AreEqual(0, coordinator.ActiveCount);
+
+        await database.Transactions.RollbackAsync(holder);
+        CollectionAssert.AreEqual(new long[] { 10, 20, 30 }, await StoredAsync());
+    }
+
+    /// <summary>The same for REST: the client leaves after the server read its request.</summary>
+    [Test]
+    public async Task RestWriteOfAClientThatLeftBeforeTheBegin_DoesNotStart(
+        [ValueSource(nameof(RestWrites))] string endpoint,
+        [Values(CamusIsolationLevel.ReadCommitted, CamusIsolationLevel.Serializable)] CamusIsolationLevel level)
+    {
+        await SetUpEngineAsync(Options with { DefaultIsolationLevel = level });
+        RecordingLogger log = new();
+        using CancellationTokenSource client = new();
+
+        Assert.AreEqual(StatusCodes.Status499ClientClosedRequest, await RestWriteAsync(endpoint, log, client, leaveAfterBody: true));
+        Assert.IsTrue(client.IsCancellationRequested, "the client left when its body was read");
+
+        AssertQuiet(log);
+        Assert.AreEqual(0, coordinator.ActiveCount);
+        CollectionAssert.AreEqual(new long[] { 10, 20, 30 }, await StoredAsync());
+        Assert.AreEqual(2, (await database.TableDescriptors["items"]).Schema.Columns!.Count, "the schema change did not start");
+    }
+
+    /// <summary>A REST request that was cancelled before the server read it is refused on every endpoint.</summary>
+    [TestCaseSource(nameof(RestWrites))]
+    public async Task RestWriteCancelledBeforeItsBody_DoesNotStart(string endpoint)
+    {
+        await SetUpEngineAsync();
+        RecordingLogger log = new();
+        using CancellationTokenSource client = new();
+        client.Cancel();
+
+        Assert.AreEqual(StatusCodes.Status499ClientClosedRequest, await RestWriteAsync(endpoint, log, client));
+
+        AssertQuiet(log);
+        Assert.AreEqual(0, coordinator.ActiveCount);
+        CollectionAssert.AreEqual(new long[] { 10, 20, 30 }, await StoredAsync());
+    }
+
+    /// <summary>A REST write that lost a conflict is not replayed for a client that left.</summary>
+    [TestCase("non-query")]
+    [TestCase("returning")]
+    [TestCase("stream returning")]
+    [TestCase("insert")]
+    [TestCase("update")]
+    [TestCase("delete")]
+    public async Task SerializableRestWriteThatLostAConflict_IsNotRetriedForAClientThatLeft(string endpoint)
+    {
+        await SetUpEngineAsync(Options with { DefaultIsolationLevel = CamusIsolationLevel.Serializable });
+        KvTransaction holder = await database.Transactions.BeginAsync();
+        await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(holder, db, "UPDATE items SET v = 99 WHERE v = 10", null));
+
+        TableGate gate = await TableGate.InstallAsync(database, "items");
+        RecordingLogger log = new();
+        using CancellationTokenSource client = new();
+        Task<int> write = Task.Run(() => RestWriteAsync(endpoint, log, client));
+        try
+        {
+            await gate.Reached;
+            client.Cancel();
+        }
+        finally
+        {
+            gate.Open();
+        }
+
+        // A retry loop that goes on ends with the conflict instead.
+        Assert.AreEqual(StatusCodes.Status499ClientClosedRequest, await write.WaitAsync(Deadline));
+        AssertQuiet(log);
+        Assert.AreEqual(0, coordinator.ActiveCount);
+
+        await database.Transactions.RollbackAsync(holder);
+        CollectionAssert.AreEqual(new long[] { 10, 20, 30 }, await StoredAsync());
+    }
+
+    /// <summary>
+    /// A write with RETURNING observes the disconnect before it writes: it is rolled back, stores nothing
+    /// and leaves no lock.
+    /// </summary>
+    [TestCase("returning")]
+    [TestCase("stream returning")]
+    public async Task RestReturningWriteOfAClientThatDisconnects_IsRolledBack(string endpoint)
+    {
+        await SetUpEngineAsync();
+        TableGate gate = await TableGate.InstallAsync(database, "items");
+        RecordingLogger log = new();
+        using CancellationTokenSource client = new();
+        Task<int> write = Task.Run(() => RestWriteAsync(endpoint, log, client));
+        try
+        {
+            await gate.Reached;
+            client.Cancel();
+        }
+        finally
+        {
+            gate.Open();
+        }
+
+        Assert.AreEqual(StatusCodes.Status499ClientClosedRequest, await write.WaitAsync(Deadline));
+        AssertQuiet(log);
+        Assert.AreEqual(0, coordinator.ActiveCount);
+
+        await WriteAsync("UPDATE items SET v = 12 WHERE v = 10");
+        CollectionAssert.AreEqual(new long[] { 12, 20, 30 }, await StoredAsync());
+    }
+
+    /// <summary>
+    /// A cancel that the client did not cause is still a failure of the node: it keeps its status and its
+    /// error log.
+    /// </summary>
+    [Test]
+    public async Task CancelThatIsNotADisconnect_StaysAnInternalError()
+    {
+        await SetUpEngineAsync();
+        RecordingLogger log = new();
+        using CancellationTokenSource client = new();
+        ControllerContext context = Context(new { databaseName = db, tableName = "items" }, aborted: client.Token);
+        context.HttpContext.Request.Body = new SignallingBody([], () => throw new OperationCanceledException("not the client"));
+
+        JsonResult result = await new InsertController(executor, coordinator, log, Options) { ControllerContext = context }.Insert();
+
+        Assert.AreEqual(500, result.StatusCode);
+        Assert.IsTrue(log.Entries.Any(e => e.Level == LogLevel.Error));
     }
 
     /// <summary>

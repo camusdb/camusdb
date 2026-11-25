@@ -269,6 +269,8 @@ The reaper uses the following rules.
   once. A client that disconnects in a write does not stop the write. The write ends on its own, and
   the idle time starts then.
 - The commit and the rollback of a statement do not stop when its client disconnects.
+- A write does not start when its client left before its transaction began. A Serializable write that
+  loses a conflict is not retried for a client that left.
 - A client host that dies or becomes unreachable without a TCP close is found by TCP keepalive, after
   about 2 minutes without an answer. Its statements then end as for any other disconnect.
 - A client that stays connected and does not read its rows keeps its transaction, as in PostgreSQL.

@@ -85,20 +85,23 @@ public sealed class InsertController : CommandsController
                         values: new List<Dictionary<string, ColumnValue>>() { request.Values }
                     );
                     InsertResult r = await executor.Insert(ticket).ConfigureAwait(false);
-                    causalToken = await transactions.CommitAsync(r.Database, tx, ct).ConfigureAwait(false);
+                    causalToken = await transactions.CommitAsync(r.Database, tx, CancellationToken.None).ConfigureAwait(false);
                     insertedRows = r.InsertedRows;
                 }
                 catch
                 {
-                    await transactions.RollbackIfNotCompletedAsync(tx, ct).ConfigureAwait(false);
+                    await transactions.RollbackIfNotCompletedAsync(tx, CancellationToken.None).ConfigureAwait(false);
                     throw;
                 }
             }
 
+            // The client's disconnect reaches the begin and the retries, and never the commit or the
+            // rollback: a finalize that a disconnect cuts leaves its locks to expire.
+            CancellationToken requestAborted = HttpContext.RequestAborted;
             if (options.DefaultIsolationLevel == CamusIsolationLevel.Serializable)
-                await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitBody).ConfigureAwait(false);
+                await SerializableRetryHelper.ExecuteAutocommitAsync(AutocommitBody, cancellationToken: requestAborted).ConfigureAwait(false);
             else
-                await AutocommitBody(CancellationToken.None).ConfigureAwait(false);
+                await AutocommitBody(requestAborted).ConfigureAwait(false);
 
             return new JsonResult(new InsertResponse("ok", insertedRows) { CausalToken = causalToken.IsNull() ? null : causalToken });
         }
@@ -107,6 +110,10 @@ public sealed class InsertController : CommandsController
             LogCommandFailure(e);
 
             return new JsonResult(new InsertResponse("failed", e.Code, e.Message)) { StatusCode = CamusDBErrorCodes.GetHttpStatus(e.Code) };
+        }
+        catch (OperationCanceledException) when (ClientClosedRequest)
+        {
+            return new JsonResult(new InsertResponse("failed", UnclassifiedErrorCode, LogClientClosedRequest())) { StatusCode = StatusCodes.Status499ClientClosedRequest };
         }
         catch (Exception e)
         {
