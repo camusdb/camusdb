@@ -1063,9 +1063,12 @@ public sealed class RowUpdater
             return 0;
 
         // The rewritten row is stored under the current schema version, so its positional layout is
-        // fixed for the whole chunk. Compiled once here rather than per row.
-        CompiledRowCodec codec = await table.GetRowCodecAsync(tx.TransactionId, table.Schema.Version).ConfigureAwait(false);
-        List<TableColumnSchema> schemaColumns = table.Schema.Columns!;
+        // fixed for the whole chunk. Compiled once here rather than per row. The version and its
+        // columns are read together, once: a schema change that lands while the chunk runs must not
+        // give it the codec of one layout and the columns of another.
+        (int schemaVersion, List<TableColumnSchema>? layoutColumns) = table.Schema.ReadLayout();
+        List<TableColumnSchema> schemaColumns = layoutColumns!;
+        CompiledRowCodec codec = await table.GetRowCodecAsync(tx.TransactionId, schemaVersion).ConfigureAwait(false);
         LargeValuePolicy largeValuePolicy = LargeValuePolicy.For(schemaColumns, update.Database.Options);
 
         // Index writability is fixed for the statement (the transaction pins the schema version),
@@ -1074,10 +1077,10 @@ public sealed class RowUpdater
 
         // With triggers, the evaluated columns are null, so a carried row still decodes every column. A
         // row whose BEFORE trigger changes a carried column stops carrying below.
-        UpdateCarryPlan carry = UpdateCarryPlan.Build(table, update.AssignedColumns, writableIndexes, update.EvaluatedColumns, update.ForeignKeys);
+        UpdateCarryPlan carry = UpdateCarryPlan.Build(table, schemaColumns, update.AssignedColumns, writableIndexes, update.EvaluatedColumns, update.ForeignKeys);
 
         (ReadOnlyMemory<byte>?[] oldRows, ReadOnlyMemory<byte>?[] storedRows, List<int>?[] oldOutOfLine, bool[] carried) =
-            await ResolveRowsForUpdateAsync(table, tx, rowIds, rawRows, carry).ConfigureAwait(false);
+            await ResolveRowsForUpdateAsync(table, schemaVersion, tx, rowIds, rawRows, carry).ConfigureAwait(false);
 
         List<KvTableStore.RowUpdate> batch = new(rowIds.Count);
         List<(int Position, Dictionary<string, ColumnValue> Row)>? writtenImages = newImages is not null ? new(rowIds.Count) : null;
@@ -1114,7 +1117,7 @@ public sealed class RowUpdater
             Dictionary<string, ColumnValue> oldRow = await RowEncoder.DecodeWritableAsync(
                 table.Schema, tx.TransactionId, rowId, rawData.Value,
                 requiredColumns: carried[i] ? carry.DecodedColumns : null,
-                visibilitySchemaVersion: table.Schema.Version,
+                visibilitySchemaVersion: schemaVersion,
                 decodeState: carried[i] ? carryDecodeState : decodeState
             ).ConfigureAwait(false);
 
@@ -1259,7 +1262,7 @@ public sealed class RowUpdater
         /// are decoded even when carried.
         /// </param>
         /// <param name="assigned">The columns the statement assigns, compared case-insensitively.</param>
-        public static UpdateCarryPlan Build(TableDescriptor table, IReadOnlySet<string> assigned, List<TableIndexSchema> writableIndexes, IReadOnlySet<string>? evaluatedColumns, ForeignKeyStatementChecker foreignKeys)
+        public static UpdateCarryPlan Build(TableDescriptor table, List<TableColumnSchema> columns, IReadOnlySet<string> assigned, List<TableIndexSchema> writableIndexes, IReadOnlySet<string>? evaluatedColumns, ForeignKeyStatementChecker foreignKeys)
         {
             HashSet<string> validated = new(StringComparer.OrdinalIgnoreCase);
 
@@ -1279,8 +1282,6 @@ public sealed class RowUpdater
             // Index key columns already cover these; named explicitly so that a later narrowing of the
             // decode cannot drop a column the foreign-key check compares.
             foreignKeys.CollectCheckedColumns(validated);
-
-            List<TableColumnSchema> columns = table.Schema.Columns!;
 
             if (evaluatedColumns is null)
             {
@@ -1342,6 +1343,7 @@ public sealed class RowUpdater
     /// </summary>
     private static async Task<(ReadOnlyMemory<byte>?[] rows, ReadOnlyMemory<byte>?[] storedRows, List<int>?[] outOfLine, bool[] carried)> ResolveRowsForUpdateAsync(
         TableDescriptor table,
+        int schemaVersion,
         KvTransaction tx,
         List<ObjectIdValue> rowIds,
         ReadOnlyMemory<byte>?[] rawRows,
@@ -1362,7 +1364,7 @@ public sealed class RowUpdater
             outOfLine[i] = RowStorageForms.OutOfLineOrdinals(row.Span);
 
             int storedVersion = RowStorageForms.StoredVersion(System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(row.Span));
-            if (!carry.IsEmpty && storedVersion == table.Schema.Version)
+            if (!carry.IsEmpty && storedVersion == schemaVersion)
             {
                 carried[i] = true;
                 (carryIds ??= []).Add(rowIds[i]);

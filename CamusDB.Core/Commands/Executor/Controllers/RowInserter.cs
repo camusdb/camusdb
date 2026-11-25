@@ -339,8 +339,10 @@ internal sealed class RowInserter
 
         // Compiled once per statement: every inserted row is written under the current schema version,
         // so its positional layout is fixed for the whole VALUES list.
-        CompiledRowCodec codec = await table.GetRowCodecAsync(tx.TransactionId, table.Schema.Version).ConfigureAwait(false);
-        List<TableColumnSchema> schemaColumns = table.Schema.Columns!;
+        // The version and its columns are read together, once (see TableSchema.ReadLayout).
+        (int schemaVersion, List<TableColumnSchema>? layoutColumns) = table.Schema.ReadLayout();
+        List<TableColumnSchema> schemaColumns = layoutColumns!;
+        CompiledRowCodec codec = await table.GetRowCodecAsync(tx.TransactionId, schemaVersion).ConfigureAwait(false);
 
         // The storage rules for large values are read once per statement from the current options
         // snapshot, so a published setting change governs the next statement.

@@ -82,10 +82,8 @@ internal static class ElementStateApplier
             );
         }
 
-        tableSchema.Version++;
-        tableSchema.Columns = tableColumns;
-        tableSchema.SchemaHistory ??= [];
-        tableSchema.SchemaHistory.Add(new()
+        tableSchema.PublishLayout(tableSchema.Version + 1, tableColumns);
+        tableSchema.AppendSchemaHistory(new()
         {
             Version = tableSchema.Version,
             Columns = tableSchema.Columns

@@ -161,10 +161,9 @@ internal static class TableDeltaApplier
             // column and index definitions they were encoded against. The view keeps its own id; the
             // staging relation has served its purpose and only the view answers for that storage now.
             tableSchema.StorageId = staging.EffectiveStorageId;
-            tableSchema.Columns = staging.Columns;
+            tableSchema.PublishLayout(staging.Version, staging.Columns);
             tableSchema.Indexes = staging.Indexes;
             tableSchema.CheckConstraints = staging.CheckConstraints;
-            tableSchema.Version = staging.Version;
             tableSchema.SchemaHistory = staging.SchemaHistory;
             tableSchema.SchemaHistoryLoader = staging.SchemaHistoryLoader;
             tableSchema.IsPopulated = true;
