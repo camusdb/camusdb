@@ -49,8 +49,10 @@ internal static class StoredRowRewriter
 
         ReadOnlyMemory<byte>?[] stored = await table.Store.GetRowsBatch(tx, rowIds, default, LargeValueFetch.Raw).ConfigureAwait(false);
 
-        CompiledRowCodec codec = await table.GetRowCodecAsync(tx.TransactionId, table.Schema.Version).ConfigureAwait(false);
-        List<TableColumnSchema> columns = table.Schema.Columns!;
+        // The version and its columns are read together, once (see TableSchema.ReadLayout).
+        (int schemaVersion, List<TableColumnSchema>? layoutColumns) = table.Schema.ReadLayout();
+        List<TableColumnSchema> columns = layoutColumns!;
+        CompiledRowCodec codec = await table.GetRowCodecAsync(tx.TransactionId, schemaVersion).ConfigureAwait(false);
         LargeValuePolicy policy = LargeValuePolicy.For(columns, database.Options);
 
         List<KvTableStore.RowUpdate> batch = new(rows.Count);

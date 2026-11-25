@@ -40,21 +40,16 @@ internal static class ColumnDeltaApplier
         if (op == SchemaOp.DropColumn)
             ForeignKeyDependencyRules.RequireColumnNotInForeignKey(schema, tableSchema, payload.Column.Name);
 
-        tableSchema.Version++;
-
-        switch (op)
+        List<TableColumnSchema> columns = op switch
         {
-            case SchemaOp.AddColumn:
-                AddColumn(tableSchema, payload.Column);
-                break;
+            SchemaOp.AddColumn => WithColumnAdded(tableSchema.Columns!, payload.Column),
+            SchemaOp.DropColumn => WithColumnDropped(tableSchema.Columns!, payload.Column.Name),
+            _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown alter table operation '{op}'"),
+        };
 
-            case SchemaOp.DropColumn:
-                DropColumn(tableSchema, payload.Column.Name);
-                break;
-
-            default:
-                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown alter table operation '{op}'");
-        }
+        // The new version and its columns appear together: a statement that runs without the schema
+        // lock must never read the new version with the old columns.
+        tableSchema.PublishLayout(tableSchema.Version + 1, columns);
 
         TableSchemaHistory schemaHistory = new()
         {
@@ -62,8 +57,7 @@ internal static class ColumnDeltaApplier
             Columns = tableSchema.Columns,
         };
 
-        tableSchema.SchemaHistory ??= [];
-        tableSchema.SchemaHistory.Add(schemaHistory);
+        tableSchema.AppendSchemaHistory(schemaHistory);
 
         return tableSchema;
     }
@@ -116,13 +110,11 @@ internal static class ColumnDeltaApplier
             identityAlways: current.IdentityAlways
         );
 
-        tableSchema.Version++;
-        tableSchema.Columns = columns;
-        tableSchema.SchemaHistory ??= [];
+        tableSchema.PublishLayout(tableSchema.Version + 1, columns);
 
         // Rename is purely a label change: positional encoding means every historical snapshot
         // must also reflect the new name so rows written under any previous version decode correctly.
-        foreach (TableSchemaHistory history in tableSchema.SchemaHistory)
+        foreach (TableSchemaHistory history in tableSchema.SchemaHistory ?? [])
         {
             if (history.Columns is null) continue;
             int hIdx = history.Columns.FindIndex(c => c.Id == current.Id);
@@ -141,7 +133,7 @@ internal static class ColumnDeltaApplier
                 identityAlways: hCol.IdentityAlways);
         }
 
-        tableSchema.SchemaHistory.Add(new() { Version = tableSchema.Version, Columns = tableSchema.Columns });
+        tableSchema.AppendSchemaHistory(new() { Version = tableSchema.Version, Columns = tableSchema.Columns });
 
         // Storage parameters that name a column store the NAME, not the immutable column id, so a
         // rename would otherwise leave ttl_expiration_expression pointing at a column that no longer
@@ -161,13 +153,14 @@ internal static class ColumnDeltaApplier
         return tableSchema;
     }
 
-    internal static void AddColumn(TableSchema tableSchema, SchemaColumnPayload newColumn)
+    /// <summary>Returns a copy of <paramref name="current"/> with <paramref name="newColumn"/> appended.</summary>
+    private static List<TableColumnSchema> WithColumnAdded(List<TableColumnSchema> current, SchemaColumnPayload newColumn)
     {
         bool hasColumn = false;
 
-        List<TableColumnSchema> tableColumns = new(tableSchema.Columns!.Count);
+        List<TableColumnSchema> tableColumns = new(current.Count + 1);
 
-        foreach (TableColumnSchema column in tableSchema.Columns!)
+        foreach (TableColumnSchema column in current)
         {
             if (string.Equals(newColumn.Name, column.Name, StringComparison.OrdinalIgnoreCase))
                 hasColumn = true;
@@ -198,16 +191,17 @@ internal static class ColumnDeltaApplier
             )
         );
 
-        tableSchema.Columns = tableColumns;
+        return tableColumns;
     }
 
-    internal static void DropColumn(TableSchema tableSchema, string columnName)
+    /// <summary>Returns a copy of <paramref name="current"/> without the column <paramref name="columnName"/>.</summary>
+    private static List<TableColumnSchema> WithColumnDropped(List<TableColumnSchema> current, string columnName)
     {
         bool hasColumn = false;
 
-        List<TableColumnSchema> tableColumns = new(tableSchema.Columns!.Count);
+        List<TableColumnSchema> tableColumns = new(current.Count);
 
-        foreach (TableColumnSchema column in tableSchema.Columns!)
+        foreach (TableColumnSchema column in current)
         {
             if (columnName == column.Name)
                 hasColumn = true;
@@ -218,6 +212,6 @@ internal static class ColumnDeltaApplier
         if (!hasColumn)
             throw new CamusDBException(CamusDBErrorCodes.UnknownColumn, $"Unknown column '{columnName}'");
 
-        tableSchema.Columns = tableColumns;
+        return tableColumns;
     }
 }

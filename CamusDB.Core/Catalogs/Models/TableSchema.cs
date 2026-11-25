@@ -30,8 +30,47 @@ public sealed class TableSchema : IWriteShapeSource
     /// Index changes ride the table blob (via <c>PersistSchemaTableAsync</c> /
     /// <c>TableSchema.Indexes</c>) but stay invisible to other cluster nodes until routed
     /// through <c>SchemaChangeLogEntry</c>.
+    ///
+    /// <para>A reader that needs the version and <see cref="Columns"/> of the same layout calls
+    /// <see cref="ReadLayout"/>: two reads of the two properties can straddle a schema change.</para>
     /// </summary>
-    public int Version { get; set; }
+    public int Version
+    {
+        get => layout.Version;
+        set => layout = new(value, layout.Columns);
+    }
+
+    /// <summary>
+    /// The layout version and its columns. They are published as one reference, so a statement that
+    /// runs without the schema lock reads a version together with the columns of that version.
+    /// </summary>
+    private volatile LayoutPair layout = new(0, null);
+
+    /// <summary>A column-layout version and the column list of that version. Never changed after it is built.</summary>
+    private sealed class LayoutPair(int version, List<TableColumnSchema>? columns)
+    {
+        public readonly int Version = version;
+
+        public readonly List<TableColumnSchema>? Columns = columns;
+    }
+
+    /// <summary>
+    /// Returns <see cref="Version"/> and the <see cref="Columns"/> of that version, read together. A row
+    /// is encoded by the codec of one version from values laid out by one column list, and the two must
+    /// belong to the same layout: a pair mixed from two layouts encodes the wrong number of cells.
+    /// </summary>
+    internal (int Version, List<TableColumnSchema>? Columns) ReadLayout()
+    {
+        LayoutPair pair = layout;
+        return (pair.Version, pair.Columns);
+    }
+
+    /// <summary>
+    /// Publishes a layout version and its columns in one step. Every schema change that moves both
+    /// calls this: setting the two properties one after the other shows readers the new version with
+    /// the old columns in between. Called under the schema lock.
+    /// </summary>
+    internal void PublishLayout(int version, List<TableColumnSchema>? columns) => layout = new(version, columns);
 
     /// <summary>
     /// The name of the table. It can be changed.
@@ -132,7 +171,11 @@ public sealed class TableSchema : IWriteShapeSource
     /// <summary>
     /// The list of columns that make up the table
     /// </summary>
-    public List<TableColumnSchema>? Columns { get; set; }
+    public List<TableColumnSchema>? Columns
+    {
+        get => layout.Columns;
+        set => layout = new(layout.Version, value);
+    }
 
     /// <summary>
     /// Index definitions replicated alongside this table schema. Each entry carries an
@@ -240,10 +283,51 @@ public sealed class TableSchema : IWriteShapeSource
     public bool IsMaterializedView => Kind == RelationKind.MaterializedView;
 
     /// <summary>
-    /// A list of all the previous versions of the table schema.
+    /// The column layouts this table has had, the current one included, as far as they are held in
+    /// memory. Null on a table loaded from storage until a layout is fetched through
+    /// <see cref="SchemaHistoryLoader"/>.
+    ///
+    /// <para>Statements iterate this list without the schema lock, so a list that a shared table
+    /// schema holds is never changed in place. A layout is added with
+    /// <see cref="AppendSchemaHistory"/>, which publishes a new list.</para>
     /// </summary>
-    public List<TableSchemaHistory>? SchemaHistory { get; set; }
+    public List<TableSchemaHistory>? SchemaHistory
+    {
+        get => Volatile.Read(ref schemaHistory);
+        set => Volatile.Write(ref schemaHistory, value);
+    }
 
+    private List<TableSchemaHistory>? schemaHistory;
+
+    /// <summary>
+    /// Adds a layout to <see cref="SchemaHistory"/> by publishing a copy of the list with the layout
+    /// at its end. A statement that iterates the list it read keeps a list that no longer changes.
+    ///
+    /// <para>A schema change calls this under the schema lock while a lazy load in
+    /// <see cref="GetSchemaHistoryAsync"/> may publish under its own semaphore. Both publish by
+    /// compare-and-swap and build again from the newer list when they lose, so neither drops the
+    /// layout the other added.</para>
+    /// </summary>
+    internal void AppendSchemaHistory(TableSchemaHistory layout)
+    {
+        while (true)
+        {
+            List<TableSchemaHistory>? seen = Volatile.Read(ref schemaHistory);
+
+            List<TableSchemaHistory> next = new((seen?.Count ?? 0) + 1);
+            if (seen is not null)
+                next.AddRange(seen);
+            next.Add(layout);
+
+            if (ReferenceEquals(Interlocked.CompareExchange(ref schemaHistory, next, seen), seen))
+                return;
+        }
+    }
+
+    /// <summary>
+    /// Fetches one past layout from storage by version. Null on a table whose every layout is in
+    /// <see cref="SchemaHistory"/>.
+    /// </summary>
     [JsonIgnore]
     public Func<HLCTimestamp, int, ValueTask<TableSchemaHistory?>>? SchemaHistoryLoader { get; set; }
 
@@ -260,32 +344,36 @@ public sealed class TableSchema : IWriteShapeSource
 
     /// <summary>
     /// Serializes lazy schema-history loads so concurrent decoders (parallel scan workers)
-    /// requesting the same missing version perform one KV read, and so the published
-    /// <see cref="SchemaHistory"/> list is replaced by copy-on-write swap — never mutated in
-    /// place — keeping lock-free readers safe. DDL writers mutate the list under the schema
-    /// semaphore and are unaffected.
+    /// requesting the same missing version perform one KV read. A schema change does not take this
+    /// semaphore: it adds its layout through <see cref="AppendSchemaHistory"/>, and the load publishes
+    /// by compare-and-swap for that reason.
     /// </summary>
     private readonly SemaphoreSlim historyLoadSemaphore = new(1, 1);
 
-    private TableSchemaHistory GetCurrentVersionHistory()
+    private TableSchemaHistory GetCurrentVersionHistory(LayoutPair current)
     {
         TableSchemaHistory? cached = currentVersionHistory;
-        if (cached is not null && cached.Version == Version && ReferenceEquals(cached.Columns, Columns))
+        if (cached is not null && cached.Version == current.Version && ReferenceEquals(cached.Columns, current.Columns))
             return cached;
 
-        cached = new() { Version = Version, Columns = Columns };
+        cached = new() { Version = current.Version, Columns = current.Columns };
         currentVersionHistory = cached;
         return cached;
     }
 
     public TableSchemaHistory GetSchemaHistory(int version)
     {
-        if (version == Version && Columns is not null)
-            return GetCurrentVersionHistory();
+        // One read of the pair: a version taken with the columns of another layout would be handed out,
+        // and cached by callers, as the layout of that version.
+        LayoutPair current = layout;
+        if (version == current.Version && current.Columns is not null)
+            return GetCurrentVersionHistory(current);
 
-        if (SchemaHistory is not null)
+        // One read of the list reference: a published list is never changed in place.
+        List<TableSchemaHistory>? snapshot = SchemaHistory;
+        if (snapshot is not null)
         {
-            foreach (TableSchemaHistory history in SchemaHistory)
+            foreach (TableSchemaHistory history in snapshot)
             {
                 if (history.Version == version)
                     return history;
@@ -306,12 +394,12 @@ public sealed class TableSchema : IWriteShapeSource
 
     public async ValueTask<TableSchemaHistory> GetSchemaHistoryAsync(HLCTimestamp txId, int version)
     {
-        if (version == Version && Columns is not null)
-            return GetCurrentVersionHistory();
+        LayoutPair current = layout;
+        if (version == current.Version && current.Columns is not null)
+            return GetCurrentVersionHistory(current);
 
-        // Read a local snapshot of the list reference: the load path below never mutates a
-        // published list in place (copy-on-write swap), so iterating a snapshot is safe even
-        // while another decoder is loading a different version concurrently.
+        // Read a local snapshot of the list reference: a published list is never changed in place,
+        // so iterating a snapshot is safe while a load or a schema change publishes another list.
         List<TableSchemaHistory>? snapshot = SchemaHistory;
         if (snapshot is not null)
         {
@@ -348,12 +436,24 @@ public sealed class TableSchema : IWriteShapeSource
                 List<TableColumnSchema>? labeledWith = Columns;
                 loaded.TakeCurrentNames(labeledWith);
 
-                // Copy-on-write: readers outside the semaphore may be iterating the current
-                // list, so publish a new sorted list instead of mutating in place.
-                List<TableSchemaHistory> next = snapshot is null ? new(1) : new(snapshot);
-                next.Add(loaded);
-                next.Sort(static (a, b) => a.Version.CompareTo(b.Version));
-                SchemaHistory = next;
+                // Readers outside the semaphore may be iterating the current list, so publish a new
+                // sorted list. A schema change can publish its own layout while this one loads; the
+                // swap then fails and the list is built again from the newer one.
+                while (true)
+                {
+                    List<TableSchemaHistory> next = snapshot is null ? new(1) : new(snapshot);
+                    next.Add(loaded);
+                    next.Sort(static (a, b) => a.Version.CompareTo(b.Version));
+
+                    if (ReferenceEquals(Interlocked.CompareExchange(ref schemaHistory, next, snapshot), snapshot))
+                        break;
+
+                    snapshot = Volatile.Read(ref schemaHistory);
+
+                    // A list set whole by a contents swap may already hold this version.
+                    if (snapshot is not null && snapshot.Exists(history => history.Version == version))
+                        break;
+                }
 
                 // A rename relabels the layouts already in the list under the schema semaphore,
                 // not under this one, so one that ran while this layout was loading missed it. Every

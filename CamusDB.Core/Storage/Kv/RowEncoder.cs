@@ -335,8 +335,9 @@ public static class RowEncoder
         ArgumentNullException.ThrowIfNull(schema);
         ArgumentNullException.ThrowIfNull(row);
 
-        List<TableColumnSchema> columns = schema.Columns!;
-        CompiledRowCodec codec = GetCodec(schema, schema.Version, columns);
+        (int version, List<TableColumnSchema>? layoutColumns) = schema.ReadLayout();
+        List<TableColumnSchema> columns = layoutColumns!;
+        CompiledRowCodec codec = GetCodec(schema, version, columns);
         return codec.Encode(RowSlotAdapter.FromRow(columns, row));
     }
 
@@ -352,8 +353,9 @@ public static class RowEncoder
         ArgumentNullException.ThrowIfNull(schema);
         ArgumentNullException.ThrowIfNull(row);
 
-        List<TableColumnSchema> columns = schema.Columns!;
-        CompiledRowCodec codec = GetCodec(schema, schema.Version, columns);
+        (int version, List<TableColumnSchema>? layoutColumns) = schema.ReadLayout();
+        List<TableColumnSchema> columns = layoutColumns!;
+        CompiledRowCodec codec = GetCodec(schema, version, columns);
         return codec.EncodeStorageValue(RowSlotAdapter.FromRow(columns, row));
     }
 
