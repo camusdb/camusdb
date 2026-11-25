@@ -33,9 +33,12 @@ namespace CamusDB.Core.Storage.Kv;
 /// timestamps: an older requester waits for a younger holder, a younger requester aborts at once and
 /// is replayed from BeginAsync. Waits therefore only ever point older-to-younger, so no wait cycle
 /// can form and two transactions contending in reverse order can never both abort. One requester is
-/// exempt from the age rule: a transaction that holds no range lock and has staged no write
-/// (<see cref="KvTransaction.HoldsNoLocksOrWrites"/>) is nobody's holder, so its wait can never close
-/// a cycle, and it waits out the lock-wait deadline whatever its age.</para>
+/// exempt from the age rule: a transaction that holds no range lock, no key lock and has staged no
+/// write (<see cref="KvTransaction.HoldsNoLocksOrWrites"/>) is nobody's holder, so its wait can never
+/// close a cycle, and it waits out the lock-wait deadline whatever its age. The exclusive key locks
+/// follow the same rule (<see cref="AcquireExclusiveKeyLockAsync"/>, and the batched acquire of
+/// <see cref="KvBatchWriter"/>), so every wait in either mechanism points older to younger or starts
+/// from a transaction that holds nothing.</para>
 ///
 /// <para><b>A live write intent is a lock holder too.</b> Kahuna refuses a Shared or Exclusive
 /// range acquire while a covered key carries another transaction's live write intent, and names
@@ -163,6 +166,16 @@ internal sealed class KvRangeLockManager
     /// </summary>
     internal bool ReusesPointReadsForWrites(KvTransaction tx)
         => options.TransactionReadReuseEnabled && ValidatesPointReadsAtCommit(tx);
+
+    /// <summary>
+    /// The age half of the wait-die rule: true when <paramref name="tx"/> started before the
+    /// transaction that holds the lock it was refused, so a wait from it points older to younger and
+    /// cannot close a cycle. A transaction id is its start timestamp. An unknown holder (Zero) gives
+    /// false, because no order can be proven. The other half, a requester that holds nothing, is
+    /// <see cref="KvTransaction.HoldsNoLocksOrWrites"/>; range locks and key locks apply both.
+    /// </summary>
+    internal static bool RequesterIsOlder(KvTransaction tx, HLCTimestamp holder)
+        => holder != HLCTimestamp.Zero && tx.TransactionId.CompareTo(holder) < 0;
 
     /// <summary>
     /// Returns <c>true</c> if <paramref name="tx"/> holds a singleton <b>Shared</b> point lock
@@ -578,7 +591,7 @@ internal sealed class KvRangeLockManager
             // in-flight writer instead of failing on its first lock.
             if (type == KeyValueResponseType.AlreadyLocked)
             {
-                bool requesterIsOlder = holder != HLCTimestamp.Zero && tx.TransactionId.CompareTo(holder) < 0;
+                bool requesterIsOlder = RequesterIsOlder(tx, holder);
                 bool mayWait = requesterIsOlder || tx.HoldsNoLocksOrWrites;
                 if (mayWait && Stopwatch.GetTimestamp() < deadline)
                 {
@@ -956,6 +969,15 @@ internal sealed class KvRangeLockManager
     /// <para>Optimistic transactions take no explicit exclusive write lock — the write's implicit
     /// point lock plus commit-time validation replace it. That skip applies to the write lock only:
     /// under Serializable the read/scan predicate locks still apply (see the class summary).</para>
+    ///
+    /// <para><b>A held key waits under wait-die.</b> When another transaction holds the key, Kahuna
+    /// answers <c>AlreadyLocked</c> at once and names the holder. The requester polls with back-off
+    /// until <see cref="CamusDBOptions.LockWaitDeadlineMs"/> when it is older than the holder
+    /// (<see cref="RequesterIsOlder"/>) or holds nothing (<see cref="KvTransaction.HoldsNoLocksOrWrites"/>),
+    /// the rule the range locks above apply. A younger requester that holds something fails at once.
+    /// Both failures are the retryable <see cref="CamusDBErrorCodes.TransactionConflict"/>. Each attempt
+    /// after a denial registers under a fresh operation id: the denied attempt is finished and recorded
+    /// no lock, and its id would only replay the denial (see <see cref="Catalogs.Meta.CatalogKeyLock"/>).</para>
     /// </summary>
     internal async Task AcquireExclusiveKeyLockAsync(KvTransaction tx, string key, CancellationToken cancellationToken)
     {
@@ -966,23 +988,49 @@ internal sealed class KvRangeLockManager
         if (tx.Locking == KeyValueTransactionLocking.Optimistic)
             return;
 
-        (KeyValueResponseType lockType, _, _, _) = await retry.RetryOnMustRetryRegistered(tx, "exclusive lock acquisition", key,
-            (coordinatorKey, operationId) => kahuna.LocateAndTryAcquireExclusiveLock(tx.TransactionId, key, 0, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
-            cancellationToken
-        ).ConfigureAwait(false);
+        long deadline = retry.LockWaitDeadlineTicks();
+        int waits = 0;
 
-        if (lockType == KeyValueResponseType.AlreadyLocked)
-            throw new CamusDBException(CamusDBErrorCodes.TransactionConflict, $"Key {key} is locked by another transaction");
+        while (true)
+        {
+            // RetryOnMustRetryRegistered mints a new operation id on every call, which is what an attempt
+            // after a denial needs; it keeps that id across its own transient retries.
+            (KeyValueResponseType lockType, _, _, HLCTimestamp holder) = await retry.RetryOnMustRetryRegistered(tx, "exclusive lock acquisition", key,
+                (coordinatorKey, operationId) => kahuna.LocateAndTryAcquireExclusiveLock(tx.TransactionId, key, 0, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
+                cancellationToken
+            ).ConfigureAwait(false);
 
-        // A range that lost quorum or changed leadership (e.g. under a partition) aborts the lock
-        // acquisition; that is transient and retryable from BeginAsync, not corruption.
-        if (lockType == KeyValueResponseType.Aborted)
-            throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, $"Lock acquisition on {key} was aborted by Kahuna — retry the operation from BeginAsync");
+            if (lockType == KeyValueResponseType.Locked)
+            {
+                tx.MarkHoldsKeyLocks();
 
-        if (lockType != KeyValueResponseType.Locked)
+                if (options.LockTracingEnabled)
+                    Log.LogPointLockAcquired(logger, key, tx.UniqueId);
+
+                return;
+            }
+
+            if (lockType == KeyValueResponseType.AlreadyLocked)
+            {
+                bool requesterIsOlder = RequesterIsOlder(tx, holder);
+                bool mayWait = requesterIsOlder || tx.HoldsNoLocksOrWrites;
+
+                if (mayWait && Stopwatch.GetTimestamp() < deadline)
+                {
+                    ServerDiagnostics.AddKvRetryWait(requesterIsOlder ? "keylock_holder_wait" : "keylock_empty_requester_wait");
+                    await Task.Delay(KahunaRetryPolicy.RetryDelayMs(waits++), cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+
+                throw new CamusDBException(CamusDBErrorCodes.TransactionConflict, messages.HeldKeyLockMessage(tx, key, waited: mayWait));
+            }
+
+            // A range that lost quorum or changed leadership (e.g. under a partition) aborts the lock
+            // acquisition; that is transient and retryable from BeginAsync, not corruption.
+            if (lockType == KeyValueResponseType.Aborted)
+                throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, $"Lock acquisition on {key} was aborted by Kahuna — retry the operation from BeginAsync");
+
             throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Failed to acquire lock on {key}: {lockType}");
-
-        if (options.LockTracingEnabled)
-            Log.LogPointLockAcquired(logger, key, tx.UniqueId);
+        }
     }
 }

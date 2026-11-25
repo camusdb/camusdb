@@ -457,14 +457,14 @@ public sealed partial class KvTableStore
     /// takes (<see cref="KvBatchWriter.AcquireRowLocksForLockingReadAsync"/>). A Serializable read-write
     /// transaction also turns its point lock on the row key into an exclusive one, with wait-die, so a
     /// Serializable reader cannot take a shared lock on the row before this transaction ends, and a
-    /// later UPDATE of the row finds the lock already exclusive. The key lock is taken first: a held
-    /// row then fails or is skipped at once, and only a conflict with a reader's shared range lock
-    /// waits.</para>
+    /// later UPDATE of the row finds the lock already exclusive. The key lock is taken first, so a row
+    /// another writer holds is met there: <see cref="RowLockWaitPolicy.Wait"/> waits for it under
+    /// wait-die as an UPDATE does, NOWAIT fails at once and SKIP LOCKED skips it at once.</para>
     ///
     /// <para><b>The result.</b> Aligned with <paramref name="rowIds"/>. A row comes back null when a
     /// concurrent commit deleted it, and also, under <see cref="RowLockWaitPolicy.SkipLocked"/>, when
     /// another transaction holds it; <c>Skipped</c> tells the two apart (null for the other policies).
-    /// A held row under the other policies throws. Every cell of a returned row is resolved: the caller
+    /// A held row under the other policies throws, after the wait-die wait for the default. Every cell of a returned row is resolved: the caller
     /// re-checks the predicate and returns the row, and either may read any column.</para>
     ///
     /// <para>The locks stay until the transaction commits or rolls back, also on a row the caller then

@@ -7,6 +7,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -30,7 +31,9 @@ namespace CamusDB.Tests.Storage;
 /// group stops at its first key that is not granted and says nothing about the keys after it. A key
 /// with no answer is still pending and must be sent again; a loop that took the silence for a grant
 /// would return as if it held locks it never took. The SKIP LOCKED and NOWAIT forms of the loop are
-/// checked here too, at the storage layer, where the exact answers can be controlled.
+/// checked here too, at the storage layer, where the exact answers can be controlled, and so is the
+/// wait-die rule of the single-key and batched acquires, where the order of the keys in one answer and
+/// the age of each transaction can be controlled.
 /// </summary>
 [TestFixture]
 // Serial: starts and stops its own embedded Kahuna node, which is too heavy to run alongside
@@ -67,14 +70,17 @@ public sealed class TestRowLockBatchAnswers
         }
     }
 
-    private static async Task<(EmbeddedKahuna node, StoppingKahuna stub, KvTableStore store)> CreateStoreAsync(string tableId)
+    private static async Task<(EmbeddedKahuna node, StoppingKahuna stub, KvTableStore store)> CreateStoreAsync(string tableId, CamusDBOptions? options = null)
     {
         EmbeddedKahuna node = new();
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync($"{tableId}/warmup", CancellationToken.None);
         StoppingKahuna stub = new(node.Kahuna);
-        return (node, stub, new KvTableStore(stub, CamusDBOptions.Default, "rowlockanswers", tableId));
+        return (node, stub, new KvTableStore(stub, options ?? CamusDBOptions.Default, "rowlockanswers", tableId));
     }
+
+    /// <summary>A lock-wait deadline far above the time a requester that must not wait takes to fail.</summary>
+    private static readonly CamusDBOptions LongDeadline = CamusDBOptions.Default with { LockWaitDeadlineMs = 2_000 };
 
     private static async Task<KvTransaction> BeginAsync(IKahuna kahuna, CamusIsolationLevel level = CamusIsolationLevel.ReadCommitted)
     {
@@ -266,6 +272,103 @@ public sealed class TestRowLockBatchAnswers
 
             await RollbackAsync(stub, other);
             await RollbackAsync(stub, holder);
+        }
+        finally
+        {
+            await node.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// The single-key acquire of a row write applies wait-die. Transactions begun through Kahuna get their
+    /// identity at begin, so the begin order is the age order here.
+    /// </summary>
+    [Test]
+    public async Task SingleKeyAcquire_AnOlderRequesterWaits_AndAYoungerOneWithLocksDiesAtOnce()
+    {
+        (EmbeddedKahuna node, StoppingKahuna stub, KvTableStore store) = await CreateStoreAsync("t5", LongDeadline);
+
+        try
+        {
+            List<ObjectIdValue> rowIds = await SeedAsync(stub, store, 3);
+
+            KvTransaction older = await BeginAsync(stub);
+            KvTransaction holder = await BeginAsync(stub);
+            KvTransaction younger = await BeginAsync(stub);
+
+            await store.LockAndReadRowsForMutationAsync(holder, [rowIds[0]]);
+
+            Assert.IsTrue(older.HoldsNoLocksOrWrites);
+            await store.LockAndReadRowsForMutationAsync(older, [rowIds[1]]);
+            Assert.IsFalse(older.HoldsNoLocksOrWrites, "a granted key lock makes the transaction a holder before it writes");
+            await store.LockAndReadRowsForMutationAsync(younger, [rowIds[2]]);
+
+            Stopwatch sw = Stopwatch.StartNew();
+            CamusDBException? died = Assert.ThrowsAsync<CamusDBException>(
+                async () => await store.UpdateRow(younger, rowIds[0], [9]));
+            Assert.AreEqual(CamusDBErrorCodes.TransactionConflict, died!.Code, died.Message);
+            Assert.Less(sw.ElapsedMilliseconds, 1_000, "a younger requester that holds a lock must not wait");
+
+            Task release = Task.Run(async () =>
+            {
+                await Task.Delay(250);
+                await RollbackAsync(stub, holder);
+            });
+
+            sw.Restart();
+            await store.UpdateRow(older, rowIds[0], [9]);
+            Assert.GreaterOrEqual(sw.ElapsedMilliseconds, 100, "the older requester must have waited for the holder");
+            await release;
+
+            await RollbackAsync(stub, younger);
+            await RollbackAsync(stub, older);
+        }
+        finally
+        {
+            await node.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// One node answers a batch in the order it was sent and stops at the first refused key. A key granted
+    /// before the refusal makes the requester a holder in that same answer, so a younger requester then
+    /// dies at once. With the refused key first, nothing was granted, and the requester waits.
+    /// </summary>
+    [Test]
+    public async Task BatchedAcquire_AGrantInTheSameAnswer_MakesTheRequesterAHolder()
+    {
+        (EmbeddedKahuna node, StoppingKahuna stub, KvTableStore store) = await CreateStoreAsync("t6", LongDeadline);
+
+        try
+        {
+            List<ObjectIdValue> rowIds = await SeedAsync(stub, store, 2);
+
+            KvTransaction holder = await BeginAsync(stub);
+            await store.LockAndReadRowsForMutationAsync(holder, [rowIds[1]]);
+
+            KvTransaction grantedFirst = await BeginAsync(stub);
+            Stopwatch sw = Stopwatch.StartNew();
+            CamusDBException? died = Assert.ThrowsAsync<CamusDBException>(
+                async () => await store.LockAndReadRowsForMutationAsync(grantedFirst, [rowIds[0], rowIds[1]]));
+            Assert.AreEqual(CamusDBErrorCodes.TransactionConflict, died!.Code, died.Message);
+            Assert.Less(sw.ElapsedMilliseconds, 1_000, "the row granted in the same answer makes the requester a holder");
+            Assert.IsFalse(grantedFirst.HoldsNoLocksOrWrites);
+            await RollbackAsync(stub, grantedFirst);
+
+            KvTransaction refusedFirst = await BeginAsync(stub);
+            Task release = Task.Run(async () =>
+            {
+                await Task.Delay(250);
+                await RollbackAsync(stub, holder);
+            });
+
+            sw.Restart();
+            ReadOnlyMemory<byte>?[] rows = await store.LockAndReadRowsForMutationAsync(refusedFirst, [rowIds[1], rowIds[0]]);
+            Assert.GreaterOrEqual(sw.ElapsedMilliseconds, 100, "a requester that holds nothing waits for the holder");
+            Assert.That(rows, Has.All.Not.Null);
+            await release;
+
+            await RollbackAsync(stub, refusedFirst);
         }
         finally
         {
