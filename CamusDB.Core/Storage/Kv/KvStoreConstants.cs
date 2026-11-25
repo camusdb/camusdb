@@ -40,6 +40,21 @@ internal static class KvStoreConstants
     internal const int ProbeRangeMaxEntries = 65_536;
 
     /// <summary>
+    /// The most index entries an index build sends to Kahuna in one call. A backfill batch of rows with
+    /// one entry each fits in one call; a GIN index, whose rows hold many entries each, takes several. Far
+    /// below Kahuna's <c>MaxBatchItems</c>, and the number of items its write aggregator puts in one
+    /// proposal, so a batch becomes one log entry per partition.
+    /// </summary>
+    internal const int IndexEntryBatchMaxEntries = 512;
+
+    /// <summary>
+    /// The most key and value bytes an index build sends to Kahuna in one call. It matters for entries
+    /// with a large INCLUDE payload or a long text key: 512 of them would otherwise make one message and
+    /// one log entry of many megabytes. An entry larger than this goes alone.
+    /// </summary>
+    internal const int IndexEntryBatchMaxBytes = 1024 * 1024;
+
+    /// <summary>
     /// Page size of a foreign-key existence probe. The probe stops at the first live entry, so a full
     /// page would transfer up to <see cref="DefaultPageSize"/> keys to answer one yes-or-no question
     /// for every parent that has many children. A small page keeps that cost flat; entries the page

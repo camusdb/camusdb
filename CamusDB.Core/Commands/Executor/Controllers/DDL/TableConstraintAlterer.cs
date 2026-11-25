@@ -32,27 +32,24 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// constraint is removed again and the statement fails. See <see cref="RowConstraintValidationPass"/>.
 /// </para>
 ///
-/// <para><b>Standalone</b>: the constraint is enforced in memory, the fence waits for the commits in
-/// flight, the rows are read, and only then is the schema persisted. A crash before the persist leaves
-/// no constraint, which is correct, because none was proven.</para>
-///
-/// <para><b>Cluster</b>: a coordinator job (<see cref="SchemaElementKind.Check"/> or
+/// <para><b>How</b>: a coordinator job (<see cref="SchemaElementKind.Check"/> or
 /// <see cref="SchemaElementKind.NotNull"/>) is recorded before the constraint replicates, and
 /// <see cref="SchemaChangeCoordinator.ValidateRowConstraintAsync"/> waits for every live node, reads the
-/// rows and deletes the job. A statement that fails for any reason, not only a violation, removes the
-/// constraint again, so a failed ALTER leaves nothing enforced and can simply run again. A new leader
-/// that finds the job validates again, so a constraint that is enforced but was never proven cannot
-/// stay after a crash.</para>
+/// rows and deletes the job. A standalone node takes the same path, as the only member of its schema log.
+/// A statement that fails for any reason, not only a violation, removes the
+/// constraint again, so a failed ALTER leaves nothing enforced and can run again. A new leader, or
+/// a standalone node that restarts, validates a job it finds again, so a constraint that is enforced but
+/// was never proven cannot stay after a crash.</para>
 ///
-/// <para>Both enter the database's DDL gate for their table, as a foreign key ADD does, so two ALTERs
-/// of one database cannot interleave their checks and their replication. In a cluster the read of the
+/// <para>Every statement here enters the database's DDL gate for its table, as a foreign key ADD does, so
+/// two ALTERs of one database cannot interleave their checks and their replication. The read of the
 /// rows runs with the gate released and the table held (<see cref="SchemaChangeCoordinator.ValidateRowConstraintAsync"/>),
-/// so DDL on other tables proceeds while the rows are read; a standalone node reads under the gate.</para>
+/// so DDL on other tables proceeds while the rows are read, and DDL on this table waits.</para>
 ///
 /// <para><b>Inside a transaction with a private schema</b>, ADD CHECK and SET NOT NULL take one of two
 /// forms. On a table the transaction created, the constraint joins the transaction's change set, and the
 /// transaction's own rows are read through it and checked; no other transaction can see such a table
-/// before the commit. On any other table the cluster form above runs, owned by the transaction
+/// before the commit. On any other table the form above runs, owned by the transaction
 /// (<see cref="StageRowConstraintAsync"/>): the constraint is enforced for every transaction from the
 /// statement on, the rows are proven at the statement, the commit makes it permanent, and a rollback
 /// removes it. A SET NOT NULL on a column that is already NOT NULL only takes the new name, in the change
@@ -95,17 +92,41 @@ internal sealed class TableConstraintAlterer
     {
         // Inside a transaction with a private schema the change is a delta, which joins the change set, on
         // a single node too. The other single-node form changes the schema in place and persists it at once.
+        // ADD CHECK and SET NOT NULL have no such form: they always replicate.
         bool replicated = isClusterMode || TransactionSchemaScope.OverlayFor(database) is not null;
 
         return ticket.Operation switch
         {
-            AlterConstraintOperation.AddCheck => await AddCheck(catalogs, tableOpener, database, table, ticket, isClusterMode).ConfigureAwait(false),
-            AlterConstraintOperation.DropConstraint => await DropConstraint(catalogs, database, table, ticket, replicated).ConfigureAwait(false),
-            AlterConstraintOperation.SetNotNull => await SetNotNull(catalogs, tableOpener, database, table, ticket, isClusterMode).ConfigureAwait(false),
-            AlterConstraintOperation.DropNotNull => await DropNotNull(catalogs, database, table, ticket, replicated).ConfigureAwait(false),
-            AlterConstraintOperation.SetStorage => await SetStorage(catalogs, database, table, ticket, replicated).ConfigureAwait(false),
+            AlterConstraintOperation.AddCheck => await AddCheck(catalogs, tableOpener, database, table, ticket).ConfigureAwait(false),
+            AlterConstraintOperation.DropConstraint => await UnderGateAsync(tableOpener, database, ticket, gated => DropConstraint(catalogs, database, gated, ticket, replicated)).ConfigureAwait(false),
+            AlterConstraintOperation.SetNotNull => await SetNotNull(catalogs, tableOpener, database, table, ticket).ConfigureAwait(false),
+            AlterConstraintOperation.DropNotNull => await UnderGateAsync(tableOpener, database, ticket, gated => DropNotNull(catalogs, database, gated, ticket, replicated)).ConfigureAwait(false),
+            AlterConstraintOperation.SetStorage => await UnderGateAsync(tableOpener, database, ticket, gated => SetStorage(catalogs, database, gated, ticket, replicated)).ConfigureAwait(false),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown alter constraint operation '{ticket.Operation}'")
         };
+    }
+
+    /// <summary>
+    /// Runs a change that reads no row under the DDL gate, on the table opened there. A staged change in
+    /// progress on the table is waited for. It persists the whole table at each of its steps, and a change
+    /// that persisted the table beside it could store a definition that misses that step.
+    /// </summary>
+    private async Task<bool> UnderGateAsync(
+        TableOpener tableOpener,
+        DatabaseDescriptor database,
+        AlterConstraintTicket ticket,
+        Func<TableDescriptor, Task<bool>> change)
+    {
+        await database.DdlGate.EnterAsync(ticket.TableName, logger).ConfigureAwait(false);
+        try
+        {
+            TableDescriptor gated = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+            return await change(gated).ConfigureAwait(false);
+        }
+        finally
+        {
+            database.SchemaDdlSemaphore.Release();
+        }
     }
 
     private async Task<bool> AddCheck(
@@ -113,13 +134,13 @@ internal sealed class TableConstraintAlterer
         TableOpener tableOpener,
         DatabaseDescriptor database,
         TableDescriptor table,
-        AlterConstraintTicket ticket,
-        bool isClusterMode)
+        AlterConstraintTicket ticket)
     {
         // CHECK, named NOT NULL and foreign keys share one name space (ConstraintNameRules). Checked
         // here so a taken name is refused before any work, and again under the gate and the schema lock.
         ConstraintNameRules.RequireUnused(table.Schema, ticket.ConstraintName);
 
+        // Parsed before any work, so a bad expression is refused with nothing recorded.
         SQLParser.NodeAst parsedCondition = SQLParser.SQLParserProcessor.ParseCondition(ticket.Expression!);
 
         if (TransactionSchemaScope.OverlayFor(database) is { } overlay)
@@ -131,10 +152,7 @@ internal sealed class TableConstraintAlterer
         await database.DdlGate.EnterAsync(ticket.TableName, logger).ConfigureAwait(false);
         try
         {
-            if (isClusterMode)
-                await AddCheckClusterAsync(catalogs, tableOpener, database, ticket).ConfigureAwait(false);
-            else
-                await AddCheckStandaloneAsync(catalogs, database, table, ticket, parsedCondition).ConfigureAwait(false);
+            await AddCheckStagedAsync(catalogs, tableOpener, database, ticket).ConfigureAwait(false);
         }
         finally
         {
@@ -189,80 +207,11 @@ internal sealed class TableConstraintAlterer
     }
 
     /// <summary>
-    /// ADD CHECK on one node: enforce in memory, fence and wait for the commits in flight, read the
-    /// rows, then persist. Every failure before the commit restores the previous list, so the node never
-    /// enforces a constraint that is not durable or not proven.
-    /// </summary>
-    private async Task AddCheckStandaloneAsync(
-        CatalogsManager catalogs,
-        DatabaseDescriptor database,
-        TableDescriptor table,
-        AlterConstraintTicket ticket,
-        SQLParser.NodeAst parsedCondition)
-    {
-        List<CheckConstraintSchema>? previousChecks = null;
-        bool mutated = false;
-        KvTransaction? tx = null;
-
-        try
-        {
-            await database.Schema.AcquireLockAsync().ConfigureAwait(false);
-            try
-            {
-                ConstraintNameRules.RequireUnused(table.Schema, ticket.ConstraintName);
-
-                previousChecks = table.Schema.CheckConstraints;
-
-                CheckConstraintSchema check = new()
-                {
-                    Name = ticket.ConstraintName,
-                    Expression = ticket.Expression!,
-                    ReferencedColumns = ticket.ReferencedColumns ?? [],
-                    ParsedCondition = parsedCondition,
-                };
-
-                // A new list, not an Add: a statement on another thread can be iterating the old one.
-                table.Schema.CheckConstraints = previousChecks is null ? [check] : [.. previousChecks, check];
-                mutated = true;
-            }
-            finally
-            {
-                database.Schema.ReleaseLock();
-            }
-
-            // Every statement that starts now checks the constraint. The fence refuses the later commit
-            // of a transaction that wrote the table before, and waits for one whose commit is in flight.
-            await database.FenceWritersAndWaitAsync(table.Schema, database.Kahuna.SchemaAckWaitTimeout).ConfigureAwait(false);
-
-            if (TestInterceptBeforeRowValidation is { } intercept)
-                await intercept().ConfigureAwait(false);
-
-            await RowConstraintValidationPass.ScanForCheckViolationAsync(database, table, ticket.ConstraintName, parsedCondition).ConfigureAwait(false);
-
-            tx = await database.Transactions.BeginAsync(
-                CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
-            ).ConfigureAwait(false);
-
-            await catalogs.PersistSchemaTableAsync(database, table.Schema, tx).ConfigureAwait(false);
-            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
-            mutated = false;
-        }
-        finally
-        {
-            if (mutated)
-                await RevertChecksAsync(database, table, previousChecks).ConfigureAwait(false);
-
-            if (tx is not null)
-                await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
-        }
-    }
-
-    /// <summary>
-    /// ADD CHECK in a cluster: record the job, replicate the constraint (every node enforces it from its
+    /// ADD CHECK: record the job, replicate the constraint (every node enforces it from its
     /// apply on), then let the coordinator wait for every node, read the rows and delete the job, or
     /// remove the constraint on any failure.
     /// </summary>
-    private async Task AddCheckClusterAsync(
+    private async Task AddCheckStagedAsync(
         CatalogsManager catalogs,
         TableOpener tableOpener,
         DatabaseDescriptor database,
@@ -468,8 +417,7 @@ internal sealed class TableConstraintAlterer
         TableOpener tableOpener,
         DatabaseDescriptor database,
         TableDescriptor table,
-        AlterConstraintTicket ticket,
-        bool isClusterMode)
+        AlterConstraintTicket ticket)
     {
         string columnName = ticket.ColumnName!;
 
@@ -495,10 +443,7 @@ internal sealed class TableConstraintAlterer
         await database.DdlGate.EnterAsync(ticket.TableName, logger).ConfigureAwait(false);
         try
         {
-            if (isClusterMode)
-                await SetNotNullClusterAsync(catalogs, tableOpener, database, ticket.TableName, columnName, constraintName).ConfigureAwait(false);
-            else
-                await SetNotNullStandaloneAsync(catalogs, database, table, columnName, constraintName).ConfigureAwait(false);
+            await SetNotNullStagedAsync(catalogs, tableOpener, database, ticket.TableName, columnName, constraintName).ConfigureAwait(false);
         }
         finally
         {
@@ -561,83 +506,12 @@ internal sealed class TableConstraintAlterer
     }
 
     /// <summary>
-    /// SET NOT NULL on one node: enforce in memory, fence and wait for the commits in flight, read the
-    /// rows, then persist. A column that is already NOT NULL only takes the new name: its rows are
-    /// already proven, so there is nothing to read. Every failure before the commit restores the column.
-    /// </summary>
-    private async Task SetNotNullStandaloneAsync(
-        CatalogsManager catalogs,
-        DatabaseDescriptor database,
-        TableDescriptor table,
-        string columnName,
-        string constraintName)
-    {
-        int revertIdx = -1;
-        TableColumnSchema? revertColumn = null;
-        bool wasNotNull = false;
-        KvTransaction? tx = null;
-
-        try
-        {
-            await database.Schema.AcquireLockAsync().ConfigureAwait(false);
-            try
-            {
-                List<TableColumnSchema> columns = table.Schema.Columns!;
-                int idx = columns.FindIndex(c => string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase));
-                if (idx < 0)
-                    throw new CamusDBException(
-                        CamusDBErrorCodes.InvalidInput,
-                        $"Column '{columnName}' does not exist on table '{table.Name}'");
-
-                TableColumnSchema old = columns[idx];
-                ConstraintNameRules.RequireUnusedForNotNull(table.Schema, constraintName, old.Id);
-                revertIdx = idx;
-                revertColumn = old;
-                wasNotNull = old.NotNull;
-                ConstraintDeltaApplier.ReplaceColumn(table.Schema, idx, ConstraintDeltaApplier.WithNotNull(old, notNull: true, constraintName));
-            }
-            finally
-            {
-                database.Schema.ReleaseLock();
-            }
-
-            if (!wasNotNull)
-            {
-                // Every statement that starts now refuses a NULL. The fence refuses the later commit of
-                // a transaction that wrote the table before, and waits for one whose commit is in flight.
-                await database.FenceWritersAndWaitAsync(table.Schema, database.Kahuna.SchemaAckWaitTimeout).ConfigureAwait(false);
-
-                if (TestInterceptBeforeRowValidation is { } intercept)
-                    await intercept().ConfigureAwait(false);
-
-                await RowConstraintValidationPass.ScanForNullAsync(database, table, columnName).ConfigureAwait(false);
-            }
-
-            tx = await database.Transactions.BeginAsync(
-                CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
-            ).ConfigureAwait(false);
-
-            await catalogs.PersistSchemaTableAsync(database, table.Schema, tx).ConfigureAwait(false);
-            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
-            revertColumn = null;
-        }
-        finally
-        {
-            if (revertColumn is not null)
-                await RevertColumnAsync(database, table, revertIdx, revertColumn).ConfigureAwait(false);
-
-            if (tx is not null)
-                await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
-        }
-    }
-
-    /// <summary>
-    /// SET NOT NULL in a cluster. A column that is already NOT NULL only takes the new name. Otherwise
+    /// SET NOT NULL. A column that is already NOT NULL only takes the new name. Otherwise
     /// the job is recorded, the flag replicates (every node refuses a NULL from its apply on), and the
     /// coordinator waits for every node, reads the rows and deletes the job, or makes the column
     /// nullable again on any failure.
     /// </summary>
-    private async Task SetNotNullClusterAsync(
+    private async Task SetNotNullStagedAsync(
         CatalogsManager catalogs,
         TableOpener tableOpener,
         DatabaseDescriptor database,
@@ -678,9 +552,8 @@ internal sealed class TableConstraintAlterer
 
     /// <summary>
     /// ADD CHECK, or SET NOT NULL on a nullable column, inside a transaction with a private schema, on a
-    /// table other transactions write: the cluster form of the statement, owned by the change set
-    /// <paramref name="ownerChangeSetId"/>, on both single-node and cluster databases (both keep the schema
-    /// in a schema log). The job is recorded with its owner, the constraint replicates to the shared schema,
+    /// table other transactions write: the form of the statement outside a transaction, owned by the change
+    /// set <paramref name="ownerChangeSetId"/>. The job is recorded with its owner, the constraint replicates to the shared schema,
     /// and every node enforces it from its apply on, for every transaction. The coordinator then waits for
     /// the earlier writers and reads the rows (<see cref="SchemaChangeCoordinator.ValidateRowConstraintAsync"/>).
     /// A row that breaks the constraint takes it back and fails the statement. After a read that passed the

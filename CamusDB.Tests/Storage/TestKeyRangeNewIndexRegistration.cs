@@ -65,21 +65,22 @@ public sealed class TestKeyRangeNewIndexRegistration : BaseTest
             "INSERT INTO accounts (id, balance) VALUES (1, 100), (2, 200)", null));
         await database.Transactions.CommitAsync(insert);
 
-        // The table is open, so the index is added to the live descriptor and no reopen registers it.
-        TableDescriptor table = await executor.OpenTable(new OpenTableTicket(dbname, "accounts"));
+        // The table is open, so no first open of it registers the new index.
+        await executor.OpenTable(new OpenTableTicket(dbname, "accounts"));
 
         string? writeOnlySpace = null;
         bool registeredWhileWriteOnly = false;
 
-        // The hook fires while the index is WriteOnly: concurrent statements already write its entries.
-        TableIndexAdder.TestHookBeforePublish = () =>
+        // The hook fires while the index is WriteOnly: concurrent statements already write its entries. The
+        // table is read as such a statement finds it, through the descriptor that holds the WriteOnly index.
+        executor.TestInterceptAfterIndexBackfill = async () =>
         {
+            TableDescriptor table = await database.TableDescriptors["accounts"];
             TableIndexSchema index = table.Indexes["balance_idx"];
             Assert.That(index.State, Is.EqualTo(SchemaElementState.WriteOnly));
 
             writeOnlySpace = table.Store.IndexKeySpace(index.KvId);
             registeredWhileWriteOnly = IsKeyRangeRouted(writeOnlySpace);
-            return Task.CompletedTask;
         };
 
         try
@@ -88,7 +89,7 @@ public sealed class TestKeyRangeNewIndexRegistration : BaseTest
         }
         finally
         {
-            TableIndexAdder.TestHookBeforePublish = null;
+            executor.TestInterceptAfterIndexBackfill = null;
         }
 
         Assert.That(writeOnlySpace, Is.Not.Null, "the hook must fire during CREATE INDEX");

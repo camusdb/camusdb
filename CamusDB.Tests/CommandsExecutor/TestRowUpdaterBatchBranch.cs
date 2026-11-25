@@ -26,7 +26,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// Exercises the batched UPDATE path (UpdateRowsBatch) on a COW branch database, where
 /// <c>KvTableStore.ancestorStores</c> is non-empty so the branch code path runs: old index entries
 /// are tombstoned (not physically deleted), new unique entries go through the per-item post-lock
-/// ancestry probe (<c>ResolveBranchUniqueFlagsAsync</c>), and branch writes must stay isolated from
+/// ancestry probe (<c>ResolveBranchUniqueFlagsBatchAsync</c>), and branch writes must stay isolated from
 /// the ancestor. The root-only tests in <see cref="TestRowUpdaterBatch"/> never take this path.
 /// </summary>
 // Serial: boots an embedded Kahuna node per test. Running node-booting fixtures concurrently
@@ -161,7 +161,7 @@ internal sealed class TestRowUpdaterBatchBranch : BaseTest
     public async Task BranchBatchUpdate_UniqueIndex_DuplicateAgainstInheritedValue_Throws()
     {
         // A branch row updated to a unique value that exists only in the ancestor (never touched on
-        // the branch) must be rejected. Exercises ResolveBranchUniqueFlagsAsync's post-lock ancestry
+        // the branch) must be rejected. Exercises ResolveBranchUniqueFlagsBatchAsync's post-lock ancestry
         // probe: the new key is absent branch-locally but live in the ancestor for a different row.
         (string rootName, DatabaseDescriptor rootDb, string branchName, DatabaseDescriptor branchDb, CommandExecutor executor) =
             await CreateRootAndBranch(rowCount: 2, uniqueIndex: true); // val=0, val=1 inherited

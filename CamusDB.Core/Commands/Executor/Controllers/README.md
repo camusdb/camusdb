@@ -12,7 +12,7 @@ work and documents the invariant that makes it correct.
 | `ServerLevelStatementDispatcher` | Statements that open no database (CREATE/DROP/RENAME/RELINK DATABASE, COMMENT ON DATABASE, users, grants, cluster settings). Shared by the DDL and no-rows entry points so the two lists cannot drift |
 | `DatabaseLifecycleService` | Create, branch, open, close, drop, relink, rename — and the fences that keep those correct against each other |
 | `DDL/DdlStatementDispatcher` | Routes a parsed DDL statement to the service that executes it |
-| `DDL/SchemaDdlService` | Table/column/index/constraint/comment DDL, and the three execution shapes (single transaction, two-phase index DDL, staged coordinator) |
+| `DDL/SchemaDdlService` | Table/column/index/constraint/comment DDL, and the three execution shapes (single transaction, two-phase index drop, staged coordinator) |
 | `DDL/DdlForwardingCoordinator` | Forwards DDL to the schema leader and waits until the change is visible locally |
 | `DDL/TableSettingsService` | Version-neutral `ALTER TABLE … SET/RESET` storage parameters |
 | `DDL/CreateTableAsSelectExecutor` | `CREATE TABLE … AS SELECT` and the relation-staging primitives a matview refresh uses |

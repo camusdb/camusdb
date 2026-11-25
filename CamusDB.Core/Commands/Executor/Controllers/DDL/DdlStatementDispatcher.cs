@@ -679,26 +679,17 @@ internal sealed class DdlStatementDispatcher
                         AlterIndexOperation.AddPrimaryKey or
                         AlterIndexOperation.AddInvertedIndex;
 
-                    // Inside a transaction with a private schema an index add takes the two-phase shape,
-                    // which runs its build in the transaction; the staged coordinator commits steps of its own.
-                    if (context.IsClusterMode && sqlAddIndex && TransactionSchemaScope.OverlayFor(database) is null)
-                    {
-                        bool ok = await schemaDdl.ExecuteClusterAddIndexAsync(database, table, alterIndexTicket).ConfigureAwait(false);
-                        return new ExecuteDDLSQLResult(database, ok);
-                    }
-
-                    // Both cluster (non-add) and standalone paths require the two-phase DDL sequence
-                    // so Phase 2 (ReplicateIndexChangeAsync) persists the schema change across
-                    // close/reopen. ExecuteDdlInTransaction is single-phase and skips that step.
-                    bool indexExistedBefore = table.AllIndexes.ContainsKey(alterIndexTicket.IndexName);
-                    bool compensateOnAbort = sqlAddIndex && !indexExistedBefore;
-                    {
-                        bool ok = await schemaDdl.ExecuteClusteredIndexDdlAsync(
-                            database, table, alterIndexTicket, compensateOnAbort,
+                    // Inside a transaction with a private schema an index add runs its build in the
+                    // transaction, or stages it owned by the transaction; outside one, the coordinator
+                    // drives the staged build in both modes.
+                    bool ok = sqlAddIndex && TransactionSchemaScope.OverlayFor(database) is null
+                        ? await schemaDdl.ExecuteStagedAddIndexAsync(database, table, alterIndexTicket).ConfigureAwait(false)
+                        : await schemaDdl.ExecuteIndexDdlAsync(
+                            database, table, alterIndexTicket,
                             tx => tableIndexAlterer.Alter(queryExecutor, database, table, alterIndexTicket, tx)
                         ).ConfigureAwait(false);
-                        return new ExecuteDDLSQLResult(database, ok);
-                    }
+
+                    return new ExecuteDDLSQLResult(database, ok);
                 }
 
             case NodeType.AlterTableRenameColumn:

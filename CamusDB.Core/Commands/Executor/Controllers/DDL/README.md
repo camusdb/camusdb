@@ -10,7 +10,8 @@ SQL-level DDL command controllers. Each `SQLExecutor*Creator` translates a raw S
 | `SQLExecutorAlterIndexCreator` | Parses `ALTER INDEX` / `CREATE INDEX` / `DROP INDEX` → `AlterIndexTicket` → `TableIndexAlterer` |
 | `TableColumnAdder` | Adds a column to an existing table: updates the schema and back-fills null values in existing rows |
 | `TableColumnDropper` | Drops a column from an existing table: updates the schema and removes the column's data from existing rows |
-| `TableIndexAdder` | Builds a new index on an existing table by scanning all rows and writing index entries |
+| `TableIndexAdder` | Checks every index add, and builds an index on a table that the statement's own transaction created |
+| `IndexBackfiller` | Writes the entries of a new index for every existing row, in committed batches |
 | `TableIndexDropper` | Removes an index's entries from storage and drops it from the schema |
 
 All multi-step operations are driven by a `FluxMachine` so each phase (open table, acquire lock, update catalog, write storage, commit) is an explicit, named step.

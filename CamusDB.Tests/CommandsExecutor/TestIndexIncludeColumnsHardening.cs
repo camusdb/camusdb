@@ -105,7 +105,7 @@ internal sealed class TestIndexIncludeColumnsHardening : BaseTest
 
         // Fires once after backfill has scanned existing rows and before publish: the index is
         // WriteOnly, so this INSERT's index maintenance must write the entry — with its INCLUDE tuple.
-        TableIndexAdder.TestHookBeforePublish = async () =>
+        executor.TestInterceptAfterIndexBackfill = async () =>
         {
             KvTransaction tx = await database.Transactions.BeginAsync();
             await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(tx, dbname,
@@ -120,7 +120,7 @@ internal sealed class TestIndexIncludeColumnsHardening : BaseTest
         }
         finally
         {
-            TableIndexAdder.TestHookBeforePublish = null;
+            executor.TestInterceptAfterIndexBackfill = null;
         }
 
         // The row written during the WriteOnly window must be covered with its payload intact.

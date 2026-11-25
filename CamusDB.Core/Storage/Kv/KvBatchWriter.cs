@@ -18,8 +18,8 @@ using CamusDB.Core.Util.ObjectIds;
 namespace CamusDB.Core.Storage.Kv;
 
 /// <summary>
-/// The set-based write paths for one table: mass insert, mass update, mass delete, and the bulk
-/// key-space purges that DROP INDEX and a branch DROP TABLE need.
+/// The set-based write paths for one table: mass insert, mass update, mass delete, the entries of an
+/// index build, and the bulk key-space purges that DROP INDEX and a branch DROP TABLE need.
 ///
 /// <para><b>Why these exist alongside the per-row paths.</b> Each batch costs two Kahuna round trips
 /// for the whole set — one <see cref="IKahuna.LocateAndTryAcquireManyExclusiveLocks"/> and one
@@ -310,6 +310,188 @@ internal sealed class KvBatchWriter
         // Track modified keys for the 2PC commit. Locks were already tracked inside
         // AcquireManyWithRetry as each key was confirmed Locked.
         tx.TrackModifiedRange(lockKeys, KeyValueDurability.Persistent);
+    }
+
+    // -----------------------------------------------------------------------
+    // Batched index build path (CREATE INDEX)
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Writes many entries of one index for rows whose row keys are not written: the write path of an
+    /// index build. The entries go out in chunks of at most
+    /// <see cref="KvStoreConstants.IndexEntryBatchMaxEntries"/> entries and
+    /// <see cref="KvStoreConstants.IndexEntryBatchMaxBytes"/> bytes, and each chunk costs two Kahuna round
+    /// trips, one lock acquire and one set, where a write per entry costs two round trips per entry. A
+    /// build holds the exclusive lock on every row of its batch until it commits, so the number of round
+    /// trips is also the time a writer of one of those rows waits.
+    ///
+    /// <para><b>Unique entries.</b> They use <c>SetIfNotExists</c>, so a key that another row holds is
+    /// refused as <see cref="CamusDBErrorCodes.DuplicateUniqueKeyValue"/>. Two entries of one call with
+    /// the same key are refused too: within a chunk by this method, across chunks by Kahuna, which checks
+    /// the key against the transaction's own staged copy.</para>
+    ///
+    /// <para><b><paramref name="backfillMode"/></b> is for a build that runs beside other writers and may
+    /// run a batch again. The entry of a row can then exist already, written by an UPDATE while the index
+    /// was <c>WriteOnly</c> or by an earlier run of the batch. A refused unique entry is read back in one
+    /// more round trip: an entry that names the same row is the one this call would write, and one that
+    /// names another row is a duplicate. The read is safe because the transaction holds the exclusive lock
+    /// on the key. A backfill is pessimistic for that reason.</para>
+    ///
+    /// <para>On a branch database the write flag of each unique entry is resolved over the ancestry after
+    /// the locks are held (<see cref="KvBranchReader.ResolveBranchUniqueFlagsBatchAsync"/>), as in the DML
+    /// batches, and the entries then go out in the same single set.</para>
+    /// </summary>
+    internal async Task PutIndexEntriesBatch(
+        KvTransaction tx,
+        string indexId,
+        IReadOnlyList<KvTableStore.IndexEntryWrite> entries,
+        bool unique,
+        bool backfillMode,
+        CancellationToken cancellationToken = default)
+    {
+        if (entries.Count == 0)
+            return;
+
+        // Started before the items are built: each one embeds the transaction id.
+        await tx.EnsureSessionStartedAsync(cancellationToken, keys.TableKeyPrefix).ConfigureAwait(false);
+
+        for (int start = 0; start < entries.Count;)
+            start = await PutIndexEntryChunkAsync(tx, indexId, entries, start, unique, backfillMode, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// One chunk of <see cref="PutIndexEntriesBatch"/>, from <paramref name="start"/>. Returns the
+    /// position of the first entry the chunk did not take.
+    /// </summary>
+    private async Task<int> PutIndexEntryChunkAsync(
+        KvTransaction tx,
+        string indexId,
+        IReadOnlyList<KvTableStore.IndexEntryWrite> entries,
+        int start,
+        bool unique,
+        bool backfillMode,
+        CancellationToken cancellationToken)
+    {
+        int capacity = Math.Min(entries.Count - start, KvStoreConstants.IndexEntryBatchMaxEntries);
+
+        List<(string key, int expiresMs, KeyValueDurability durability)> lockKeys = new(capacity);
+        List<KahunaSetKeyValueRequestItem> items = new(capacity);
+        Dictionary<string, bool> refusalIsDuplicate = new(capacity, StringComparer.Ordinal);
+        Dictionary<string, ObjectIdValue>? rowIdByKey = unique && backfillMode ? new(capacity, StringComparer.Ordinal) : null;
+        List<KvBranchReader.BranchUniqueFlagRequest>? flagRequests = unique && branch.IsBranch ? new(capacity) : null;
+
+        bool upgradeReads = KvRangeLockManager.IsSerializableReadWrite(tx);
+        string? bucketPrefix = upgradeReads ? keys.BuildIndexBucketPrefix(indexId) : null;
+        List<(string BucketPrefix, string Key)>? upgrades = null;
+
+        KeyValueFlags flags = unique ? KeyValueFlags.SetIfNotExists : KeyValueFlags.Set;
+        long bytes = 0;
+        int next = start;
+
+        for (; next < entries.Count && items.Count < KvStoreConstants.IndexEntryBatchMaxEntries; next++)
+        {
+            KvTableStore.IndexEntryWrite entry = entries[next];
+
+            string kvKey = unique
+                ? keys.BuildUniqueIndexKey(indexId, entry.Key)
+                : keys.BuildNonUniqueIndexKey(indexId, entry.Key, entry.RowId);
+
+            byte[] value = BranchKvCodec.EncodeIndexRowId(entry.RowId, entry.IncludeTuple ?? default);
+
+            int size = kvKey.Length + value.Length;
+            if (items.Count > 0 && bytes + size > KvStoreConstants.IndexEntryBatchMaxBytes)
+                break;
+
+            // Kahuna refuses a batch that names a key twice. A repeated unique key is a duplicate value; a
+            // repeated non-unique key is the same entry of the same row.
+            if (!refusalIsDuplicate.TryAdd(kvKey, unique && !backfillMode))
+            {
+                if (unique)
+                    throw new CamusDBException(CamusDBErrorCodes.DuplicateUniqueKeyValue, $"Duplicate entry for key '{keys.DuplicateKeyLabel(indexId)}'");
+
+                continue;
+            }
+
+            bytes += size;
+            lockKeys.Add((kvKey, 0, KeyValueDurability.Persistent));
+            items.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = kvKey, Value = value, CompareValue = null, CompareRevision = -1, Flags = flags, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
+
+            rowIdByKey?.Add(kvKey, entry.RowId);
+            flagRequests?.Add(new KvBranchReader.BranchUniqueFlagRequest(indexId, entry.Key, kvKey, entry.RowId));
+
+            if (bucketPrefix is not null)
+                CollectSharedPointLock(tx, bucketPrefix, kvKey, ref upgrades);
+        }
+
+        tx.ReserveMutations(lockKeys.Count);
+
+        await UpgradeSharedPointLocksAsync(tx, upgrades, cancellationToken).ConfigureAwait(false);
+        await AcquireManyWithRetry(tx, lockKeys, cancellationToken).ConfigureAwait(false);
+
+        if (flagRequests is not null)
+        {
+            Dictionary<string, KeyValueFlags> resolved =
+                await branch.ResolveBranchUniqueFlagsBatchAsync(tx, flagRequests, cancellationToken).ConfigureAwait(false);
+
+            foreach (KahunaSetKeyValueRequestItem item in items)
+                item.Flags = resolved[item.Key!];
+        }
+
+        List<string>? refused = rowIdByKey is null ? null : [];
+        await SetManyWithRetry(tx, items, refusalIsDuplicate, cancellationToken, refused: refused).ConfigureAwait(false);
+
+        if (refused is not { Count: > 0 })
+        {
+            tx.TrackModifiedRange(lockKeys, KeyValueDurability.Persistent);
+            return next;
+        }
+
+        await RequireEntriesNameTheirRowsAsync(tx, indexId, refused, rowIdByKey!, cancellationToken).ConfigureAwait(false);
+
+        // Only the entries this call staged; the others were there before it.
+        HashSet<string> present = new(refused, StringComparer.Ordinal);
+        List<string> staged = new(lockKeys.Count - present.Count);
+        for (int i = 0; i < lockKeys.Count; i++)
+        {
+            if (!present.Contains(lockKeys[i].key))
+                staged.Add(lockKeys[i].key);
+        }
+
+        tx.TrackModifiedRange(staged, KeyValueDurability.Persistent);
+        return next;
+    }
+
+    /// <summary>
+    /// Reads the unique entries that a backfill found in place and throws
+    /// <see cref="CamusDBErrorCodes.DuplicateUniqueKeyValue"/> for one that names another row than the
+    /// backfill would write. The caller holds the exclusive lock on every key, so an entry that the set
+    /// found cannot be gone; if the read does not see it, the batch is refused as retryable.
+    /// </summary>
+    private async Task RequireEntriesNameTheirRowsAsync(
+        KvTransaction tx,
+        string indexId,
+        List<string> entryKeys,
+        Dictionary<string, ObjectIdValue> rowIdByKey,
+        CancellationToken cancellationToken)
+    {
+        BranchKvValue[] existing = await branch.ProbeManyRaw(
+            tx.TransactionId,
+            HLCTimestamp.Zero,
+            entryKeys,
+            coordinatorKey: "",
+            "index_backfill_entries",
+            cancellationToken).ConfigureAwait(false);
+
+        for (int i = 0; i < existing.Length; i++)
+        {
+            if (!existing[i].HasPayload)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.TransactionMustRetry,
+                    $"The entry of index '{keys.DuplicateKeyLabel(indexId)}' that refused a backfilled entry was not found again — retry the operation from BeginAsync");
+
+            if (!BranchKvCodec.IndexEntryNamesRow(existing[i].Payload.Span, rowIdByKey[entryKeys[i]]))
+                throw new CamusDBException(CamusDBErrorCodes.DuplicateUniqueKeyValue, $"Duplicate entry for key '{keys.DuplicateKeyLabel(indexId)}'");
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1185,6 +1367,9 @@ internal sealed class KvBatchWriter
     /// stays exact. For every other key a <c>NotSet</c> mirrors the per-row path and is acceptable: the
     /// key already holds its value, and the items it held back are resent without it.</para>
     ///
+    /// <para><paramref name="refused"/> receives each key whose <c>NotSet</c> was accepted, for a caller
+    /// that must look at what the key already holds (see <see cref="PutIndexEntriesBatch"/>).</para>
+    ///
     /// <para>Returns false only when <paramref name="aborts"/> is given and a retryable abort was
     /// recorded in it instead of thrown; the caller must stop.</para>
     /// </summary>
@@ -1193,7 +1378,8 @@ internal sealed class KvBatchWriter
         List<KahunaSetKeyValueRequestItem> items,
         Dictionary<string, bool> uniqueByKey,
         CancellationToken ct,
-        RetryableAbortSink? aborts = null)
+        RetryableAbortSink? aborts = null,
+        List<string>? refused = null)
     {
         // A set of a key this transaction read, refused by a live write intent of another transaction,
         // can succeed only if that transaction rolls back. With the flag Kahuna answers Aborted at once
@@ -1263,6 +1449,8 @@ internal sealed class KvBatchWriter
                         // keys a partially staged batch did set are recorded before the throw.
                         if (uniqueByKey.TryGetValue(key, out bool unique) && unique)
                             duplicateKey ??= key;
+                        else
+                            refused?.Add(key);
                         break; // a non-unique NotSet mirrors the per-row path and is acceptable
 
                     case KeyValueResponseType.NotApplied:

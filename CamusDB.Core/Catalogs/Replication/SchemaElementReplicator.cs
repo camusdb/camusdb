@@ -50,10 +50,9 @@ internal sealed class SchemaElementReplicator
     }
 
     /// <summary>
-    /// Replicates a completed AddIndex or DropIndex change to all cluster nodes via the
-    /// schema log. Must be called AFTER the local work (backfill etc.) is done and
-    /// <c>table.Schema.Indexes</c> reflects the final state. Only called when
-    /// <c>isClusterMode</c>; standalone nodes need no replication.
+    /// Replicates a completed index change through the schema log: the drop of an index, in both modes, and
+    /// the AddIndex of an index that a transaction built over its own rows. Must be called AFTER the local
+    /// work is done and <c>table.Schema.Indexes</c> reflects the final state.
     /// </summary>
     internal async Task ReplicateIndexChangeAsync(
         DatabaseDescriptor database,
@@ -83,8 +82,8 @@ internal sealed class SchemaElementReplicator
     /// Proposes an <c>AddColumn</c> delta with <paramref name="initialState"/> and replicates
     /// it to all cluster nodes via the schema log.  Used by
     /// <see cref="SchemaChangeCoordinator"/> to begin a staged add sequence in
-    /// <c>DeleteOnly</c> rather than jumping straight to <c>Public</c>.
-    /// Only valid on cluster nodes (<c>isClusterMode</c>).
+    /// <c>DeleteOnly</c> rather than jumping straight to <c>Public</c>. Valid in both modes: a standalone
+    /// node is the only member of its own schema log.
     /// </summary>
     internal async Task ReplicateAddColumnInStateAsync(
         DatabaseDescriptor database,
@@ -112,8 +111,7 @@ internal sealed class SchemaElementReplicator
     /// <summary>
     /// Proposes a single <c>SetElementState</c> delta and replicates it to all cluster nodes
     /// via the schema log, then waits for every live node to ack the resulting version.
-    /// Validates the state transition before proposing.
-    /// Only valid on cluster nodes (<c>isClusterMode</c>).
+    /// Validates the state transition before proposing. Valid in both modes.
     /// </summary>
     internal async Task ReplicateElementStateAsync(
         DatabaseDescriptor database,
@@ -143,7 +141,7 @@ internal sealed class SchemaElementReplicator
     /// Proposes an <c>AddIndex</c> delta with <paramref name="initialState"/> and replicates
     /// it to all cluster nodes via the schema log. Used by <see cref="SchemaChangeCoordinator"/>
     /// to begin the staged add sequence in <c>DeleteOnly</c> rather than jumping straight to
-    /// <c>Public</c>. Only valid on cluster nodes (<c>isClusterMode</c>).
+    /// <c>Public</c>. Valid in both modes.
     /// </summary>
     internal async Task ReplicateAddIndexInStateAsync(
         DatabaseDescriptor database,
@@ -172,9 +170,8 @@ internal sealed class SchemaElementReplicator
     /// Proposes a <c>DropIndex</c> delta and replicates it to all cluster nodes.
     /// Used to compensate a failed coordinator-driven add-index sequence: if the
     /// index was added in <c>DeleteOnly</c> or <c>WriteOnly</c> state but the sequence
-    /// did not reach <c>Public</c>, this removes it cleanly on every node.
-    /// Only valid on cluster nodes (<c>isClusterMode</c>). No-op if the index is
-    /// already absent (idempotent).
+    /// did not reach <c>Public</c>, this removes it cleanly on every node. No-op if the index is
+    /// already absent (idempotent). Valid in both modes.
     /// </summary>
     internal async Task ReplicateDropIndexAsync(DatabaseDescriptor database, string tableName, string indexName)
     {
@@ -364,9 +361,10 @@ internal sealed class SchemaElementReplicator
     }
 
     /// <summary>
-    /// Proposes an <c>AddCheckConstraint</c> delta and replicates it to all cluster nodes.
-    /// The proposer must already have validated the expression and confirmed existing rows pass.
-    /// Only valid when <c>isClusterMode</c>; standalone nodes apply the change directly.
+    /// Proposes an <c>AddCheckConstraint</c> delta and replicates it to all cluster nodes, which enforce
+    /// the constraint from their apply on. The proposer must already have validated the expression. It reads
+    /// the existing rows afterwards (<see cref="SchemaChangeCoordinator.ValidateRowConstraintAsync"/>), so
+    /// that no write can break the constraint behind the read. Valid in both modes.
     /// </summary>
     internal async Task ReplicateAddCheckConstraintAsync(
         DatabaseDescriptor database,
@@ -450,7 +448,8 @@ internal sealed class SchemaElementReplicator
     /// Proposes a <c>SetColumnNotNull</c> delta and replicates it to all cluster nodes.
     /// Idempotent: if the column's NOT NULL state already matches, the delta is a no-op but still
     /// advances the schema version.
-    /// Only valid when <c>isClusterMode</c>; standalone nodes apply the change directly.
+    /// Valid in both modes. A standalone node uses it to set the flag; to clear it, the node changes the
+    /// schema in place.
     /// </summary>
     internal async Task ReplicateSetColumnNotNullAsync(
         DatabaseDescriptor database,

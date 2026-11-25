@@ -1428,6 +1428,16 @@ public sealed class CommandExecutor : IAsyncDisposable
         => schemaDdl.ReleaseOwnedSequenceAsync(database, tableId, sequenceId);
 
     /// <summary>
+    /// Test-only hook: invoked after the backfill of a new index wrote its last batch and before the step to
+    /// <c>Public</c>. Null in production; a test clears it after use.
+    /// </summary>
+    internal Func<Task>? TestInterceptAfterIndexBackfill
+    {
+        get => schemaDdl.TestInterceptAfterIndexBackfill;
+        set => schemaDdl.TestInterceptAfterIndexBackfill = value;
+    }
+
+    /// <summary>
     /// Test-only hook fired after each backfill batch checkpoint, so a test can force a leader change
     /// between batches without depending on timing. Writes through to the service that owns the
     /// backfill loop; both test projects assign it directly on the executor.

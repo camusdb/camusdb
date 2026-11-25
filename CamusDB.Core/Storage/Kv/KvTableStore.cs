@@ -771,7 +771,7 @@ public sealed partial class KvTableStore
         CancellationToken cancellationToken = default)
         => indexes.ScanIndexEqualityManyAsync(tx, indexId, keyTypes, keys, pageSize, cancellationToken);
 
-    /// <inheritdoc cref="KvIndexAccessor.PutIndexEntry"/>
+    /// <summary>Writes one index entry: <see cref="KvBatchWriter.PutIndexEntriesBatch"/> with one entry.</summary>
     public Task PutIndexEntry(
         KvTransaction tx,
         string indexId,
@@ -781,7 +781,7 @@ public sealed partial class KvTableStore
         bool backfillMode = false,
         byte[]? includeTuple = null,
         CancellationToken cancellationToken = default)
-        => indexes.PutIndexEntry(tx, indexId, key, rowId, unique, backfillMode, includeTuple, cancellationToken);
+        => batch.PutIndexEntriesBatch(tx, indexId, [new IndexEntryWrite(key, rowId, includeTuple)], unique, backfillMode, cancellationToken);
 
     /// <inheritdoc cref="KvIndexAccessor.DeleteIndexEntry"/>
     public Task DeleteIndexEntry(
@@ -829,6 +829,16 @@ public sealed partial class KvTableStore
         await batch.DeleteRowsBatch(tx, rows, cancellationToken).ConfigureAwait(false);
         IndexUsage?.CountDeletes(rows);
     }
+
+    /// <inheritdoc cref="KvBatchWriter.PutIndexEntriesBatch"/>
+    public Task PutIndexEntriesBatch(
+        KvTransaction tx,
+        string indexId,
+        IReadOnlyList<IndexEntryWrite> entries,
+        bool unique,
+        bool backfillMode,
+        CancellationToken cancellationToken = default)
+        => batch.PutIndexEntriesBatch(tx, indexId, entries, unique, backfillMode, cancellationToken);
 
     /// <inheritdoc cref="KvBatchWriter.DropIndexEntries"/>
     public Task<int> DropIndexEntries(KvTransaction tx, string indexName, CancellationToken cancellationToken = default)

@@ -391,34 +391,31 @@ that was planned before the constraint existed. As a result, the statement that 
 checked it. In the opposite order, a short autocommit `UPDATE` can commit
 a violating value between the scan and the start of enforcement, and the constraint is then
 published over a row that breaks it. Both operations enter the DDL gate for their table, as a
-foreign-key ADD does. In a cluster, the gate's semaphore is released during the scan, and the table is
+foreign-key ADD does. The gate's semaphore is released during the scan, and the table is
 held (`SchemaChangeCoordinator.ValidateRowConstraintAsync`). This means that DDL on other tables
-of the database can proceed, and DDL on this table waits for the scan. A standalone node scans under
-the semaphore.
+of the database can proceed, and DDL on this table waits for the scan.
 
-`isClusterMode` selects one of two paths.
+A cluster node and a standalone node run the same steps. They record a coordinator job
+(`SchemaElementKind.Check` / `SchemaElementKind.NotNull`,
+keyed by the constraint name) and replicate the delta (below). After that,
+`SchemaChangeCoordinator.ValidateRowConstraintAsync` waits until the earlier writers of each live
+node are settled. It then scans and deletes the job. A failure can be a violation or a timeout, for
+example. It can also be a lost leadership, or a replication that committed but whose
+acknowledgements timed out. On any failure, the coordinator replicates the removal
+(`DropCheckConstraint`, or `SetColumnNotNull` with `NotNull = false`) and then deletes the job
+(`SchemaChangeCoordinator.TakeBackRowConstraintAsync`). The job is left in place only when the
+removal also fails. A new schema leader, or a standalone node that restarts, validates a job that it
+finds again (`ResumeJobsAsync`). This means that a constraint that is enforced but not proven is not
+left in place after a crash. A job that spent `MaxResumeAttempts` is abandoned, and its constraint is
+removed. A CHECK or NOT NULL doesn't have an element state that would show that it was not proven. While
+the job is active, the constraint is visible in `SHOW CREATE TABLE`.
 
-- **Standalone:** under `Schema.Semaphore`, publish a new constraint list or column list on
-  `table.Schema`. The lists are copy-on-write and are not changed in place. DML iterates
-  both lists with no lock. Next, `DatabaseDescriptor.FenceWritersAndWaitAsync` makes the later commit
-  of each earlier writer fail, and waits for the commits in flight. After that, scan, persist in a DDL
-  `KvTransaction`, and commit. Any failure before the commit **reverts** the in-memory change
-  (`RevertChecksAsync` / `RevertColumnAsync`). This means that the node can't enforce a constraint
-  that is not proven and durable. A
-  crash before the persist leaves no constraint.
-- **Cluster:** record a coordinator job (`SchemaElementKind.Check` / `SchemaElementKind.NotNull`,
-  keyed by the constraint name) and replicate the delta (below). After that,
-  `SchemaChangeCoordinator.ValidateRowConstraintAsync` waits until the earlier writers of each live
-  node are settled. It then scans and deletes the job. A failure can be a violation or a timeout, for
-  example. It can also be a lost leadership, or a replication that committed but whose
-  acknowledgements timed out. On any failure, the coordinator replicates the removal
-  (`DropCheckConstraint`, or `SetColumnNotNull` with `NotNull = false`) and then deletes the job
-  (`SchemaChangeCoordinator.TakeBackRowConstraintAsync`). The job is left in place only when the
-  removal also fails. A new schema leader that finds the job validates again
-  (`ResumeJobsAsync`). This means that a constraint that is enforced but not proven is not left in
-  place after a crash. A job that spent `MaxResumeAttempts` is abandoned, and its constraint is removed. A
-  CHECK or NOT NULL doesn't have an element state that would show that it was not proven. While the
-  job is active, the constraint is visible in `SHOW CREATE TABLE`.
+`DropConstraint`, `DropNotNull` and `SetStorage` read no row. They enter the DDL gate for the table too,
+so they wait for a staged change in progress on it. In a cluster they replicate a delta. A standalone
+node changes the schema in place: under `Schema.Semaphore`, it publishes a new constraint list or column
+list on `table.Schema`, persists the table in a DDL `KvTransaction`, and commits. The lists are
+copy-on-write, because DML iterates them with no lock. A failure before the commit **reverts** the
+in-memory change (`RevertChecksAsync` / `RevertColumnAsync`).
 
 ### Cluster / replication
 
@@ -458,7 +455,6 @@ path that makes a `TableSchema` live must rebuild the cache.
 
 - fresh CREATE
 - apply-from-replication
-- standalone ALTER
 - **load-from-disk**
 
 `ParseCheckConstraintAsts` is invoked on all of them. A new path that populates `CheckConstraints`

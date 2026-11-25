@@ -337,7 +337,8 @@ the parent are covered: a `DELETE` of a parent row that was staged before the AD
 commit in the same way. `CREATE TABLE` with a foreign key protects its parents by the same rule. A transaction that only read the tables, or that writes them after step 3,
 is not affected. `CREATE INDEX` uses the same rule. An index built this way does not miss a row.
 
-In standalone mode the same steps run on the one node. `CREATE TABLE` with a constraint goes
+In standalone mode the same steps run on the one node, with the same job records, and a restart
+finishes an index build or a validation that was interrupted. `CREATE TABLE` with a constraint goes
 through the same states in a cluster, and is Public at once in standalone mode.
 
 **Other DDL during the ADD.** The statement enters the database's DDL gate for the child table.

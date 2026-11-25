@@ -18,6 +18,7 @@ using CamusDB.Core.SQLParser;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.ObjectIds;
+using Kahuna.Shared.KeyValue;
 using Kommander.Time;
 using Microsoft.Extensions.Logging;
 
@@ -30,13 +31,12 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 ///
 /// <para><b>There are three execution shapes, and picking the wrong one is the classic bug.</b>
 /// <see cref="ExecuteDdlInTransaction"/> is the single-transaction shape for metadata-only work.
-/// <see cref="ExecuteClusteredIndexDdlAsync"/> is the two-phase shape used whenever index <em>data</em>
-/// is written: phase 1 commits the backfill so the entries are durable and visible, and only then does
-/// phase 2 replicate the schema delta that makes the index public. The staged-coordinator shape
-/// (<see cref="AddColumnAsync"/> in both modes, <see cref="ExecuteClusterAddIndexAsync"/>) drives an
-/// element through <c>Absent → DeleteOnly → WriteOnly → Public</c> so the cluster is never in a state
-/// where one node writes an element another node cannot read, and a column is never readable before
-/// its existing rows are filled.</para>
+/// <see cref="ExecuteIndexDdlAsync"/> is the two-phase shape of an index drop: phase 1 commits the removal
+/// of the entries, and phase 2 replicates the schema delta that removes the index. The
+/// staged-coordinator shape (<see cref="AddColumnAsync"/>, <see cref="ExecuteStagedAddIndexAsync"/>)
+/// drives an element through <c>Absent → DeleteOnly → WriteOnly → Public</c>, in a cluster and on a
+/// standalone node alike, so the cluster is never in a state where one node writes an element another
+/// node cannot read, and a column or an index is never readable before the existing rows are in it.</para>
 ///
 /// <para><b>Every path enters the database's <see cref="SchemaDdlGate"/> for the tables it names,
 /// and every path releases it in a <c>finally</c> that also fires the deferred step-down.</b> The gate's
@@ -51,9 +51,9 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// is still in flight.</para>
 ///
 /// <para>Partial failures compensate rather than unwind: a backfill that spans batches has already
-/// committed the earlier ones, so an aborted ADD INDEX purges the orphaned entries
-/// (<see cref="CompensateAbortedAddIndexAsync"/>) and a partially staged cluster add drops the
-/// element and deletes its coordinator job (<see cref="CompensateClusterAddIndexAsync"/>).</para>
+/// committed the earlier ones, so a staged index add that fails drops the index on every node, deletes
+/// its coordinator job and purges the entries
+/// (<see cref="SchemaChangeCoordinator.TakeBackIndexAsync(DatabaseDescriptor, SchemaChangeJob, IndexBuildInfo, long, Exception)"/>).</para>
 /// </summary>
 internal sealed partial class SchemaDdlService
 {
@@ -118,7 +118,14 @@ internal sealed partial class SchemaDdlService
     internal Func<SchemaElementState, Task>? TestInterceptAfterAddColumnStep;
 
     /// <summary>
-    /// Test-only hook: invoked by the cluster <c>CREATE INDEX</c> after its early checks and before it
+    /// Test-only hook: invoked after the backfill of a new index wrote its last batch and before the step
+    /// to <c>Public</c>. A test writes rows at that point, which the statements themselves must index. Null
+    /// in production; a test clears it after use.
+    /// </summary>
+    internal Func<Task>? TestInterceptAfterIndexBackfill;
+
+    /// <summary>
+    /// Test-only hook: invoked by <c>CREATE INDEX</c> after its early checks and before it
     /// enters the DDL gate. A test commits another schema change at that point, such as a DROP COLUMN
     /// of a column the index reads. Null in production; a test clears it after use.
     /// </summary>
@@ -1129,12 +1136,15 @@ internal sealed partial class SchemaDdlService
     }
 
     /// <summary>
-    /// Scans every existing row in <paramref name="tableName"/> and writes an index entry
-    /// for each, using backfill mode (idempotent — <c>Set</c> rather than <c>SetIfNotExists</c>
-    /// for unique indexes). Processes rows in <see cref="BackfillBatchSize"/>-row transactions;
-    /// after each committed batch invokes <paramref name="onCheckpoint"/> with the last rowId so
+    /// Scans every existing row in <paramref name="tableName"/> and writes its index entries with the
+    /// idempotent write of a backfill, in transactions of at most <see cref="IndexBackfiller.BatchRows"/>
+    /// rows; after each full batch commits, invokes <paramref name="onCheckpoint"/> with the last row id so
     /// the coordinator can persist a resume offset. Called by <see cref="SchemaChangeCoordinator"/>
     /// just before the index transitions from <c>WriteOnly</c> to <c>Public</c>.
+    ///
+    /// <para>The batches run at <c>Background</c> admission priority on a standalone node: one node serves
+    /// the build and the user traffic, and each batch re-enters the admission gate, so a saturated node
+    /// serves the traffic first. In a cluster they run at the engine default.</para>
     /// </summary>
     internal async Task BackfillIndexEntriesAsync(
         DatabaseDescriptor database,
@@ -1188,21 +1198,24 @@ internal sealed partial class SchemaDdlService
                 await TestInterceptAfterBackfillCheckpoint().ConfigureAwait(false);
         }
 
-        IndexBackfiller.Result result = await IndexBackfiller.BackfillAsync(
+        int indexedRows = await IndexBackfiller.BackfillAsync(
             database, table, target, afterRowId,
-            priority: null,
+            priority: context.IsClusterMode ? null : TransactionPriority.Background,
             Checkpoint,
             context.Logger,
             currentOptions,
             cancellationToken).ConfigureAwait(false);
 
-        Log.LogIndexBackfillComplete(context.Logger, result.Rows, indexInfo.IndexName);
+        Log.LogIndexBackfillComplete(context.Logger, indexedRows, indexInfo.IndexName);
+
+        if (TestInterceptAfterIndexBackfill is { } intercept)
+            await intercept().ConfigureAwait(false);
     }
 
     /// <summary>
     /// Drives the add-index sequence through the coordinator-owned staged path
-    /// (<c>Absent → DeleteOnly → WriteOnly → [backfill] → Public</c>).
-    /// Only called in cluster mode.
+    /// (<c>Absent → DeleteOnly → WriteOnly → [backfill] → Public</c>), on a standalone node and in a
+    /// cluster alike. Every statement that adds an index to a table that other transactions see comes here.
     /// </summary>
     /// <remarks>
     /// <b>Checks before the gate are fast refusals only.</b> Another statement can commit between the
@@ -1210,8 +1223,14 @@ internal sealed partial class SchemaDdlService
     /// window would leave a definition built before it with the id of a column the table no longer has,
     /// and an expression index staged with such an id makes every fresh open of the table fail. So the
     /// definition that is staged is built again, with every check, on the table opened under the gate.
+    ///
+    /// <para><b>Why a standalone node stages the index too.</b> The backfill visits every row and waits for
+    /// every open transaction that holds one, and the coordinator runs it with the gate released and the
+    /// table held. A build in memory under the gate kept every DDL of the database waiting for that long.
+    /// It cannot release the gate either, because the index it adds is not durable: another statement that
+    /// persists the table would store an unfinished index with no job to finish it.</para>
     /// </remarks>
-    internal async Task<bool> ExecuteClusterAddIndexAsync(
+    internal async Task<bool> ExecuteStagedAddIndexAsync(
         DatabaseDescriptor database,
         TableDescriptor table,
         AlterIndexTicket ticket
@@ -1219,7 +1238,7 @@ internal sealed partial class SchemaDdlService
     {
         CamusDBOptions currentOptions = options;
 
-        if (BuildClusterIndexInfo(table, ticket, currentOptions) is null)
+        if (BuildStagedIndexInfo(table, ticket, currentOptions) is null)
             return false;
 
         if (TestInterceptBeforeAddIndexGate is { } intercept)
@@ -1237,12 +1256,16 @@ internal sealed partial class SchemaDdlService
                     CamusDBErrorCodes.ConcurrentSchemaChange,
                     $"Table '{ticket.TableName}' was replaced by another statement while index '{ticket.IndexName}' was being created; nothing was created");
 
-            if (BuildClusterIndexInfo(gated, ticket, currentOptions) is not { } indexInfo)
+            if (BuildStagedIndexInfo(gated, ticket, currentOptions) is not { } indexInfo)
                 return false;
 
             await StageIndexWithinGateAsync(database, gated.Id, ticket.TableName, indexInfo).ConfigureAwait(false);
 
             database.Cache?.InvalidateByTableId(database.Id, gated.Id);
+
+            // The step to Public evicted the table's descriptor. Opened again here, so a reader of the
+            // descriptor cache, such as the statistics and the planners, finds it with the new index.
+            await context.TableOpener.Open(database, gated.Name).ConfigureAwait(false);
 
             return true;
         }
@@ -1254,13 +1277,13 @@ internal sealed partial class SchemaDdlService
     }
 
     /// <summary>
-    /// Checks a cluster <c>CREATE INDEX</c> against <paramref name="table"/> and builds the definition
+    /// Checks a <c>CREATE INDEX</c> against <paramref name="table"/> and builds the definition
     /// to stage: the column ids, the INCLUDE ids and the stored form of each expression. Null when the
     /// index exists and the statement says <c>IF NOT EXISTS</c>. The ids are only as current as
     /// <paramref name="table"/>, so the definition that is staged must come from a table opened under
     /// the DDL gate.
     /// </summary>
-    private static IndexBuildInfo? BuildClusterIndexInfo(TableDescriptor table, AlterIndexTicket ticket, CamusDBOptions currentOptions)
+    private static IndexBuildInfo? BuildStagedIndexInfo(TableDescriptor table, AlterIndexTicket ticket, CamusDBOptions currentOptions)
     {
         if (ticket.IfNotExists && table.AllIndexes.ContainsKey(ticket.IndexName))
             return null;
@@ -1296,8 +1319,7 @@ internal sealed partial class SchemaDdlService
     /// schema-change coordinator, and removes it again if the sequence fails before Public. The caller
     /// entered the DDL gate for the table; the coordinator releases the gate while the backfill runs and
     /// holds it again when it returns (see <see cref="SchemaChangeCoordinator.RunJobAsync"/>), so the
-    /// compensation below proposes under it. The cluster add-index path and the foreign-key add path
-    /// both call it.
+    /// compensation below proposes under it. The add-index path and the foreign-key add path both call it.
     /// </summary>
     /// <remarks>
     /// With <paramref name="ownerChangeSetId"/> the job belongs to that explicit transaction: it stops after
@@ -1306,17 +1328,17 @@ internal sealed partial class SchemaDdlService
     /// </remarks>
     private async Task<int> StageIndexWithinGateAsync(DatabaseDescriptor database, string tableId, string tableName, IndexBuildInfo indexInfo, string? ownerChangeSetId = null)
     {
-        SchemaChangeCoordinator coordinator = new(catalogs, context.Logger);
-        coordinator.IndexBackfillAsync = (db, tbl, info, start, checkpoint, cancellationToken) => BackfillIndexEntriesAsync(db, tbl, info, start, checkpoint, cancellationToken);
+        SchemaChangeCoordinator coordinator = new(catalogs, context.Logger)
+        {
+            IndexBackfillAsync = (db, tbl, info, start, checkpoint, cancellationToken) => BackfillIndexEntriesAsync(db, tbl, info, start, checkpoint, cancellationToken),
+            PurgeIndexEntriesAsync = (db, storageId, indexId) => context.DeferredPurges.PurgeIndexKeySpaceAsync(db, storageId, indexId)
+        };
+
+        SchemaChangeJob job = new(database.Name, tableName, tableId, indexInfo.IndexName, SchemaElementState.Public, SchemaElementKind.Index, ownerChangeSetId);
 
         try
         {
-            await coordinator.RunJobAsync(
-                database,
-                new SchemaChangeJob(database.Name, tableName, tableId, indexInfo.IndexName, SchemaElementState.Public, SchemaElementKind.Index, ownerChangeSetId),
-                indexBuildInfo: indexInfo,
-                gateHeldByCaller: true
-            ).ConfigureAwait(false);
+            await coordinator.RunJobAsync(database, job, indexBuildInfo: indexInfo, gateHeldByCaller: true).ConfigureAwait(false);
 
             return coordinator.StepsProposed;
         }
@@ -1326,27 +1348,23 @@ internal sealed partial class SchemaDdlService
             // index is that leader's, built or dropped there, and nothing here is this node's to undo.
             throw;
         }
-        catch
+        catch (Exception ex)
         {
-            // Compensate: if the index was partially committed to the schema (in DeleteOnly
-            // or WriteOnly state) but did not reach Public, emit DropIndex on all nodes and
-            // delete the persisted coordinator job, leaving the cluster in a clean state.
-            // Note: if this node is now degraded, compensation may be skipped by the
-            // degraded gate in ReplicateDropIndexAsync; a healthy peer's ResumeJobsAsync
-            // will reconcile the state after the step-down below.
-            // An owned job keeps its record: the owner's rollback reads it to remove the entries
-            // the backfill wrote, and deletes it then.
-            await CompensateClusterAddIndexAsync(
-                database, tableId, tableName, indexInfo.IndexName, coordinator.LeaderTerm, deleteRecord: ownerChangeSetId is null
-            ).ConfigureAwait(false);
+            // The index can be in the schema on every node, short of Public. An owned job keeps its
+            // record: the owner's rollback reads it to remove the entries the backfill wrote.
+            if (ownerChangeSetId is null)
+                await coordinator.TakeBackIndexAsync(database, job, indexInfo, coordinator.LeaderTerm, ex).ConfigureAwait(false);
+            else
+                await DropFailedOwnedIndexAsync(database, tableName, indexInfo.IndexName).ConfigureAwait(false);
+
             throw;
         }
     }
 
     // Shared helper — delegates to DatabaseDescriptor.FireDeferredSchemaStepDownAsync,
     // adding the caller's logger for the step-down failure case. Called from the finally blocks
-    // of ExecuteDdlInTransaction, AddColumnAsync, ExecuteClusterAddIndexAsync, and
-    // ExecuteClusteredIndexDdlAsync so all DDL paths release leadership on degradation.
+    // of ExecuteDdlInTransaction, AddColumnAsync, ExecuteStagedAddIndexAsync, and
+    // ExecuteIndexDdlAsync so all DDL paths release leadership on degradation.
     private async Task FireDeferredStepDownIfRequestedAsync(DatabaseDescriptor database)
     {
         try
@@ -1364,13 +1382,10 @@ internal sealed partial class SchemaDdlService
     }
 
     /// <summary>
-    /// Drops an index whose staged build failed before <c>Public</c>, and deletes its job record unless
-    /// <paramref name="deleteRecord"/> is false. The entries the backfill wrote stay in the index's key
-    /// space, whose id is never used again. A caller that keeps the record removes them later from it.
-    /// Never throws.
+    /// Drops an index that an explicit transaction staged and whose build failed. The job record and the
+    /// entries stay: the owner's rollback finds the record and removes them. Never throws.
     /// </summary>
-    private async Task CompensateClusterAddIndexAsync(
-        DatabaseDescriptor database, string tableId, string tableName, string indexName, long leaderTerm = 0, bool deleteRecord = true)
+    private async Task DropFailedOwnedIndexAsync(DatabaseDescriptor database, string tableName, string indexName)
     {
         try
         {
@@ -1383,20 +1398,6 @@ internal sealed partial class SchemaDdlService
         catch (Exception ex)
         {
             context.Logger.LogWarning(ex, "Failed to compensate partial index add for {IndexName} on {TableName}", indexName, tableName);
-        }
-
-        if (!deleteRecord)
-            return;
-
-        try
-        {
-            // Fenced by the term the statement drove the job under: a record the next schema leader
-            // took over meanwhile is that leader's, and stays for its resume.
-            await catalogs.DeleteCoordinatorJobAsync(database, tableId, indexName, leaderTerm).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            context.Logger.LogWarning(ex, "Failed to delete coordinator job for index {IndexName} on {TableName}", indexName, tableName);
         }
     }
 
@@ -1488,106 +1489,37 @@ internal sealed partial class SchemaDdlService
             AlterIndexOperation.AddPrimaryKey or
             AlterIndexOperation.AddInvertedIndex;
 
-        if (context.IsClusterMode && addIndexOperation)
-            return await ExecuteClusterAddIndexAsync(database, table, ticket).ConfigureAwait(false);
+        if (addIndexOperation && TransactionSchemaScope.OverlayFor(database) is null)
+            return await ExecuteStagedAddIndexAsync(database, table, ticket).ConfigureAwait(false);
 
-        bool indexExistedBefore = table.AllIndexes.ContainsKey(ticket.IndexName);
-        bool compensateOnAbort = addIndexOperation && !indexExistedBefore;
-
-        // Both cluster (non-add) and standalone paths use two-phase DDL: local work + schema
-        // replication. The old standalone-only ExecuteDdlInTransaction path omitted Phase 2
-        // (ReplicateIndexChangeAsync), leaving the schema unpersisted across close/reopen.
-        return await ExecuteClusteredIndexDdlAsync(
-            database, table, ticket, compensateOnAbort,
+        return await ExecuteIndexDdlAsync(
+            database, table, ticket,
             tx => tableIndexAlterer.Alter(queryExecutor, database, table, ticket, tx)
         ).ConfigureAwait(false);
     }
 
     /// <summary>
-    /// Undoes a partially applied ADD INDEX after its DDL transaction was rolled back: purges any
-    /// index entries that reached KV, then removes the index from the in-memory schema.
+    /// The index DDL that the staged coordinator does not drive, under the DDL gate: the drop of an index or
+    /// of a primary key, in two phases, and every index statement of a transaction with a private schema
+    /// (<see cref="RunIndexDdlInOwnerTransactionAsync"/>). In a drop, phase 1 commits the removal of the
+    /// entries and phase 2 replicates the schema delta; both run under the gate, so no other DDL changes the
+    /// schema between them.
     ///
-    /// <para>
-    /// The purge matters because a backfill over a table larger than one batch commits its later
-    /// batches in their own transactions (see <c>TableIndexAdder.BackfillIndex</c>), so a rollback of
-    /// the DDL transaction does not take those entries with it. They are unreachable — their index id
-    /// never becomes public — but they would occupy the keyspace forever. Runs in its own transaction,
-    /// which the caller must start only after the DDL transaction has settled: the two contend for the
-    /// same entry keys.
-    /// </para>
-    ///
-    /// <para>
-    /// Best-effort: a failed purge is logged and swallowed so the schema cleanup below still happens.
-    /// Leaving orphaned entries behind is strictly better than leaving a phantom index in the schema.
-    /// </para>
+    /// <para>Called in both modes, by the SQL dispatcher and by <see cref="AlterIndex"/>. An add outside a
+    /// transaction goes through the staged <see cref="ExecuteStagedAddIndexAsync"/> instead, and a rename
+    /// through <see cref="ExecuteDdlInTransaction"/>.</para>
     /// </summary>
-    private async Task CompensateAbortedAddIndexAsync(DatabaseDescriptor database, TableDescriptor table, string indexName)
-    {
-        string? indexKvId = table.Schema.Indexes?
-            .FirstOrDefault(ix => string.Equals(ix.Name, indexName, StringComparison.OrdinalIgnoreCase))?.Id;
-
-        if (indexKvId is not null)
-        {
-            KvTransaction cleanupTx = await database.Transactions.BeginAsync(
-                CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
-                mutationLimitOverride: 0
-            ).ConfigureAwait(false);
-            try
-            {
-                await table.Store.DropIndexEntries(cleanupTx, indexKvId).ConfigureAwait(false);
-                await database.Transactions.CommitAsync(cleanupTx).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                await database.Transactions.RollbackIfNotCompletedAsync(cleanupTx).ConfigureAwait(false);
-
-                context.Logger.LogWarning(
-                    ex,
-                    "Failed to purge index entries of aborted index {IndexName} on table {TableName}; they are unreachable but remain in storage",
-                    indexName,
-                    table.Name
-                );
-            }
-        }
-
-        table.MutateIndexes(indexes => indexes.Remove(indexName));
-
-        await database.SystemSchemaSemaphore.WaitAsync().ConfigureAwait(false);
-        try
-        {
-            table.Schema.Indexes?.RemoveAll(ix => string.Equals(ix.Name, indexName, StringComparison.OrdinalIgnoreCase));
-        }
-        finally
-        {
-            database.SystemSchemaSemaphore.Release();
-        }
-    }
-
-    /// <summary>
-    /// Two-phase execution for index DDL that writes or removes index data. Phase 1 commits the
-    /// backfill data (tx1) so the index KV entries are visible before Phase 2 replicates the schema
-    /// delta. Both phases run under the DDL gate so <c>SchemaVersion</c> stays stable across the
-    /// pair; a standalone index build therefore still holds every DDL of its database for the length of
-    /// its backfill, unlike the staged cluster build.
-    ///
-    /// <para>Called in both modes, by the SQL dispatcher and by <see cref="AlterIndex"/>: on a
-    /// standalone node for every index operation except a rename, and in a cluster for a drop of an
-    /// index or a primary key. A cluster add goes through the staged
-    /// <see cref="ExecuteClusterAddIndexAsync"/> instead, and a rename through
-    /// <see cref="ExecuteDdlInTransaction"/> in both modes.</para>
-    /// </summary>
-    internal async Task<bool> ExecuteClusteredIndexDdlAsync(
+    internal async Task<bool> ExecuteIndexDdlAsync(
         DatabaseDescriptor database,
         TableDescriptor table,
         AlterIndexTicket ticket,
-        bool compensateOnAbort,
         Func<KvTransaction, Task<bool>> localWork
     )
     {
         await database.DdlGate.EnterAsync(ticket.TableName, context.Logger).ConfigureAwait(false);
         try
         {
-            return await RunIndexDdlWithinGateAsync(database, table, ticket, compensateOnAbort, localWork).ConfigureAwait(false);
+            return await RunIndexDdlWithinGateAsync(database, table, ticket, localWork).ConfigureAwait(false);
         }
         finally
         {
@@ -1658,7 +1590,7 @@ internal sealed partial class SchemaDdlService
 
     /// <summary>
     /// <c>CREATE INDEX</c> inside a transaction with a private schema, on a table the transaction did not
-    /// create: the staged build of <see cref="ExecuteClusterAddIndexAsync"/> runs on the shared table, owned
+    /// create: the staged build of <see cref="ExecuteStagedAddIndexAsync"/> runs on the shared table, owned
     /// by the transaction, and stops with the index <c>WriteOnly</c> and backfilled. Other transactions
     /// maintain the index from then on but cannot read it. The step to <c>Public</c> joins the change set,
     /// so the publish makes the index readable together with the transaction's data; see
@@ -1669,14 +1601,14 @@ internal sealed partial class SchemaDdlService
     {
         // Against the private table first, so a definition that the transaction's own view of the table
         // refuses fails for that reason, also when the staged form cannot run on the table.
-        if (BuildClusterIndexInfo(table, ticket, options) is null)
+        if (BuildStagedIndexInfo(table, ticket, options) is null)
             return Task.FromResult(false);
 
         return RunOwnedStagedChangeAsync(database, overlay, table, "CREATE INDEX", async () =>
         {
             TableDescriptor shared = await context.TableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
-            if (BuildClusterIndexInfo(shared, ticket, options) is not { } indexInfo)
+            if (BuildStagedIndexInfo(shared, ticket, options) is not { } indexInfo)
                 return null;
 
             int steps = await StageIndexWithinGateAsync(database, shared.Id, shared.Name, indexInfo, overlay.ChangeSetId).ConfigureAwait(false);
@@ -1776,15 +1708,14 @@ internal sealed partial class SchemaDdlService
     }
 
     /// <summary>
-    /// The body of <see cref="ExecuteClusteredIndexDdlAsync"/>, for a caller that already holds
-    /// <c>SchemaDdlSemaphore</c>: the standalone build of a foreign key's index, and the drop of an
-    /// index a removed constraint owned.
+    /// The body of <see cref="ExecuteIndexDdlAsync"/>, for a caller that already holds
+    /// <c>SchemaDdlSemaphore</c>: the build of a foreign key's index inside a transaction with a private
+    /// schema, and the drop of an index a removed constraint owned.
     /// </summary>
     private async Task<bool> RunIndexDdlWithinGateAsync(
         DatabaseDescriptor database,
         TableDescriptor table,
         AlterIndexTicket ticket,
-        bool compensateOnAbort,
         Func<KvTransaction, Task<bool>> localWork
     )
     {
@@ -1797,8 +1728,12 @@ internal sealed partial class SchemaDdlService
         if (TransactionSchemaScope.OverlayFor(database) is { } overlay)
             return await RunIndexDdlInOwnerTransactionAsync(database, overlay, table, ticket, localWork).ConfigureAwait(false);
 
-        // Phase 1: run local DDL (including backfill) and commit so the index KV
-        // entries are durable and visible before the schema delta is published.
+        if (ticket.Operation is not (AlterIndexOperation.DropIndex or AlterIndexOperation.DropPrimaryKey))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                $"Index '{ticket.IndexName}' of table '{table.Name}' is added by the staged coordinator, not under the DDL gate");
+
+        // Phase 1: remove the entries and commit.
         KvTransaction tx1 = await database.Transactions.BeginAsync(
             CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
             mutationLimitOverride: 0
@@ -1812,14 +1747,12 @@ internal sealed partial class SchemaDdlService
         catch
         {
             await database.Transactions.RollbackIfNotCompletedAsync(tx1).ConfigureAwait(false);
-            if (compensateOnAbort)
-                await CompensateAbortedAddIndexAsync(database, table, ticket.IndexName).ConfigureAwait(false);
             throw;
         }
 
         if (!result) return result;
 
-        // Phase 2: index data is committed — replicate the schema change so every
+        // Phase 2: the entries are gone — replicate the schema change so every
         // node updates its TableSchema.Indexes and evicts its TableDescriptor cache.
         // A fresh transaction supplies the HLC timestamp for the schema-log entry;
         // no KV writes happen under it (ReplicateIndexChangeAsync creates its own
@@ -1867,7 +1800,7 @@ internal sealed partial class SchemaDdlService
         AlterIndexTicket ticket = new(database.Name, tableName, indexName, [], AlterIndexOperation.DropIndex);
 
         await RunIndexDdlWithinGateAsync(
-            database, table, ticket, compensateOnAbort: false,
+            database, table, ticket,
             tx => tableIndexAlterer.Alter(queryExecutor, database, table, ticket, tx)
         ).ConfigureAwait(false);
     }

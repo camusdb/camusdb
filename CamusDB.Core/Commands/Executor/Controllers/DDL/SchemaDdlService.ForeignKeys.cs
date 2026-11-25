@@ -561,8 +561,8 @@ internal sealed partial class SchemaDdlService
     /// <summary>
     /// Builds and publishes the index <paramref name="indexName"/> over the constraint's columns, in
     /// constraint order, ascending, and returns its <see cref="TableIndexSchema.KvId"/>. The index is
-    /// unowned until the <see cref="SchemaOp.AddForeignKey"/> delta claims it. Each mode uses the build it
-    /// uses for <c>CREATE INDEX</c>, so both backfill loops serve foreign keys too.
+    /// unowned until the <see cref="SchemaOp.AddForeignKey"/> delta claims it. The build is the one
+    /// <c>CREATE INDEX</c> uses, so the gate is released while the rows are indexed.
     /// </summary>
     private async Task<string> BuildOwnedIndexAsync(DatabaseDescriptor database, TableDescriptor table, ForeignKeyAlterPlan plan, string indexName)
     {
@@ -570,7 +570,7 @@ internal sealed partial class SchemaDdlService
 
         // Inside a transaction with a private schema the table is the transaction's own, and the index
         // is built in the transaction by the local build.
-        if (context.IsClusterMode && TransactionSchemaScope.OverlayFor(database) is null)
+        if (TransactionSchemaScope.OverlayFor(database) is null)
         {
             IndexBuildInfo indexInfo = new(
                 ObjectIdGenerator.Generate().ToString(),
@@ -590,7 +590,7 @@ internal sealed partial class SchemaDdlService
             AlterIndexTicket indexTicket = new(database.Name, tableName, indexName, columns, AlterIndexOperation.AddIndex);
 
             await RunIndexDdlWithinGateAsync(
-                database, table, indexTicket, compensateOnAbort: true,
+                database, table, indexTicket,
                 tx => tableIndexAlterer.Alter(queryExecutor, database, table, indexTicket, tx)
             ).ConfigureAwait(false);
         }
