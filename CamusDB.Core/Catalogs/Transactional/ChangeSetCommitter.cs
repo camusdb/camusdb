@@ -506,6 +506,10 @@ internal sealed class ChangeSetCommitter
             finally
             {
                 database.SchemaDdlSemaphore.Release();
+
+                // A checkpoint of this decision that could not be written left this node degraded. The KV
+                // transaction has ended, so the schema leadership can go to a healthy node at once.
+                await catalogs.StepDownIfRequestedAsync(database).ConfigureAwait(false);
             }
 
             logger.LogWarning(
@@ -518,7 +522,8 @@ internal sealed class ChangeSetCommitter
 
     /// <summary>
     /// Reads the decision key of a change set: <see cref="CommittedDecision"/>, <see cref="AbortedDecision"/>,
-    /// or null when absent. The caller holds the key's exclusive lock in <paramref name="transactionId"/>.
+    /// or null when absent. A caller that decides from the value holds the key's exclusive lock in
+    /// <paramref name="transactionId"/>; with a zero id the read takes the latest committed value and no lock.
     /// </summary>
     internal static async Task<byte[]?> ReadDecisionAsync(
         IKahuna kahuna, HLCTimestamp transactionId, string decisionKey, CancellationToken cancellationToken)

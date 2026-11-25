@@ -759,6 +759,35 @@ public sealed class TestInProcessSchemaCluster
             "FORCE_INDEX must return all rows after leader-change resume completes the index");
     }
 
+    /// <summary>
+    /// A partition leader that the checkpoint writes through is not reachable for two seconds, as after the
+    /// death of its node until the others elect a leader. The statement waits and the schema leader stays
+    /// healthy, so it accepts the next schema change.
+    /// </summary>
+    [Test]
+    public async Task CheckpointThatMeetsAPartitionWithoutALeader_WaitsForTheElection()
+    {
+        await using InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(nodeCount: 3);
+        string db = cluster.NextSchemaLogDatabaseName();
+        await cluster.OpenDatabaseOnAllNodesAsync(db);
+
+        InProcessSchemaCluster.Node leader = await cluster.WaitForSchemaLeaderNodeAsync(db);
+        leader.Executor.Catalogs.TestPersistCheckpointException = new Kahuna.KahunaServerException("the partition leader is not reachable");
+
+        Task create = leader.Executor.ExecuteDDLSQL(new ExecuteSQLTicket(
+            txnState: null!, database: db, sql: "CREATE TABLE t (id int64 PRIMARY KEY)", parameters: null));
+
+        await Task.Delay(2_000);
+        Assert.IsFalse(create.IsCompleted, "the statement must wait for its checkpoint");
+        leader.Executor.Catalogs.TestPersistCheckpointException = null;
+        await create.WaitAsync(TimeSpan.FromSeconds(20));
+
+        Assert.IsFalse(leader.Database!.SchemaSubsystemDegraded, "the schema leader must stay healthy");
+
+        await leader.Executor.ExecuteDDLSQL(new ExecuteSQLTicket(
+            txnState: null!, database: db, sql: "CREATE TABLE u (id int64 PRIMARY KEY)", parameters: null)).WaitAsync(TimeSpan.FromSeconds(20));
+    }
+
     // Persist-exhaustion policy:
     //   • An injected persist fault never leaves the proposer having acked-and-returned-success
     //     for a version it did not persist — the committed log is the source of truth.

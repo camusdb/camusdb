@@ -558,9 +558,9 @@ public sealed class SchemaChangeCoordinator
                                 $"A ColumnInfo is required to add column '{job.ElementName}' to table '{job.TableName}' (current state is Absent)"
                             );
 
-                        await catalogs.ReplicateAddColumnInStateAsync(
+                        await ProposeStepAsync(database, gate, () => catalogs.ReplicateAddColumnInStateAsync(
                             database, job.TableName, columnDefinition, SchemaElementState.DeleteOnly
-                        ).ConfigureAwait(false);
+                        )).ConfigureAwait(false);
                     }
                     else
                     {
@@ -570,17 +570,17 @@ public sealed class SchemaChangeCoordinator
                                 $"An IndexBuildInfo is required to add index '{job.ElementName}' to table '{job.TableName}' (current state is Absent)"
                             );
 
-                        await catalogs.ReplicateAddIndexInStateAsync(
+                        await ProposeStepAsync(database, gate, () => catalogs.ReplicateAddIndexInStateAsync(
                             database, job.TableName, indexBuildInfo, SchemaElementState.DeleteOnly
-                        ).ConfigureAwait(false);
+                        )).ConfigureAwait(false);
                     }
                 }
                 else
                 {
                     // Subsequent steps: move the existing element to the next adjacent state.
-                    await catalogs.ReplicateElementStateAsync(
+                    await ProposeStepAsync(database, gate, () => catalogs.ReplicateElementStateAsync(
                         database, job.TableName, job.ElementName, nextState, job.ElementKind
-                    ).ConfigureAwait(false);
+                    )).ConfigureAwait(false);
                 }
 
                 current = nextState;
@@ -589,6 +589,12 @@ public sealed class SchemaChangeCoordinator
                 if (OnStepCompleted is not null)
                     await OnStepCompleted(nextState, database.Schema.SchemaVersion).ConfigureAwait(false);
             }
+        }
+        catch (OperationCanceledException ex) when (term > 0 && stopOnLeadershipLoss.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            // The loss is announced before the next term is visible here, so a comparison of terms would
+            // not see it. The job is the next leader's, and the statement is answered from its outcome.
+            throw new CoordinatorJobTakenOverException(job.TableName, job.ElementName, term, ex);
         }
         finally
         {
@@ -610,6 +616,162 @@ public sealed class SchemaChangeCoordinator
             }
         }
     }
+
+    /// <summary>How often a step that waits for a pending change set looks whether it ended.</summary>
+    private static readonly TimeSpan PendingChangeSetPoll = TimeSpan.FromMilliseconds(25);
+
+    /// <summary>
+    /// How long a step waits for pending change sets beyond the time after which the resolver decides an
+    /// abandoned one (<see cref="CamusDBOptions.TransactionalDdlResolveAfterMs"/>).
+    /// </summary>
+    private const int PendingChangeSetWaitMarginMs = 10_000;
+
+    /// <summary>
+    /// Proposes one step of a staged change, and waits when the schema log refuses it because the change
+    /// set of a committing transaction is not published yet. The DDL lock keeps the two apart, but it can
+    /// be lost, and a statement on another node can free it for a moment. A refused step must not fail the
+    /// change: the element is half rolled out by then, and its removal would meet the same refusal.
+    ///
+    /// <para>The caller holds <paramref name="gate"/>. It is released while this waits, because the publish
+    /// of the change set needs it, and held again on return. The table hold keeps other statements of this
+    /// node off the table meanwhile, and the dry run of the next attempt checks the step against whatever
+    /// landed. Any other refusal, and one that outlasts the wait, is thrown.</para>
+    /// </summary>
+    private static async Task ProposeStepAsync(DatabaseDescriptor database, SchemaDdlGateHold gate, Func<Task> propose)
+    {
+        long deadline = Environment.TickCount64 + database.Options.TransactionalDdlResolveAfterMs + PendingChangeSetWaitMarginMs;
+
+        while (true)
+        {
+            long version = database.Schema.SchemaVersion;
+
+            try
+            {
+                await propose().ConfigureAwait(false);
+                return;
+            }
+            catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.TransactionMustRetry
+                                               && Environment.TickCount64 < deadline
+                                               && (database.Schema.PendingChangeSet is not null || database.Schema.SchemaVersion != version))
+            {
+                // A change set that ended between the refusal and this read shows as a moved version.
+            }
+
+            gate.Release();
+            try
+            {
+                while (database.Schema.PendingChangeSet is not null && Environment.TickCount64 < deadline)
+                    await Task.Delay(PendingChangeSetPoll).ConfigureAwait(false);
+            }
+            finally
+            {
+                await gate.AcquireAsync().ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Drops an index whose staged build failed before its statement succeeded, and deletes its job record.
+    /// Never throws: the caller is already failing, and its own error is the one to report. The entries the
+    /// backfill wrote stay in the index's key space, whose id is never used again.
+    ///
+    /// <para><b>The intent is durable before the drop, and the record outlives a failed drop.</b> The job is
+    /// written again with the target <c>Absent</c>, so a resume finishes the removal, on this node or on the
+    /// next leader (<see cref="FinishIndexRemovalAsync"/>). Deleting the record while the index is still in
+    /// the schema would leave a half-built index that every write maintains and nothing finishes. When the
+    /// intent cannot be recorded, the record stays as it is, and a resume finishes the build.</para>
+    ///
+    /// <para>An owned job keeps its record unchanged: the owner's rollback reads it to remove the index and
+    /// the entries the backfill wrote, and deletes it then.</para>
+    ///
+    /// <para>The caller holds the DDL gate.</para>
+    /// </summary>
+    internal async Task TakeBackIndexAsync(DatabaseDescriptor database, SchemaChangeJob job, IndexBuildInfo index, Exception cause)
+    {
+        SchemaDdlGateHold gate = new(database.DdlGate, heldByCaller: true);
+        long term = LeaderTerm;
+        bool owned = job.OwnerChangeSetId is not null;
+
+        try
+        {
+            if (!owned && FindIndex(database, job.TableId, index.IndexId) is not null)
+            {
+                PersistedCoordinatorJob intent = BuildPersistedJob(
+                    job with { TargetState = SchemaElementState.Absent }, columnDefinition: null, index, attempts: 0, term);
+                intent.FailureCode = (cause as CamusDBException)?.Code ?? CamusDBErrorCodes.InvalidInternalOperation;
+                intent.FailureMessage = cause.Message;
+
+                await catalogs.PersistCoordinatorJobAsync(database, intent).ConfigureAwait(false);
+            }
+
+            using (database.DdlGate.HoldTable(job.TableId, job.TableName, DescribeElement(job)))
+                await DropIndexByIdAsync(database, job.TableId, index.IndexId, gate).ConfigureAwait(false);
+
+            if (!owned)
+                await catalogs.DeleteCoordinatorJobAsync(database, job.TableId, job.ElementName, term).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogWarning(ex,
+                "Could not remove the index {ElementName} of {TableName}, whose build failed; its job stays, and a resume finishes it",
+                job.ElementName, job.TableName);
+        }
+        finally
+        {
+            await gate.AcquireAsync().ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Finishes the removal of an index whose build failed, from a record that targets <c>Absent</c>
+    /// (<see cref="TakeBackIndexAsync"/>): drops the index when the schema still has it, then deletes the
+    /// record. The index is found by its id, so an index that was created later under the same name stays.
+    /// Never throws; a removal that fails leaves the record for the next resume.
+    /// </summary>
+    private async Task FinishIndexRemovalAsync(DatabaseDescriptor database, PersistedCoordinatorJob persisted, SchemaChangeJob job, long term)
+    {
+        SchemaDdlGateHold gate = new(database.DdlGate, heldByCaller: false);
+
+        try
+        {
+            await gate.AcquireAsync().ConfigureAwait(false);
+
+            if (persisted.IndexId is { } indexId)
+            {
+                using (database.DdlGate.HoldTable(job.TableId, job.TableName, DescribeElement(job)))
+                    await DropIndexByIdAsync(database, job.TableId, indexId, gate).ConfigureAwait(false);
+            }
+
+            await catalogs.DeleteCoordinatorJobAsync(database, persisted.TableId, persisted.ElementName, term).ConfigureAwait(false);
+            ClearBackoff(database, persisted);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogWarning(ex,
+                "Could not finish the removal of the index {ElementName} of {TableName}; a later resume tries again",
+                job.ElementName, job.TableName);
+            RecordFailedAttempt(database, persisted, job.TableName);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    /// <summary>Drops the index with the id <paramref name="indexId"/>, by its current name. No-op when the schema does not have it.</summary>
+    private Task DropIndexByIdAsync(DatabaseDescriptor database, string tableId, string indexId, SchemaDdlGateHold gate) =>
+        FindIndex(database, tableId, indexId) is null
+            ? Task.CompletedTask
+            : ProposeStepAsync(database, gate, () =>
+                FindIndex(database, tableId, indexId) is { } found
+                    ? catalogs.ReplicateDropIndexAsync(database, found.TableName, found.IndexName)
+                    : Task.CompletedTask);
+
+    private static (string TableName, string IndexName)? FindIndex(DatabaseDescriptor database, string tableId, string indexId) =>
+        FindTableById(database.Schema, tableId) is { Name: { } tableName } table
+        && table.Indexes?.Find(ix => string.Equals(ix.Id, indexId, StringComparison.Ordinal)) is { } index
+            ? (tableName, index.Name)
+            : null;
 
     /// <summary>
     /// Decides a job that an explicit transaction owns (<see cref="PersistedCoordinatorJob.OwnerChangeSetId"/>)
@@ -952,7 +1114,8 @@ public sealed class SchemaChangeCoordinator
         }
         catch (Exception ex)
         {
-            if (JobWasHandedOver(database, term, ex))
+            // A cancelled fill is a lost leadership too, also when no newer term is visible yet.
+            if (JobWasHandedOver(database, term, ex) || (ex is OperationCanceledException && cancellationToken.IsCancellationRequested))
             {
                 if (logger?.IsEnabled(LogLevel.Information) == true)
                 {
@@ -1139,9 +1302,9 @@ public sealed class SchemaChangeCoordinator
             // tells the index the engine built apart from one the user made.
             string? ownedIndexName = FindOwnedIndexName(database.Schema, job.TableName, job.ElementName);
 
-            await catalogs.ReplicateElementStateAsync(
+            await ProposeStepAsync(database, gate, () => catalogs.ReplicateElementStateAsync(
                 database, job.TableName, job.ElementName, SchemaElementState.Absent, SchemaElementKind.ForeignKey
-            ).ConfigureAwait(false);
+            )).ConfigureAwait(false);
 
             if (ownedIndexName is not null)
                 await DropReleasedIndexAsync(database, job.TableName, ownedIndexName).ConfigureAwait(false);
@@ -1635,6 +1798,13 @@ public sealed class SchemaChangeCoordinator
                 {
                     removalGate.Release();
                 }
+                continue;
+            }
+
+            // Likewise for an index whose build failed: it is dropped, never built.
+            if (persisted.ElementKind == SchemaElementKind.Index && persisted.TargetState == SchemaElementState.Absent)
+            {
+                await FinishIndexRemovalAsync(database, persisted, job, term).ConfigureAwait(false);
                 continue;
             }
 

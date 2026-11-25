@@ -959,9 +959,10 @@ AddIndex(DeleteOnly)  → ack gate → SetElementState(WriteOnly) → ack gate
   skip it; a different `rowId` ⇒ a genuine duplicate-key violation, so throw
   `DuplicateUniqueKeyValue`.
 - **Failure compensation.** If the staged add throws before reaching `Public`,
-  `CompensateClusterAddIndexAsync` emits a `DropIndex` delta (removing the partial `DeleteOnly`/
-  `WriteOnly` index on every node) and deletes the persisted coordinator job, leaving the cluster
-  clean — there is never a *phantom* index (schema says it exists, no data) or a partially-public
+  `SchemaChangeCoordinator.TakeBackIndexAsync` records the removal in the job (target `Absent`), emits
+  a `DropIndex` delta (removing the partial `DeleteOnly`/`WriteOnly` index on every node) and deletes
+  the job, leaving the cluster clean. When the delta cannot be proposed, the job stays and a resume
+  drops the index — there is never a *phantom* index (schema says it exists, no data) or a partially-public
   one.
 
 A **drop** stays a single `DropIndex` delta (`ApplyDropIndex`, idempotent remove-by-name); no
@@ -1752,7 +1753,11 @@ run, are safe. In a branch database the purge reaches only the branch's own entr
 
 The pending checkpoint writes `{db}/meta/changeset:{id}`, so a reopen restores the pending change set
 from the checkpoint. The publish checkpoint writes every object the change set touched, deletes the
-pending record and the decision key, and writes the version, in one KV transaction.
+pending record and the decision key, and writes the version, in one KV transaction. The abort checkpoint
+deletes the pending record, and deletes the decision key only when a resolver wrote `aborted` to it. A
+transaction that aborts itself leaves the key absent and can still hold its lock, because its rollback may
+not reach the lock before the lease ends. A checkpoint that waited for that lock would run out of attempts
+and mark the schema leader degraded.
 
 #### Resolver
 
@@ -1765,7 +1770,10 @@ coordinator-job sweep, which also runs the resolver. The resolver takes the deci
 transaction of its own and reads it. `committed` means the transaction committed, so it publishes.
 Absent means the transaction did not commit, so it writes `aborted`, commits that, and aborts. The
 transaction writes the key under the same lock after it reads it absent, so the two never both write
-it. When the transaction still holds the lock, the resolver tries again at the next run.
+it. When the transaction still holds the lock, the resolver tries again at the next run. When the
+transaction publishes while the resolver waits for the lock, the resolver finds the key absent, because the
+publish checkpoint deleted it. The change set is then no longer pending, so the resolver proposes nothing and
+deletes the `aborted` that it wrote.
 
 The node of the transaction can die between the announcement and the KV commit. A Kahuna lock without a
 lease lives as long as the session of its transaction, up to
@@ -1822,7 +1830,8 @@ same table, and compare the result with a model.
 - **Checkpoint persist-failure (degrade + step-down policy):** the schema delta is already
   committed in Raft and applied in-memory cluster-wide, so a failed checkpoint never causes
   divergence. It leaves a stale load-time cache that the committed log reconciles. The proposer's
-  `PersistSchemaCheckpointWithRetryAsync` retries the KV write with bounded backoff; on
+  `PersistSchemaCheckpointWithRetryAsync` retries the KV write with bounded backoff (a transient failure, such as a partition
+  without a leader, for up to 10 s, so an election does not count as exhaustion); on
   **exhaustion** it applies a defined policy rather than failing the (already-live) DDL:
   - It marks the node **degraded** (`DatabaseDescriptor.MarkSchemaSubsystemDegraded`). The
     degraded flag gates *all* further DDL on this node — both the proposer path
@@ -1833,8 +1842,10 @@ same table, and compare the result with a model.
     fired from a `finally` *after* the in-flight KV transaction commits/rolls back — the defer
     is essential because, in single-partition clusters, schema and KV share one Raft partition,
     so stepping down before the commit would invalidate the in-flight transaction. Every DDL
-    exit path fires it: the four `CommandExecutor` entry points and the leader-change resume
-    callback. A healthy peer then wins the next election and takes over.
+    exit path fires it: the four `CommandExecutor` entry points, the leader-change resume
+    callback, a schema change that a follower forwarded (`CatalogsManager.PublishForwardedSchemaDeltaAsync`)
+    and the decision of a change set (`ChangeSetCommitter.DecideAsync`). A healthy peer then wins the next
+    election and takes over.
   - The committed DDL still returns success to the client. The degraded node does not ack any
     *new* version it cannot persist, because it refuses to propose while degraded.
   - **Recovery is by restart** today: a fresh `DatabaseDescriptor` opens non-degraded, and the
@@ -1848,8 +1859,10 @@ same table, and compare the result with a model.
   never mask the original exception. Hard crashes need no compensation — the node reloads from
   persisted (rolled-back) metadata.
 - **Cluster `ADD INDEX` failure (coordinator path):** if the staged add throws before reaching
-  `Public`, `CompensateClusterAddIndexAsync` emits a `DropIndex` delta (removing the partial
-  `DeleteOnly`/`WriteOnly` index on every node) and deletes the persisted coordinator job. Since
+  `Public`, `SchemaChangeCoordinator.TakeBackIndexAsync` records the removal in the job (target
+  `Absent`), emits a `DropIndex` delta (removing the partial `DeleteOnly`/`WriteOnly` index on every
+  node) and deletes the job; a failed removal is finished by a resume. A step of a staged change, and
+  this drop, that the log refuses because a change set is pending waits for that change set to end. Since
   the element is published incrementally but only becomes *usable* at `Public`, an abort never
   leaves a usable phantom index, and the next leader has no stale job to resume (§7.3, §8.2).
 - **Coordinator interruption (leader loss mid-sequence):** the durable job survives; the new

@@ -53,7 +53,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// <para>Partial failures compensate rather than unwind: a backfill that spans batches has already
 /// committed the earlier ones, so an aborted ADD INDEX purges the orphaned entries
 /// (<see cref="CompensateAbortedAddIndexAsync"/>) and a partially staged cluster add drops the
-/// element and deletes its coordinator job (<see cref="CompensateClusterAddIndexAsync"/>).</para>
+/// element and deletes its coordinator job (<see cref="SchemaChangeCoordinator.TakeBackIndexAsync"/>).</para>
 /// </summary>
 internal sealed partial class SchemaDdlService
 {
@@ -1309,14 +1309,12 @@ internal sealed partial class SchemaDdlService
         SchemaChangeCoordinator coordinator = new(catalogs, context.Logger);
         coordinator.IndexBackfillAsync = (db, tbl, info, start, checkpoint, cancellationToken) => BackfillIndexEntriesAsync(db, tbl, info, start, checkpoint, cancellationToken);
 
+        SchemaChangeJob job = new(
+            database.Name, tableName, tableId, indexInfo.IndexName, SchemaElementState.Public, SchemaElementKind.Index, ownerChangeSetId);
+
         try
         {
-            await coordinator.RunJobAsync(
-                database,
-                new SchemaChangeJob(database.Name, tableName, tableId, indexInfo.IndexName, SchemaElementState.Public, SchemaElementKind.Index, ownerChangeSetId),
-                indexBuildInfo: indexInfo,
-                gateHeldByCaller: true
-            ).ConfigureAwait(false);
+            await coordinator.RunJobAsync(database, job, indexBuildInfo: indexInfo, gateHeldByCaller: true).ConfigureAwait(false);
 
             return coordinator.StepsProposed;
         }
@@ -1326,19 +1324,11 @@ internal sealed partial class SchemaDdlService
             // index is that leader's, built or dropped there, and nothing here is this node's to undo.
             throw;
         }
-        catch
+        catch (Exception ex)
         {
-            // Compensate: if the index was partially committed to the schema (in DeleteOnly
-            // or WriteOnly state) but did not reach Public, emit DropIndex on all nodes and
-            // delete the persisted coordinator job, leaving the cluster in a clean state.
-            // Note: if this node is now degraded, compensation may be skipped by the
-            // degraded gate in ReplicateDropIndexAsync; a healthy peer's ResumeJobsAsync
-            // will reconcile the state after the step-down below.
-            // An owned job keeps its record: the owner's rollback reads it to remove the entries
-            // the backfill wrote, and deletes it then.
-            await CompensateClusterAddIndexAsync(
-                database, tableId, tableName, indexInfo.IndexName, coordinator.LeaderTerm, deleteRecord: ownerChangeSetId is null
-            ).ConfigureAwait(false);
+            // The index can be in the schema in DeleteOnly or WriteOnly. A removal that cannot finish here
+            // (a degraded node, a lost leadership) leaves a record that a resume finishes.
+            await coordinator.TakeBackIndexAsync(database, job, indexInfo, ex).ConfigureAwait(false);
             throw;
         }
     }
@@ -1360,43 +1350,6 @@ internal sealed partial class SchemaDdlService
                 "Schema partition step-down after persist exhaustion failed for database {DatabaseName}",
                 database.Name
             );
-        }
-    }
-
-    /// <summary>
-    /// Drops an index whose staged build failed before <c>Public</c>, and deletes its job record unless
-    /// <paramref name="deleteRecord"/> is false. The entries the backfill wrote stay in the index's key
-    /// space, whose id is never used again. A caller that keeps the record removes them later from it.
-    /// Never throws.
-    /// </summary>
-    private async Task CompensateClusterAddIndexAsync(
-        DatabaseDescriptor database, string tableId, string tableName, string indexName, long leaderTerm = 0, bool deleteRecord = true)
-    {
-        try
-        {
-            if (database.Schema.Tables.TryGetValue(tableName, out TableSchema? tableSchema) &&
-                tableSchema.Indexes?.Any(ix => string.Equals(ix.Name, indexName, StringComparison.OrdinalIgnoreCase)) == true)
-            {
-                await catalogs.ReplicateDropIndexAsync(database, tableName, indexName).ConfigureAwait(false);
-            }
-        }
-        catch (Exception ex)
-        {
-            context.Logger.LogWarning(ex, "Failed to compensate partial index add for {IndexName} on {TableName}", indexName, tableName);
-        }
-
-        if (!deleteRecord)
-            return;
-
-        try
-        {
-            // Fenced by the term the statement drove the job under: a record the next schema leader
-            // took over meanwhile is that leader's, and stays for its resume.
-            await catalogs.DeleteCoordinatorJobAsync(database, tableId, indexName, leaderTerm).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            context.Logger.LogWarning(ex, "Failed to delete coordinator job for index {IndexName} on {TableName}", indexName, tableName);
         }
     }
 

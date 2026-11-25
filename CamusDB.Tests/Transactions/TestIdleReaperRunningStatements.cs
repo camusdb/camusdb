@@ -25,6 +25,7 @@ using Microsoft.Extensions.Logging;
 
 using CamusDB.Core;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.Catalogs.Transactional;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -453,7 +454,9 @@ internal sealed class TestIdleReaperRunningStatements : SharedNodeBaseTest
     [TestCaseSource(nameof(EveryEntryPoint))]
     public async Task ExplicitTransaction_WithARunningStatement_IsNotReaped(string entryPoint)
     {
-        await SetUpEngineAsync();
+        // The gate is on the shared descriptor of the table. With transactional DDL on, a schema statement
+        // of a transaction opens the table in its own schema and does not meet the gate.
+        await SetUpEngineAsync(Options with { TransactionalDdlEnabled = false });
         KvTransaction tx = await BeginExplicitAsync();
         TableGate gate = await TableGate.InstallAsync(database, "items");
 
@@ -477,6 +480,47 @@ internal sealed class TestIdleReaperRunningStatements : SharedNodeBaseTest
         Assert.AreEqual(0, coordinator.RunningStatementsForTest(tx));
         Assert.AreEqual(1, await SweepAsync(), "an idle transaction is still reaped");
         Assert.AreEqual(KvTransactionStatus.RolledBack, tx.Status);
+    }
+
+    /// <summary>
+    /// With transactional DDL on, a schema statement that waits for the DDL lock counts as running too. The
+    /// reap of the transaction after it drops the staged column and frees the lock.
+    /// </summary>
+    [TestCase("rest ddl")]
+    [TestCase("grpc ddl")]
+    public async Task ExplicitTransaction_WithAWaitingSchemaStatement_IsNotReaped(string entryPoint)
+    {
+        await SetUpEngineAsync(Options with { TransactionalDdlEnabled = true });
+        KvTransaction tx = await BeginExplicitAsync();
+
+        Task statement;
+        TransactionalDdlLock? holder = await TransactionalDdlLock.TryAcquireAsync(database, logger: null);
+        Assert.IsNotNull(holder);
+        await using (holder)
+        {
+            statement = Task.Run(() => RunAsync(entryPoint, tx));
+            Assert.IsTrue(
+                SpinWait.SpinUntil(() => coordinator.RunningStatementsForTest(tx) == 1, Deadline),
+                "the statement did not start");
+
+            Assert.AreEqual(0, await SweepAsync(), "a transaction with a waiting statement is not idle");
+            Assert.AreEqual(KvTransactionStatus.Active, tx.Status);
+            Assert.AreEqual(1, coordinator.ActiveCount);
+            Assert.IsFalse(statement.IsCompleted, "the statement must wait for the DDL lock");
+        }
+
+        await statement.WaitAsync(Deadline);
+        Assert.IsFalse(database.Schema.Tables["items"].Columns!.Exists(c => c.Name == "extra"), "the column is staged only");
+        Assert.IsNull(
+            await TransactionalDdlLock.TryAcquireAsync(database, logger: null), "the transaction holds the DDL lock");
+
+        Assert.AreEqual(0, coordinator.RunningStatementsForTest(tx));
+        Assert.AreEqual(1, await SweepAsync(), "an idle transaction is still reaped");
+        Assert.AreEqual(KvTransactionStatus.RolledBack, tx.Status);
+
+        Assert.IsFalse(database.Schema.Tables["items"].Columns!.Exists(c => c.Name == "extra"));
+        await using TransactionalDdlLock? free = await TransactionalDdlLock.TryAcquireAsync(database, logger: null);
+        Assert.IsNotNull(free, "the reaped transaction must free the DDL lock");
     }
 
     [TestCaseSource(nameof(AutocommitEntryPoints))]

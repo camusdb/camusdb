@@ -308,6 +308,54 @@ internal sealed class TestTransactionalDdlRaces : BaseTest
     }
 
     /// <summary>
+    /// A resolver waits for the decision key while the transaction commits and publishes. The checkpoint of the
+    /// publish deletes the key, so the resolver then finds it absent. It must not leave a decision behind for a
+    /// change set that has ended, and the change stays published.
+    /// </summary>
+    [Test]
+    public async Task ResolverThatWaitsWhileTheCommitPublishes_LeavesNoDecision()
+    {
+        (string name, DatabaseDescriptor database, CommandExecutor executor) = await CreateNamedDatabaseAsync();
+
+        for (int i = 0; i < 20; i++)
+        {
+            KvTransaction tx = await BeginSessionAsync(database.Transactions);
+            await Ddl(executor, tx, name, $"CREATE TABLE fresh{i} (id int64 PRIMARY KEY)");
+            await Write(executor, tx, name, $"INSERT INTO fresh{i} (id) VALUES (1)");
+
+            TransactionSchemaOverlay overlay = (TransactionSchemaOverlay)tx.SchemaChanges!;
+            Task? resolve = null;
+
+            overlay.Committer.TestAtStep = async step =>
+            {
+                if (step != ChangeSetStep.Announced)
+                    return;
+
+                resolve = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await executor.ResolvePendingChangeSetForTests(database);
+                    }
+                    catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.TransactionMustRetry)
+                    {
+                        // The commit held the key for the whole wait of the resolver.
+                    }
+                });
+
+                await Task.Delay(10 * (i % 10));
+            };
+
+            await database.Transactions.CommitAsync(tx);
+            await resolve!.WaitAsync(TimeSpan.FromSeconds(20));
+
+            Assert.IsNull(database.Schema.PendingChangeSet);
+            Assert.AreEqual(0, await CountMetaKeysAsync(database, DecisionKeyPrefix(database)), $"round {i}: a decision is left");
+            Assert.AreEqual(1, (await QueryOutsideAsync(executor, database, $"SELECT * FROM fresh{i}")).Count);
+        }
+    }
+
+    /// <summary>
     /// Records that describe work of the source (a decision, data to remove) are not part of the schema a
     /// branch inherits.
     /// </summary>

@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using NUnit.Framework;
 using Microsoft.Extensions.Logging;
 
+using Kahuna;
 using Kahuna.Shared.Communication.Rest;
 
 using CamusDB.Core;
@@ -110,7 +111,7 @@ public sealed class TestClusterGrowFromOneNode
             {
                 return await action();
             }
-            catch (Exception ex) when (ex is CamusDBException or TimeoutException)
+            catch (Exception ex) when (ex is CamusDBException or KahunaServerException or TimeoutException)
             {
                 last = ex;
                 await Task.Delay(250);

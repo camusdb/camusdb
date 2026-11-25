@@ -172,7 +172,8 @@ public sealed class TestClusterCommitTimestamp
         // The coordinator's partitions elect a new leader first. Until then the commit answers that its
         // outcome is unresolved, and the caller retries the same commit.
         CamusDBException? lastUnresolved = null;
-        for (int attempt = 0; attempt < 6 && tx.Status != KvTransactionStatus.Committed; attempt++)
+        long deadline = Environment.TickCount64 + 60_000;
+        while (tx.Status != KvTransactionStatus.Committed && Environment.TickCount64 < deadline)
         {
             try
             {
@@ -181,6 +182,7 @@ public sealed class TestClusterCommitTimestamp
             catch (CamusDBException e) when (e.Code == CamusDBErrorCodes.TransactionFinalizeUnresolved)
             {
                 lastUnresolved = e;
+                await Task.Delay(250);
             }
         }
 

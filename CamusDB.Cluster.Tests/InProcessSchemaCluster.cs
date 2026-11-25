@@ -48,6 +48,9 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
     // Replaced, never mutated, when a node joins: a caller that holds the array keeps a consistent view.
     private Node[] nodes;
 
+    // Restarts of several nodes can run at once; each one replaces its node in the shared tables.
+    private readonly object membershipGate = new();
+
     private InProcessSchemaCluster(Node[] nodes, FaultInjectingCommunication faultComm, BuildContext buildContext)
     {
         this.nodes = nodes;
@@ -81,26 +84,32 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         Func<int, CamusDBOptions, CamusDBOptions>? ConfigureNodeOptions);
 
     /// <summary>Wraps a started embedded node in an executor and registers it with the shared in-process transports.</summary>
-    private static Node BuildNode(int index, EmbeddedKahuna kahuna, BuildContext context)
+    private static Node BuildNode(int index, EmbeddedKahuna kahuna, BuildContext context, int starts = 1)
     {
         // A test that needs nodes to differ (one node without an extension, say) states it here; the
         // default is the same configuration everywhere.
         CamusDBOptions nodeOptions = context.ConfigureNodeOptions?.Invoke(index, context.Options) ?? context.Options;
         CommandValidator validator = new(nodeOptions);
         CatalogsManager catalogs = new(context.Logger);
+
+        // Each start of a node sends through a transport of its own, so a kill stops what that start still
+        // sends without touching the node that replaces it.
+        KillableSchemaTransport transport = new(context.SchemaTransport);
+        kahuna.SetSchemaAckForwarder(transport);
+
         CommandExecutor executor = new(
             validator,
             catalogs,
             context.Logger, nodeOptions,
             sharedNode: kahuna,
-            schemaDdlForwarder: context.Forwarder,
+            schemaDdlForwarder: context.Forwarder is null ? null : transport,
             isClusterMode: true,
             fragmentTransport: context.FragmentTransport
         );
 
         context.Registry.Register(kahuna, executor);
 
-        return new Node(index, kahuna, executor);
+        return new Node(index, kahuna, executor, starts, transport);
     }
 
     /// <summary>
@@ -130,7 +139,7 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
             peers: peers,
             partitions: context.Partitions,
             raftCommunication: faultComm,
-            interNode: context.InterNode.ForNode($"localhost:{context.PortBase + index + 1}"),
+            interNode: context.InterNode.ForNode(SenderName($"localhost:{context.PortBase + index + 1}", starts: 1)),
             loggerFactory: context.LoggerFactory,
             configureNode: options =>
             {
@@ -144,7 +153,7 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         context.InterNode.SetNodes(all.ToDictionary(node => node.Raft.GetLocalEndpoint(), node => node.Kahuna));
 
         foreach (Node killed in current.Where(n => n.IsKilled))
-            context.InterNode.BlockLink(killed.Kahuna.Raft.GetLocalEndpoint(), kahuna.Raft.GetLocalEndpoint());
+            BlockLinks(killed, kahuna.Raft.GetLocalEndpoint(), SenderName(kahuna.Raft.GetLocalEndpoint(), starts: 1));
 
         try
         {
@@ -157,8 +166,6 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
             await kahuna.DisposeAsync().ConfigureAwait(false);
             throw;
         }
-
-        kahuna.SetSchemaAckForwarder(context.SchemaTransport);
 
         Node node = BuildNode(index, kahuna, context);
         Volatile.Write(ref nodes, [.. current, node]);
@@ -233,7 +240,7 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
                     peers: peers,
                     partitions: partitions,
                     raftCommunication: faultComm,
-                    interNode: interNode.ForNode($"localhost:{port}"),
+                    interNode: interNode.ForNode(SenderName($"localhost:{port}", starts: 1)),
                     loggerFactory: loggerFactory,
                     configureNode: configureNode
                 );
@@ -287,8 +294,7 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
             // leader's RecordRemoteSchemaAck, replacing the co-location side-effect of the old
             // static SchemaAckTracker. Every node gets it so the leader's per-instance tracker
             // receives real follower acks.
-            foreach (EmbeddedKahuna kahuna in kahunaNodes)
-                kahuna.SetSchemaAckForwarder(schemaTransport);
+            // BuildNode installs it, behind the per-node switch that a kill turns off.
 
             // DDL forwarding itself is opt-in: off by default so the rest of the suite keeps the
             // "follower DDL throws leader-required" behaviour that RunOnSchemaLeaderAsync relies on.
@@ -707,6 +713,7 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
     {
         ValidateNodeIndex(nodeIndex);
         Nodes[nodeIndex].IsKilled = true;
+        Nodes[nodeIndex].Transport.IsKilled = true;
         string endpoint = Nodes[nodeIndex].Kahuna.Raft.GetLocalEndpoint();
 
         // Block transport before disposal so in-flight messages are not forwarded.
@@ -714,16 +721,19 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         faultComm.BlockRecipient(endpoint);
 
         foreach (Node other in Nodes.Where(n => n.Index != nodeIndex))
-            buildContext.InterNode.BlockLink(endpoint, other.Kahuna.Raft.GetLocalEndpoint());
+            BlockLinks(Nodes[nodeIndex], other.Kahuna.Raft.GetLocalEndpoint(), other.SenderName);
 
         // A crashed host answers no schema probe, schema ack or query fragment either. Left
         // registered, the dead node still answers the schema pull probe, so the ack gate counts it
         // as live and waits on it instead of dropping it from the live set.
         buildContext.Registry.Unregister(endpoint);
 
+        Task stopped = Nodes[nodeIndex].Kahuna.DisposeAsync().AsTask();
+        Nodes[nodeIndex].Stopped = stopped;
+
         try
         {
-            await Nodes[nodeIndex].Kahuna.DisposeAsync().AsTask()
+            await stopped
                 .WaitAsync(TimeSpan.FromSeconds(5))
                 .ConfigureAwait(false);
         }
@@ -731,6 +741,126 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         {
             TestContext.Progress.WriteLine($"KillNodeAsync timed out disposing {endpoint}");
         }
+    }
+
+    /// <summary>
+    /// Cuts or restores the Kahuna calls between a live node and all others, in both directions. Raft traffic
+    /// and schema forwards still pass, as when only one of the node's two server ports is unreachable.
+    /// </summary>
+    public void SetKahunaLinksBlocked(int nodeIndex, bool blocked)
+    {
+        ValidateNodeIndex(nodeIndex);
+        Node node = Nodes[nodeIndex];
+        string endpoint = node.Kahuna.Raft.GetLocalEndpoint();
+
+        foreach (Node other in Nodes.Where(n => n.Index != nodeIndex))
+        {
+            string otherEndpoint = other.Kahuna.Raft.GetLocalEndpoint();
+
+            if (blocked)
+            {
+                buildContext.InterNode.BlockLink(node.SenderName, otherEndpoint);
+                buildContext.InterNode.BlockLink(other.SenderName, endpoint);
+            }
+            else
+            {
+                buildContext.InterNode.UnblockLink(node.SenderName, otherEndpoint);
+                buildContext.InterNode.UnblockLink(other.SenderName, endpoint);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Cuts the Kahuna links of <paramref name="killed"/> to one other node: the calls it sends, by its sender
+    /// name, and the calls that reach it, by its endpoint. A restart unblocks only the second, so what still
+    /// runs of the killed process in this one stays cut off.
+    /// </summary>
+    private void BlockLinks(Node killed, string otherEndpoint, string otherSender)
+    {
+        buildContext.InterNode.BlockLink(killed.SenderName, otherEndpoint);
+        buildContext.InterNode.BlockLink(otherSender, killed.Kahuna.Raft.GetLocalEndpoint());
+    }
+
+    /// <summary>
+    /// The name under which one start of a node sends Kahuna calls. Each start has its own, so the links of a
+    /// killed process stay blocked while the process that replaced it at the same endpoint uses them.
+    /// </summary>
+    private static string SenderName(string endpoint, int starts) => $"{endpoint}#{starts}";
+
+    /// <summary>
+    /// Starts the killed node at <paramref name="nodeIndex"/> again, with its name, its node id, its endpoint
+    /// and the storage its options name, as a process that is started again on its data directory. The node
+    /// must store its data and its Raft log on disk (<c>configureNode</c>); with the memory engines it would
+    /// come back empty under an identity whose log the others count on.
+    ///
+    /// <para>The executor and the Kahuna node of the killed process are stopped first, behind blocked links,
+    /// so nothing of it can reach the cluster through the endpoint that the new process takes. The caller
+    /// opens its databases with <see cref="OpenDatabaseOnNodeAsync"/>. <see cref="Nodes"/> holds a new
+    /// <see cref="Node"/> afterwards.</para>
+    /// </summary>
+    public async Task<Node> RestartNodeAsync(int nodeIndex, TimeSpan? timeout = null)
+    {
+        ValidateNodeIndex(nodeIndex);
+        Node dead = Nodes[nodeIndex];
+
+        if (!dead.IsKilled)
+            throw new InvalidOperationException($"Node {nodeIndex} is not killed");
+
+        BuildContext context = buildContext;
+        string endpoint = dead.Kahuna.Raft.GetLocalEndpoint();
+
+        await DisposeExecutorAsync(dead).ConfigureAwait(false);
+
+        // The storage engine locks its directory, so the old node must be gone before the new one opens it.
+        await dead.Stopped.WaitAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+
+        int starts = dead.Starts + 1;
+        string sender = SenderName(endpoint, starts);
+
+        EmbeddedKahuna kahuna = CreateClusterNode(
+            nodeName: dead.Kahuna.Raft.GetLocalNodeName(),
+            nodeId: nodeIndex + 1,
+            port: context.PortBase + nodeIndex + 1,
+            peers: [.. Nodes.Where(n => n.Index != nodeIndex).Select(n => new RaftNode(n.Kahuna.Raft.GetLocalEndpoint()))],
+            partitions: context.Partitions,
+            raftCommunication: faultComm,
+            interNode: context.InterNode.ForNode(sender),
+            loggerFactory: context.LoggerFactory,
+            configureNode: context.ConfigureNode
+        );
+
+        Node node;
+
+        lock (membershipGate)
+        {
+            node = BuildNode(nodeIndex, kahuna, context, starts);
+
+            Node[] next = [.. nodes];
+            next[nodeIndex] = node;
+
+            faultComm.SetNodes(next.ToDictionary(n => n.Kahuna.Raft.GetLocalEndpoint(), n => n.Kahuna.Raft));
+            context.InterNode.SetNodes(next.ToDictionary(n => n.Kahuna.Raft.GetLocalEndpoint(), n => n.Kahuna.Kahuna));
+
+            foreach (Node other in next.Where(n => n.Index != nodeIndex))
+            {
+                context.InterNode.UnblockLink(other.SenderName, endpoint);
+
+                // A node that is still down stays cut off in both directions.
+                if (other.IsKilled)
+                    BlockLinks(other, endpoint, sender);
+            }
+
+            Volatile.Write(ref nodes, next);
+        }
+
+        faultComm.UnblockSender(endpoint);
+        faultComm.UnblockRecipient(endpoint);
+
+        await kahuna.StartAsync(CancellationToken.None)
+            .WaitAsync(timeout ?? TimeSpan.FromSeconds(90))
+            .ConfigureAwait(false);
+
+        return node;
     }
 
     /// <summary>
@@ -1011,9 +1141,12 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
 
     public sealed class Node
     {
-        internal Node(int index, EmbeddedKahuna kahuna, CommandExecutor executor)
+        internal Node(int index, EmbeddedKahuna kahuna, CommandExecutor executor, int starts, KillableSchemaTransport transport)
         {
+            Transport = transport;
             Index = index;
+            Starts = starts;
+            SenderName = InProcessSchemaCluster.SenderName(kahuna.Raft.GetLocalEndpoint(), starts);
             Kahuna = kahuna;
             Executor = executor;
         }
@@ -1028,6 +1161,18 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
 
         /// <summary>Set by <see cref="KillNodeAsync"/>. A killed node answers nothing, so the waits of the harness skip it.</summary>
         public bool IsKilled { get; internal set; }
+
+        /// <summary>How many times the node was started; 1 until <see cref="RestartNodeAsync"/> starts it again.</summary>
+        internal int Starts { get; }
+
+        /// <summary>What this start of the node sends schema statements, deltas and acks with.</summary>
+        internal KillableSchemaTransport Transport { get; }
+
+        /// <summary>The name of this start of the node in the Kahuna transport. See <see cref="InProcessSchemaCluster.SenderName"/>.</summary>
+        internal string SenderName { get; }
+
+        /// <summary>Ends when the Kahuna node that <see cref="KillNodeAsync"/> stopped released its storage.</summary>
+        internal Task Stopped { get; set; } = Task.CompletedTask;
     }
 
     /// <summary>
@@ -1084,7 +1229,7 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         public Task<AppendLogsResponse> AppendLogs(RaftManager manager, RaftNode node, AppendLogsRequest request)
         {
             if (IsBlocked(manager, node)) return emptyAppend;
-            return inner.AppendLogs(manager, node, request);
+            return inner.AppendLogs(manager, node, CopyLogs(request));
         }
 
         public Task<CompleteAppendLogsResponse> CompleteAppendLogs(RaftManager manager, RaftNode node, CompleteAppendLogsRequest request)
@@ -1096,7 +1241,56 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         public Task<BatchRequestsResponse> BatchRequests(RaftManager manager, RaftNode node, BatchRequestsRequest request)
         {
             if (IsBlocked(manager, node)) return Task.FromResult(new BatchRequestsResponse());
-            return inner.BatchRequests(manager, node, request);
+            return inner.BatchRequests(manager, node, CopyLogs(request));
+        }
+
+        private static BatchRequestsRequest CopyLogs(BatchRequestsRequest request)
+        {
+            if (request.Requests is not { } items || !items.Any(item => item.AppendLogs?.Logs is { Count: > 0 }))
+                return request;
+
+            List<BatchRequestsRequestItem> copies = new(items.Count);
+            foreach (BatchRequestsRequestItem item in items)
+            {
+                copies.Add(item.AppendLogs is null
+                    ? item
+                    : new BatchRequestsRequestItem { Type = item.Type, AppendLogs = CopyLogs(item.AppendLogs) });
+            }
+
+            return new BatchRequestsRequest { Requests = copies };
+        }
+
+        /// <summary>
+        /// The request with log entries of its own, as a message that crossed the network has. The leader
+        /// marks its entries committed in place, and a follower that stores its Raft log on disk would
+        /// otherwise write an entry that changes under it.
+        /// </summary>
+        private static AppendLogsRequest CopyLogs(AppendLogsRequest request)
+        {
+            if (request.Logs is not { Count: > 0 } logs)
+                return request;
+
+            List<RaftLog> copies = new(logs.Count);
+            foreach (RaftLog log in logs)
+            {
+                copies.Add(new RaftLog
+                {
+                    Id = log.Id,
+                    Type = log.Type,
+                    Term = log.Term,
+                    Time = log.Time,
+                    LogType = log.LogType,
+                    LogData = log.LogData,
+                });
+            }
+
+            return new AppendLogsRequest(
+                request.Partition, request.Term, request.Time, request.Endpoint, copies, request.PrevLogIndex, request.PrevLogTerm)
+            {
+                Quiesce = request.Quiesce,
+                RetentionFloor = request.RetentionFloor,
+                RetentionBudget = request.RetentionBudget,
+            };
         }
 
         public Task<JoinResponse> SendJoin(RaftManager manager, RaftNode node, JoinRequest request)

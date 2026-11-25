@@ -339,6 +339,28 @@ public sealed class CatalogsManager
         finally
         {
             database.SchemaDdlSemaphore.Release();
+
+            // The statement runs on the follower, so no statement of this node gives the leadership up after
+            // a checkpoint that could not be written. A degraded leader would refuse every later schema change.
+            await StepDownIfRequestedAsync(database).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Gives up the schema leadership of <paramref name="database"/> when a checkpoint that could not be
+    /// written left this node degraded, so that a healthy node takes it. For the schema changes that no
+    /// statement of this node surrounds: a forwarded one, and the decision of a change set. Never throws; the
+    /// caller holds no DDL gate.
+    /// </summary>
+    internal async Task StepDownIfRequestedAsync(DatabaseDescriptor database)
+    {
+        try
+        {
+            await database.FireDeferredSchemaStepDownAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Schema partition step-down after persist exhaustion failed for database {DbName}", database.Name);
         }
     }
 

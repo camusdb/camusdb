@@ -12,14 +12,15 @@ namespace CamusDB.Core.Catalogs;
 /// term than the writer's: the schema leadership moved while the writer drove the job, and the next
 /// leader took the job over. The writer must stop driving; the job belongs to its successor, and the
 /// statement that started it answers from the job's outcome
-/// (<see cref="SchemaChangeCoordinator.RunJobAsync"/>).
+/// (<see cref="SchemaChangeCoordinator.RunJobAsync"/>). Also thrown when the driver stopped because this
+/// node lost the schema leadership, which it can learn before any newer term is visible.
 /// </summary>
 public sealed class CoordinatorJobTakenOverException : CamusDBException
 {
     /// <summary>The term the refused writer drove the job under.</summary>
     public long WriterTerm { get; }
 
-    /// <summary>The term stored on the record, the successor's.</summary>
+    /// <summary>The term stored on the record, the successor's, or zero when no successor is known yet.</summary>
     public long OwnerTerm { get; }
 
     public CoordinatorJobTakenOverException(string tableName, string elementName, long writerTerm, long ownerTerm)
@@ -30,6 +31,17 @@ public sealed class CoordinatorJobTakenOverException : CamusDBException
     {
         WriterTerm = writerTerm;
         OwnerTerm = ownerTerm;
+    }
+
+    /// <summary>The driver stopped because this node lost the schema leadership of <paramref name="writerTerm"/>.</summary>
+    public CoordinatorJobTakenOverException(string tableName, string elementName, long writerTerm, Exception stopped)
+        : base(
+            CamusDBErrorCodes.InvalidInternalOperation,
+            $"The schema-change job for '{tableName}.{elementName}' stopped: this node lost the schema leadership of " +
+            $"term {writerTerm} while it drove the job",
+            stopped)
+    {
+        WriterTerm = writerTerm;
     }
 }
 

@@ -9,7 +9,9 @@
 using CamusDB.Core.Catalogs.Apply;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
+using Grpc.Core;
 using Kahuna;
 using Kahuna.Server.KeyValues;
 using Kahuna.Shared.KeyValue;
@@ -61,6 +63,23 @@ internal sealed class SchemaCheckpointWriter
     /// </summary>
     private static readonly TimeSpan CheckpointCommitTimeout = TimeSpan.FromSeconds(30);
 
+    /// <summary>Attempts of a checkpoint whatever its failure is.</summary>
+    private const int MinPersistAttempts = 3;
+
+    /// <summary>
+    /// How long a checkpoint starts further attempts after a transient failure. A checkpoint writes through
+    /// the partition leaders, and one of them can be a node that died a moment ago: the write fails at once
+    /// until the others elect a leader. Attempts that end before the election would mark a healthy node
+    /// degraded, and it refuses schema changes until it restarts.
+    /// </summary>
+    private const int TransientPersistWindowMs = 10_000;
+
+    private const int MaxPersistRetryDelayMs = 500;
+
+    /// <summary>
+    /// Writes the KV checkpoint of a committed entry, again after a failure. Never throws: a checkpoint that
+    /// cannot be written marks this node degraded and asks it to give up the schema leadership.
+    /// </summary>
     internal async Task PersistSchemaCheckpointWithRetryAsync(
         DatabaseDescriptor database,
         SchemaChangeLogEntry entry,
@@ -70,7 +89,7 @@ internal sealed class SchemaCheckpointWriter
         IReadOnlyList<ChangeSetCheckpointDelta>? changeSetDropped = null
     )
     {
-        const int maxAttempts = 3;
+        long started = Environment.TickCount64;
 
         for (int attempt = 1; ; attempt++)
         {
@@ -79,7 +98,8 @@ internal sealed class SchemaCheckpointWriter
                 await PersistSchemaCheckpointAsync(database, entry, droppedTableId, droppedViewId, droppedSequenceId, changeSetDropped).ConfigureAwait(false);
                 return;
             }
-            catch (Exception ex) when (attempt < maxAttempts)
+            catch (Exception ex) when (attempt < MinPersistAttempts
+                || IsTransientPersistFailure(ex) && Environment.TickCount64 - started < TransientPersistWindowMs)
             {
                 logger.LogWarning(
                     ex,
@@ -89,7 +109,7 @@ internal sealed class SchemaCheckpointWriter
                     entry.ToVersion
                 );
 
-                await Task.Delay(50 * attempt).ConfigureAwait(false);
+                await Task.Delay(Math.Min(50 * attempt, MaxPersistRetryDelayMs)).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -100,7 +120,7 @@ internal sealed class SchemaCheckpointWriter
                 // in single-partition clusters the schema and KV partitions are the same: stepping
                 // down before CommitAsync would invalidate the in-flight KV transaction.
                 // Restart replay will recover the checkpoint on the next open.
-                Log.LogSchemaCheckpointExhausted(logger, ex, maxAttempts, database.Name, entry.ToVersion);
+                Log.LogSchemaCheckpointExhausted(logger, ex, attempt, database.Name, entry.ToVersion);
 
                 database.MarkSchemaSubsystemDegraded();
                 database.RequestDeferredSchemaStepDown();
@@ -109,6 +129,18 @@ internal sealed class SchemaCheckpointWriter
             }
         }
     }
+
+    /// <summary>
+    /// True for a failure that a leader election or a short wait ends: a partition leader that cannot be
+    /// reached, or a commit that was refused and may be tried again.
+    /// </summary>
+    private static bool IsTransientPersistFailure(Exception ex) => ex switch
+    {
+        CamusDBException refused => refused.Code is CamusDBErrorCodes.TransactionMustRetry or CamusDBErrorCodes.TransactionConflict,
+        KahunaServerException failure => failure.ResponseType != KeyValueResponseType.StorageCorrupt,
+        RpcException unreachable => KahunaRetryPolicy.IsTransientTransportFailure(unreachable, CancellationToken.None),
+        _ => false,
+    };
 
     internal async Task PersistSchemaCheckpointAsync(
         DatabaseDescriptor database,
@@ -297,7 +329,10 @@ internal sealed class SchemaCheckpointWriter
     /// <item>A publish stages every delta of its change set as <see cref="StageEntryCheckpointAsync"/> stages
     /// a single entry, with the dropped ids the publisher captured before the apply, then deletes the
     /// pending record and the decision key. All of it commits in this one transaction.</item>
-    /// <item>An abort deletes the pending record and the decision key.</item>
+    /// <item>An abort deletes the pending record, and the decision key when a resolver wrote one. The
+    /// decision key of a transaction that aborts itself is absent, and its lock can still be held: the
+    /// rollback of the transaction may not have reached it, and only the lease frees it then. A delete would
+    /// wait for that lock, use up the attempts of the checkpoint, and mark this node degraded.</item>
     /// </list>
     /// A decision for a change set that was not pending stages only the version key: the publish or the
     /// abort that ended it already wrote its checkpoint.
@@ -341,7 +376,14 @@ internal sealed class SchemaCheckpointWriter
         }
 
         await MetaKeyWriter.DeleteMetaKey(kahuna, tx, MetaKeys.ChangeSetKey(database.Id, decision.ChangeSetId)).ConfigureAwait(false);
-        await MetaKeyWriter.DeleteMetaKey(kahuna, tx, MetaKeys.ChangeSetDecisionKey(database.Id, decision.ChangeSetId)).ConfigureAwait(false);
+
+        string decisionKey = MetaKeys.ChangeSetDecisionKey(database.Id, decision.ChangeSetId);
+
+        // Read outside the transaction: the latest committed value, which no lock holds back.
+        if (entry.Op != SchemaOp.AbortChangeSet
+            || await Transactional.ChangeSetCommitter.ReadDecisionAsync(kahuna, HLCTimestamp.Zero, decisionKey, CancellationToken.None).ConfigureAwait(false) is not null)
+            await MetaKeyWriter.DeleteMetaKey(kahuna, tx, decisionKey).ConfigureAwait(false);
+
         await WriteVersionKeyAsync(kahuna, tx, database.Id, entry.ToVersion).ConfigureAwait(false);
     }
 

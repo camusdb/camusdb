@@ -77,11 +77,22 @@ internal sealed class PendingChangeSetResolver
 
         bool committed = await ReadOrAbortDecisionAsync(database, pending.ChangeSetId).ConfigureAwait(false);
 
-        logger.LogWarning(
-            "Resolving change set {ChangeSetId} of database {Database} left pending by its transaction: {Decision}",
-            pending.ChangeSetId, database.Name, committed ? "publish" : "abort");
-
         bool decided = await committer.DecideAsync(database, pending.ChangeSetId, publish: committed).ConfigureAwait(false);
+
+        if (decided)
+        {
+            logger.LogWarning(
+                "Resolved change set {ChangeSetId} of database {Database}, which its transaction left pending: {Decision}",
+                pending.ChangeSetId, database.Name, committed ? "publish" : "abort");
+        }
+        else if (!committed)
+        {
+            // The committing node ended the change set while this resolve waited for the decision key. The
+            // checkpoint of that end deleted the key, so the read above found it absent and wrote 'aborted'
+            // after it. No checkpoint comes that would delete it again, and the log has ended the change set.
+            await DeleteAbortedDecisionAsync(database, pending.ChangeSetId).ConfigureAwait(false);
+        }
+
         return decided ? committed : null;
     }
 
