@@ -99,6 +99,31 @@ internal sealed class KvConflictMessageBuilder
     }
 
     /// <summary>
+    /// Builds the message for an exclusive key lock that another transaction holds, when the requester
+    /// stops trying (see the wait-die rule in <see cref="KvRangeLockManager"/>).
+    /// <paramref name="waited"/> true means the requester was allowed to wait and the holder kept the
+    /// key past <see cref="CamusDBOptions.LockWaitDeadlineMs"/>; false means it was not allowed to wait,
+    /// because it is not older than the holder and already holds locks of its own.
+    /// </summary>
+    internal string HeldKeyLockMessage(KvTransaction? tx, string key, bool waited)
+    {
+        StringBuilder message = new();
+
+        message.Append("Key '").Append(DescribeKey(key)).Append("' is locked by another transaction");
+
+        if (waited)
+            message.Append(", still after waiting ").Append(options.LockWaitDeadlineMs).Append(" ms (lock_wait_deadline_ms)");
+        else
+            message.Append("; this transaction already holds locks and is not older than the holder, so it gives way instead of waiting (wait-die)");
+
+        AppendConflictContext(message, tx, null, 0);
+
+        message.Append(" — retry the transaction from BeginAsync");
+
+        return message.ToString();
+    }
+
+    /// <summary>
     /// Builds the message for a retry-budget exhaustion (as opposed to a wall-clock deadline):
     /// the operation kept receiving transient conflict responses for the whole retry budget.
     /// Carries the same diagnostic context as <see cref="LockWaitDeadlineMessage"/> — which

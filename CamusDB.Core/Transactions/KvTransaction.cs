@@ -231,6 +231,13 @@ public sealed class KvTransaction
     /// rows by key keeps the first ones; the others are read again by a write, as before.
     /// </summary>
     private const int MaxRememberedPointReads = 64;
+
+    /// <summary>
+    /// True once Kahuna granted this transaction an exclusive key lock. Written under
+    /// <c>trackSync</c>, read under it by <see cref="HoldsNoLocksOrWrites"/>. See <see cref="MarkHoldsKeyLocks"/>.
+    /// </summary>
+    private bool holdsKeyLocks;
+
     private Dictionary<string, SchemaVersionPin>? schemaPins;
 
     // Write-shape fence state, guarded by trackSync. See PinWriteShape and TryEnterCommit. The first
@@ -1501,22 +1508,40 @@ public sealed class KvTransaction
     }
 
     /// <summary>
-    /// True while this transaction holds no range lock and has staged no write, so nothing of it can
-    /// be waited on by another transaction. Wait-die aborts a younger lock requester because a wait
-    /// from it could close a cycle through what it already holds; a requester that holds nothing
-    /// cannot be on any cycle, so it may wait for its deadline instead of aborting at once. The
-    /// exclusive key lock a write takes is not tracked separately, but a write path takes it and
-    /// records the key before it returns, so no range-lock acquire of this transaction ever runs
-    /// between the two.
+    /// True while this transaction holds no range lock, no exclusive key lock and has staged no write,
+    /// so nothing of it can be waited on by another transaction. Wait-die aborts a younger lock
+    /// requester because a wait from it could close a cycle through what it already holds; a
+    /// requester that holds nothing cannot be on any cycle, so it may wait for its deadline instead of
+    /// aborting at once. Range locks and key locks both wait under this rule, so a key lock counts as
+    /// a holding whether or not a write followed it: <c>SELECT … FOR UPDATE</c> holds row locks with no
+    /// write, and an <c>UPDATE</c> holds its row locks before it writes (<see cref="MarkHoldsKeyLocks"/>).
     /// </summary>
     public bool HoldsNoLocksOrWrites
     {
         get
         {
             lock (trackSync)
-                return (acquiredRangeLocks is null || acquiredRangeLocks.Count == 0)
+                return !holdsKeyLocks
+                    && (acquiredRangeLocks is null || acquiredRangeLocks.Count == 0)
                     && (modifiedKeys is null || modifiedKeys.Count == 0);
         }
+    }
+
+    /// <summary>
+    /// Records that Kahuna granted this transaction at least one exclusive key lock. Call it as soon as
+    /// a grant is seen, before the same acquire decides how to treat a key another transaction holds:
+    /// a batched acquire can be granted some keys and refused others in one answer, and from then on
+    /// the transaction is a holder for the wait-die rule (<see cref="HoldsNoLocksOrWrites"/>). The
+    /// coordinator owns the locks and releases them when the transaction ends, so only the fact is
+    /// kept here, not the keys. It never goes back to false.
+    /// </summary>
+    public void MarkHoldsKeyLocks()
+    {
+        if (Volatile.Read(ref holdsKeyLocks))
+            return;
+
+        lock (trackSync)
+            holdsKeyLocks = true;
     }
 
     /// <summary>True while this transaction holds at least one range lock, of any mode and any bounds.</summary>

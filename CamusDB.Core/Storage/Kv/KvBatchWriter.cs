@@ -843,9 +843,10 @@ internal sealed class KvBatchWriter
     ///
     /// <para>Returns null unless <paramref name="policy"/> is <see cref="RowLockWaitPolicy.SkipLocked"/>.
     /// For SKIP LOCKED, the array is aligned with <paramref name="rowIds"/> and true marks a row that
-    /// another transaction holds: it was not locked and must not be read or returned. The other
-    /// policies throw on a held row: <see cref="CamusDBErrorCodes.TransactionConflict"/> by default and
-    /// <see cref="CamusDBErrorCodes.LockNotAvailable"/> for NOWAIT.</para>
+    /// another transaction holds: it was not locked and must not be read or returned. NOWAIT throws
+    /// <see cref="CamusDBErrorCodes.LockNotAvailable"/> on a held row at once. The default waits for the
+    /// holder under the wait-die rule of an UPDATE (<see cref="AcquireManyWithRetry"/>) and throws
+    /// <see cref="CamusDBErrorCodes.TransactionConflict"/> when it may not wait or the wait runs out.</para>
     /// </summary>
     internal async Task<bool[]?> AcquireRowLocksForLockingReadAsync(
         KvTransaction tx,
@@ -870,9 +871,8 @@ internal sealed class KvBatchWriter
         }
 
         HashSet<string>? heldByOthers = policy == RowLockWaitPolicy.SkipLocked ? new(StringComparer.Ordinal) : null;
-        string alreadyLockedCode = policy == RowLockWaitPolicy.NoWait ? CamusDBErrorCodes.LockNotAvailable : CamusDBErrorCodes.TransactionConflict;
 
-        await AcquireManyWithRetry(tx, lockKeys, cancellationToken, aborts: null, heldByOthers, alreadyLockedCode).ConfigureAwait(false);
+        await AcquireManyWithRetry(tx, lockKeys, cancellationToken, aborts: null, policy, heldByOthers).ConfigureAwait(false);
 
         if (heldByOthers is null)
             return null;
@@ -1167,26 +1167,15 @@ internal sealed class KvBatchWriter
         }).ToList();
 
     /// <summary>
-    /// Acquires every exclusive lock of a batch in one round-trip, retrying only the transient
-    /// responses and bounded by both the wall-clock deadline and the retry budget.
+    /// Takes the exclusive lock on every key of <paramref name="lockKeys"/> in one round trip per round,
+    /// waiting out transient answers and, under wait-die, keys another transaction holds. Returns false
+    /// only when a retryable abort was recorded in <paramref name="aborts"/> instead of thrown (see
+    /// <see cref="RetryableAbortSink"/>); the caller must stop.
     ///
     /// <para>Optimistic transactions take no explicit exclusive WRITE locks: each confirmed write folds
     /// an implicit point lock into the coordinator working set, and write-write conflicts are detected
-    /// at commit (write-intent conflict on the modified keys plus read-set validation). Skipping the
-    /// acquire makes the WRITE path non-blocking — a concurrent writer is not blocked and the loser
-    /// aborts at prepare instead of at lock time.</para>
-    ///
-    /// <para>This is fully lock-free only under Read Committed. Under Serializable the read/scan paths
-    /// still take SHARED range/point locks and a following write upgrades them to Exclusive, both gated
-    /// on the isolation level rather than on <see cref="KvTransaction.Locking"/>. Serializable +
-    /// Optimistic is therefore a hybrid, deliberately not weakened to lock-free.</para>
-    ///
-    /// <para>Returns false only when <paramref name="aborts"/> is given and a retryable abort was recorded
-    /// in it instead of thrown (see <see cref="RetryableAbortSink"/>); the caller must stop.</para>
-    /// </summary>
-    /// <summary>
-    /// Takes the exclusive lock on every key of <paramref name="lockKeys"/>, waiting out transient
-    /// answers, and returns false only when a retryable abort was recorded in <paramref name="aborts"/>.
+    /// at commit. Under Serializable the read/scan paths still take shared range/point locks, gated on
+    /// the isolation level rather than on <see cref="KvTransaction.Locking"/>.</para>
     ///
     /// <para><b>A key with no answer is still pending.</b> Kahuna splits the keys into one group per
     /// leader node and stops each group at its first key that is not <c>Locked</c>: the keys after it
@@ -1194,23 +1183,39 @@ internal sealed class KvBatchWriter
     /// with the transient ones. Treating the silence as success would let a caller read and then write
     /// a row it believes it locked while another writer can still change it.</para>
     ///
-    /// <para><b>What a held key does.</b> By default an <c>AlreadyLocked</c> answer ends the call with
-    /// <paramref name="alreadyLockedCode"/>, which is <see cref="CamusDBErrorCodes.TransactionConflict"/>
-    /// unless a caller asked for another code (<c>FOR UPDATE NOWAIT</c> asks for
-    /// <see cref="CamusDBErrorCodes.LockNotAvailable"/>). With <paramref name="heldByOthers"/>, a held
-    /// key is recorded there instead and left unlocked (<c>FOR UPDATE SKIP LOCKED</c>), and the keys its
-    /// group did not answer are sent again at once: a round in which only refused keys stopped the
-    /// groups waits for nothing, so it does not back off or spend the retry budget. Every group answers
-    /// at least one key per round, so the pending set shrinks and the loop ends.</para>
+    /// <para><b>What a held key does.</b> An <c>AlreadyLocked</c> answer names the holder.
+    /// <list type="bullet">
+    /// <item><see cref="RowLockWaitPolicy.Wait"/>, every write path and a plain <c>FOR UPDATE</c>: the
+    /// wait-die rule of <see cref="KvRangeLockManager"/>. The held key goes into the next round, after
+    /// the back-off, when the transaction is older than every holder the round named or holds nothing,
+    /// until <see cref="CamusDBOptions.LockWaitDeadlineMs"/>. Otherwise, and at the deadline, the call
+    /// ends with <see cref="CamusDBErrorCodes.TransactionConflict"/>. The keys the round granted count as
+    /// holdings before this decision (<see cref="KvTransaction.MarkHoldsKeyLocks"/>): the answers of
+    /// parallel groups come in no fixed order, so a grant listed after the refusal is still one.</item>
+    /// <item><see cref="RowLockWaitPolicy.NoWait"/>: the call ends at once with
+    /// <see cref="CamusDBErrorCodes.LockNotAvailable"/>, whatever the ages.</item>
+    /// <item><see cref="RowLockWaitPolicy.SkipLocked"/>: the key is recorded in
+    /// <paramref name="heldByOthers"/> and left unlocked, and the keys its group did not answer are sent
+    /// again at once. A round in which only refused keys stopped the groups waits for nothing, so it does
+    /// not back off or spend the retry budget. Every group answers at least one key per round, so the
+    /// pending set shrinks and the loop ends.</item>
+    /// </list></para>
+    ///
+    /// <para>A round whose only unresolved keys are held keys spends no attempt of the retry budget: its
+    /// wait is bounded by the deadline, as a range-lock wait is. A held key is sent again under a fresh
+    /// operation id, because its denied attempt is finished and the same id would only replay the denial.</para>
     /// </summary>
     private async Task<bool> AcquireManyWithRetry(
         KvTransaction tx,
         List<(string key, int expiresMs, KeyValueDurability durability)> lockKeys,
         CancellationToken ct,
         RetryableAbortSink? aborts = null,
-        HashSet<string>? heldByOthers = null,
-        string alreadyLockedCode = CamusDBErrorCodes.TransactionConflict)
+        RowLockWaitPolicy policy = RowLockWaitPolicy.Wait,
+        HashSet<string>? heldByOthers = null)
     {
+        if (policy == RowLockWaitPolicy.SkipLocked)
+            ArgumentNullException.ThrowIfNull(heldByOthers);
+
         // Start the deferred session before the optimistic check so that the write calls that
         // follow (SetManyWithRetry / DeleteManyWithRetry) have a valid TransactionId.
         await tx.EnsureSessionStartedAsync(ct, keys.TableKeyPrefix).ConfigureAwait(false);
@@ -1238,28 +1243,28 @@ internal sealed class KvBatchWriter
                     () => kahuna.LocateAndTryAcquireManyExclusiveLocks(tx.TransactionId, pending, ct, tx.CoordinatorKey, lockBatchOperationId),
                     ct).ConfigureAwait(false);
 
-            // First pass: trace every successfully locked key (when lock tracing is on). The coordinator
-            // owns the folded point locks and releases them at finalize, so no client-side tracking is
-            // needed for cleanup.
-            if (options.LockTracingEnabled)
-            {
-                foreach ((KeyValueResponseType type, string key, KeyValueDurability _, _) in responses ?? [])
-                {
-                    if (type == KeyValueResponseType.Locked)
-                        Log.LogPointLockAcquired(logger, key, tx.UniqueId);
-                }
-            }
-
-            // Second pass: queue transient failures for retry; throw on hard failures.
+            // Queue transient and held keys for the next round; fail on hard answers. A held key is only
+            // noted here: whether the transaction may wait for it depends on every grant in the round.
             List<(string, int, KeyValueDurability)> retryBatch = [];
             TransientAnswers transients = default;
             if (responses is null)
                 retryBatch.AddRange(pending);
 
-            foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, _) in responses ?? [])
+            bool granted = false;
+            string? heldKey = null;
+            bool olderThanEveryHolder = true;
+
+            foreach ((KeyValueResponseType type, string key, KeyValueDurability durability, HLCTimestamp holder) in responses ?? [])
             {
                 if (type == KeyValueResponseType.Locked)
+                {
+                    // The coordinator owns the folded point locks and releases them at finalize, so the
+                    // transaction keeps only the fact that it holds one, for the wait-die rule.
+                    granted = true;
+                    if (options.LockTracingEnabled)
+                        Log.LogPointLockAcquired(logger, key, tx.UniqueId);
                     continue;
+                }
 
                 if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
                 {
@@ -1270,20 +1275,16 @@ internal sealed class KvBatchWriter
 
                 if (type == KeyValueResponseType.AlreadyLocked)
                 {
-                    if (heldByOthers is not null)
+                    if (policy == RowLockWaitPolicy.SkipLocked)
                     {
-                        heldByOthers.Add(key);
+                        heldByOthers!.Add(key);
                         continue;
                     }
 
-                    string message = alreadyLockedCode == CamusDBErrorCodes.LockNotAvailable
-                        ? $"Key {key} is locked by another transaction, and NOWAIT was requested"
-                        : $"Key {key} is locked by another transaction";
-
-                    RetryableAbortSink.Raise(aborts,
-                        new CamusDBException(alreadyLockedCode, message),
-                        ServerDiagnostics.Tags.AbortSite.AcquireMany);
-                    return false;
+                    heldKey ??= key;
+                    olderThanEveryHolder &= KvRangeLockManager.RequesterIsOlder(tx, holder);
+                    retryBatch.Add((key, 0, durability));
+                    continue;
                 }
 
                 // A range that lost quorum or changed leadership (e.g. under a partition) aborts the
@@ -1299,6 +1300,33 @@ internal sealed class KvBatchWriter
                 throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Failed to acquire lock on {key}: {type}");
             }
 
+            if (granted)
+                tx.MarkHoldsKeyLocks();
+
+            // One clock reading for the held-key decision and the transient deadline below, so a round
+            // that decided to wait for a holder is not then failed as past the deadline.
+            long now = Stopwatch.GetTimestamp();
+
+            if (heldKey is not null)
+            {
+                if (policy == RowLockWaitPolicy.NoWait)
+                {
+                    RetryableAbortSink.Raise(aborts,
+                        new CamusDBException(CamusDBErrorCodes.LockNotAvailable, $"Key {messages.DescribeKey(heldKey)} is locked by another transaction, and NOWAIT was requested"),
+                        ServerDiagnostics.Tags.AbortSite.AcquireMany);
+                    return false;
+                }
+
+                bool mayWait = olderThanEveryHolder || tx.HoldsNoLocksOrWrites;
+                if (!mayWait || now >= deadline)
+                {
+                    RetryableAbortSink.Raise(aborts,
+                        new CamusDBException(CamusDBErrorCodes.TransactionConflict, messages.HeldKeyLockMessage(tx, heldKey, waited: mayWait)),
+                        ServerDiagnostics.Tags.AbortSite.AcquireMany);
+                    return false;
+                }
+            }
+
             // The keys a group did not answer, because an earlier key of the group was not granted.
             if (responses is not null)
                 AddUnansweredKeys(pending, responses, retryBatch);
@@ -1309,14 +1337,14 @@ internal sealed class KvBatchWriter
             // Only refused keys (recorded in heldByOthers) stopped the groups: there is nothing to wait
             // for, so the unanswered keys go out again at once, as a new, smaller declaration. The set
             // must have shrunk; a round that answered nothing goes through the bounded wait below.
-            if (responses is not null && !transients.Any && retryBatch.Count < pending.Count)
+            if (responses is not null && !transients.Any && heldKey is null && retryBatch.Count < pending.Count)
             {
                 lockBatchOperationId = TransactionOperationId.NewRandom();
                 pending = retryBatch;
                 continue;
             }
 
-            if (transients.DeadlinePassed(deadline, replicationDeadline))
+            if (transients.DeadlinePassed(now, deadline, replicationDeadline))
             {
                 RetryableAbortSink.Raise(aborts,
                     new CamusDBException(
@@ -1326,7 +1354,9 @@ internal sealed class KvBatchWriter
                 return false;
             }
 
-            if (transients.CountsAgainstRetryBudget && ++retries >= KahunaRetryPolicy.MaxKahunaRetries)
+            // A round that waits only for holders is bounded by the deadline checked above.
+            bool spendsAttempt = transients.CountsAgainstRetryBudget && (heldKey is null || transients.Any);
+            if (spendsAttempt && ++retries >= KahunaRetryPolicy.MaxKahunaRetries)
             {
                 RetryableAbortSink.Raise(aborts,
                     new CamusDBException(
@@ -1336,13 +1366,17 @@ internal sealed class KvBatchWriter
                 return false;
             }
 
-            ServerDiagnostics.AddKvRetryWait("acquire_many");
+            ServerDiagnostics.AddKvRetryWait(heldKey is null
+                ? "acquire_many"
+                : olderThanEveryHolder ? "keylock_holder_wait" : "keylock_empty_requester_wait");
             await Task.Delay(KahunaRetryPolicy.RetryDelayMs(rounds++), ct).ConfigureAwait(false);
 
             // A shrinking pending set (some keys were confirmed Locked) is a new, smaller declaration —
-            // register it under a fresh id. An unchanged set (every key transient) is the identical batch
-            // resent (e.g. a lost completion ack) — keep the id so the coordinator replays idempotently.
-            if (retryBatch.Count != pending.Count)
+            // register it under a fresh id. So is a round with a held key: its attempt was denied and is
+            // finished, and the same id would only replay the denial. An unchanged set of transient keys
+            // is the identical batch resent (e.g. a lost completion ack) — keep the id so the coordinator
+            // replays idempotently.
+            if (retryBatch.Count != pending.Count || heldKey is not null)
                 lockBatchOperationId = TransactionOperationId.NewRandom();
             pending = retryBatch;
         }
@@ -1734,7 +1768,11 @@ internal sealed class KvBatchWriter
 
         /// <summary>Whether the deadline the last round runs on has passed.</summary>
         public readonly bool DeadlinePassed(long lockDeadline, long replicationDeadline) =>
-            Stopwatch.GetTimestamp() >= (OnlyWaitingForReplication ? replicationDeadline : lockDeadline);
+            DeadlinePassed(Stopwatch.GetTimestamp(), lockDeadline, replicationDeadline);
+
+        /// <summary>Whether the deadline the last round runs on had passed at <paramref name="now"/>, a <see cref="Stopwatch"/> timestamp.</summary>
+        public readonly bool DeadlinePassed(long now, long lockDeadline, long replicationDeadline) =>
+            now >= (OnlyWaitingForReplication ? replicationDeadline : lockDeadline);
 
         /// <summary>The message of the deadline the last round ran on, with the round's transient counts in the operation name.</summary>
         public readonly string DeadlineMessage(KvConflictMessageBuilder messages, KvTransaction tx, string operation, IReadOnlyList<string> keys, int conflicting) =>
