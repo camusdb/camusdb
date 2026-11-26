@@ -551,7 +551,7 @@ reads this value from the environment only.
 
 `DOTNET_GCDynamicAdaptationMode=1` in the environment turns the mode back on. The node then logs a
 warning at startup when the write aggregator uses short cycles (`kahuna.key_value_write_precise_wake`
-on, or `kahuna.key_value_write_post_completion_hold_ms` 0). To run with the mode on, set
+on, or `kahuna.key_value_write_post_completion_hold_ms` 0, which is the standalone default). To run with the mode on, set
 `kahuna.key_value_write_precise_wake: false` and keep the hold at 1 ms or more. Workstation GC, which
 the `dev` profile selects, does not use dynamic adaptation.
 
@@ -690,8 +690,8 @@ until an interleaved A/B on the soak harness shows the gain for your shape. Meas
 `bank` candidate arm with the device held constant: 2 and 4 in flight lowered throughput 15-20% — the
 Raft round stretched with the in-flight count while batches got smaller.
 
-`kahuna.key_value_write_linger_ms` (default **1**) and `kahuna.key_value_write_max_batch_items` (default
-**512**) shape the write aggregator's batches. The linger is how long the oldest queued item may wait before
+`kahuna.key_value_write_linger_ms` (default **1** in cluster mode, **0** on a standalone node) and
+`kahuna.key_value_write_max_batch_items` (default **512**) shape the write aggregator's batches. The linger is how long the oldest queued item may wait before
 a batch is dispatched while no batch is in flight. The cap bounds a batch's items. The measured round
 costs ~1.4 ms fixed plus ~18 µs per item. This means that denser batches are the lever at one
 partition. A linger above the ~2.6 ms that an item already waits trades write latency for density.
@@ -700,14 +700,24 @@ cross-partition WAL group commit, inert at one partition). Measured 2026-09-09: 
 inert at full occupancy (1, 3 and 5 ms all gave the same batches). A completing batch re-dispatches
 whatever is queued.
 
-`kahuna.key_value_write_post_completion_hold_ms` (default **1** in CamusDB; Kahuna's own default is 0)
-adds density at full occupancy. After a batch completes, the aggregator waits this long before
+`kahuna.key_value_write_post_completion_hold_ms` (default **1** in cluster mode and **0** on a
+standalone node; Kahuna's own default is 0) adds density at full occupancy. After a batch completes, the aggregator waits this long before
 dispatching the next one. This means that more items accumulate per batch. The aggregator has one Raft
 round in flight per partition. At full load, a round carries only what arrived during the previous
 round. The hold
 applies after a completion only: a write that arrives at an idle partition waits for the linger. Set
 `0` to dispatch each round as soon as the one before it completes; an explicit value always wins over
 the shipped default.
+
+A standalone node runs with no hold and no linger. It has one voter, so a round is a local log write
+and a partition sends a batch as soon as its log is free. Measured on the bank shape in standalone
+mode on a memory-backed store against a 1 ms hold and a 1 ms linger, Serializable, three runs each:
+at 8 workers the commit call fell from 0.87 to 0.35 ms and throughput rose 14.5% for 26% more CPU
+per transaction; at 64 and 256 workers throughput stayed level and CPU per transaction rose 7% and
+2%. On an NVMe drive a round is a device sync of 3 to 20 ms and the two settings did not differ
+beyond the drive's variation between runs. A standalone node that is short of CPU at high concurrency
+can set both keys to `1`. A cluster of one node keeps the cluster defaults, because its configuration
+stays in force when other nodes join it.
 
 `kahuna.key_value_write_precise_wake` (default **true**) fires the aggregator's hold, linger and
 queue-age wakes from one dedicated timer thread per node. The .NET timer queue measures a delay with a

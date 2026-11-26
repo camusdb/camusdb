@@ -630,9 +630,9 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         Assert.That(built.KeyValueWritePostCompletionHoldMs, Is.EqualTo(2));
 
         EmbeddedKahunaOptions defaults = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/lg-unset", unset, CamusDBOptions.Default);
-        Assert.That(defaults.KeyValueWriteLingerMs, Is.EqualTo(new EmbeddedKahunaOptions().KeyValueWriteLingerMs));
+        Assert.That(defaults.KeyValueWriteLingerMs, Is.EqualTo(EmbeddedKahunaOptionsBuilder.DefaultStandaloneKeyValueWriteLingerMs));
         Assert.That(defaults.KeyValueWriteMaxBatchItems, Is.EqualTo(new EmbeddedKahunaOptions().KeyValueWriteMaxBatchItems));
-        Assert.That(defaults.KeyValueWritePostCompletionHoldMs, Is.EqualTo(EmbeddedKahunaOptionsBuilder.DefaultKeyValueWritePostCompletionHoldMs));
+        Assert.That(defaults.KeyValueWritePostCompletionHoldMs, Is.EqualTo(EmbeddedKahunaOptionsBuilder.DefaultStandaloneKeyValueWritePostCompletionHoldMs));
     }
 
     [Test]
@@ -658,18 +658,38 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     // ── Post-completion hold ─────────────────────────────────────────────────
 
     [Test]
-    public void Baselines_HoldOneMsAfterABatchCompletes_ByDefault()
+    public void ClusterBaseline_HoldsOneMsAfterABatchCompletes_ByDefault()
     {
-        // Kahuna's own default is 0 (dispatch the next batch the instant one completes); CamusDB ships
-        // 1 ms so a fully occupied aggregator packs more items per Raft round. Every baseline carries it.
-        string dataPath = "/tmp/hold-test";
-        ConfigDefinition config = new() { DataDir = dataPath };
+        // Kahuna's own default is 0 (dispatch the next batch when one completes). The cluster baseline
+        // holds 1 ms so a round to the peers carries more items, and keeps Kahuna's linger.
+        ConfigDefinition config = new() { DataDir = "/tmp/hold-test" };
+        EmbeddedKahunaOptions cluster = EmbeddedKahunaOptionsBuilder.ClusterBaseline(config, CamusDBOptions.Default);
 
         Assert.That(EmbeddedKahunaOptionsBuilder.DefaultKeyValueWritePostCompletionHoldMs, Is.EqualTo(1));
-        Assert.That(EmbeddedKahunaOptionsBuilder.StandaloneBaseline(dataPath).KeyValueWritePostCompletionHoldMs, Is.EqualTo(1));
-        Assert.That(EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline(dataPath).KeyValueWritePostCompletionHoldMs, Is.EqualTo(1));
-        Assert.That(EmbeddedKahunaOptionsBuilder.ClusterBaseline(config, CamusDBOptions.Default).KeyValueWritePostCompletionHoldMs, Is.EqualTo(1));
+        Assert.That(cluster.KeyValueWritePostCompletionHoldMs, Is.EqualTo(1));
+        Assert.That(cluster.KeyValueWriteLingerMs, Is.EqualTo(new EmbeddedKahunaOptions().KeyValueWriteLingerMs));
         Assert.That(new EmbeddedKahunaOptions().KeyValueWritePostCompletionHoldMs, Is.EqualTo(0), "the Kahuna default this baseline deliberately departs from");
+    }
+
+    [Test]
+    public void StandaloneBaselines_SendABatchAsSoonAsTheLogIsFree_ByDefault()
+    {
+        // One voter: a round is a local log write, so neither a hold after a batch nor a linger
+        // before the first one is configured. Kahuna dispatches at once from idle only when both are 0.
+        string dataPath = "/tmp/hold-test";
+        EmbeddedKahunaOptions[] baselines =
+        [
+            EmbeddedKahunaOptionsBuilder.StandaloneBaseline(dataPath),
+            EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline(dataPath),
+        ];
+
+        foreach (EmbeddedKahunaOptions baseline in baselines)
+        {
+            Assert.That(baseline.KeyValueWritePostCompletionHoldMs, Is.EqualTo(0));
+            Assert.That(baseline.KeyValueWriteLingerMs, Is.EqualTo(0));
+        }
+
+        Assert.That(new EmbeddedKahunaOptions().KeyValueWriteLingerMs, Is.GreaterThan(0), "the Kahuna default these baselines depart from");
     }
 
     [Test]
@@ -698,13 +718,17 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     }
 
     [Test]
-    public void PostCompletionHold_ExplicitZero_RestoresImmediateDispatch()
+    public void PostCompletionHold_ExplicitValue_WinsOverEitherBaseline()
     {
-        // An operator who wants Kahuna's dispatch-at-once behaviour sets the key to 0 explicitly; 0 is a
-        // value, so the shipped 1 must not replace it.
-        KahunaOptionsConfig zero = new() { KeyValueWritePostCompletionHoldMs = 0 };
+        // 0 is a value: on a cluster node it must replace the shipped 1.
+        ConfigDefinition cluster = new() { DataDir = "/tmp/hold-zero", Kahuna = new KahunaOptionsConfig { KeyValueWritePostCompletionHoldMs = 0 } };
+        Assert.That(EmbeddedKahunaOptionsBuilder.BuildCluster(cluster, CamusDBOptions.Default).KeyValueWritePostCompletionHoldMs, Is.EqualTo(0));
 
-        Assert.That(EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/hold-zero", zero, CamusDBOptions.Default).KeyValueWritePostCompletionHoldMs, Is.EqualTo(0));
+        // A standalone node that asks for a hold and a linger gets them.
+        KahunaOptionsConfig held = new() { KeyValueWritePostCompletionHoldMs = 1, KeyValueWriteLingerMs = 1 };
+        EmbeddedKahunaOptions standalone = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/hold-one", held, CamusDBOptions.Default);
+        Assert.That(standalone.KeyValueWritePostCompletionHoldMs, Is.EqualTo(1));
+        Assert.That(standalone.KeyValueWriteLingerMs, Is.EqualTo(1));
     }
 
     [Test]

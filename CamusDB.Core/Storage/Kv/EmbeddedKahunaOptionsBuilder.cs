@@ -206,13 +206,15 @@ public static class EmbeddedKahunaOptionsBuilder
             // every key on that actor. See KahunaOptionsConfig.RocksdbDirectReads for the measurement.
             // Override with kahuna.rocksdb_direct_reads.
             RocksDbDirectReads = false,
-            // Hold 1 ms after a batch completes before dispatching the next (Kahuna's default is 0),
-            // so a round carries more items. The hold ends on the aggregator's timer thread, at its
-            // deadline, and a buffer that reaches the learned fill target is dispatched before the
-            // hold ends. The measurements are on the three Default* constants. Override with
-            // kahuna.key_value_write_post_completion_hold_ms, kahuna.key_value_write_precise_wake
-            // and kahuna.key_value_write_fill_target_trigger.
-            KeyValueWritePostCompletionHoldMs = DefaultKeyValueWritePostCompletionHoldMs,
+            // No hold after a batch completes and no linger before the first one: a partition sends a
+            // batch as soon as its log is free. The node has one voter, so a round is a local log
+            // write and a wait before it adds its length to every commit. The measurements are on
+            // DefaultStandaloneKeyValueWritePostCompletionHoldMs. The timer thread and the fill
+            // trigger stay on for a deployment that sets a hold. Override with
+            // kahuna.key_value_write_post_completion_hold_ms, kahuna.key_value_write_linger_ms,
+            // kahuna.key_value_write_precise_wake and kahuna.key_value_write_fill_target_trigger.
+            KeyValueWritePostCompletionHoldMs = DefaultStandaloneKeyValueWritePostCompletionHoldMs,
+            KeyValueWriteLingerMs = DefaultStandaloneKeyValueWriteLingerMs,
             KeyValueWritePreciseWake = DefaultKeyValueWritePreciseWake,
             KeyValueWriteFillTargetTrigger = DefaultKeyValueWriteFillTargetTrigger,
             // Materialize on resolve: the commit's settle installs the committed values on every replica and no
@@ -272,13 +274,15 @@ public static class EmbeddedKahunaOptionsBuilder
             // every key on that actor. See KahunaOptionsConfig.RocksdbDirectReads for the measurement.
             // Override with kahuna.rocksdb_direct_reads.
             RocksDbDirectReads = false,
-            // Hold 1 ms after a batch completes before dispatching the next (Kahuna's default is 0),
-            // so a round carries more items. The hold ends on the aggregator's timer thread, at its
-            // deadline, and a buffer that reaches the learned fill target is dispatched before the
-            // hold ends. The measurements are on the three Default* constants. Override with
-            // kahuna.key_value_write_post_completion_hold_ms, kahuna.key_value_write_precise_wake
-            // and kahuna.key_value_write_fill_target_trigger.
-            KeyValueWritePostCompletionHoldMs = DefaultKeyValueWritePostCompletionHoldMs,
+            // No hold after a batch completes and no linger before the first one: a partition sends a
+            // batch as soon as its log is free. The node has one voter, so a round is a local log
+            // write and a wait before it adds its length to every commit. The measurements are on
+            // DefaultStandaloneKeyValueWritePostCompletionHoldMs. The timer thread and the fill
+            // trigger stay on for a deployment that sets a hold. Override with
+            // kahuna.key_value_write_post_completion_hold_ms, kahuna.key_value_write_linger_ms,
+            // kahuna.key_value_write_precise_wake and kahuna.key_value_write_fill_target_trigger.
+            KeyValueWritePostCompletionHoldMs = DefaultStandaloneKeyValueWritePostCompletionHoldMs,
+            KeyValueWriteLingerMs = DefaultStandaloneKeyValueWriteLingerMs,
             KeyValueWritePreciseWake = DefaultKeyValueWritePreciseWake,
             KeyValueWriteFillTargetTrigger = DefaultKeyValueWriteFillTargetTrigger,
             // Materialize on resolve: the commit's settle installs the committed values on every replica and no
@@ -858,19 +862,46 @@ public static class EmbeddedKahunaOptionsBuilder
     internal static bool RaftWalFlushUnitFloorEnabled = true;
 
     /// <summary>
-    /// CamusDB's post-completion hold for Kahuna's key/value write aggregator, in milliseconds
+    /// The cluster baseline's post-completion hold for Kahuna's key/value write aggregator, in milliseconds
     /// (Kahuna's own default is 0). The aggregator keeps one Raft batch in flight per partition and
     /// dispatches the next when a batch completes, so at full occupancy a batch carries what arrived
     /// during one round; the hold lets more items accumulate per round. It lasts its configured time
     /// with <see cref="DefaultKeyValueWritePreciseWake"/>, and a buffer that fills early leaves before
     /// it ends with <see cref="DefaultKeyValueWriteFillTargetTrigger"/>. A hold of 0 with a linger of
-    /// 0 is faster on one node (1.18x at 64 workers on the bank shape) and is not the default: on
-    /// three nodes at 8 workers it used 2.2 times the CPU per transaction for less throughput than
-    /// the exact hold, it wrote 16% to 47% more to the device per transaction, and on a three-node
-    /// NVMe cluster four runs ranged from 6,526 to 9,850 transactions a second. An explicit
+    /// 0 is the standalone default (<see cref="DefaultStandaloneKeyValueWritePostCompletionHoldMs"/>)
+    /// and is not the cluster default: on three nodes at 8 workers it used 2.2 times the CPU per
+    /// transaction for less throughput than the exact hold, it wrote 16% to 47% more to the device
+    /// per transaction, and on a three-node NVMe cluster four runs ranged from 6,526 to 9,850
+    /// transactions a second. A cluster of one node keeps this hold, because its configuration
+    /// stays in force when other nodes join it. An explicit
     /// <c>kahuna.key_value_write_post_completion_hold_ms</c> (including 0) always wins.
     /// </summary>
     internal const int DefaultKeyValueWritePostCompletionHoldMs = 1;
+
+    /// <summary>
+    /// The standalone baselines' post-completion hold, in milliseconds: 0, with
+    /// <see cref="DefaultStandaloneKeyValueWriteLingerMs"/> also 0. A standalone node has one voter,
+    /// so a Raft round is a local log write and a partition's log is idle for most of a held cycle.
+    /// Kahuna sends a batch at once from an idle partition only when the hold and the linger are
+    /// both 0. Measured on the bank shape in standalone mode against the 1 ms hold and 1 ms linger,
+    /// Serializable, three runs each on a memory-backed store: at 8 workers the commit call fell
+    /// from 0.87 to 0.35 ms and throughput rose 14.5% for 26% more CPU per transaction; at 64 and
+    /// 256 workers the commit call fell 26% and 10%, throughput stayed level, and CPU per
+    /// transaction rose 7% and 2%, because the node ran three times as many, smaller rounds. On an
+    /// NVMe drive a round is a device sync of 3 to 20 ms, batches kept their size within 13%, and
+    /// the drive's own variation between runs was larger than any difference between the settings.
+    /// A node that is short of CPU at high concurrency can set
+    /// <c>kahuna.key_value_write_post_completion_hold_ms: 1</c> and
+    /// <c>kahuna.key_value_write_linger_ms: 1</c>.
+    /// </summary>
+    internal const int DefaultStandaloneKeyValueWritePostCompletionHoldMs = 0;
+
+    /// <summary>
+    /// The standalone baselines' write linger, in milliseconds: 0 (Kahuna's own default is 1). The
+    /// linger is how long the oldest queued write waits before a batch leaves an idle partition. See
+    /// <see cref="DefaultStandaloneKeyValueWritePostCompletionHoldMs"/> for the measurement.
+    /// </summary>
+    internal const int DefaultStandaloneKeyValueWriteLingerMs = 0;
 
     /// <summary>
     /// CamusDB's baseline for <c>kahuna.key_value_write_precise_wake</c>: on, which is also Kahuna's

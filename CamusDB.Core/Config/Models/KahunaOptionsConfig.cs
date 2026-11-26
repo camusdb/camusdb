@@ -558,7 +558,7 @@ public sealed class KahunaOptionsConfig
 
     /// <summary>
     /// How long the write aggregator lets a partition's oldest queued item wait, in milliseconds, before
-    /// dispatching a batch while no batch is in flight (Kahuna default 1). With one batch in flight an
+    /// dispatching a batch while no batch is in flight (Kahuna default 1; 0 on a standalone node). With one batch in flight an
     /// item already waits about one Raft round (~2.6 ms measured on tmpfs), so 1 ms never fires; raising
     /// it trades write latency for denser batches. The measured round cost is ~1.4 ms fixed plus ~18 µs
     /// per item, so density is the lever at one partition — not depth (see
@@ -570,10 +570,12 @@ public sealed class KahunaOptionsConfig
 
     /// <summary>
     /// How long the write aggregator holds after a batch completes before dispatching the next one, in
-    /// milliseconds (CamusDB default 1; Kahuna's own default is 0 = dispatch at once). The linger never
+    /// milliseconds (CamusDB default 1 in cluster mode and 0 on a standalone node; Kahuna's own
+    /// default is 0 = dispatch at once). The linger never
     /// fires at full occupancy because completion re-dispatches whatever is queued; this hold adds batch
     /// density there, at the cost of that much write latency. See
-    /// <see cref="Storage.Kv.EmbeddedKahunaOptionsBuilder.DefaultKeyValueWritePostCompletionHoldMs"/>.
+    /// <see cref="Storage.Kv.EmbeddedKahunaOptionsBuilder.DefaultKeyValueWritePostCompletionHoldMs"/> and
+    /// <see cref="Storage.Kv.EmbeddedKahunaOptionsBuilder.DefaultStandaloneKeyValueWritePostCompletionHoldMs"/>.
     /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.KeyValueWritePostCompletionHoldMs"/>.
     /// </summary>
     public int? KeyValueWritePostCompletionHoldMs { get; set; }
