@@ -486,7 +486,7 @@ and how often from disk.
 
 | Profile | Block cache | Memtable sub-budget | Actor caches | Total |
 |---------|-------------|---------------------|--------------|-------|
-| `prod` (default) | 10% of machine memory, ≤ 2 GiB | ¼ of it, raised to the Raft-log flush unit (≤ half the cache), ≤ 1 GiB — see below | 6.25% of the managed heap budget, ≥ 64 MiB | ~16% of memory (~1.5 GiB on an 8 GiB box) |
+| `prod` (default) | 10% of machine memory, ≤ 2 GiB | ¼ of it, raised to the Raft-log flush unit (≤ half the cache), ≤ 1 GiB — see below | 6.25% of the managed heap budget, ≥ 64 MiB; up to four times that when every actor fills its cap (from a 2 GiB heap budget) | ~16% of memory (~1.5 GiB on an 8 GiB box), up to ~37% when every actor fills its cap |
 | `dev` | 64 MiB | 16 MiB | 32 MiB | ~96 MiB, on any machine |
 
 `dev` is for a node sharing a developer machine with the application being built against it. The
@@ -584,7 +584,7 @@ cache). Leave room for the budgets beside the heap when you pick the heap percen
 |-----|---------------------|-------|
 | `rocksdb_shared_memory_budget_mb` | 10% of machine memory | 64 MiB – 2 GiB (320 MiB floor if 10% reaches it) |
 | `rocksdb_shared_memtable_budget_mb` | a quarter of the block cache, raised to the Raft-log flush unit (at most half the cache) | 16 MiB – 1 GiB (128 MiB floor if a quarter reaches it) |
-| `max_bytes_per_actor` | 6.25% of the managed heap budget (≥ 64 MiB for the layer) ÷ the key/value actor count | 1 MiB – 2 GiB per actor (8 MiB floor if the share reaches it) |
+| `max_bytes_per_actor` | 6.25% of the managed heap budget (≥ 64 MiB for the layer) ÷ the key/value actor count, times 4 from a 2 GiB heap budget (at most the whole layer) | 1 MiB – 2 GiB per actor (8 MiB floor if the share reaches it) |
 | `max_entries_per_actor` | `max_bytes_per_actor` ÷ ~512 B | 2k – 4M (10k floor if the share reaches it) |
 
 A floor applies only if the computed value reaches it.
@@ -642,7 +642,9 @@ is far more often a developer workstation or a CI container sharing the box with
 IDE than a dedicated database server. An explicit value always wins over the computed one. Take an
 8 GiB, 8-core machine where none of them is set and no heap limit applies. It gets an 819 MiB block
 cache, a 204 MiB memtable sub-budget (above the 192 MiB flush unit before any floor applies), and
-512 MiB of actor caches split across 32 actors (16 MiB each). That is about 1.5 GiB.
+a 512 MiB actor-cache layer over 32 actors, with a cap of 64 MiB per actor (four shares of 16 MiB).
+That is about 1.5 GiB while the data sits on a few actors, and up to about 3 GiB when all 32 actors
+fill their cap.
 
 A dedicated server should raise all four explicitly. The sizing above is a floor to build from.
 
@@ -650,7 +652,9 @@ The 6.25% share and its 64 MiB floor bound the *complete* actor-cache layer, and
 then divided by the key/value actor count (`kahuna.key_value_workers`, or max(32, 4 × CPU cores)
 when unset); only the 8 MiB per-actor minimum is per actor. Adding cores
 therefore splits the same budget more ways and does not grow it — a machine with many cores
-relative to its RAM does not end up with a multiple of the intended share.
+relative to its RAM does not end up with a multiple of the intended share. From a 2 GiB heap budget
+one actor may hold four of those shares (see `max_bytes_per_actor` below), so the layer is the
+expected size of the caches and four times the layer is their upper bound.
 
 The RocksDB pair is shared: `rocksdb_shared_memory` (default on, and a no-op unless `storage` and
 `wal_storage` are both `rocksdb`) makes one block cache and one write-buffer manager serve both the
@@ -670,6 +674,13 @@ sets both budgets explicitly.
 
 `max_bytes_per_actor` is **per actor**: multiply by the actor count (`key_value_workers`,
 default max(32, 4 × CPU cores)) to get the total.
+
+All rows of a table are cached by one actor, and each of its indexes by one more, so the actors fill
+unevenly. From a 2 GiB heap budget the computed cap is therefore four even shares of the layer: with
+a 2,458 MiB heap limit and 64 actors, 9.6 MiB per actor where the even share is 2.4 MiB. The cap is
+enforced per actor, so the actor caches together can reach four times the layer, a quarter of the
+heap budget, on a node where every actor fills its cap. Below a 2 GiB heap budget the cap stays at
+the even share. Set `max_bytes_per_actor` and `max_entries_per_actor` to choose another size.
 
 `kahuna.key_value_write_max_in_flight_batches_per_partition` (default **1**, Kahuna 1.7.1) is how many
 write-aggregator batches a partition may have waiting on Raft at once. At 1, the next batch is dispatched

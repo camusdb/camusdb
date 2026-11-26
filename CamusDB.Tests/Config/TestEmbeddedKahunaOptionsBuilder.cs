@@ -794,12 +794,15 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         // with one actor per CPU, a many-core machine claimed 64 MB x cores however little RAM it
         // had — 1 GB of a 4 GB container, four times the share the layer was meant to take. The
         // floor now bounds the layer as a whole, so raising the actor count splits a fixed budget
-        // instead of growing it.
+        // instead of growing it. From a 2 GiB heap one actor may cache four even shares, so the bound
+        // of the caches together is four times the layer there.
         const long OneMb = 1024L * 1024;
         long totalRam = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
         Assume.That(totalRam, Is.GreaterThan(0), "memory-proportional sizing needs a known RAM size");
 
         long expectedLayerBytes = Math.Max(totalRam / 16, 64L * OneMb);
+        long boundBytes = expectedLayerBytes
+            * (totalRam >= EmbeddedKahunaOptionsBuilder.ActorCacheSharesMinHeapBytes ? EmbeddedKahunaOptionsBuilder.ActorCacheSharesPerActor : 1);
 
         EmbeddedKahunaOptions few = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb(
             "/tmp/actor-floor-few", new KahunaOptionsConfig { KeyValueWorkers = 4 }, CamusDBOptions.Default);
@@ -807,11 +810,12 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         EmbeddedKahunaOptions many = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb(
             "/tmp/actor-floor-many", new KahunaOptionsConfig { KeyValueWorkers = 32 }, CamusDBOptions.Default);
 
-        Assert.That(few.MaxBytesPerActor * 4, Is.LessThanOrEqualTo(expectedLayerBytes));
+        Assert.That(few.MaxBytesPerActor, Is.LessThanOrEqualTo(expectedLayerBytes));
+        Assert.That(few.MaxBytesPerActor * 4, Is.LessThanOrEqualTo(boundBytes));
 
-        // At 32 actors the layer may only exceed its budget through the 8 MB per-actor minimum, which
+        // At 32 actors the caches may only exceed their bound through the 8 MB per-actor minimum, which
         // exists so an individual cache stays large enough to be worth having.
-        Assert.That(many.MaxBytesPerActor * 32, Is.LessThanOrEqualTo(Math.Max(expectedLayerBytes, 32 * 8L * OneMb)));
+        Assert.That(many.MaxBytesPerActor * 32, Is.LessThanOrEqualTo(Math.Max(boundBytes, 32 * 8L * OneMb)));
 
         // More actors must never hand each actor more memory.
         Assert.That(many.MaxBytesPerActor, Is.LessThanOrEqualTo(few.MaxBytesPerActor));

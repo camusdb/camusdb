@@ -708,12 +708,17 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 #   #   memtable budget  = a quarter of the block cache, at most 1 GiB, raised to the Raft-log flush
 #   #                      unit (192 MiB at the wal_shard_* defaults) but never past half the block cache
 #   #   actor caches     = 6.25% of the managed heap budget (at least 64 MiB for the layer), divided
-#   #                      across the key/value actors, at most 2 GiB each; entries at ~512 B each
+#   #                      across the key/value actors, at most 2 GiB each; entries at ~512 B each.
+#   #                      From a 2 GiB heap budget one actor may hold four of those shares, because
+#   #                      a table's rows are all on one actor; the caches together can then reach
+#   #                      a quarter of the heap budget
 #   # Machine memory is the container's cgroup limit, else physical RAM. The managed heap budget is
 #   # the .NET heap hard limit when one is set, else machine memory. The RocksDB budgets sit OUTSIDE a
 #   # heap limit and count against the container beside it — leave room for both.
-#   # Example, 8 GiB / 8 cores, no heap limit: 819 MiB block cache, 204 MiB memtables, and 512 MiB of
-#   # actor caches (16 MiB x 32 actors) => ~1.5 GiB. Adding cores splits the same actor budget further. The node logs the values it chose once at startup ("RocksDB shared memory:
+#   # Example, 8 GiB / 8 cores, no heap limit: 819 MiB block cache, 204 MiB memtables, and a 512 MiB
+#   # actor layer with a cap of 64 MiB for each of 32 actors (four shares of 16 MiB) => ~1.5 GiB when
+#   # the data sits on a few actors, up to ~3 GiB when every actor fills its cap. Adding cores splits
+#   # the same actor budget further. The node logs the values it chose once at startup ("RocksDB shared memory:
 #   # ..."). A dedicated server should set all four, for example on an 8 GiB machine:
 #   #   rocksdb_shared_memory_budget_mb: 3584
 #   #   rocksdb_shared_memtable_budget_mb: 896
