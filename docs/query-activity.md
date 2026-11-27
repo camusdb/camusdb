@@ -161,12 +161,16 @@ transaction, its owner and who killed it.
 | Code | Meaning |
 |---|---|
 | `CADB0566` | No open transaction has this id. The transaction may have ended or may belong to another user. The id may also be wrong. |
-| `CADB0568` | The kill is in effect, and a statement of the transaction still runs. See [What a kill does to a running statement](#what-a-kill-does-to-a-running-statement). |
+| `CADB0568` | The kill is in effect, and its rollback has not ended yet: a statement of the transaction still runs, or the rollback is in progress. See [What a kill does to a running statement](#what-a-kill-does-to-a-running-statement). |
+| `CADB0569` | The kill is in effect, but the rollback failed. The transaction runs no further statement and cannot commit. The storage node releases its locks when the transaction's session there expires. The same kill reports `CADB0569` again. |
 | `CADB0501` | A commit or a rollback of the transaction won: it committed before the kill, or its outcome is not known yet. The message says which. |
 | `CADB0567` | The node that may own the transaction did not answer. The transaction may still be open; send the kill again. |
 
 A kill of a transaction that the kill already ended succeeds again. That is how you confirm a pending
-kill.
+kill. A kill whose rollback failed reports `CADB0569` again instead.
+
+The kill waits for its rollback up to half of `cluster_activity_peer_timeout_ms`, also when no
+statement runs. A rollback that takes longer returns `CADB0568`, and the rollback continues.
 
 ### What a kill does to a running statement
 
@@ -174,7 +178,7 @@ The kill ends the transaction at once: from that moment it runs no new statement
 The rollback itself waits until no statement of the transaction runs, because a rollback beside a
 running write would race the write's own changes.
 
-- A read stops at its next row with `CADB0565`.
+- A read stops at its next row with `CADB0565`. This does not depend on `query_activity_enabled`.
 - A write stops before its next write reaches storage, with `CADB0565`.
 - When the statement ends, the rollback runs and the locks are released.
 
@@ -219,7 +223,7 @@ transaction that wrote to the table, or ran DDL, and then stopped sending statem
    ```
 
    The blocked writer can run again at once. If the kill returns `CADB0568`, a statement of the
-   transaction still runs; the rollback runs when it ends.
+   transaction still runs, or the rollback is in progress; the locks are released when it ends.
 
 4. Tell the owner of the client. Their next statement on that transaction fails with `CADB0565`.
 

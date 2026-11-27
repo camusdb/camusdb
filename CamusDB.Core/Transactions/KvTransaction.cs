@@ -976,11 +976,144 @@ public sealed class KvTransaction
         MarkRollbackOnly(reason);
     }
 
+    // Created by the first read that watches for a kill; most transactions never run one, and they pay
+    // nothing. Never disposed: it has no timer, and the reads' linked sources unregister themselves.
+    private CancellationTokenSource? killSource;
+
+    /// <summary>
+    /// A token that fires when <c>KILL TRANSACTION</c> ends this transaction. A read of the transaction
+    /// links it into its own token, so the kill stops the read at its next token check whether or not
+    /// the read is on the running-statement list (<c>query_activity_enabled</c> off, or a read that had
+    /// not registered yet when the kill came).
+    ///
+    /// <para>The source and the kill reason are each published with a full fence, and each side reads
+    /// the other's field after its own write: a read that creates the source after the kill looked for
+    /// it sees the reason and cancels the source itself, and a kill that comes after the source exists
+    /// cancels it in <see cref="CancelKillToken"/>. So no read misses the kill.</para>
+    /// </summary>
+    public CancellationToken KillToken
+    {
+        get
+        {
+            CancellationTokenSource? source = Volatile.Read(ref killSource);
+            if (source is null)
+            {
+                CancellationTokenSource created = new();
+                source = Interlocked.CompareExchange(ref killSource, created, null) ?? created;
+            }
+
+            if (Volatile.Read(ref killReason) is not null)
+                source.Cancel();
+
+            return source.Token;
+        }
+    }
+
+    /// <summary>
+    /// Fires <see cref="KillToken"/> after <see cref="MarkKilled"/>. Separate from it because the
+    /// cancellation runs the reads' callbacks on the calling thread, and <see cref="MarkKilled"/> runs
+    /// under the host's lock of the transaction's entry. Call it outside that lock.
+    /// </summary>
+    public void CancelKillToken()
+    {
+        if (Volatile.Read(ref killReason) is not null)
+            Volatile.Read(ref killSource)?.Cancel();
+    }
+
     /// <summary>The error a statement or a commit of a killed transaction reports.</summary>
     public CamusDBException KilledError() => new(
         CamusDBErrorCodes.TransactionKilled,
         $"Transaction {UniqueId} was {Volatile.Read(ref killReason) ?? "killed by KILL TRANSACTION"}. " +
         "It is rolled back and accepts no further statement; begin a new transaction");
+
+    /// <summary>
+    /// Wraps the lazy cursor of a read that runs under <paramref name="killWatch"/>, a token source
+    /// linked to the request's token and to <see cref="KillToken"/>. A cancellation that the kill caused
+    /// becomes <see cref="KilledError"/>, as it does while the statement plans, and the source is
+    /// disposed when the cursor is, which removes its registration on <see cref="KillToken"/>.
+    /// </summary>
+    public IAsyncEnumerable<T> StopOnKill<T>(IAsyncEnumerable<T> cursor, CancellationTokenSource killWatch, CancellationToken request) =>
+        new KillWatchingCursor<T>(this, cursor, killWatch, request);
+
+    /// <summary>
+    /// True when <paramref name="exception"/> is the cancellation that a kill caused, not one that the
+    /// client's request caused.
+    /// </summary>
+    public bool IsKillCancellation(Exception exception, CancellationToken request) =>
+        exception is OperationCanceledException && Volatile.Read(ref killReason) is not null && !request.IsCancellationRequested;
+
+    /// <summary>The enumerable half of <see cref="StopOnKill{T}"/>.</summary>
+    private sealed class KillWatchingCursor<T>(
+        KvTransaction tx, IAsyncEnumerable<T> rows, CancellationTokenSource killWatch, CancellationToken request) : IAsyncEnumerable<T>
+    {
+        public IAsyncEnumerator<T> GetAsyncEnumerator(CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                return new KillWatchingEnumerator<T>(tx, rows.GetAsyncEnumerator(cancellationToken), killWatch, request);
+            }
+            catch
+            {
+                killWatch.Dispose();
+                throw;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The enumerator half of <see cref="StopOnKill{T}"/>. Hand-written for the reason given on
+    /// <see cref="AbortOnFailure{T}"/>: it opens and disposes the inner enumerator together with its own.
+    /// </summary>
+    private sealed class KillWatchingEnumerator<T>(
+        KvTransaction tx, IAsyncEnumerator<T> inner, CancellationTokenSource killWatch, CancellationToken request) : IAsyncEnumerator<T>
+    {
+        public T Current => inner.Current;
+
+        public ValueTask<bool> MoveNextAsync()
+        {
+            // Checked before every row: a cursor whose rows are already in memory (a SHOW statement, a
+            // buffered sort) observes no token, and would otherwise run to its end after the kill.
+            if (Volatile.Read(ref tx.killReason) is not null)
+                throw tx.KilledError();
+
+            ValueTask<bool> step;
+
+            try
+            {
+                step = inner.MoveNextAsync();
+            }
+            catch (Exception ex) when (tx.IsKillCancellation(ex, request))
+            {
+                throw tx.KilledError();
+            }
+
+            return step.IsCompletedSuccessfully ? step : AwaitStep(step);
+        }
+
+        private async ValueTask<bool> AwaitStep(ValueTask<bool> step)
+        {
+            try
+            {
+                return await step.ConfigureAwait(false);
+            }
+            catch (Exception ex) when (tx.IsKillCancellation(ex, request))
+            {
+                throw tx.KilledError();
+            }
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            try
+            {
+                await inner.DisposeAsync().ConfigureAwait(false);
+            }
+            finally
+            {
+                killWatch.Dispose();
+            }
+        }
+    }
 
     /// <summary>
     /// Wraps a statement's lazy cursor so a failure while the rows stream aborts the transaction exactly

@@ -138,9 +138,13 @@ public static class GrpcErrorMapper
         CamusDBErrorCodes.TransactionNotFound => StatusCode.NotFound,
         CamusDBErrorCodes.TransactionOwnerUnreachable => StatusCode.Unavailable,
 
-        // The kill is in effect, and its rollback waits for a running statement to end. DEADLINE_EXCEEDED
-        // is gRPC's name for an operation that did not complete in time and may still complete.
+        // The kill is in effect, and its rollback waits for a running statement to end or is still in
+        // progress. DEADLINE_EXCEEDED is gRPC's name for an operation that did not complete in time and
+        // may still complete.
         CamusDBErrorCodes.TransactionKillPending => StatusCode.DeadlineExceeded,
+
+        // The kill fenced the transaction, but its rollback failed on the server.
+        CamusDBErrorCodes.TransactionKillRollbackFailed => StatusCode.Internal,
 
         // The trigger's extension is missing here or differs from the one it was created with; a
         // node that deploys the right file can run the same statement.

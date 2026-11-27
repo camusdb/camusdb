@@ -262,6 +262,15 @@ internal sealed class SelectStatementExecutor
     /// statement plans or while its rows stream, aborts the transaction
     /// (<see cref="KvTransaction.MarkRollbackOnly(string)"/>). The write-with-RETURNING hand-off meets
     /// the same rule again in the DML dispatcher; the first reason is kept.
+    ///
+    /// <para>A statement of an explicit transaction that a host tracks (one with
+    /// <see cref="KvTransaction.Activity"/>) runs under a token linked to
+    /// <see cref="KvTransaction.KillToken"/>, so <c>KILL TRANSACTION</c> stops it at its next token
+    /// check, and its cursor before its next row, with <see cref="CamusDBErrorCodes.TransactionKilled"/>.
+    /// The link is made before the statement registers on the running-statement list, so a kill that
+    /// comes at any point of the statement stops it, also with that list off. A write with a RETURNING
+    /// list on this path gets the same token; it is refused at its next write in any case
+    /// (<see cref="KvTransaction.ReserveMutations"/>). Other transactions pay nothing for this.</para>
     /// </summary>
     public async Task<(DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)> ExecuteSQLQuery(ExecuteSQLTicket ticket, CacheMetadataHolder? metaOut = null, QuerySchemaHolder? schemaOut = null)
     {
@@ -269,16 +278,34 @@ internal sealed class SelectStatementExecutor
         KvTransaction? tx = ticket.TxnState;
         tx?.ThrowIfRollbackOnly();
 
+        CancellationToken request = ticket.CancellationToken;
+        CancellationTokenSource? killWatch = null;
+
+        if (tx?.Activity is not null)
+        {
+            killWatch = CancellationTokenSource.CreateLinkedTokenSource(request, tx.KillToken);
+            ticket = ticket.WithCancellationToken(killWatch.Token);
+        }
+
         try
         {
             (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) =
                 await ExecuteSQLQueryBounded(ticket, metaOut, schemaOut).ConfigureAwait(false);
 
-            return (database, tx is null ? cursor : tx.AbortOnFailure(cursor));
+            if (tx is null)
+                return (database, cursor);
+
+            cursor = tx.AbortOnFailure(cursor);
+            return (database, killWatch is null ? cursor : tx.StopOnKill(cursor, killWatch, request));
         }
         catch (Exception ex)
         {
             tx?.MarkRollbackOnly(ex);
+            killWatch?.Dispose();
+
+            if (tx is not null && tx.IsKillCancellation(ex, request))
+                throw tx.KilledError();
+
             throw;
         }
     }

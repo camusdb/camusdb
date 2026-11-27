@@ -215,7 +215,8 @@ public sealed class QueryActivityService
     /// <see cref="CamusDBErrorCodes.TransactionNotFound"/>, <see cref="CamusDBErrorCodes.TransactionKillPending"/>,
     /// <see cref="CamusDBErrorCodes.TransactionAlreadyCompleted"/> when a commit won or a finalize owns
     /// the transaction, <see cref="CamusDBErrorCodes.TransactionOwnerUnreachable"/> when a peer that may
-    /// own it did not answer, or the error of a rollback that failed.
+    /// own it did not answer, or <see cref="CamusDBErrorCodes.TransactionKillRollbackFailed"/> when the
+    /// rollback failed.
     /// </exception>
     public async Task KillTransactionAsync(string transactionId, ActivityViewer viewer, TransactionKiller killedBy)
     {
@@ -265,8 +266,9 @@ public sealed class QueryActivityService
             case TransactionKillOutcome.Pending:
                 throw new CamusDBException(
                     CamusDBErrorCodes.TransactionKillPending,
-                    $"Transaction '{transactionId}' is killed: it runs no further statement and cannot commit. A statement of it " +
-                    "still runs, and the rollback releases its locks when that statement ends; run the same KILL TRANSACTION to check");
+                    $"Transaction '{transactionId}' is killed: it runs no further statement and cannot commit. Its rollback has " +
+                    "not ended yet: it waits for a running statement of the transaction, or is in progress, and it releases the " +
+                    "locks when it ends; run the same KILL TRANSACTION to check");
 
             case TransactionKillOutcome.Committed:
                 throw new CamusDBException(

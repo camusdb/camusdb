@@ -825,12 +825,22 @@ public static class CamusDBErrorCodes
 
     /// <summary>
     /// <c>KILL TRANSACTION</c> fenced the transaction, so it runs no further statement and cannot commit,
-    /// but a statement of it was still running when the kill stopped waiting. The rollback runs, and the
-    /// locks are released, when that statement ends: a read stops at its next row, and a write stops at
-    /// its next write. The same kill can be sent again to learn whether the rollback ran. Maps to HTTP
+    /// but its rollback had not ended when the kill stopped waiting: a statement of it still ran, or the
+    /// rollback itself was still in progress. The rollback runs, and the locks are released, when that
+    /// statement ends (a read stops at its next row, and a write stops at its next write) or when the
+    /// rollback completes. The same kill can be sent again to learn how the rollback ended. Maps to HTTP
     /// 409 and gRPC <c>DEADLINE_EXCEEDED</c>.
     /// </summary>
     public const string TransactionKillPending = "CADB0568";
+
+    /// <summary>
+    /// <c>KILL TRANSACTION</c> fenced the transaction, but its rollback failed. The transaction accepts
+    /// no further statement and no commit, and the host no longer tracks it; the storage node releases
+    /// what the rollback did not when the transaction's session there expires. The same kill sent again
+    /// reports this code again, never success, because the release was not confirmed. Maps to HTTP 500
+    /// and gRPC <c>INTERNAL</c>.
+    /// </summary>
+    public const string TransactionKillRollbackFailed = "CADB0569";
 
     public const string InvalidConfig = "CADB0600";
 
@@ -1411,6 +1421,7 @@ public static class CamusDBErrorCodes
         TransactionNotFound => 404,
         TransactionOwnerUnreachable => 503,
         TransactionKillPending => 409,
+        TransactionKillRollbackFailed => 500,
         LockNotAvailable => 409,
         SnapshotPrecedesContentsGeneration => 400,
         StatementNotAllowedInTransaction => 400,

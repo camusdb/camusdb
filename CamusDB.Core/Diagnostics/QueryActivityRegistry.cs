@@ -129,7 +129,7 @@ public sealed class QueryActivityRegistry
 
         // An explicit transaction records its last statement for SHOW TRANSACTIONS on the same terms.
         // Every SQL statement of a transaction passes here, so this is the one place that sees them all.
-        ticket.TxnState?.Activity?.NoteStatement(ticket.Sql, ticket.Principal);
+        ticket.TxnState?.Activity?.NoteStatement(ticket.Sql, ticket.Principal, Math.Max(1, options.QueryActivityMaxSqlLength));
 
         if (!options.QueryActivityEnabled)
             return null;
@@ -254,29 +254,6 @@ public sealed class QueryActivityRegistry
                                              queryId[ids.Prefix.Length] == '-';
 
     /// <summary>
-    /// Stops the reads that run now on the transaction whose client handle is
-    /// <paramref name="transactionClientId"/>, for <c>KILL TRANSACTION</c>. Each one ends at its next row
-    /// with <paramref name="error"/>. A read whose parse has not ended yet is stopped as soon as it is
-    /// known to be a read. A write is left to run: the kill stops it at its next write instead.
-    /// Returns how many statements were asked to stop.
-    /// </summary>
-    public int CancelTransactionStatements(HLCTimestamp transactionClientId, CamusDBException error)
-    {
-        int cancelled = 0;
-
-        foreach (KeyValuePair<long, QueryActivityEntry> pair in running)
-        {
-            if (pair.Value.TransactionClientId != transactionClientId)
-                continue;
-
-            if (pair.Value.RequestCancel(error) == QueryCancelOutcome.Cancelled)
-                cancelled++;
-        }
-
-        return cancelled;
-    }
-
-    /// <summary>
     /// The id of the oldest statement that runs now on each transaction, keyed by the transaction's
     /// client handle, for the <c>query_id</c> column of <c>SHOW TRANSACTIONS</c>. One pass over the
     /// running statements, made only when someone reads the list.
@@ -344,15 +321,6 @@ public sealed class QueryActivityEntry
     private bool sourceReleased;
 
     private int cancelRequested;
-
-    /// <summary>The error the stopped statement reports, when a kill rather than a cancel stopped it. Guarded by <see cref="gate"/>.</summary>
-    private CamusDBException? cancelError;
-
-    /// <summary>
-    /// A kill that arrived before the parse showed the statement to be a read. <see cref="AllowCancel"/>
-    /// applies it. Guarded by <see cref="gate"/>.
-    /// </summary>
-    private CamusDBException? deferredCancel;
 
     private bool cancellable;
 
@@ -455,25 +423,15 @@ public sealed class QueryActivityEntry
     /// <summary>
     /// Lets <c>CANCEL QUERY</c> stop the statement. Called on the row-returning path when the parse
     /// shows that the statement is a read. It only ever turns cancellation on, never off, so a cancel
-    /// accepted before it cannot apply to a write. A <c>KILL TRANSACTION</c> that arrived earlier
-    /// stops the read here.
+    /// accepted before it cannot apply to a write.
     /// </summary>
     public void AllowCancel()
     {
         if (cancellation is null)
             return;
 
-        CamusDBException? deferred;
         lock (gate)
-        {
             cancellable = true;
-            deferred = deferredCancel;
-            deferredCancel = null;
-        }
-
-        // Outside the lock, for the reason RequestCancel gives.
-        if (deferred is not null)
-            RequestCancel(deferred);
     }
 
     /// <summary>Moves the statement from planning to execution.</summary>
@@ -519,13 +477,7 @@ public sealed class QueryActivityEntry
     /// <summary>
     /// Cancels the statement's token when the statement still runs and accepts a cancel.
     /// </summary>
-    /// <param name="error">
-    /// Null for <c>CANCEL QUERY</c>. For <c>KILL TRANSACTION</c>, the error the statement reports
-    /// instead of <see cref="CamusDBErrorCodes.QueryCancelled"/>; a kill that meets a statement whose
-    /// parse has not ended yet is kept and applied by <see cref="AllowCancel"/> when the statement turns
-    /// out to be a read.
-    /// </param>
-    internal QueryCancelOutcome RequestCancel(CamusDBException? error = null)
+    internal QueryCancelOutcome RequestCancel()
     {
         if (cancellation is null)
             return QueryCancelOutcome.NotCancellable;
@@ -538,15 +490,9 @@ public sealed class QueryActivityEntry
                 return QueryCancelOutcome.NotFound;
 
             if (!cancellable)
-            {
-                if (error is not null)
-                    deferredCancel ??= error;
-
                 return QueryCancelOutcome.NotCancellable;
-            }
 
             cancellers++;
-            cancelError ??= error;
         }
 
         Volatile.Write(ref cancelRequested, 1);
@@ -703,13 +649,7 @@ public sealed class QueryActivityEntry
     /// like, and the transports treat it as one.
     /// </summary>
     public CamusDBException Cancelled()
-    {
-        CamusDBException? killed;
-        lock (gate)
-            killed = cancelError;
-
-        return killed ?? new CamusDBException(CamusDBErrorCodes.QueryCancelled, $"Query '{Id}' was cancelled by CANCEL QUERY");
-    }
+        => new(CamusDBErrorCodes.QueryCancelled, $"Query '{Id}' was cancelled by CANCEL QUERY");
 
     /// <summary>Records the row count of a statement that returns no cursor, before it ends.</summary>
     public void SetRowsAffected(long rows) => Volatile.Write(ref rowsReturned, rows);

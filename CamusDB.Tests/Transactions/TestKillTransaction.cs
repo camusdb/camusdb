@@ -676,6 +676,171 @@ internal sealed class TestKillTransaction : SharedNodeBaseTest
         Assert.AreEqual(KvTransactionStatus.RolledBack, tx.Status);
     }
 
+    /// <summary>
+    /// With the running-statement list off, no read is registered anywhere. The kill still stops the
+    /// read: it watches the transaction's own kill token, and its cursor checks the kill before each row.
+    /// The sorted read returns its rows from memory and observes no token, so only that check stops it.
+    /// </summary>
+    [TestCase("SELECT v FROM items")]
+    [TestCase("SELECT v FROM items ORDER BY v")]
+    public async Task KillOfARunningRead_StopsIt_WithTheActivityListOff(string read)
+    {
+        await SetUpEngineAsync(Options with { QueryActivityEnabled = false });
+        KvTransaction tx = await BeginExplicitAsync();
+
+        RunningStatement statement = coordinator.EnterStatement(tx.ClientId.L, (uint)tx.ClientId.C);
+        (_, IAsyncEnumerable<QueryResultRow> rows) = await executor.ExecuteSQLQuery(
+            new ExecuteSQLTicket(tx, db, read, null));
+        IAsyncEnumerator<QueryResultRow> cursor = rows.GetAsyncEnumerator();
+        Assert.IsTrue(await cursor.MoveNextAsync());
+
+        string id = await IdOfAsync(tx);
+        Assert.AreEqual(CamusDBErrorCodes.TransactionKillPending, (await KillFailsAsync(id)).Code);
+
+        CamusDBException stopped = Assert.ThrowsAsync<CamusDBException>(async () => await cursor.MoveNextAsync())!;
+        Assert.AreEqual(CamusDBErrorCodes.TransactionKilled, stopped.Code, stopped.Message);
+
+        await cursor.DisposeAsync();
+        statement.Dispose();
+
+        await WaitUntilAsync(() => coordinator.ActiveCount == 0);
+        Assert.AreEqual(KvTransactionStatus.RolledBack, tx.Status);
+    }
+
+    /// <summary>
+    /// A read links the kill token after its entry check and before it registers anywhere. Whichever
+    /// comes first, the read's link or the kill, the read's token fires: a token taken before the kill
+    /// fires when the kill cancels it, and a token taken after the kill is already fired.
+    /// </summary>
+    [Test]
+    public async Task KillToken_FiresForAReadThatLinksBeforeOrAfterTheKill()
+    {
+        await SetUpEngineAsync();
+
+        KvTransaction linkedFirst = await database.Transactions.BeginAsync();
+        CancellationToken early = linkedFirst.KillToken;
+        linkedFirst.MarkKilled("killed by a test");
+        Assert.IsFalse(early.IsCancellationRequested, "the kill cancels the token after it leaves the host's lock");
+        linkedFirst.CancelKillToken();
+        Assert.IsTrue(early.IsCancellationRequested);
+
+        KvTransaction killedFirst = await database.Transactions.BeginAsync();
+        killedFirst.MarkKilled("killed by a test");
+        Assert.IsTrue(killedFirst.KillToken.IsCancellationRequested, "a read that links after the kill finds the token fired");
+
+        KvTransaction alive = await database.Transactions.BeginAsync();
+        Assert.IsFalse(alive.KillToken.IsCancellationRequested);
+        alive.CancelKillToken();
+        Assert.IsFalse(alive.KillToken.IsCancellationRequested, "only a kill fires the token");
+
+        foreach (KvTransaction tx in new[] { linkedFirst, killedFirst, alive })
+            await database.Transactions.RollbackIfNotCompletedAsync(tx);
+    }
+
+    /// <summary>
+    /// A rollback that fails is reported as failed, by the kill that ran it and by every kill after it,
+    /// and the client of the transaction is not told that it is rolled back.
+    /// </summary>
+    [Test]
+    public async Task KillWhoseRollbackFailed_ReportsTheFailure_AlsoToARetry()
+    {
+        await SetUpEngineAsync();
+        (KvTransaction tx, _) = await BeginAndWriteAsync("embedded");
+        string id = await IdOfAsync(tx);
+
+        // The real rollback runs, so the row lock is released; the kill is then told that it failed.
+        coordinator.KillRollbackForTest = async rollback =>
+        {
+            await rollback();
+            throw new InvalidOperationException("injected rollback failure");
+        };
+
+        CamusDBException first = await KillFailsAsync(id);
+        Assert.AreEqual(CamusDBErrorCodes.TransactionKillRollbackFailed, first.Code, first.Message);
+        StringAssert.Contains("injected rollback failure", first.Message);
+
+        CamusDBException retry = await KillFailsAsync(id);
+        Assert.AreEqual(CamusDBErrorCodes.TransactionKillRollbackFailed, retry.Code, "a retry must not confirm a rollback that failed");
+
+        CamusDBException commit = Assert.ThrowsAsync<CamusDBException>(() => coordinator.CommitTrackedAsync(tx))!;
+        Assert.AreEqual(CamusDBErrorCodes.TransactionKilled, commit.Code);
+        StringAssert.Contains("rollback failed", commit.Message);
+        StringAssert.DoesNotContain("It is rolled back", commit.Message);
+
+        Assert.AreEqual(0, coordinator.ActiveCount);
+    }
+
+    /// <summary>
+    /// A kill of an idle transaction waits for its rollback only up to its deadline. A slow rollback
+    /// answers "pending", and the coordinator finishes it; a later kill reports how it ended.
+    /// </summary>
+    [Test]
+    public async Task KillOfAnIdleTransaction_AnswersAtItsDeadline_WhenTheRollbackIsSlow()
+    {
+        await SetUpEngineAsync();
+        (KvTransaction tx, _) = await BeginAndWriteAsync("embedded");
+        string id = await IdOfAsync(tx);
+
+        TaskCompletionSource release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        coordinator.KillRollbackForTest = async rollback =>
+        {
+            await release.Task;
+            await rollback();
+        };
+
+        try
+        {
+            Stopwatch watch = Stopwatch.StartNew();
+            CamusDBException pending = await KillFailsAsync(id).WaitAsync(TimeSpan.FromSeconds(10));
+
+            Assert.AreEqual(CamusDBErrorCodes.TransactionKillPending, pending.Code, pending.Message);
+            StringAssert.Contains("in progress", pending.Message);
+            Assert.Less(watch.Elapsed, TimeSpan.FromSeconds(5), "the kill answers at its deadline (300 ms here)");
+            Assert.AreEqual(TransactionActivityStates.Finalizing, (await RowOfAsync(tx))["state"].StrValue);
+        }
+        finally
+        {
+            release.TrySetResult();
+        }
+
+        await WaitUntilAsync(() => coordinator.ActiveCount == 0);
+        Assert.AreEqual(KvTransactionStatus.RolledBack, tx.Status);
+
+        await KillAsync(id);
+        CollectionAssert.AreEqual(new long[] { 10, 20, 30 }, await StoredAsync());
+    }
+
+    /// <summary>
+    /// An idle transaction keeps at most the configured length of its last statement, whatever the size
+    /// of the request, and never a credential that the statement carried.
+    /// </summary>
+    [Test]
+    public async Task LastSql_KeepsABoundedMaskedPreview_OfALargeStatement()
+    {
+        await SetUpEngineAsync(Options with { QueryActivityMaxSqlLength = 64 });
+        KvTransaction tx = await BeginExplicitAsync();
+
+        string large = $"SELECT '{new string('x', 1_000_000)}' AS s";
+        (_, IAsyncEnumerable<QueryResultRow> rows) = await executor.ExecuteSQLQuery(new ExecuteSQLTicket(tx, db, large, null));
+        await rows.ToListAsync();
+
+        Assert.AreEqual(large[..64], tx.Activity!.LastSql, "only the preview is kept, not the request");
+        Assert.AreEqual(large[..64], (await RowOfAsync(tx))["last_sql"].StrValue);
+
+        TransactionActivity activity = new("db", origin: null, principal: null);
+
+        string small = "SELECT 1";
+        activity.NoteStatement(small, principal: null, maxSqlLength: 64);
+        Assert.AreSame(small, activity.LastSql, "a statement within the limit is kept as is, with no copy");
+
+        string credential = $"ALTER USER bob IDENTIFIED BY 'hunter2{new string('s', 200)}'";
+        activity.NoteStatement(credential, principal: null, maxSqlLength: 40);
+        Assert.LessOrEqual(activity.LastSql!.Length, 40);
+        StringAssert.DoesNotContain("hunter2", activity.LastSql);
+
+        await coordinator.RollbackByIdAsync(tx.ClientId.L, (uint)tx.ClientId.C);
+    }
+
     /// <summary>A commit that holds the finalize claim wins; the kill reports it and fences nothing.</summary>
     [Test]
     public async Task KillWhileACommitHoldsTheClaim_IsRefused_AndFencesNothing()

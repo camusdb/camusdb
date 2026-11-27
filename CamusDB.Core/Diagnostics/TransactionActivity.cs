@@ -5,6 +5,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Auth;
 using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Core.Diagnostics;
@@ -71,15 +72,32 @@ public sealed class TransactionActivity
         return viewer.CanSee(current?.Name, current?.Id);
     }
 
-    /// <summary>The text of the last statement, unredacted. Never return it to a reader as is.</summary>
+    /// <summary>
+    /// The text of the last statement. Unredacted when it was within the length limit at the time; never
+    /// return it to a reader as is.
+    /// </summary>
     internal string? LastSql => Volatile.Read(ref lastSql);
 
     /// <summary>
     /// Records a statement that starts on the transaction. Called for every SQL statement of the
-    /// transaction, on the statement path, so it does no more than two reference writes.
+    /// transaction, on the statement path.
+    ///
+    /// <para>A statement within <paramref name="maxSqlLength"/> is kept by reference, which costs two
+    /// reference writes. A longer one is masked and then cut to that length here, so an idle
+    /// transaction never keeps a large request alive for <c>SHOW TRANSACTIONS</c> (a statement may be
+    /// up to <c>max_statement_bytes</c>). The mask runs before the cut: a cut first could split a
+    /// password literal, and the mask would no longer find it. Only long statements pay for this, and
+    /// they already pay for their parse.</para>
     /// </summary>
-    public void NoteStatement(string sql, Principal? principal)
+    public void NoteStatement(string sql, Principal? principal, int maxSqlLength)
     {
+        if (sql.Length > maxSqlLength)
+        {
+            sql = SqlCredentialRedactor.Redact(sql);
+            if (sql.Length > maxSqlLength)
+                sql = sql[..maxSqlLength];
+        }
+
         Volatile.Write(ref lastSql, sql);
 
         if (principal is not null && Volatile.Read(ref owner) is null)
