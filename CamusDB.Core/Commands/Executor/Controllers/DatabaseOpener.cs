@@ -125,6 +125,11 @@ internal sealed class DatabaseOpener
             // and never published purges its entries once the index left the schema.
             PurgeIndexEntriesAsync = (db, storageId, indexId) =>
                 commandExecutor.PurgeIndexEntriesAsync(db, storageId, indexId),
+
+            // Wire the purge run: a resumed DROP INDEX replaces its job with a purge record once the index
+            // is gone, and the entries are removed in the background.
+            SchedulePurge = (db, record) =>
+                commandExecutor.ScheduleDeferredPurge(db, record),
         };
         this.logger = logger;
         this.sharedNode = sharedNode ?? throw new ArgumentNullException(nameof(sharedNode), "A shared Kahuna node is required");

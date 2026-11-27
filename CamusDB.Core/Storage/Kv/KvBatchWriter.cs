@@ -987,10 +987,12 @@ internal sealed class KvBatchWriter
     }
 
     /// <summary>
-    /// Deletes every KV entry belonging to the named index. Used by DROP INDEX to reclaim
-    /// the <c>{dbId}:{tableId}|i:{indexName}/…</c> space. All deletes run under <paramref name="tx"/>
-    /// so they are atomic with the schema-removal that follows in the same transaction.
-    /// Returns the number of entries deleted.
+    /// Deletes every KV entry of one index, the <c>{dbId}:{tableId}|i:{indexId}/…</c> key space, in
+    /// <paramref name="tx"/>, and returns the number of entries deleted. Every key is collected before
+    /// the first delete and the deletes are one batch of <paramref name="tx"/>, so the cost and the memory
+    /// grow with the index. Its one caller is the immediate path of <c>TableDropper</c>, which deletes the
+    /// table's data in its DDL transaction. <c>DROP INDEX</c> does not use it: it purges the key space in
+    /// bounded batches after the index left the schema (<c>DeferredPurgeRunner</c>).
     /// </summary>
     internal async Task<int> DropIndexEntries(KvTransaction tx, string indexName, CancellationToken cancellationToken = default)
     {

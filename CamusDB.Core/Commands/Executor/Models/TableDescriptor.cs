@@ -89,6 +89,19 @@ public sealed class TableDescriptor
     /// </summary>
     public Dictionary<string, TableIndexSchema> AllIndexes => Volatile.Read(ref allIndexes);
 
+    /// <summary>
+    /// The primary key index when a statement may read it, or null when the table has none or it is not
+    /// <c>Public</c> (<see cref="SchemaElementStateRules.IsReadableIndex"/>). A primary key that a staged
+    /// <c>ADD PRIMARY KEY</c> has not backfilled yet, or that a <c>DROP PRIMARY KEY</c> has taken to
+    /// <c>DeleteOnly</c>, is missing entries, and a lookup through it would miss rows. A path that finds the
+    /// rows of a statement through the primary key reads it here; the write paths read <see cref="AllIndexes"/>.
+    /// </summary>
+    public TableIndexSchema? ReadablePrimaryKey =>
+        Indexes.TryGetValue(CamusDBConstants.PrimaryKeyInternalName, out TableIndexSchema? primaryKey)
+        && SchemaElementStateRules.IsReadableIndex(Schema, primaryKey)
+            ? primaryKey
+            : null;
+
     /// <summary>The GIN indexes on the table, in no particular order (a snapshot, like <see cref="Indexes"/>).</summary>
     public IReadOnlyList<TableIndexSchema> InvertedIndexes => Volatile.Read(ref invertedIndexes);
 

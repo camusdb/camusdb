@@ -128,6 +128,52 @@ internal static class CoordinatorJobStore
     }
 
     /// <summary>
+    /// Replaces the job of a <c>DROP INDEX</c> with the record that purges the index's entries, in one KV
+    /// transaction: the purge record is written and the job is deleted together. A crash before the commit
+    /// leaves the job, which a resume finishes by doing this again; a crash after it leaves the record,
+    /// which a purge run finishes. Neither is ever lost without the other in its place.
+    ///
+    /// <para>Fenced by <paramref name="leaderTerm"/> like <see cref="DeleteCoordinatorJobAsync"/>: when a
+    /// newer term owns the job, nothing is written and <see cref="CoordinatorJobTakenOverException"/> is
+    /// thrown. The job key is deleted only while it still holds a drop of the same index, so a record that a
+    /// later statement wrote under the same element name stays. The purge record is keyed by storage id and
+    /// index id, so writing it a second time writes the same key. Retried on a definite non-commit.</para>
+    /// </summary>
+    internal static async Task CompleteIndexDropAsync(
+        DatabaseDescriptor database, string tableId, string elementName, DeferredPurgeRecord purge, long leaderTerm)
+    {
+        IKahuna kahuna = database.Kahuna.Kahuna;
+        string jobKey = MetaKeys.CoordinatorKey(database.Id, tableId, elementName);
+        string purgeKey = MetaKeys.PurgeKey(database.Id, purge.PurgeId);
+        byte[] bytes = MetaJsonSerializer.Serialize(purge, MetaJsonContext.Default.DeferredPurgeRecord);
+        string droppedIndexId = purge.IndexIds.Count == 1 ? purge.IndexIds[0] : "";
+
+        await SerializableRetryHelper.ExecuteAutocommitAsync(async _ =>
+        {
+            KvTransaction tx = await database.Transactions.BeginAsync(
+                CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+            ).ConfigureAwait(false);
+            try
+            {
+                await RequireNotOwnedByNewerTermAsync(kahuna, tx, jobKey, tableName: null, elementName, leaderTerm).ConfigureAwait(false);
+
+                PersistedCoordinatorJob? stored = await ReadLockedCoordinatorJobAsync(database, tx, tableId, elementName).ConfigureAwait(false);
+
+                await MetaKeyWriter.WriteMetaKey(kahuna, tx, purgeKey, bytes).ConfigureAwait(false);
+
+                if (stored is { IndexDrop: true } && string.Equals(stored.IndexId, droppedIndexId, StringComparison.Ordinal))
+                    await MetaKeyWriter.DeleteMetaKey(kahuna, tx, jobKey).ConfigureAwait(false);
+
+                await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
+            }
+            finally
+            {
+                await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+            }
+        }).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Deletes the record of one staged element when it still belongs to the transaction
     /// <paramref name="ownerChangeSetId"/>, and leaves any other record under the key alone. A removal works
     /// on a job it read earlier; by the time it deletes the record, the key can hold the record of a later
@@ -237,17 +283,27 @@ internal static class CoordinatorJobStore
     /// owns metadata write intents in the same bucket; a nested transaction's snapshot scan would wait
     /// for those intents while the outer transaction waits for the scan, creating a self-deadlock.
     /// Keeping discovery and deletion in one transaction also makes the cleanup atomic with the drop.
+    ///
+    /// <para><b>An unfinished <c>DROP INDEX</c> keeps its purge.</b> The job of such a drop is the only
+    /// record of the key space it must still remove once the index is out of the schema, and an immediate
+    /// drop of the table purges only the indexes the table still lists. So a drop job whose index is gone
+    /// from <paramref name="droppedTable"/>, or is no longer <c>Public</c>, is replaced by its purge record
+    /// (<see cref="DeferredPurgeRecord.ForDroppedIndex"/>) in <paramref name="tx"/>; the record is due from
+    /// the current schema version on. A drop job whose index is still <c>Public</c> never started: it is
+    /// given up with the table, because a <c>RELINK</c> brings that index back, complete.</para>
     /// </summary>
     internal static async Task DeleteCoordinatorJobsForTableAsync(
         DatabaseDescriptor database,
         string tableId,
-        KvTransaction tx)
+        KvTransaction tx,
+        TableSchema? droppedTable = null)
     {
         IKahuna kahuna = database.Kahuna.Kahuna;
         string tableJobPrefix = $"{MetaKeys.CoordinatorKeyPrefix(database.Id)}{tableId}~";
         string? tableJobPrefixEnd = MetaKeys.PrefixUpperBound(tableJobPrefix);
 
         List<string> keysToDelete = [];
+        List<DeferredPurgeRecord> unfinishedDrops = [];
 
         await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
             tx.TransactionId,
@@ -259,9 +315,27 @@ internal static class CoordinatorJobStore
             KeyValueDurability.Persistent,
             CancellationToken.None).ConfigureAwait(false))
         {
-            if (key.StartsWith(tableJobPrefix, StringComparison.Ordinal) && entry.Value is not null)
-                keysToDelete.Add(key);
+            if (!key.StartsWith(tableJobPrefix, StringComparison.Ordinal) || entry.Value is not { Length: > 0 } bytes)
+                continue;
+
+            keysToDelete.Add(key);
+
+            PersistedCoordinatorJob job = MetaJsonSerializer.Deserialize(bytes, MetaJsonContext.Default.PersistedCoordinatorJob);
+            if (job is not { IndexDrop: true, IndexId: { } indexId })
+                continue;
+
+            TableIndexSchema? index = droppedTable?.Indexes?.Find(ix => string.Equals(ix.KvId, indexId, StringComparison.Ordinal));
+            if (index is { State: SchemaElementState.Public })
+                continue;
+
+            unfinishedDrops.Add(DeferredPurgeRecord.ForDroppedIndex(
+                tableId, job.IndexStorageId ?? droppedTable?.EffectiveStorageId ?? tableId, indexId, database.SharedSchema.SchemaVersion));
         }
+
+        foreach (DeferredPurgeRecord purge in unfinishedDrops)
+            await MetaKeyWriter.WriteMetaKey(
+                kahuna, tx, MetaKeys.PurgeKey(database.Id, purge.PurgeId),
+                MetaJsonSerializer.Serialize(purge, MetaJsonContext.Default.DeferredPurgeRecord)).ConfigureAwait(false);
 
         foreach (string key in keysToDelete)
             await MetaKeyWriter.DeleteMetaKey(kahuna, tx, key).ConfigureAwait(false);

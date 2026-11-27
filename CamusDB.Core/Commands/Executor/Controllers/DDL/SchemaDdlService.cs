@@ -29,14 +29,15 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// and indexes, constraints, and comments. Every statement here either runs locally or is handed to
 /// <see cref="DdlForwardingCoordinator"/> first, so a follower never mutates schema itself.
 ///
-/// <para><b>There are three execution shapes, and picking the wrong one is the classic bug.</b>
-/// <see cref="ExecuteDdlInTransaction"/> is the single-transaction shape for metadata-only work.
-/// <see cref="ExecuteIndexDdlAsync"/> is the two-phase shape of an index drop: phase 1 commits the removal
-/// of the entries, and phase 2 replicates the schema delta that removes the index. The
-/// staged-coordinator shape (<see cref="AddColumnAsync"/>, <see cref="ExecuteStagedAddIndexAsync"/>)
-/// drives an element through <c>Absent → DeleteOnly → WriteOnly → Public</c>, in a cluster and on a
-/// standalone node alike, so the cluster is never in a state where one node writes an element another
-/// node cannot read, and a column or an index is never readable before the existing rows are in it.</para>
+/// <para><b>There are two execution shapes, and picking the wrong one is the classic bug.</b>
+/// <see cref="ExecuteDdlInTransaction"/> is the single-transaction shape for metadata-only work. The
+/// staged-coordinator shape drives an element through <c>Absent → DeleteOnly → WriteOnly → Public</c>
+/// (<see cref="AddColumnAsync"/>, <see cref="ExecuteStagedAddIndexAsync"/>), or an index back down
+/// <c>Public → WriteOnly → DeleteOnly → Absent</c> (<see cref="ExecuteIndexDdlAsync"/> for a drop), in a
+/// cluster and on a standalone node alike. So the cluster is never in a state where one node writes an
+/// element another node cannot read, or reads an index another node stopped maintaining, and a column or
+/// an index is never readable before the existing rows are in it. A dropped index's entries are purged in
+/// the background after the drop (<see cref="DropIndexStagedWithinGateAsync"/>).</para>
 ///
 /// <para><b>Every path enters the database's <see cref="SchemaDdlGate"/> for the tables it names,
 /// and every path releases it in a <c>finally</c> that also fires the deferred step-down.</b> The gate's
@@ -130,6 +131,35 @@ internal sealed partial class SchemaDdlService
     /// of a column the index reads. Null in production; a test clears it after use.
     /// </summary>
     internal Func<Task>? TestInterceptBeforeAddIndexGate;
+
+    /// <summary>
+    /// Test-only hook: invoked by <c>DROP INDEX</c> outside a transaction after each step of the index
+    /// commits (<c>WriteOnly</c>, <c>DeleteOnly</c>, <c>Absent</c>), with the state reached, before the next
+    /// step. A test reads and writes the table in a given state, or throws to stop the statement there. Null
+    /// in production; a test clears it after use.
+    /// </summary>
+    internal Func<SchemaElementState, Task>? TestInterceptAfterIndexDropStep;
+
+    /// <summary>
+    /// Test-only hook: invoked by <c>DROP INDEX</c> outside a transaction after its job is written and before
+    /// its first step, with the index still <c>Public</c>. A test throws to stop the drop there. Null in
+    /// production; a test clears it after use.
+    /// </summary>
+    internal Func<Task>? TestInterceptBeforeIndexDropFirstStep;
+
+    /// <summary>
+    /// Test-only hook: invoked before the job of a dropped index is replaced by its purge record, by a drop
+    /// and by a <c>CREATE INDEX</c> that finishes an earlier drop of the same name. A test throws to fail that
+    /// write. Null in production; a test clears it after use.
+    /// </summary>
+    internal Func<Task>? TestInterceptBeforeIndexDropRecord;
+
+    /// <summary>
+    /// Test-only hook: invoked by <c>DROP INDEX</c> outside a transaction after the caller opened the table
+    /// and before the statement enters the DDL gate. A test drops or replaces the table at that point. Null
+    /// in production; a test clears it after use.
+    /// </summary>
+    internal Func<Task>? TestInterceptBeforeIndexDropGate;
 
     internal SchemaDdlService(
         ExecutorContext context,
@@ -1328,11 +1358,7 @@ internal sealed partial class SchemaDdlService
     /// </remarks>
     private async Task<int> StageIndexWithinGateAsync(DatabaseDescriptor database, string tableId, string tableName, IndexBuildInfo indexInfo, string? ownerChangeSetId = null)
     {
-        SchemaChangeCoordinator coordinator = new(catalogs, context.Logger)
-        {
-            IndexBackfillAsync = (db, tbl, info, start, checkpoint, cancellationToken) => BackfillIndexEntriesAsync(db, tbl, info, start, checkpoint, cancellationToken),
-            PurgeIndexEntriesAsync = (db, storageId, indexId) => context.DeferredPurges.PurgeIndexKeySpaceAsync(db, storageId, indexId)
-        };
+        SchemaChangeCoordinator coordinator = NewStagedIndexCoordinator();
 
         SchemaChangeJob job = new(database.Name, tableName, tableId, indexInfo.IndexName, SchemaElementState.Public, SchemaElementKind.Index, ownerChangeSetId);
 
@@ -1350,6 +1376,12 @@ internal sealed partial class SchemaDdlService
         }
         catch (Exception ex)
         {
+            // A run that failed before it wrote its own job proposed nothing, and the job key may still
+            // hold another job, such as the drop of an earlier index of this name that the run was
+            // settling. A take-back would write over that job.
+            if (!coordinator.JobRecorded)
+                throw;
+
             // The index can be in the schema on every node, short of Public. An owned job keeps its
             // record: the owner's rollback reads it to remove the entries the backfill wrote.
             if (ownerChangeSetId is null)
@@ -1499,15 +1531,16 @@ internal sealed partial class SchemaDdlService
     }
 
     /// <summary>
-    /// The index DDL that the staged coordinator does not drive, under the DDL gate: the drop of an index or
-    /// of a primary key, in two phases, and every index statement of a transaction with a private schema
-    /// (<see cref="RunIndexDdlInOwnerTransactionAsync"/>). In a drop, phase 1 commits the removal of the
-    /// entries and phase 2 replicates the schema delta; both run under the gate, so no other DDL changes the
-    /// schema between them.
+    /// Index DDL under the DDL gate, other than an add outside a transaction: the drop of an index or of a
+    /// primary key (<see cref="DropIndexStagedWithinGateAsync"/>), and every index statement of a transaction
+    /// with a private schema (<see cref="RunIndexDdlInOwnerTransactionAsync"/>). The gate is entered for the
+    /// table, which also waits for a staged change in progress on it. A drop takes the semaphore only for
+    /// its proposals and holds the table in between, and finds the semaphore held again when it returns.
     ///
     /// <para>Called in both modes, by the SQL dispatcher and by <see cref="AlterIndex"/>. An add outside a
     /// transaction goes through the staged <see cref="ExecuteStagedAddIndexAsync"/> instead, and a rename
-    /// through <see cref="ExecuteDdlInTransaction"/>.</para>
+    /// through <see cref="ExecuteDdlInTransaction"/>. <paramref name="localWork"/> serves an add inside a
+    /// transaction only; a drop has no local work.</para>
     /// </summary>
     internal async Task<bool> ExecuteIndexDdlAsync(
         DatabaseDescriptor database,
@@ -1516,6 +1549,10 @@ internal sealed partial class SchemaDdlService
         Func<KvTransaction, Task<bool>> localWork
     )
     {
+        if (ticket.Operation is AlterIndexOperation.DropIndex or AlterIndexOperation.DropPrimaryKey
+            && TestInterceptBeforeIndexDropGate is { } intercept)
+            await intercept().ConfigureAwait(false);
+
         await database.DdlGate.EnterAsync(ticket.TableName, context.Logger).ConfigureAwait(false);
         try
         {
@@ -1709,8 +1746,10 @@ internal sealed partial class SchemaDdlService
 
     /// <summary>
     /// The body of <see cref="ExecuteIndexDdlAsync"/>, for a caller that already holds
-    /// <c>SchemaDdlSemaphore</c>: the build of a foreign key's index inside a transaction with a private
-    /// schema, and the drop of an index a removed constraint owned.
+    /// <c>SchemaDdlSemaphore</c>: an index statement of a transaction with a private schema
+    /// (<see cref="RunIndexDdlInOwnerTransactionAsync"/>), and a drop outside one
+    /// (<see cref="DropIndexStagedWithinGateAsync"/>). The foreign-key paths call it for the build of a
+    /// constraint's index inside a transaction, and for the drop of an index a removed constraint owned.
     /// </summary>
     private async Task<bool> RunIndexDdlWithinGateAsync(
         DatabaseDescriptor database,
@@ -1719,74 +1758,118 @@ internal sealed partial class SchemaDdlService
         Func<KvTransaction, Task<bool>> localWork
     )
     {
-        // Under the DDL semaphore and before the local work: a dropped index leaves the in-memory
-        // schema before its delta is proposed, so this is the only place a refusal is safe. Both the
-        // ticket API and the SQL path reach this helper.
-        if (ticket.Operation is AlterIndexOperation.DropIndex or AlterIndexOperation.DropPrimaryKey)
-            ForeignKeyDependencyRules.RequireIndexNotInForeignKey(database.Schema, table.Schema, ticket.IndexName);
-
         if (TransactionSchemaScope.OverlayFor(database) is { } overlay)
+        {
+            // Under the DDL semaphore, before the index leaves the private schema. Both the ticket API and
+            // the SQL path reach this helper.
+            if (ticket.Operation is AlterIndexOperation.DropIndex or AlterIndexOperation.DropPrimaryKey)
+                ForeignKeyDependencyRules.RequireIndexNotInForeignKey(database.Schema, table.Schema, ticket.IndexName);
+
             return await RunIndexDdlInOwnerTransactionAsync(database, overlay, table, ticket, localWork).ConfigureAwait(false);
+        }
 
         if (ticket.Operation is not (AlterIndexOperation.DropIndex or AlterIndexOperation.DropPrimaryKey))
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,
                 $"Index '{ticket.IndexName}' of table '{table.Name}' is added by the staged coordinator, not under the DDL gate");
 
-        // Phase 1: remove the entries and commit.
-        KvTransaction tx1 = await database.Transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
-            mutationLimitOverride: 0
-        ).ConfigureAwait(false);
-        bool result;
-        try
-        {
-            result = await localWork(tx1).ConfigureAwait(false);
-            await database.Transactions.CommitAsync(tx1).ConfigureAwait(false);
-        }
-        catch
-        {
-            await database.Transactions.RollbackIfNotCompletedAsync(tx1).ConfigureAwait(false);
-            throw;
-        }
-
-        if (!result) return result;
-
-        // Phase 2: the entries are gone — replicate the schema change so every
-        // node updates its TableSchema.Indexes and evicts its TableDescriptor cache.
-        // A fresh transaction supplies the HLC timestamp for the schema-log entry;
-        // no KV writes happen under it (ReplicateIndexChangeAsync creates its own
-        // internal checkpoint transaction via PersistSchemaCheckpointAsync).
-        KvTransaction tx2 = await database.Transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
-            mutationLimitOverride: 0
-        ).ConfigureAwait(false);
-        try
-        {
-            await catalogs.ReplicateIndexChangeAsync(database, ticket, table, tx2).ConfigureAwait(false);
-        }
-        finally
-        {
-            await database.Transactions.RollbackIfNotCompletedAsync(tx2).ConfigureAwait(false);
-        }
-
-        // Schema has been replicated; evict stale cache entries for this table. Phase 1's
-        // row/index KV writes are already handled by the CommitAsync invalidation hook, but
-        // schema-dep entries (keyed by tableId, not by KV key) need an explicit call here.
-        database.Cache?.InvalidateByTableId(database.Id, table.Id);
-
-        // Re-populate the descriptor cache: ReplicateIndexChangeAsync fires
-        // InvalidateAppliedTableDescriptor which evicts the table. Re-opening here
-        // ensures callers that rely on TableDescriptors find it immediately after DDL.
-        await context.TableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
-
-        return result;
+        return await DropIndexStagedWithinGateAsync(database, ticket, table.Id).ConfigureAwait(false);
     }
 
     /// <summary>
-    /// Drops one index, its entries and its schema entry, if it still exists. The caller holds
-    /// <c>SchemaDdlSemaphore</c>, or is the resume coordinator, which runs on the schema leader outside
-    /// any statement. Used for the index a foreign key owned, after that constraint is removed.
+    /// Drops an index outside a transaction, for <c>DROP INDEX</c>, <c>ALTER TABLE ... DROP INDEX</c> and
+    /// <c>DROP PRIMARY KEY</c>, in both modes. The caller holds <c>SchemaDdlSemaphore</c>. The coordinator
+    /// steps the index down to <c>Absent</c> on every node and then starts the purge of its entries in the
+    /// background (<see cref="SchemaChangeCoordinator.RunIndexDropAsync"/>), so the statement does not read
+    /// or delete a single entry, and its time and memory do not depend on the size of the index.
+    ///
+    /// <para><b>Nothing here edits the schema.</b> The table is opened again under the semaphore, so the
+    /// existence check, the <c>IF EXISTS</c> answer and the foreign-key refusal see the schema that the
+    /// drop starts from; a concurrent drop of the same index makes this one a no-op or a "does not exist".
+    /// The index leaves this node's schema only when the node applies the deltas, as on every other node,
+    /// so a failure part-way leaves the schema as it is persisted, and the next resume finishes the drop.</para>
+    ///
+    /// <para><b>The table is the one the caller resolved.</b> The caller opened the table before it entered
+    /// the gate, by name. When another statement dropped the table meanwhile, <c>IF EXISTS</c> answers "not
+    /// applied" and a plain drop fails with <c>TableDoesntExist</c>. When it also created a table of the same
+    /// name, the drop is refused with <c>ConcurrentSchemaChange</c>, as a staged add is, so it never removes an
+    /// index of the table that replaced the one the statement named.</para>
+    ///
+    /// <para><b>The table may be held by the caller.</b> A foreign key whose validation failed drops the
+    /// index the engine built for it from inside its own staged job, which holds the table
+    /// (<see cref="DropIndexWithinGateAsync"/>). Every other caller entered the gate for the table, and
+    /// entering waits for every hold on it, so a hold seen here is the caller's own.</para>
+    /// </summary>
+    private async Task<bool> DropIndexStagedWithinGateAsync(DatabaseDescriptor database, AlterIndexTicket ticket, string expectedTableId)
+    {
+        TableDescriptor table;
+        try
+        {
+            table = await context.TableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+        }
+        catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.TableDoesntExist && ticket.IfExists)
+        {
+            return false;
+        }
+
+        if (!string.Equals(table.Id, expectedTableId, StringComparison.Ordinal))
+            throw new CamusDBException(
+                CamusDBErrorCodes.ConcurrentSchemaChange,
+                $"Table '{ticket.TableName}' was replaced by another statement while index '{ticket.IndexName}' was being dropped; nothing was dropped");
+
+        if (!table.AllIndexes.TryGetValue(ticket.IndexName, out TableIndexSchema? index))
+        {
+            if (ticket.IfExists)
+                return false;
+
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Index '{ticket.IndexName}' does not exist in table '{table.Name}'");
+        }
+
+        ForeignKeyDependencyRules.RequireIndexNotInForeignKey(database.Schema, table.Schema, index.Name);
+
+        SchemaChangeCoordinator coordinator = NewStagedIndexCoordinator();
+
+        if (TestInterceptAfterIndexDropStep is { } intercept)
+            coordinator.OnStepCompleted = (state, _) => intercept(state);
+
+        SchemaChangeJob job = new(database.Name, table.Name, table.Id, index.Name, SchemaElementState.Absent, SchemaElementKind.Index);
+
+        await coordinator.RunIndexDropAsync(
+            database, job, index.KvId, table.Schema.EffectiveStorageId,
+            gateHeldByCaller: true,
+            tableHeldByCaller: database.DdlGate.IsTableHeld(table.Name)).ConfigureAwait(false);
+
+        database.Cache?.InvalidateByTableId(database.Id, table.Id);
+
+        // The deltas evicted the table's descriptor. Opened again here, so a reader of the descriptor
+        // cache, such as the statistics and the planners, finds it without the index.
+        if (catalogs.TableExists(database, table.Name))
+            await context.TableOpener.Open(database, table.Name).ConfigureAwait(false);
+
+        return true;
+    }
+
+    /// <summary>
+    /// A coordinator for the staged index paths of a statement: the build of an index and its removal. The
+    /// purge of a dropped index runs in the background on this node (<see cref="DeferredPurgeRunner.Schedule"/>).
+    /// </summary>
+    private SchemaChangeCoordinator NewStagedIndexCoordinator() => new(catalogs, context.Logger)
+    {
+        IndexBackfillAsync = (db, tbl, info, start, checkpoint, cancellationToken) => BackfillIndexEntriesAsync(db, tbl, info, start, checkpoint, cancellationToken),
+        PurgeIndexEntriesAsync = (db, storageId, indexId) => context.DeferredPurges.PurgeIndexKeySpaceAsync(db, storageId, indexId),
+        SchedulePurge = (db, record) => context.DeferredPurges.Schedule(db, record),
+        TestInterceptAfterIndexDropRecorded = TestInterceptBeforeIndexDropFirstStep,
+        TestInterceptBeforeIndexDropRecord = TestInterceptBeforeIndexDropRecord,
+    };
+
+    /// <summary>
+    /// Drops one index, if it still exists, through the staged drop (<see cref="DropIndexStagedWithinGateAsync"/>),
+    /// or inside the private schema of the current transaction. Used for the index a foreign key owned,
+    /// after that constraint is removed. The caller holds <c>SchemaDdlSemaphore</c>: a statement that
+    /// entered the gate for the table, or a staged job of the constraint, which also holds the table. The
+    /// resume coordinator calls it from such a job too.
     /// </summary>
     internal async Task DropIndexWithinGateAsync(DatabaseDescriptor database, string tableName, string indexName)
     {
@@ -1797,7 +1880,7 @@ internal sealed partial class SchemaDdlService
         if (!table.AllIndexes.ContainsKey(indexName))
             return;
 
-        AlterIndexTicket ticket = new(database.Name, tableName, indexName, [], AlterIndexOperation.DropIndex);
+        AlterIndexTicket ticket = new(database.Name, tableName, indexName, [], AlterIndexOperation.DropIndex, ifExists: true);
 
         await RunIndexDdlWithinGateAsync(
             database, table, ticket,
@@ -1920,7 +2003,14 @@ internal sealed partial class SchemaDdlService
 
                 return tableDropper.Drop(queryExecutor, rowDeleter, database, table, ticket, tx);
             },
-            postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, table.Id),
+            postCommitInvalidate: () =>
+            {
+                database.Cache?.InvalidateByTableId(database.Id, table.Id);
+
+                // The drop can have replaced the job of an unfinished DROP INDEX with its purge record
+                // (CoordinatorJobStore.DeleteCoordinatorJobsForTableAsync); the next purge run looks for it.
+                database.MarkDeferredPurgesDue();
+            },
             tableNames: [table.Name]
         ).ConfigureAwait(false);
 

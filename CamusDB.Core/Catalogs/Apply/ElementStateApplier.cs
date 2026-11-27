@@ -37,7 +37,10 @@ internal static class ElementStateApplier
             throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{payload.TableName}' does not exist");
 
         if (payload.ElementKind == SchemaElementKind.Index)
+        {
+            RefuseDemotionOfAnIndexAForeignKeyUses(schema, tableSchema, payload);
             return ApplyIndexElementState(tableSchema, payload);
+        }
 
         if (payload.ElementKind == SchemaElementKind.ForeignKey)
             return ApplyForeignKeyElementState(tableSchema, payload);
@@ -90,6 +93,33 @@ internal static class ElementStateApplier
         });
 
         return tableSchema;
+    }
+
+    /// <summary>
+    /// Refuses the step <c>Public → WriteOnly</c> of an index that a foreign key uses, as its backing index
+    /// or as the parent key it references (<see cref="ForeignKeyDependencyRules.RequireIndexNotInForeignKey"/>).
+    /// That step only starts a <c>DROP INDEX</c>. The statement checks the same rule before it records its job,
+    /// but a job that a failure left at <c>Public</c> is resumed later, and a foreign key can claim the public
+    /// index in between. The check runs here, against the schema in log order, so every node refuses the same
+    /// entry, and the drop never takes away an index a constraint still names. Raised before anything changes.
+    /// </summary>
+    private static void RefuseDemotionOfAnIndexAForeignKeyUses(Schema schema, TableSchema tableSchema, SchemaElementStatePayload payload)
+    {
+        if (payload.State != SchemaElementState.WriteOnly)
+            return;
+
+        TableIndexSchema? index = tableSchema.Indexes?.Find(ix => string.Equals(ix.Name, payload.ElementName, StringComparison.OrdinalIgnoreCase));
+        if (index is not { State: SchemaElementState.Public })
+            return;
+
+        try
+        {
+            ForeignKeyDependencyRules.RequireIndexNotInForeignKey(schema, tableSchema, payload.ElementName);
+        }
+        catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.DependentObjectsExist)
+        {
+            throw new SchemaDeltaRefusedException(ex.Code, ex.Message);
+        }
     }
 
     /// <summary>

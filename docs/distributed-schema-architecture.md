@@ -850,6 +850,9 @@ To scale to databases with many tables, metadata is stored per object, not as on
                                           "aborted" (§9.2)
 {db}/meta/purge:{changeSetId}~{n}       → DeferredPurgeRecord — data a published change set made
                                           unreachable, removed after the publish (§9.2)
+{db}/meta/purge:index~{storageId}~{indexId}
+                                        → DeferredPurgeRecord — the entries of an index that a
+                                          DROP INDEX outside a transaction removed (§7.3)
 {db}/meta/system                        → SystemSchema — LEGACY index storage, read-only;
                                           only migrated from on load (see §7.3)
 ```
@@ -977,9 +980,59 @@ AddIndex(DeleteOnly)  → ack gate → SetElementState(WriteOnly) → ack gate
   index by id, so it never takes down a later index of the same name, and a resume never takes down
   an index that is already `Public`.
 
-A **drop** stays a single `DropIndex` delta (`ApplyDropIndex`, idempotent remove-by-name); no
-staging is needed to remove an index. `DROP INDEX` reclaims the data via
-`KvTableStore.DropIndexEntries`.
+A **drop** outside a transaction is staged too, in the other direction
+(`SchemaChangeCoordinator.RunIndexDropAsync`): `Public → WriteOnly → DeleteOnly → Absent`, one
+`SetElementState` delta per step, then a background purge of the key space. The rules:
+
+- **The drop job comes first.** `PersistedCoordinatorJob.IndexDrop` is written before the first delta,
+  with the index id and the storage id. The steps find the index by id, so a rename before the first
+  step does not hide it and a later index of the same name is never touched.
+- **No local edit of the schema.** The index leaves each node's schema only when that node applies the
+  deltas. A statement that fails part-way leaves the schema of the leader as it is persisted. The drop
+  had a two-phase shape before this: phase 1 purged the entries and removed the index from the leader's
+  live `TableSchema` before its commit, and phase 2 replicated a `DropIndex` delta. A failed phase-1
+  commit left the leader without the index while the checkpoint still had it, and a follower that had
+  not applied phase 2 read an index with no entries.
+- **The purge starts only when no write can add an entry.** The `DeleteOnly` step fences the writers
+  planned before it (§9.1), and the pre-proposal gate of the `Absent` step waits until every live node
+  acknowledged `DeleteOnly` (§6). So when the index is `Absent` on the leader, the key space is closed.
+- **The job becomes a purge record.** One KV transaction writes the purge record
+  `{db}/meta/purge:index~{storageId}~{indexId}` and deletes the job
+  (`CoordinatorJobStore.CompleteIndexDropAsync`), so a crash leaves one of the two, never neither. The
+  statement then schedules the purge on `DeferredPurgeRunner` and returns. The record is due on a node
+  whose schema version is at least the record's `DueVersion` (§9.2, data removal).
+- **A failure is finished by the resume.** A failed step leaves the job, and the next resume drives the index the
+  rest of the way down (`ResumeIndexDropAsync`). The attempt limit of other jobs does not apply: an index
+  left between states keeps its name taken, and only the drop ends that. The one exception is the first
+  step: a foreign key can claim the index while it is still `Public`, before a resumed drop takes that step.
+  The drop checks the foreign-key rule again before the step, and the `SetElementState` applier refuses a
+  `Public → WriteOnly` step of an index that a constraint uses, in log order, on every node. The drop is
+  then given up (`StartIndexDropAsync`), and the index and the constraint stay.
+- **Every live node, not a quorum, before the purge record.** Each step's pre-proposal gate settles the
+  step before it on every live node, but the last step's own gate accepts a quorum. So after `Absent` the
+  drop waits for full convergence (`RequireEveryLiveNodeAppliedAsync`) before it writes the purge record
+  and the statement returns. A timeout leaves the job for the resume.
+- **The handover is followed by index id.** A driver that lost the leadership waits until the job key no
+  longer holds the drop of its index, and then checks that the index with that id is gone
+  (`AnswerFromHandedOverIndexDropAsync`). A `CREATE INDEX` of the same name right after the successor
+  finished cannot make it report a failure.
+- **The table is held for the whole drop.** The drop holds the table for all its steps (§4.1) and takes the
+  DDL gate for each proposal only, so DDL on other tables runs between the steps.
+- **A same-name job settles the drop first.** `RunJobAsync` reads the job key before it writes a new job.
+  A drop job of an earlier index that is already gone is finished (its purge record replaces it); a drop
+  job whose index is still in the schema refuses the new statement with `ConcurrentSchemaChange` until the
+  resume finishes it. A run that fails before it wrote its own job (`SchemaChangeCoordinator.JobRecorded`)
+  takes nothing back, so it never writes over the earlier drop's job.
+- **A table drop keeps the purge of an unfinished drop.** `DeleteCoordinatorJobsForTableAsync` replaces the
+  job of a drop whose index is gone or not `Public` with its purge record, in the drop's own transaction.
+  A `RELINK` restores only `Public` indexes (`SchemaChangeEntryFactory`), so no index comes back between
+  states with no job to finish it.
+- **The statement checks the table it resolved.** The table is opened again under the gate, and a table id
+  that changed (a drop and a create of the same name in between) refuses the drop with
+  `ConcurrentSchemaChange`.
+
+The index of a foreign key that failed validation is dropped the same way, from inside the job of the
+constraint, which already holds the table (`SchemaDdlService.DropIndexWithinGateAsync`).
 
 **The backfill is checkpointed and resumable.** `BackfillIndexEntriesAsync` processes rows in
 bounded batches (`IndexBackfiller.BatchRows`, currently 500 rows scanned per batch; a batch that
@@ -1082,7 +1135,7 @@ So the canonical sequences are:
 AddColumn:  Absent → DeleteOnly → WriteOnly → (backfill defaults) → Public
 AddIndex:   Absent → DeleteOnly → WriteOnly → (backfill entries)  → Public
 DropColumn: Public → WriteOnly → DeleteOnly → Absent
-DropIndex:  Public → Absent          (single delta — removing an index needs no staging)
+DropIndex:  Public → WriteOnly → DeleteOnly → Absent → (background purge of the entries)
 ```
 
 **Why each intermediate state is necessary.** The danger in a distributed add is the two-version
@@ -1755,7 +1808,13 @@ pending entry takes the version to the base plus one, and nothing else applies w
   once, and one node never removes the same record twice at once. A run stops when its database closes.
 - The coordinator-job sweep on the schema leader runs every due record that is left, for example after
   a crash of the committing node or a leader change. A database is scanned for records only after it
-  opens and after a publish applies on that node.
+  opens, after a publish applies on that node, and after the node wins the schema leadership.
+
+A `DROP INDEX` outside a transaction writes a record of the same kind with no change set (§7.3). Its
+purge id is `index~{storageId}~{indexId}`, which a change set id cannot produce, and it is due on a node
+whose schema version is at least its `DueVersion`: the version at which the index was gone from the
+schema of every live node. The schema leader schedules it at once, and the sweep finishes one that is
+left.
 
 A record of kind `SequenceCounter` is work of the same form: the counter of an altered sequence must get
 its new definition after the publish. It carries the id of the sequence and no definition. A run gives the

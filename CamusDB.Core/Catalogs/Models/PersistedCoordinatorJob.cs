@@ -78,6 +78,21 @@ public sealed class PersistedCoordinatorJob
     /// <summary>Immutable index ID, set when ElementKind is Index.</summary>
     public string? IndexId { get; set; }
 
+    /// <summary>
+    /// True for the job of a <c>DROP INDEX</c> outside a transaction: the index named by
+    /// <see cref="IndexId"/> goes down <c>Public → WriteOnly → DeleteOnly → Absent</c>, and once it is
+    /// gone the job is replaced by a <see cref="DeferredPurgeRecord"/> for its key space. A resume
+    /// finds the index by <see cref="IndexId"/>, never by name, and always drives it down: a drop is
+    /// never taken back. False for every other job, and in records written before the field existed.
+    /// </summary>
+    public bool IndexDrop { get; set; }
+
+    /// <summary>
+    /// For an <see cref="IndexDrop"/> job, the storage id whose index key space holds the entries
+    /// (<c>TableSchema.EffectiveStorageId</c> when the drop started). Null for every other job.
+    /// </summary>
+    public string? IndexStorageId { get; set; }
+
     /// <summary>Column IDs the index covers, used to resolve column names on resume.</summary>
     public string[]? IndexColumnIds { get; set; }
 

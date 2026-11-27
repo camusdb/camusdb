@@ -213,7 +213,7 @@ internal sealed class TableDropper
         // the aliasing hazard.
         try
         {
-            await catalogs.DeleteCoordinatorJobsForTableAsync(database, tableId, tx).ConfigureAwait(false);
+            await catalogs.DeleteCoordinatorJobsForTableAsync(database, tableId, tx, table.Schema).ConfigureAwait(false);
         }
         catch (Exception ex)
         {

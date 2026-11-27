@@ -217,9 +217,10 @@ fork timestamp.
   metadata-only and branch-local.
 - **Branch `DROP TABLE`/`DROP INDEX` do not scan or tombstone inherited data.** Once the branch
   schema no longer references an object, its inherited data is unreachable. Only the
-  branch-local overlay for that object is physically purged (`PurgeLocalRowOverlayAsync` /
-  `DropIndexEntries`). Branch drops therefore cost O(branch overlay) and do not depend on the
-  size of the parent's data.
+  branch-local overlay for that object is physically purged: `PurgeLocalRowOverlayAsync` and
+  `DropIndexEntries` for a table, and for an index the background purge of the branch's own index
+  key space that a `DROP INDEX` schedules ([drop-index.md](drop-index.md)). Branch drops therefore
+  cost O(branch overlay) and do not depend on the size of the parent's data.
 
 ---
 

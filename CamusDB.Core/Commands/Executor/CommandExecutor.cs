@@ -1438,6 +1438,38 @@ public sealed class CommandExecutor : IAsyncDisposable
     }
 
     /// <summary>
+    /// Test-only hook fired by <c>DROP INDEX</c> outside a transaction after each step of the index
+    /// (<c>WriteOnly</c>, <c>DeleteOnly</c>, <c>Absent</c>), before the next one. Null in production; a test
+    /// clears it after use.
+    /// </summary>
+    internal Func<SchemaElementState, Task>? TestInterceptAfterIndexDropStep
+    {
+        get => schemaDdl.TestInterceptAfterIndexDropStep;
+        set => schemaDdl.TestInterceptAfterIndexDropStep = value;
+    }
+
+    /// <summary>Test-only hook: <c>DROP INDEX</c> after its job is written, before its first step. Null in production.</summary>
+    internal Func<Task>? TestInterceptBeforeIndexDropFirstStep
+    {
+        get => schemaDdl.TestInterceptBeforeIndexDropFirstStep;
+        set => schemaDdl.TestInterceptBeforeIndexDropFirstStep = value;
+    }
+
+    /// <summary>Test-only hook: <c>DROP INDEX</c> after the table is opened, before the DDL gate. Null in production.</summary>
+    internal Func<Task>? TestInterceptBeforeIndexDropGate
+    {
+        get => schemaDdl.TestInterceptBeforeIndexDropGate;
+        set => schemaDdl.TestInterceptBeforeIndexDropGate = value;
+    }
+
+    /// <summary>Test-only hook: before a dropped index's job is replaced by its purge record. Null in production.</summary>
+    internal Func<Task>? TestInterceptBeforeIndexDropRecord
+    {
+        get => schemaDdl.TestInterceptBeforeIndexDropRecord;
+        set => schemaDdl.TestInterceptBeforeIndexDropRecord = value;
+    }
+
+    /// <summary>
     /// Test-only hook fired after each backfill batch checkpoint, so a test can force a leader change
     /// between batches without depending on timing. Writes through to the service that owns the
     /// backfill loop; both test projects assign it directly on the executor.
@@ -1581,6 +1613,14 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// </summary>
     internal Task<bool> PurgeIndexEntriesAsync(DatabaseDescriptor database, string storageId, string indexId) =>
         deferredPurges.PurgeIndexKeySpaceAsync(database, storageId, indexId);
+
+    /// <summary>
+    /// Starts the run of one purge record in the background. <see cref="Controllers.DatabaseOpener"/> wires it
+    /// into the resume coordinator, which writes the record of a dropped index when it finishes a
+    /// <c>DROP INDEX</c> that a previous leader or a failed statement left.
+    /// </summary>
+    internal void ScheduleDeferredPurge(DatabaseDescriptor database, DeferredPurgeRecord record) =>
+        deferredPurges.Schedule(database, record);
 
     public Task<bool> AlterIndex(AlterIndexTicket ticket) => schemaDdl.AlterIndex(ticket);
 

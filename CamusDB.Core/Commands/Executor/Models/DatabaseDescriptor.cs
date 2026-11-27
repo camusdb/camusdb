@@ -529,8 +529,10 @@ public sealed record DatabaseDescriptor : IDisposable
     /// <summary>
     /// 1 while a deferred purge record of this database may exist that no run on this node finished; see
     /// <see cref="Catalogs.Models.DeferredPurgeRecord"/>. Starts at 1, so the first run after an open looks
-    /// for records a crash left, and a publish of a change set sets it again on every node. A run scans the
-    /// meta bucket only while it is 1, so a database with no pending purge costs no scan.
+    /// for records a crash left. A publish of a change set sets it again on every node, and a node that wins
+    /// the schema leadership sets it for the record of a dropped index that the previous leader did not
+    /// finish. A run scans the meta bucket only while it is 1, so a database with no pending purge costs no
+    /// scan.
     /// </summary>
     private int deferredPurgesDue = 1;
 

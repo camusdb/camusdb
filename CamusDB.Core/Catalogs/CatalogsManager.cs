@@ -643,6 +643,10 @@ public sealed class CatalogsManager
     public async Task DeleteCoordinatorJobAsync(DatabaseDescriptor database, string tableId, string elementName, long leaderTerm = 0)
         => await CoordinatorJobStore.DeleteCoordinatorJobAsync(database, tableId, elementName, leaderTerm).ConfigureAwait(false);
 
+    /// <inheritdoc cref="CoordinatorJobStore.CompleteIndexDropAsync"/>
+    internal Task CompleteIndexDropAsync(DatabaseDescriptor database, string tableId, string elementName, DeferredPurgeRecord purge, long leaderTerm)
+        => CoordinatorJobStore.CompleteIndexDropAsync(database, tableId, elementName, purge, leaderTerm);
+
     internal Task DeleteOwnedCoordinatorJobAsync(
         DatabaseDescriptor database, string tableId, string elementName, SchemaElementKind kind, string ownerChangeSetId)
         => CoordinatorJobStore.DeleteOwnedCoordinatorJobAsync(database, tableId, elementName, kind, ownerChangeSetId);
@@ -650,11 +654,13 @@ public sealed class CatalogsManager
     public async Task<PersistedCoordinatorJob?> TryLoadCoordinatorJobAsync(DatabaseDescriptor database, string tableId, string elementName)
         => await CoordinatorJobStore.TryLoadCoordinatorJobAsync(database, tableId, elementName).ConfigureAwait(false);
 
+    /// <inheritdoc cref="CoordinatorJobStore.DeleteCoordinatorJobsForTableAsync"/>
     public async Task DeleteCoordinatorJobsForTableAsync(
         DatabaseDescriptor database,
         string tableId,
-        KvTransaction tx)
-        => await CoordinatorJobStore.DeleteCoordinatorJobsForTableAsync(database, tableId, tx).ConfigureAwait(false);
+        KvTransaction tx,
+        TableSchema? droppedTable = null)
+        => await CoordinatorJobStore.DeleteCoordinatorJobsForTableAsync(database, tableId, tx, droppedTable).ConfigureAwait(false);
 
     public async Task<List<PersistedCoordinatorJob>> LoadCoordinatorJobsAsync(DatabaseDescriptor database)
         => await CoordinatorJobStore.LoadCoordinatorJobsAsync(database).ConfigureAwait(false);

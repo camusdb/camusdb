@@ -244,7 +244,14 @@ internal static class SchemaChangeEntryFactory
                 // The foreign keys stay behind (below), so an index the engine created for one would
                 // name an owner that does not exist. It is kept as an ordinary index: it still serves
                 // queries, and an ADD CONSTRAINT that follows can reuse it.
-                Indexes = src.Indexes is { Count: > 0 } ? [.. src.Indexes.Select(WithoutOwner)] : null,
+                //
+                // Only Public indexes come back. An index in another state belongs to a staged CREATE INDEX
+                // or DROP INDEX that was cut short, and the drop of the table deleted the job that would
+                // have finished it: the index would keep its name taken and its writes paid with nobody to
+                // read it or remove it. Its entries stay in the table's key space, which the table's last
+                // purge reclaims (the key-space catalog names every index id), and the drop of the table
+                // already wrote the purge record of an unfinished DROP INDEX.
+                Indexes = PublicIndexesWithoutOwner(src.Indexes),
                 CheckConstraints = src.CheckConstraints is { Count: > 0 } ? [.. src.CheckConstraints] : null,
                 // Foreign keys are deliberately not relinked. While the table was dropped, no
                 // parent-side check could see its rows, so the parents they reference may be gone.
@@ -264,6 +271,22 @@ internal static class SchemaChangeEntryFactory
                 RefreshedAt = src.RefreshedAt,
             })
         };
+    }
+
+    /// <summary>The <c>Public</c> indexes of a relinked table, without their owner constraint; null when there are none.</summary>
+    private static TableIndexSchema[]? PublicIndexesWithoutOwner(List<TableIndexSchema>? indexes)
+    {
+        if (indexes is not { Count: > 0 })
+            return null;
+
+        List<TableIndexSchema> kept = new(indexes.Count);
+        foreach (TableIndexSchema index in indexes)
+        {
+            if (index.State == SchemaElementState.Public)
+                kept.Add(WithoutOwner(index));
+        }
+
+        return kept.Count > 0 ? [.. kept] : null;
     }
 
     private static TableIndexSchema WithoutOwner(TableIndexSchema index) =>

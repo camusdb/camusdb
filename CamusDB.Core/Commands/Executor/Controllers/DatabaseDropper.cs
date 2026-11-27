@@ -831,6 +831,20 @@ internal sealed class DatabaseDropper
     // materialising the whole bucket in one shot.
     internal static long PurgeBatchesForTesting;
 
+    /// <summary>
+    /// Test-only: counts the scans a purge starts at the beginning of a bucket. A test reads it to prove
+    /// that the scans from the start do not grow with the number of keys: each batch after the first
+    /// starts after the previous batch's last key.
+    /// </summary>
+    internal static long PurgeScansFromStartForTesting;
+
+    /// <summary>
+    /// Test-only hook: awaited after each batch of a purge is deleted, with the bucket. A test throws from
+    /// it, for its own bucket only, to stop a purge part-way, as a crash would. Null in production; a test
+    /// clears it after use.
+    /// </summary>
+    internal static Func<string, Task>? TestInterceptAfterPurgeBatch;
+
     // Test-only: counts the keyspace-catalog scan rounds, so a test can prove the collection re-scans
     // (a confirming round) rather than reading the catalog once — the guard against a transient miss.
     internal static long CatalogScanRoundsForTesting;
@@ -859,7 +873,7 @@ internal sealed class DatabaseDropper
     /// <summary>
     /// Purges one row, large-value or index key space of database <paramref name="dbId"/>, and returns true
     /// only when the key space is confirmed empty. Used by <see cref="DeferredPurgeRunner"/> to remove the
-    /// data of a published change set.
+    /// data that a published change set or a <c>DROP INDEX</c> made unreachable.
     /// </summary>
     internal Task<bool> PurgeKeySpaceAsync(IKahuna kahuna, string dbId, string keySpace, CancellationToken ct = default)
         => PurgeSpaceAsync(kahuna, dbId, keySpace, ct);
@@ -877,8 +891,8 @@ internal sealed class DatabaseDropper
 
     /// <summary>
     /// Deletes every key under <paramref name="keyPrefix"/> in <paramref name="bucket"/> in bounded
-    /// batches of <see cref="CamusDBOptions.KeyspacePurgeBatchSize"/>: scan one batch, delete it,
-    /// re-scan. Peak memory is one batch regardless of how large the overlay is — a <c>DROP DATABASE</c>
+    /// batches of <see cref="CamusDBOptions.KeyspacePurgeBatchSize"/>: scan one batch, delete it, and
+    /// scan on from the batch's last key; at the end, scan again from the start to confirm. Peak memory is one batch regardless of how large the overlay is — a <c>DROP DATABASE</c>
     /// can span an entire database. The loop ends after <see cref="MaxPurgeScanRounds"/> consecutive
     /// scans make no progress (all-empty or all-failed), which also absorbs a transient scan miss; a
     /// batch that deletes nothing (persistent delete errors) counts as no-progress so the loop can't
@@ -896,17 +910,27 @@ internal sealed class DatabaseDropper
         int batchSize = options.KeyspacePurgeBatchSize;
         if (batchSize < 1) batchSize = 1;
 
+        // The scan after a deleted batch starts after that batch's last key. A scan from the start would
+        // walk again over every key the earlier batches deleted, while the store still keeps their deleted
+        // versions, so N keys in batches of B would cost about N²/B inspected entries. Only scans from the
+        // start count as proof that the bucket is empty: a scan past the cursor that comes back empty
+        // sends the next scan back to the start.
+        string? resumeAfter = null;
+
         int failStreak = 0;
         int emptyStreak = 0;
         while (true)
         {
             ct.ThrowIfCancellationRequested();
 
+            if (resumeAfter is null)
+                PurgeScansFromStartForTesting++;
+
             List<string> batch = [];
             try
             {
                 await foreach ((string key, ReadOnlyKeyValueEntry _) in kahuna.LocateAndScanRange(
-                    HLCTimestamp.Zero, bucket, null, true, null, true, batchSize,
+                    HLCTimestamp.Zero, bucket, resumeAfter, resumeAfter is null, null, true, batchSize,
                     HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).ConfigureAwait(false))
                 {
                     if (!key.StartsWith(keyPrefix, StringComparison.Ordinal))
@@ -943,6 +967,13 @@ internal sealed class DatabaseDropper
             // and the scan round trip is its own natural spacing.
             if (batch.Count == 0)
             {
+                // The end of the bucket past the cursor: confirm from the start.
+                if (resumeAfter is not null)
+                {
+                    resumeAfter = null;
+                    continue;
+                }
+
                 if (++emptyStreak >= MaxPurgeScanRounds)
                     return true;
 
@@ -959,13 +990,19 @@ internal sealed class DatabaseDropper
 
             if (deleted == batch.Count)
             {
-                failStreak = 0; // real progress; re-scan for the remainder
+                failStreak = 0; // real progress; scan on from the last deleted key
+                resumeAfter = batch[^1];
                 if (logger.IsEnabled(LogLevel.Debug))
                     logger.LogDebug("Purged {Count} key(s) under bucket '{Bucket}' for dropped database (id={Id})", batch.Count, bucket, id);
+
+                if (TestInterceptAfterPurgeBatch is { } intercept)
+                    await intercept(bucket).ConfigureAwait(false);
+
                 continue;
             }
 
-            // Some keys were not confirmed deleted. Bound the retries so a persistently failing key
+            // Some keys were not confirmed deleted. The cursor stays, so the next scan reads the same
+            // window again and retries them. Bound the retries so a persistently failing key
             // does not spin forever; give up and report the bucket as not-yet-empty (the recovery
             // markers stay in place and a later sweep / startup resume retries).
             if (++failStreak >= MaxPurgeScanRounds)

@@ -135,6 +135,11 @@ CREATE TABLE   orders_restored RELINK TO 'A0';
 
   An index that a foreign key created and owned remains as an ordinary index. For more information,
   see [foreign-keys.md](foreign-keys.md).
+- **A recovered table comes back with its public indexes only.** An index that a `CREATE INDEX` or a
+  `DROP INDEX` left between states when the table was dropped does not come back: the drop of the table
+  deleted the job that would have finished it. The table drop also keeps the purge of an unfinished
+  `DROP INDEX`, so the entries of that index are removed in the background. See
+  [drop-index.md](drop-index.md).
 
 Recovery succeeds as long as the orphan exists (i.e. the garbage collector has not reclaimed it
 yet), even slightly past `expires_at`.
