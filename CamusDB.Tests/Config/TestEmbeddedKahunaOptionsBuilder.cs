@@ -313,15 +313,15 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     public void DurableMaterializeOnResolve_UnsetDefaultsOnOnBothBaselines()
     {
         // The record shape passed two consecutive clean two-hour fault soaks on two released Kahuna
-        // versions, so CamusDB's baselines turn it on; Kahuna's own default stays off, which is what a
-        // node built against an older Kahuna would run with, and why the rolling-upgrade rule pins false.
+        // versions, so CamusDB's baselines turn it on. Kahuna's own default is on since 1.19.0; the
+        // baselines state it so the shape does not depend on the pinned Kahuna version.
         ConfigDefinition config = new() { DataDir = "/data/camus", Mode = "cluster", InitialPartitions = 3 };
 
         EmbeddedKahunaOptions cluster = EmbeddedKahunaOptionsBuilder.BuildCluster(config, CamusDBOptions.Default);
         EmbeddedKahunaOptions standalone =
             EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/materialize-db", new KahunaOptionsConfig(), CamusDBOptions.Default);
 
-        Assert.That(new EmbeddedKahunaOptions().DurableMaterializeOnResolve, Is.False, "Kahuna's own default, which CamusDB's baseline overrides");
+        Assert.That(new EmbeddedKahunaOptions().DurableMaterializeOnResolve, Is.True, "Kahuna's own default since 1.19.0");
         Assert.That(cluster.DurableMaterializeOnResolve, Is.True);
         Assert.That(standalone.DurableMaterializeOnResolve, Is.True);
     }
@@ -346,6 +346,53 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         Assert.That(EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/materialize-db", on.Kahuna, CamusDBOptions.Default).DurableMaterializeOnResolve, Is.True);
         Assert.That(EmbeddedKahunaOptionsBuilder.BuildCluster(off, CamusDBOptions.Default).DurableMaterializeOnResolve, Is.False);
         Assert.That(EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/materialize-db", off.Kahuna, CamusDBOptions.Default).DurableMaterializeOnResolve, Is.False);
+    }
+
+    // ── Log entries per commit ───────────────────────────────────────────────
+
+    [Test]
+    public void CommitShapeSwitches_UnsetStayOffOnEveryBaseline()
+    {
+        // The bundle entry is read only by Kahuna.Core 1.19.0 or later, so no baseline turns it on for a
+        // cluster that may still have an older node. The merged settles stay off with it until the
+        // shape has run under faults.
+        ConfigDefinition config = new() { DataDir = "/data/camus", Mode = "cluster", InitialPartitions = 3 };
+
+        EmbeddedKahunaOptions cluster = EmbeddedKahunaOptionsBuilder.BuildCluster(config, CamusDBOptions.Default);
+        EmbeddedKahunaOptions standaloneRocksDb =
+            EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/commit-shape-db", new KahunaOptionsConfig(), CamusDBOptions.Default);
+        EmbeddedKahunaOptions standalone =
+            EmbeddedKahunaOptionsBuilder.BuildStandalone("/tmp/commit-shape-db", new KahunaOptionsConfig(), CamusDBOptions.Default);
+
+        foreach (EmbeddedKahunaOptions options in new[] { cluster, standaloneRocksDb, standalone })
+        {
+            Assert.That(options.DurableMergeAdjacentSettles, Is.False);
+            Assert.That(options.DurableOnePhaseBundleEntry, Is.False);
+        }
+    }
+
+    [Test]
+    public void CommitShapeSwitches_FlowThroughOneAtATime()
+    {
+        // Each key reaches its own Kahuna option and leaves the other one alone, on the cluster and on
+        // the standalone baseline. An explicit false is a value too.
+        KahunaOptionsConfig mergeOnly = new() { DurableMergeAdjacentSettles = true };
+        KahunaOptionsConfig bundleOnly = new() { DurableOnePhaseBundleEntry = true };
+        KahunaOptionsConfig bothOff = new() { DurableMergeAdjacentSettles = false, DurableOnePhaseBundleEntry = false };
+
+        foreach (Func<KahunaOptionsConfig, EmbeddedKahunaOptions> build in new Func<KahunaOptionsConfig, EmbeddedKahunaOptions>[]
+        {
+            kahuna => EmbeddedKahunaOptionsBuilder.BuildCluster(new ConfigDefinition { DataDir = "/data/camus", Kahuna = kahuna }, CamusDBOptions.Default),
+            kahuna => EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/commit-shape-db", kahuna, CamusDBOptions.Default),
+        })
+        {
+            Assert.That(build(mergeOnly).DurableMergeAdjacentSettles, Is.True);
+            Assert.That(build(mergeOnly).DurableOnePhaseBundleEntry, Is.False);
+            Assert.That(build(bundleOnly).DurableMergeAdjacentSettles, Is.False);
+            Assert.That(build(bundleOnly).DurableOnePhaseBundleEntry, Is.True);
+            Assert.That(build(bothOff).DurableMergeAdjacentSettles, Is.False);
+            Assert.That(build(bothOff).DurableOnePhaseBundleEntry, Is.False);
+        }
     }
 
     [Test]

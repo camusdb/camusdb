@@ -248,6 +248,19 @@ public sealed class TestConfigReaderCharacterization
     }
 
     [Test]
+    public void ReadsTheCommitShapeSwitches_AndLeavesThemUnsetByDefault()
+    {
+        Assert.That(new ConfigReader().Read("kahuna:\n  durable_merge_adjacent_settles: true").Kahuna.DurableMergeAdjacentSettles, Is.True);
+        Assert.That(new ConfigReader().Read("kahuna:\n  durable_merge_adjacent_settles: false").Kahuna.DurableMergeAdjacentSettles, Is.False);
+        Assert.That(new ConfigReader().Read("kahuna:\n  durable_one_phase_bundle_entry: true").Kahuna.DurableOnePhaseBundleEntry, Is.True);
+        Assert.That(new ConfigReader().Read("kahuna:\n  durable_one_phase_bundle_entry: false").Kahuna.DurableOnePhaseBundleEntry, Is.False);
+
+        KahunaOptionsConfig unset = new ConfigReader().Read("kahuna:\n  key_value_write_linger_ms: 1").Kahuna;
+        Assert.That(unset.DurableMergeAdjacentSettles, Is.Null, "unset must stay unset so Kahuna's own default applies");
+        Assert.That(unset.DurableOnePhaseBundleEntry, Is.Null, "unset must stay unset so Kahuna's own default applies");
+    }
+
+    [Test]
     public void ReadsEveryWalShardTuningKey()
     {
         // All eight in one document, each at a non-default value, so a key that parses into the wrong

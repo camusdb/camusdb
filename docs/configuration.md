@@ -430,7 +430,7 @@ a ledger.
 
 ### Materialize on resolve
 
-`kahuna.durable_materialize_on_resolve` (default **on** in CamusDB; Kahuna's own default is off) sets the record shape of
+`kahuna.durable_materialize_on_resolve` (default **on** in CamusDB, and in Kahuna since 1.19.0) sets the record shape of
 a committed durable transaction. The commit's settle installs each committed value from the prepared
 intent on each replica. This means that Kahuna writes no materialization record per key. On the anchor
 partition, a two-row transaction then costs about four Raft entries where it would cost six (the
@@ -450,6 +450,34 @@ Two operating rules apply. The record shape enforces both, and CamusDB does not 
   `durable_materialize_on_resolve: false` on all nodes until the last one is upgraded. Then remove the
   key.
 - **Same value on all nodes of the group**, for the same reason as the one-phase gate above.
+
+### Log entries per commit
+
+Two keys reduce the Raft entries that a committed transaction writes on its partition. Both are off by
+default and need Kahuna.Core 1.19.0 or later. With materialize on resolve, a two-row transaction that
+commits in one phase writes four entries: three for the bundle (record init, prepare, decision) and one
+for the settle.
+
+`kahuna.durable_merge_adjacent_settles` (default **off**) writes one entry for each run of adjacent
+settles in a batch of the partition's write scheduler. The commands keep their order in the log, and
+each build that installs on a settle reads the entry. The key needs no upgrade order, it can differ
+between nodes, and turning it off is safe at any time. A merged entry carries the settles of several
+transactions, so the durability floor of the partition moves in larger steps.
+
+`kahuna.durable_one_phase_bundle_entry` (default **off**) writes the bundle of a one-phase commit as one
+entry. Two operating rules apply:
+
+- **Upgrade all nodes before you turn on the key.** All nodes of the group must run Kahuna.Core 1.19.0
+  or later before any node has this on. An older node skips the entry with no error, and it then holds
+  no record and no intent of the transaction. A leader asks its replicas whether they apply the entry,
+  and it writes three entries until all of them confirm. This check catches a key that is set too
+  early. It does not cover an older node that joins later, or a node that starts again on an older
+  build and reads a log that holds bundle entries.
+- **Turning it off is safe at any time.** A node of a current build applies the entry whatever its own
+  value, so the key can differ between nodes while you change it.
+
+With both keys on, a two-row transaction writes between one and two entries: one for the bundle and a
+share of a merged settle entry.
 
 ### Persistent MVCC revision retention
 

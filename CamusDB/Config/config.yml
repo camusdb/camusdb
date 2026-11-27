@@ -808,6 +808,15 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 #   # removes the key. Turning it off is safe at any time. Give every node the same value. See
 #   # docs/configuration.md.
 #   durable_materialize_on_resolve: true
+#   # Fewer Raft entries per commit (Kahuna.Core 1.19.0 or later). Both are off by default.
+#   # durable_merge_adjacent_settles writes one entry for each run of adjacent settles in a batch. It
+#   # needs no upgrade order and can differ between nodes.
+#   # durable_one_phase_bundle_entry writes the record init, the prepares and the decision of a
+#   # one-phase commit as one entry. Every node must run Kahuna.Core 1.19.0 or later before any node
+#   # has it on: an older node skips the entry with no error. Turning either key off is safe at any
+#   # time. See docs/configuration.md.
+#   durable_merge_adjacent_settles: true
+#   durable_one_phase_bundle_entry: true
 #
 #   # MVCC revision retention. Every version of every row is a physical row; without pruning, history
 #   # grows without bound. Unset: prune by age, aligned with the effective PITR window, so a restore

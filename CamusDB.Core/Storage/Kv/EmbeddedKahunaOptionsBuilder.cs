@@ -568,6 +568,16 @@ public static class EmbeddedKahunaOptionsBuilder
         if (kahuna.DurableMaterializeOnResolve is bool materializeOnResolve)
             baseline.DurableMaterializeOnResolve = materializeOnResolve;
 
+        // The two commit-shape switches that cut log entries per commit. CamusDB keeps Kahuna's defaults
+        // (both off) and passes on what the operator states. The bundle entry is read only by
+        // Kahuna.Core 1.19.0 or later, so a CamusDB baseline would decide it for a cluster that may
+        // still have an older node.
+        if (kahuna.DurableMergeAdjacentSettles is bool mergeAdjacentSettles)
+            baseline.DurableMergeAdjacentSettles = mergeAdjacentSettles;
+
+        if (kahuna.DurableOnePhaseBundleEntry is bool onePhaseBundleEntry)
+            baseline.DurableOnePhaseBundleEntry = onePhaseBundleEntry;
+
         // Per-page scan retry budget. Kahuna's default already sits below the shipped client command
         // deadline (5 s vs 10 s) so the named failure is observable; a deployment that raises its client
         // deadline may raise this with it, keeping the budget strictly below the deadline.
