@@ -842,6 +842,11 @@ public sealed class KvTransaction
                 CamusDBErrorCodes.ReadOnlyTransaction,
                 $"cannot write in a read-only transaction (transaction {UniqueId})");
 
+        // A killed transaction's running write stops here, before its next write reaches Kahuna, so the
+        // statement ends with a definite error and the kill's rollback can run. One field read per batch.
+        if (Volatile.Read(ref killReason) is not null)
+            throw KilledError();
+
         // Counted whatever the limit: the schema-fence retry reads it to tell an attempt that wrote
         // nothing from one that did. See WriteCount.
         Interlocked.Increment(ref writeBatches);
@@ -871,6 +876,19 @@ public sealed class KvTransaction
 
     /// <summary>Running total of mutations reserved so far in this transaction.</summary>
     public int MutationCount { get { lock (trackSync) return mutationCount; } }
+
+    /// <summary>
+    /// How many distinct keys the transaction has written so far, as its client-side mirror records them.
+    /// For diagnostics (<c>SHOW TRANSACTIONS</c>); it takes the tracking lock.
+    /// </summary>
+    public int ModifiedKeyCount { get { lock (trackSync) return modifiedKeys?.Count ?? 0; } }
+
+    /// <summary>
+    /// Origin, owner and last statement of an explicit transaction, for <c>SHOW TRANSACTIONS</c>. The host
+    /// sets it when a client begins an explicit transaction, before the handle is published; it is null
+    /// for every other transaction.
+    /// </summary>
+    public Diagnostics.TransactionActivity? Activity { get; set; }
 
     private long writeBatches;
 
@@ -927,11 +945,42 @@ public sealed class KvTransaction
     /// </summary>
     public void ThrowIfRollbackOnly()
     {
+        if (Volatile.Read(ref killReason) is not null)
+            throw KilledError();
+
         if (Volatile.Read(ref rollbackOnlyReason) is { } reason)
             throw new CamusDBException(
                 CamusDBErrorCodes.TransactionRollbackOnly,
                 $"Transaction {UniqueId} is aborted, commands are ignored until the end of the transaction block: {reason}");
     }
+
+    private string? killReason;
+
+    /// <summary>Why <c>KILL TRANSACTION</c> ended this transaction, or null. Set by <see cref="MarkKilled"/>.</summary>
+    public string? KillReason => Volatile.Read(ref killReason);
+
+    /// <summary>
+    /// Marks the transaction killed by <c>KILL TRANSACTION</c>. From here a statement is refused at its
+    /// entry (<see cref="ThrowIfRollbackOnly"/>), a running write stops at its next write
+    /// (<see cref="ReserveMutations"/>), and a commit is refused, all with
+    /// <see cref="CamusDBErrorCodes.TransactionKilled"/>. It also marks the transaction rollback-only,
+    /// so a commit path that does not look at the kill still refuses.
+    ///
+    /// <para>It does not roll the transaction back. The host that tracks the transaction owns that, and
+    /// runs it once no statement runs on the transaction any more, because a rollback beside a running
+    /// write would race the write's own Kahuna calls. The first reason is kept.</para>
+    /// </summary>
+    public void MarkKilled(string reason)
+    {
+        Interlocked.CompareExchange(ref killReason, reason, null);
+        MarkRollbackOnly(reason);
+    }
+
+    /// <summary>The error a statement or a commit of a killed transaction reports.</summary>
+    public CamusDBException KilledError() => new(
+        CamusDBErrorCodes.TransactionKilled,
+        $"Transaction {UniqueId} was {Volatile.Read(ref killReason) ?? "killed by KILL TRANSACTION"}. " +
+        "It is rolled back and accepts no further statement; begin a new transaction");
 
     /// <summary>
     /// Wraps a statement's lazy cursor so a failure while the rows stream aborts the transaction exactly

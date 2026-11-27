@@ -7,13 +7,16 @@
  */
 
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using CamusDB.Core;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.Diagnostics;
 using CamusDB.Core.Transactions;
 using CamusDB.App.Models;
 using Kommander.Time;
 using Kahuna.Shared.KeyValue;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace CamusDB.App.Services;
 
@@ -25,12 +28,41 @@ namespace CamusDB.App.Services;
 /// dispose of the <see cref="RunningStatement"/> it returns. An autocommit transaction belongs to its
 /// request from its begin until that request finalizes it. The idle reaper rolls back neither one while
 /// it runs; see <see cref="ActiveTransaction"/> for the rule.</para>
+///
+/// <para>It is also the engine's <see cref="ITransactionActivitySource"/>: <c>SHOW TRANSACTIONS</c> lists
+/// its explicit transactions and <c>KILL TRANSACTION</c> ends one (<see cref="KillAsync"/>). It attaches
+/// itself to the engine when it is built.</para>
 /// </summary>
-public sealed class HttpTransactionCoordinator
+public sealed class HttpTransactionCoordinator : ITransactionActivitySource
 {
+    /// <summary>
+    /// How long the record of a killed transaction stays, so its client's next request reports the kill
+    /// rather than an unknown transaction. A client that comes back later gets "Unknown transaction".
+    /// </summary>
+    internal static readonly TimeSpan KillRecordRetention = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// The most kill records kept at once. Past it a kill keeps no record, and its client gets "Unknown
+    /// transaction" instead of the kill's error: the kill itself is unaffected.
+    /// </summary>
+    internal const int MaxKillRecords = 10_000;
+
     private readonly CommandExecutor executor;
 
+    private readonly ILogger logger;
+
     private readonly ConcurrentDictionary<(long L, uint C), ActiveTransaction> active = new();
+
+    /// <summary>
+    /// Killed transactions that already left <see cref="active"/>, by client handle. A record is added
+    /// before its entry leaves the map, so a request of the killed client finds one or the other.
+    /// </summary>
+    private readonly ConcurrentDictionary<(long L, uint C), KillRecord> killRecords = new();
+
+    /// <param name="Message">The error message the client of the killed transaction reads.</param>
+    /// <param name="OwnerName">The owner, so a kill repeated by another user still reports "not found".</param>
+    /// <param name="AtTicks">The <see cref="Stopwatch"/> tick of the kill, for the retention.</param>
+    private sealed record KillRecord(string Message, string? OwnerName, string? OwnerId, long AtTicks);
 
     /// <summary>
     /// Explicit transactions this node tracks, for <see cref="CamusDBOptions.MaxOpenExplicitTransactions"/>.
@@ -40,9 +72,13 @@ public sealed class HttpTransactionCoordinator
     /// </summary>
     private int openExplicit;
 
-    public HttpTransactionCoordinator(CommandExecutor executor)
+    /// <param name="executor">The engine. The coordinator attaches itself as the engine's source of open transactions.</param>
+    /// <param name="logger">Receives the audit line of each kill. Null writes nothing.</param>
+    public HttpTransactionCoordinator(CommandExecutor executor, ILogger<HttpTransactionCoordinator>? logger = null)
     {
         this.executor = executor;
+        this.logger = logger ?? (ILogger)NullLogger.Instance;
+        executor.QueryActivityService.AttachTransactions(this);
     }
 
     /// <summary>
@@ -118,7 +154,15 @@ public sealed class HttpTransactionCoordinator
                 isolationLevel, transactionMode, locking: locking, deferStart: deferStart,
                 priority: priority, cancellationToken: cancellationToken, causalToken: causalToken).ConfigureAwait(false);
             if (sessionOwned)
+            {
                 tx.MarkSessionOwned();
+
+                // Before the handle is published, so every reader of the list sees the origin. The
+                // principal is the ambient one of a REST request; a transport that resolved none leaves
+                // the owner to the first statement.
+                tx.Activity = new TransactionActivity(
+                    databaseName, StatementOrigin.Current, AuthorizationContext.Current.Principal);
+            }
 
             await RegisterAsync(database.Transactions, tx, sessionOwned).ConfigureAwait(false);
             registered = true;
@@ -196,7 +240,7 @@ public sealed class HttpTransactionCoordinator
         ActiveTransaction entry = Resolve(txnIdPT, txnIdCounter);
 
         if (!entry.TryTouch())
-            throw FinalizeInProgress();
+            throw FinalizeInProgress(entry);
 
         return entry.Transaction;
     }
@@ -217,7 +261,7 @@ public sealed class HttpTransactionCoordinator
         ActiveTransaction entry = Resolve(txnIdPT, txnIdCounter);
 
         if (!entry.TryEnterStatement())
-            throw FinalizeInProgress();
+            throw FinalizeInProgress(entry);
 
         return new RunningStatement(entry);
     }
@@ -236,14 +280,29 @@ public sealed class HttpTransactionCoordinator
     private ActiveTransaction Resolve(long txnIdPT, uint txnIdCounter)
     {
         if (!active.TryGetValue((txnIdPT, txnIdCounter), out ActiveTransaction? entry))
+        {
+            // A killed transaction leaves the map when its rollback ends. Its client reads why.
+            if (killRecords.TryGetValue((txnIdPT, txnIdCounter), out KillRecord? record))
+                throw new CamusDBException(CamusDBErrorCodes.TransactionKilled, record.Message);
+
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Unknown transaction");
+        }
 
         return entry;
     }
 
-    private static CamusDBException FinalizeInProgress() => new(
-        CamusDBErrorCodes.TransactionAlreadyCompleted,
-        "A commit or rollback is in progress for this transaction; no further statements may run");
+    /// <summary>
+    /// The error for a statement, commit or rollback that a finalize claim or a kill refused: the kill's
+    /// own error when a kill fenced the transaction, and "in progress" otherwise.
+    /// </summary>
+    private static CamusDBException Refusal(ActiveTransaction entry, string inProgress) =>
+        entry.IsKilled ? entry.Transaction.KilledError() : new CamusDBException(CamusDBErrorCodes.TransactionAlreadyCompleted, inProgress);
+
+    private static CamusDBException FinalizeInProgress(ActiveTransaction entry) => Refusal(
+        entry, "A commit or rollback is in progress for this transaction; no further statements may run");
+
+    private static CamusDBException CommitInProgress(ActiveTransaction entry) => Refusal(
+        entry, "A commit or rollback is already in progress for this transaction");
 
     /// <summary>
     /// Rolls back every tracked transaction that has been idle for at least
@@ -303,6 +362,222 @@ public sealed class HttpTransactionCoordinator
     }
 
     /// <summary>
+    /// Adds this node's open explicit transactions for <c>SHOW TRANSACTIONS</c>. Each entry's state is
+    /// read under its own lock; the list as a whole is not one instant, as no list of a concurrent map is.
+    /// </summary>
+    public void Snapshot(List<TrackedTransaction> into)
+    {
+        // Enumerating the dictionary takes no lock; its Values property would take every one.
+        foreach (KeyValuePair<(long L, uint C), ActiveTransaction> pair in active)
+        {
+            ActiveTransaction entry = pair.Value;
+            if (!entry.IsExplicit)
+                continue;
+
+            (string state, double ageMs, double idleMs) = entry.Describe();
+            into.Add(new TrackedTransaction(entry.Transaction, state, ageMs, idleMs));
+        }
+    }
+
+    /// <summary>
+    /// Ends an open explicit transaction for <c>KILL TRANSACTION</c>; see
+    /// <see cref="ITransactionActivitySource.KillAsync"/> for the contract.
+    ///
+    /// <para><b>One finalize wins.</b> The kill and a commit, a rollback or the reaper compete for the
+    /// same claim (<see cref="ActiveTransaction.TryBeginKill"/>). When another one holds it, the kill
+    /// waits up to <paramref name="wait"/> for it to end and reports what it did: committed, rolled back,
+    /// or still in progress. A finalize that failed and released its claim lets the kill try again.</para>
+    ///
+    /// <para><b>Running statements.</b> A kill that meets a running statement fences the transaction,
+    /// stops its reads at their next row and its writes at their next write, and leaves the rollback to
+    /// the end of the last statement. It waits up to <paramref name="wait"/> for that rollback and
+    /// otherwise reports <see cref="TransactionKillOutcome.Pending"/>; the rollback runs anyway.</para>
+    ///
+    /// <para><b>The rollback.</b> It is the reaper's: <see cref="KvTransactionsManager.AbandonAsync"/>
+    /// with no cancellation, so the change set of transactional DDL is discarded and the DDL lock freed,
+    /// and a coordinator session that is unknown parks the key mirror for a later release. A record of
+    /// the kill is kept before the entry leaves the map, so the client's next request reports the kill.
+    /// One audit line names who killed which transaction.</para>
+    /// </summary>
+    public async Task<TransactionKillOutcome> KillAsync(
+        long physical, uint counter, ActivityViewer viewer, TransactionKiller killedBy, TimeSpan wait)
+    {
+        (long L, uint C) key = (physical, counter);
+        long deadline = Stopwatch.GetTimestamp() + (long)(wait.TotalSeconds * Stopwatch.Frequency);
+        KvTransaction? seen = null;
+
+        while (true)
+        {
+            if (!active.TryGetValue(key, out ActiveTransaction? entry))
+            {
+                // The entry left while this kill waited for another finalize: report what that one did.
+                if (seen is not null)
+                    return seen.Status switch
+                    {
+                        KvTransactionStatus.Committed => TransactionKillOutcome.Committed,
+                        KvTransactionStatus.RolledBack => TransactionKillOutcome.RolledBack,
+                        _ => TransactionKillOutcome.Finalizing,
+                    };
+
+                // A kill that already ended reports its outcome again, to a viewer who may see it.
+                return killRecords.TryGetValue(key, out KillRecord? record) && viewer.CanSee(record.OwnerName, record.OwnerId)
+                    ? TransactionKillOutcome.Killed
+                    : TransactionKillOutcome.NotFound;
+            }
+
+            if (!entry.IsExplicit || entry.Transaction.Activity is not { } activity || !activity.VisibleTo(viewer))
+                return TransactionKillOutcome.NotFound;
+
+            seen = entry.Transaction;
+
+            KillClaim claim = entry.TryBeginKill(
+                killedBy.ReasonForClient(DateTime.UtcNow), out Task? whenStatementsEnd, out Task<TransactionKillOutcome>? outcome);
+
+            switch (claim)
+            {
+                case KillClaim.Claimed:
+                    LogKill(entry, activity, killedBy, pending: false);
+                    await RollBackKilledAsync(key, entry).ConfigureAwait(false);
+                    return await outcome!.ConfigureAwait(false);
+
+                case KillClaim.Pending:
+                    LogKill(entry, activity, killedBy, pending: true);
+
+                    // Reads stop at their next row with the kill's error; a write stops at its next write.
+                    executor.QueryActivity.CancelTransactionStatements(entry.Transaction.ClientId, entry.Transaction.KilledError());
+
+                    _ = RollBackWhenStatementsEndAsync(key, entry, whenStatementsEnd!);
+                    return await WaitForKillAsync(outcome!, deadline).ConfigureAwait(false);
+
+                case KillClaim.AlreadyKilled:
+                    return outcome is null
+                        ? TransactionKillOutcome.Pending
+                        : await WaitForKillAsync(outcome, deadline).ConfigureAwait(false);
+
+                case KillClaim.OutcomeUnknown:
+                    return TransactionKillOutcome.Finalizing;
+
+                default:
+                    // A commit, rollback or reap holds the claim. Look again until it ends or the wait does.
+                    if (Stopwatch.GetTimestamp() >= deadline)
+                        return TransactionKillOutcome.Finalizing;
+
+                    await Task.Delay(10).ConfigureAwait(false);
+                    continue;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Waits for a kill's rollback until <paramref name="deadline"/>, and reports
+    /// <see cref="TransactionKillOutcome.Pending"/> when it has not ended by then. A rollback that failed
+    /// throws its error.
+    /// </summary>
+    private static async Task<TransactionKillOutcome> WaitForKillAsync(Task<TransactionKillOutcome> outcome, long deadline)
+    {
+        long remaining = deadline - Stopwatch.GetTimestamp();
+        if (outcome.IsCompleted || remaining <= 0)
+            return outcome.IsCompleted ? await outcome.ConfigureAwait(false) : TransactionKillOutcome.Pending;
+
+        try
+        {
+            return await outcome.WaitAsync(TimeSpan.FromSeconds((double)remaining / Stopwatch.Frequency)).ConfigureAwait(false);
+        }
+        catch (TimeoutException) when (!outcome.IsCompleted)
+        {
+            return TransactionKillOutcome.Pending;
+        }
+    }
+
+    /// <summary>
+    /// Runs the rollback of a fenced transaction when its last running statement ends. The coordinator
+    /// owns the task: it never throws, and its outcome reaches the kills that wait through
+    /// <see cref="ActiveTransaction.CompleteKill"/> or <see cref="ActiveTransaction.FailKill"/>.
+    /// </summary>
+    private async Task RollBackWhenStatementsEndAsync((long L, uint C) key, ActiveTransaction entry, Task whenStatementsEnd)
+    {
+        await whenStatementsEnd.ConfigureAwait(false);
+        await RollBackKilledAsync(key, entry).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Rolls back a transaction whose finalize claim the kill holds, then retires its entry. Never
+    /// throws: the outcome, or the error of a rollback that failed, goes to the kills that wait.
+    /// </summary>
+    private async Task RollBackKilledAsync((long L, uint C) key, ActiveTransaction entry)
+    {
+        KvTransaction tx = entry.Transaction;
+
+        try
+        {
+            await entry.Manager.AbandonAsync(tx, CancellationToken.None).ConfigureAwait(false);
+
+            if (logger.IsEnabled(LogLevel.Information))
+                logger.LogInformation("KILL TRANSACTION: transaction {TransactionId} is rolled back", tx.UniqueId);
+
+            entry.CompleteKill(TransactionKillOutcome.Killed);
+        }
+        catch (Exception exception)
+        {
+            // The transaction stays fenced and leaves the list, as a reaped one does; the storage
+            // node's session expiry is the backstop for whatever the rollback did not release.
+            logger.LogWarning(exception, "KILL TRANSACTION: the rollback of transaction {TransactionId} failed", tx.UniqueId);
+            entry.FailKill(exception);
+        }
+        finally
+        {
+            AddKillRecord(key, entry);
+            TryRemoveEntry(key, out _);
+        }
+    }
+
+    /// <summary>The audit line of a kill: who killed which transaction, and whether a statement still ran.</summary>
+    private void LogKill(ActiveTransaction entry, TransactionActivity activity, TransactionKiller killedBy, bool pending)
+    {
+        if (!logger.IsEnabled(LogLevel.Warning))
+            return;
+
+        logger.LogWarning(
+            "KILL TRANSACTION: {KilledBy} killed transaction {TransactionId} (handle {Physical}.{Counter}) of user {Owner} " +
+            "in database {Database}, open for {AgeMs} ms{Pending}",
+            killedBy.ToString(),
+            entry.Transaction.UniqueId,
+            entry.Transaction.ClientId.L,
+            entry.Transaction.ClientId.C,
+            activity.OwnerName ?? "(unknown)",
+            activity.Database,
+            (long)entry.Describe().AgeMs,
+            pending ? "; the rollback waits for its running statement" : "");
+    }
+
+    private void AddKillRecord((long L, uint C) key, ActiveTransaction entry)
+    {
+        if (killRecords.Count >= MaxKillRecords)
+        {
+            PurgeKillRecords();
+            if (killRecords.Count >= MaxKillRecords)
+                return;
+        }
+
+        TransactionActivity? activity = entry.Transaction.Activity;
+        killRecords[key] = new KillRecord(
+            entry.Transaction.KilledError().Message, activity?.OwnerName, activity?.OwnerId, Stopwatch.GetTimestamp());
+    }
+
+    /// <summary>Drops the kill records older than <see cref="KillRecordRetention"/>. Called by the reaper on each sweep.</summary>
+    public void PurgeKillRecords()
+    {
+        if (killRecords.IsEmpty)
+            return;
+
+        foreach (KeyValuePair<(long L, uint C), KillRecord> pair in killRecords)
+        {
+            if (Stopwatch.GetElapsedTime(pair.Value.AtTicks) >= KillRecordRetention)
+                killRecords.TryRemove(pair);
+        }
+    }
+
+    /// <summary>
     /// Releases the key mirrors of abandoned transactions that have reached the age at which no
     /// coordinator session can still own their holdings, across every database this node holds open.
     /// Returns how many keys were released.
@@ -338,9 +613,7 @@ public sealed class HttpTransactionCoordinator
         }
 
         if (!entry.TryBeginFinalize())
-            throw new CamusDBException(
-                CamusDBErrorCodes.TransactionAlreadyCompleted,
-                "A commit or rollback is already in progress for this transaction");
+            throw CommitInProgress(entry);
 
         try
         {
@@ -399,13 +672,10 @@ public sealed class HttpTransactionCoordinator
     /// </summary>
     public async Task<HLCTimestamp> CommitTrackedAsync(KvTransaction tx, CancellationToken cancellationToken = default)
     {
-        if (!active.TryGetValue(Key(tx), out ActiveTransaction? entry))
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Unknown transaction");
+        ActiveTransaction entry = Resolve(Key(tx).L, Key(tx).C);
 
         if (!entry.TryBeginFinalize())
-            throw new CamusDBException(
-                CamusDBErrorCodes.TransactionAlreadyCompleted,
-                "A commit or rollback is already in progress for this transaction");
+            throw CommitInProgress(entry);
 
         try
         {
@@ -431,9 +701,7 @@ public sealed class HttpTransactionCoordinator
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Unknown transaction");
 
         if (!entry.TryBeginFinalize())
-            throw new CamusDBException(
-                CamusDBErrorCodes.TransactionAlreadyCompleted,
-                "A commit or rollback is already in progress for this transaction");
+            throw CommitInProgress(entry);
 
         try
         {
@@ -481,6 +749,13 @@ public sealed class HttpTransactionCoordinator
         // no-op, exactly as for an entry the reaper or a failed statement already removed — otherwise
         // the manager rejects the rollback with TransactionAlreadyCompleted and the entry idles until
         // the reaper, which is where every commit-time conflict of the bank workload was ending up.
+        // A killed transaction is being rolled back, or is rolled back when its running statement ends,
+        // by the kill itself. That is the end state this rollback asks for. Checked first: the kill
+        // retires its own entry after it records the kill, and an early retire here would let the
+        // client's next request see an unknown transaction instead of the kill.
+        if (entry.IsKilled)
+            return false;
+
         if (IsTerminal(entry.Transaction))
         {
             Unregister(entry.Transaction);
@@ -488,9 +763,7 @@ public sealed class HttpTransactionCoordinator
         }
 
         if (!entry.TryBeginFinalize())
-            throw new CamusDBException(
-                CamusDBErrorCodes.TransactionAlreadyCompleted,
-                "A commit or rollback is already in progress for this transaction");
+            throw CommitInProgress(entry);
 
         try
         {
@@ -553,6 +826,19 @@ public sealed class HttpTransactionCoordinator
 
     private void Unregister(KvTransaction tx) =>
         TryRemoveEntry(Key(tx), out _);
+
+    /// <summary>
+    /// Test seam: tracks a transaction that <see cref="StartAsync"/> did not begin, such as one whose
+    /// coordinator session never existed, so a test can drive the kill and the reaper over it. Production
+    /// code registers only through <see cref="StartAsync"/>.
+    /// </summary>
+    internal Task RegisterForTestAsync(KvTransactionsManager manager, KvTransaction tx, bool isExplicit)
+    {
+        if (isExplicit)
+            Interlocked.Increment(ref openExplicit);
+
+        return RegisterAsync(manager, tx, isExplicit);
+    }
 
     /// <summary>Test seam: claims the finalize gate of a tracked transaction as a concurrent commit would,
     /// so a test can observe the in-flight rejection path without racing two real finalizes.</summary>

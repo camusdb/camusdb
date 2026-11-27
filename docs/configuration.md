@@ -156,8 +156,9 @@ The slow-query-log knobs are YAML-only too. The log is **off by default**; see
 [slow-query-log.md](slow-query-log.md) for sizing guidance and for which of the four take effect
 while the node is running.
 
-The query-activity knobs are YAML-only as well, and all three take effect while the node is running.
-For more information, see [query-activity.md](query-activity.md).
+The query-activity knobs are YAML-only as well, and all four take effect while the node is running.
+They also govern `SHOW TRANSACTIONS` and `KILL TRANSACTION`. For more information, see
+[query-activity.md](query-activity.md).
 
 ### HTTP/3 on the HTTPS API port
 

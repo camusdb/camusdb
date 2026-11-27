@@ -7,6 +7,7 @@
 
 using System.Diagnostics;
 using CamusDB.Core;
+using CamusDB.Core.Diagnostics;
 using CamusDB.Core.Transactions;
 
 namespace CamusDB.App.Services;
@@ -32,11 +33,34 @@ namespace CamusDB.App.Services;
 /// to <see cref="TryEnterStatement"/>. A statement that enters first stops the reap. A reap that claims
 /// first refuses the statement. No await happens under the lock.</para>
 ///
+/// <para><b>Kill.</b> <c>KILL TRANSACTION</c> fences the transaction under the same lock
+/// (<see cref="TryBeginKill"/>): from then on no statement enters, no commit or rollback claims it, and
+/// the reaper leaves it alone. The kill takes the finalize claim itself, at once when no statement runs,
+/// or when the last running statement leaves (<see cref="LeaveStatement"/>), so its rollback never runs
+/// beside a statement of the same transaction.</para>
+///
 /// <para>The idle clock is a <see cref="Stopwatch"/> tick, so wall-clock jumps do not change it.</para>
 /// </summary>
 internal sealed class ActiveTransaction(KvTransactionsManager manager, KvTransaction transaction, bool isExplicit)
 {
     private readonly Lock gate = new();
+
+    private readonly long registeredTicks = Stopwatch.GetTimestamp();
+
+    /// <summary>Set by the kill that fenced the transaction. Guarded by <see cref="gate"/>.</summary>
+    private bool killed;
+
+    /// <summary>
+    /// Completed when the last running statement of a fenced transaction leaves and the kill holds the
+    /// finalize claim. Created by a kill that met a running statement. Guarded by <see cref="gate"/>.
+    /// </summary>
+    private TaskCompletionSource? statementsEnded;
+
+    /// <summary>
+    /// The outcome of the kill, completed when its rollback ends. Created by the kill that fenced the
+    /// transaction, so a second kill can wait for the same rollback. Guarded by <see cref="gate"/>.
+    /// </summary>
+    private TaskCompletionSource<TransactionKillOutcome>? killDone;
 
     /// <summary>Statements that run on the transaction now. A client can send several at once.</summary>
     private int runningStatements;
@@ -79,7 +103,7 @@ internal sealed class ActiveTransaction(KvTransactionsManager manager, KvTransac
     {
         lock (gate)
         {
-            if (finalizing)
+            if (finalizing || killed)
                 return false;
 
             runningStatements++;
@@ -87,14 +111,134 @@ internal sealed class ActiveTransaction(KvTransactionsManager manager, KvTransac
         }
     }
 
-    /// <summary>Ends one running statement and starts the idle time from now.</summary>
+    /// <summary>
+    /// Ends one running statement and starts the idle time from now. When a kill fenced the transaction
+    /// and this was its last running statement, the kill takes the finalize claim here, in the same step,
+    /// and its rollback starts on another thread.
+    /// </summary>
     public void LeaveStatement()
     {
+        TaskCompletionSource? claimedByKill = null;
+
         lock (gate)
         {
             runningStatements--;
             lastActivityTicks = Stopwatch.GetTimestamp();
+
+            if (killed && runningStatements == 0 && !finalizing)
+            {
+                finalizing = true;
+                claimedByKill = statementsEnded;
+            }
         }
+
+        // Outside the lock. The source runs its continuations asynchronously, so the rollback does not
+        // run on the thread that ends the statement.
+        claimedByKill?.TrySetResult();
+    }
+
+    /// <summary>True once <c>KILL TRANSACTION</c> fenced the transaction.</summary>
+    public bool IsKilled
+    {
+        get
+        {
+            lock (gate)
+                return killed;
+        }
+    }
+
+    /// <summary>
+    /// The state, age and idle time that <c>SHOW TRANSACTIONS</c> reports, read in one step.
+    /// </summary>
+    public (string State, double AgeMs, double IdleMs) Describe()
+    {
+        lock (gate)
+        {
+            string state = finalizing ? TransactionActivityStates.Finalizing
+                : killed ? TransactionActivityStates.Killing
+                : runningStatements > 0 || ownedByRequest ? TransactionActivityStates.Running
+                : TransactionActivityStates.Idle;
+
+            double idleMs = state == TransactionActivityStates.Idle
+                ? Stopwatch.GetElapsedTime(lastActivityTicks).TotalMilliseconds
+                : 0;
+
+            return (state, Stopwatch.GetElapsedTime(registeredTicks).TotalMilliseconds, idleMs);
+        }
+    }
+
+    /// <summary>
+    /// Fences the transaction for <c>KILL TRANSACTION</c> and marks it killed with
+    /// <paramref name="reason"/>, in one step with respect to every other claim.
+    ///
+    /// <para>A commit, rollback or reap that holds the finalize claim wins: the kill is refused and
+    /// fences nothing. So is a transaction whose last commit got no answer: its outcome belongs to the
+    /// storage layer, and the client can still learn it by sending its COMMIT again. Otherwise the kill
+    /// takes the claim at once when no statement runs (<see cref="KillClaim.Claimed"/>), or at the end
+    /// of the last running statement (<see cref="KillClaim.Pending"/>, and
+    /// <paramref name="whenStatementsEnd"/> completes then).</para>
+    /// </summary>
+    public KillClaim TryBeginKill(string reason, out Task? whenStatementsEnd, out Task<TransactionKillOutcome>? outcome)
+    {
+        whenStatementsEnd = null;
+
+        lock (gate)
+        {
+            outcome = killDone?.Task;
+
+            if (killed)
+                return KillClaim.AlreadyKilled;
+
+            if (finalizing)
+                return KillClaim.Finalizing;
+
+            if (Transaction.Status != KvTransactionStatus.Active)
+                return KillClaim.OutcomeUnknown;
+
+            killed = true;
+            killDone = new TaskCompletionSource<TransactionKillOutcome>(TaskCreationOptions.RunContinuationsAsynchronously);
+            outcome = killDone.Task;
+
+            // No await under the lock: this sets two fields of the transaction.
+            Transaction.MarkKilled(reason);
+
+            if (runningStatements == 0)
+            {
+                finalizing = true;
+                return KillClaim.Claimed;
+            }
+
+            statementsEnded = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            whenStatementsEnd = statementsEnded.Task;
+            return KillClaim.Pending;
+        }
+    }
+
+    /// <summary>Reports the end of the kill's rollback to every kill that waits for it.</summary>
+    public void CompleteKill(TransactionKillOutcome outcome)
+    {
+        TaskCompletionSource<TransactionKillOutcome>? done;
+        lock (gate)
+            done = killDone;
+
+        done?.TrySetResult(outcome);
+    }
+
+    /// <summary>Reports a kill whose rollback failed to every kill that waits for it.</summary>
+    public void FailKill(Exception failure)
+    {
+        TaskCompletionSource<TransactionKillOutcome>? done;
+        lock (gate)
+            done = killDone;
+
+        if (done is null)
+            return;
+
+        done.TrySetException(failure);
+
+        // Observed here: no kill may be waiting for it any more, and a faulted task nobody reads is
+        // reported as unobserved.
+        _ = done.Task.Exception;
     }
 
     /// <summary>
@@ -105,7 +249,7 @@ internal sealed class ActiveTransaction(KvTransactionsManager manager, KvTransac
     {
         lock (gate)
         {
-            if (finalizing)
+            if (finalizing || killed)
                 return false;
 
             lastActivityTicks = Stopwatch.GetTimestamp();
@@ -120,13 +264,14 @@ internal sealed class ActiveTransaction(KvTransactionsManager manager, KvTransac
     /// timed out on a slow commit and sent it again — could both drive the commit protocol.
     ///
     /// <para>A running statement does not stop the claim: a client may roll back a transaction whose
-    /// statement it no longer waits for.</para>
+    /// statement it no longer waits for. A kill does: the kill owns the finalize of a transaction it
+    /// fenced.</para>
     /// </summary>
     public bool TryBeginFinalize()
     {
         lock (gate)
         {
-            if (finalizing)
+            if (finalizing || killed)
                 return false;
 
             finalizing = true;
@@ -143,7 +288,7 @@ internal sealed class ActiveTransaction(KvTransactionsManager manager, KvTransac
     {
         lock (gate)
         {
-            if (finalizing || ownedByRequest || runningStatements > 0)
+            if (finalizing || killed || ownedByRequest || runningStatements > 0)
                 return false;
 
             if (Stopwatch.GetElapsedTime(lastActivityTicks) < idleTimeout)
@@ -169,4 +314,23 @@ internal sealed class ActiveTransaction(KvTransactionsManager manager, KvTransac
             lastActivityTicks = Stopwatch.GetTimestamp();
         }
     }
+}
+
+/// <summary>What <see cref="ActiveTransaction.TryBeginKill"/> did.</summary>
+internal enum KillClaim
+{
+    /// <summary>No statement ran: the kill fenced the transaction and holds the finalize claim. Roll back now.</summary>
+    Claimed,
+
+    /// <summary>The kill fenced the transaction; it takes the finalize claim when the last running statement ends.</summary>
+    Pending,
+
+    /// <summary>An earlier kill fenced the transaction. Wait for its outcome.</summary>
+    AlreadyKilled,
+
+    /// <summary>A commit, rollback or reap holds the finalize claim. Nothing was fenced.</summary>
+    Finalizing,
+
+    /// <summary>A commit of the transaction got no answer, so its outcome belongs to the storage layer. Nothing was fenced.</summary>
+    OutcomeUnknown,
 }

@@ -1,4 +1,4 @@
-# Running queries and connections — `SHOW QUERIES`, `SHOW CONNECTIONS`, `CANCEL QUERY`
+# Running queries, connections and transactions — `SHOW QUERIES`, `SHOW CONNECTIONS`, `SHOW TRANSACTIONS`, `CANCEL QUERY`, `KILL TRANSACTION`
 
 CamusDB does not use session objects. A client sends each statement over HTTP or gRPC, and a
 transaction lives across requests as a handle. The following statements show what the clients are
@@ -12,15 +12,22 @@ SHOW CLUSTER QUERIES;                  -- the same, from every node of the clust
 SHOW CONNECTIONS;                      -- client connections this node holds open now
 SHOW CLUSTER CONNECTIONS;              -- the same, from every node of the cluster
 
-CANCEL QUERY 'b71a90e314-45';          -- stop one running query, on any node
+SHOW TRANSACTIONS;                     -- open explicit transactions on this node, idle ones included
+SHOW CLUSTER TRANSACTIONS;             -- the same, from every node of the cluster
+
+CANCEL QUERY 'b71a90e314-45';                   -- stop one running query, on any node
+KILL TRANSACTION 'b71a90e314-t1764000000000.3'; -- roll back one open transaction, on any node
 ```
 
 They are the CamusDB form of CockroachDB `SHOW CLUSTER QUERIES` / `CANCEL QUERY` and MySQL
 `SHOW FULL PROCESSLIST` / `KILL QUERY`. None of the words is reserved: `queries`, `connections`,
-`cancel` and `query` can be used as table and column names.
+`transactions`, `cancel`, `query` and `kill` can be used as table and column names.
 
-All five statements are server-level. They need no database and open no transaction. You can send
+All eight statements are server-level. They need no database and open no transaction. You can send
 them with an empty database name.
+
+To find and end a transaction that blocks other work, see
+[Find and end a blocking transaction](#find-and-end-a-blocking-transaction).
 
 ## `SHOW QUERIES`
 
@@ -108,21 +115,135 @@ network buffer ahead of a slow client. A client that reads very slowly first rec
 are already in that buffer, then the error. Until then, the statement is listed with
 `cancel_requested = true`.
 
+## `SHOW TRANSACTIONS`
+
+One row per open explicit transaction that this node tracks, oldest first: a transaction a client
+began with `BEGIN` (`/start-transaction`, gRPC `StartTransaction`, or a `START` op on a `BatchExecute`
+stream) and has not committed or rolled back yet. A transaction that waits for its client between
+statements is listed too; it is the kind that `SHOW QUERIES` cannot show. The server-side transaction
+of an autocommit statement is not listed: `SHOW QUERIES` lists that statement with its `transaction_id`.
+
+| Column | Meaning |
+|---|---|
+| `transaction_id` | The id `KILL TRANSACTION` takes, `{node and process tag}-t{pt}.{counter}`. `{pt}.{counter}` is the handle that `SHOW QUERIES` reports as `transaction_id`. |
+| `node` | The node that holds the transaction: the node its client began it on. |
+| `database_name` | The database the transaction was begun in. |
+| `user_name` | The user who began it. NULL when authentication is off, and, for a gRPC `StartTransaction`, until its first statement. |
+| `client_address` | The client's IP address at the begin. |
+| `transport` | `http`, `grpc`, `grpc-stream` or `embedded`, for the request that began it. |
+| `isolation` | `ReadCommitted` or `Serializable`. |
+| `locking` | `Pessimistic` or `Optimistic`. |
+| `mode` | `ReadWrite` or `ReadOnly`. |
+| `started_at` | When the transaction began, UTC. |
+| `age_ms` | How long it has been open. |
+| `idle_ms` | How long it has waited for its client since its last statement ended. 0 unless `state` is `idle`. |
+| `state` | `idle`: no statement runs. `running`: a statement runs. `finalizing`: a commit, a rollback or a kill's rollback runs. `killing`: `KILL TRANSACTION` ended it, and its rollback waits for a running statement. |
+| `query_id` | The `SHOW QUERIES` id of the oldest statement that runs on it now. NULL when none runs. |
+| `last_sql` | The last statement it ran, with credential literals masked, cut to `query_activity_max_sql_length`. NULL before the first statement. The typed row APIs send no SQL and leave it unchanged. |
+| `modified_keys` | The keys it has written so far: rows, index entries and out-of-line values. A transaction that wrote nothing holds no row lock. |
+| `holds_ddl_lock` | True when a DDL statement of it holds its database's DDL lock (`transactional_ddl_enabled`). Every other DDL of that database waits until it ends. |
+| `error` | NULL on a transaction row. See [Cluster forms](#cluster-forms). |
+
+## `KILL TRANSACTION`
+
+`KILL TRANSACTION '<transaction_id>'` rolls back one open explicit transaction and returns no rows.
+Its locks are released, and a writer that waited for them proceeds. A transaction whose DDL held the
+DDL lock gives up its schema changes and the lock.
+
+The id names its node and its process, which means that you can send the kill to any node, and an id
+copied before the node restarted cannot end a transaction of the restarted process.
+
+The client of the killed transaction receives `CADB0565` (gRPC `FAILED_PRECONDITION`) on its next
+statement and on its `COMMIT`, with the user and time of the kill. Its `ROLLBACK` succeeds. The client
+must begin a new transaction. The node writes one Warning line to its log for each kill, naming the
+transaction, its owner and who killed it.
+
+| Code | Meaning |
+|---|---|
+| `CADB0566` | No open transaction has this id. The transaction may have ended or may belong to another user. The id may also be wrong. |
+| `CADB0568` | The kill is in effect, and a statement of the transaction still runs. See [What a kill does to a running statement](#what-a-kill-does-to-a-running-statement). |
+| `CADB0501` | A commit or a rollback of the transaction won: it committed before the kill, or its outcome is not known yet. The message says which. |
+| `CADB0567` | The node that may own the transaction did not answer. The transaction may still be open; send the kill again. |
+
+A kill of a transaction that the kill already ended succeeds again. That is how you confirm a pending
+kill.
+
+### What a kill does to a running statement
+
+The kill ends the transaction at once: from that moment it runs no new statement and cannot commit.
+The rollback itself waits until no statement of the transaction runs, because a rollback beside a
+running write would race the write's own changes.
+
+- A read stops at its next row with `CADB0565`.
+- A write stops before its next write reaches storage, with `CADB0565`.
+- When the statement ends, the rollback runs and the locks are released.
+
+The kill waits for that up to half of `cluster_activity_peer_timeout_ms`. If the statement has not
+ended by then, the kill returns `CADB0568` (gRPC `DEADLINE_EXCEEDED`), `SHOW TRANSACTIONS` shows the
+transaction as `killing`, and the rollback still runs when the statement ends. Send the same kill
+again to learn whether it ran.
+
+A statement ends when it asks for its next row or makes its next write. A client that stops reading a
+large result in the middle holds its statement, and with it the rollback, until it reads again or its
+connection closes. The server notices a closed connection at once, and a client host that died
+without closing it within about two minutes (TCP keepalive).
+
+### A kill and a commit at once
+
+The kill and the transaction's own `COMMIT` or `ROLLBACK` compete for the same claim, and exactly one
+of them wins. When the commit wins, the kill reports `CADB0501` and says that the transaction
+committed. When the kill wins, the commit reports `CADB0565`. A transaction whose last `COMMIT` got no
+answer cannot be killed: its outcome is decided by the storage layer, and the kill reports
+`CADB0501` so the client can send its `COMMIT` again to learn it.
+
+## Find and end a blocking transaction
+
+A table refuses writes with a lock or conflict error (`CADB0502`, `CADB0504`, `CADB0555`), or a schema
+change waits, and no running statement in `SHOW QUERIES` explains it. The usual cause is an explicit
+transaction that wrote to the table, or ran DDL, and then stopped sending statements.
+
+1. List the open transactions of the whole cluster:
+
+   ```sql
+   SHOW CLUSTER TRANSACTIONS;
+   ```
+
+2. Look for a row of the table's database with `state = 'idle'`, a large `idle_ms`, and
+   `modified_keys` above 0 or `holds_ddl_lock = true`. `last_sql` shows what it ran last, and
+   `user_name` and `client_address` show whose it is.
+
+3. End it:
+
+   ```sql
+   KILL TRANSACTION 'b71a90e314-t1764000000000.3';
+   ```
+
+   The blocked writer can run again at once. If the kill returns `CADB0568`, a statement of the
+   transaction still runs; the rollback runs when it ends.
+
+4. Tell the owner of the client. Their next statement on that transaction fails with `CADB0565`.
+
+The idle reaper ends such a transaction too, but only after `transaction_idle_timeout_ms` (5 minutes
+by default), and every statement of the transaction restarts that time.
+
 ## Who sees what
 
-- With authentication off, all callers see all rows and can cancel any query.
-- A superuser sees all rows and can cancel any query.
-- Any other user sees only their own statements and connections, and can cancel only their own
-  queries. A cancel of another user's query returns `CADB0551`, the same as an unknown id. This means
-  that the answer does not tell which ids other users own.
+- With authentication off, all callers see all rows and can cancel any query and kill any
+  transaction.
+- A superuser sees all rows and can cancel any query and kill any transaction.
+- Any other user sees only their own statements, connections and transactions, and can cancel and kill
+  only their own. A cancel or kill of another user's id returns `CADB0551` or `CADB0566`, the same as an
+  unknown id. This means that the answer does not tell which ids other users own.
 
 The rows carry the literal SQL text of statements, which is why the filter is per user. The filter
 is applied on the node that owns the rows, and another user's text never leaves that node.
 
 ## Cluster forms
 
-`SHOW CLUSTER QUERIES` and `SHOW CLUSTER CONNECTIONS` ask the other cluster members for their rows,
-in parallel, over the node-to-node HTTP channel that the node secret authenticates.
+`SHOW CLUSTER QUERIES`, `SHOW CLUSTER CONNECTIONS` and `SHOW CLUSTER TRANSACTIONS` ask the other
+cluster members for their rows, in parallel, over the node-to-node HTTP channel that the node secret
+authenticates. A `CANCEL QUERY` or `KILL TRANSACTION` for an id of another node goes to that node
+over the same channel.
 
 A member that does not answer within `cluster_activity_peer_timeout_ms` does not fail the
 statement. It gives one row with its `node` and the `error` column set, and all other columns NULL.
@@ -149,7 +270,7 @@ cluster_activity_max_concurrent_fan_outs: 8
 |---|---|---|
 | `query_activity_enabled` | `true` | Lists running statements. Off: no statement is listed, and none can be cancelled with `CANCEL QUERY`. |
 | `query_activity_max_sql_length` | `1024` | Characters of statement text shown per row. |
-| `cluster_activity_peer_timeout_ms` | `2000` | How long the cluster forms and a forwarded cancel wait for one peer. |
+| `cluster_activity_peer_timeout_ms` | `2000` | How long the cluster forms, a forwarded cancel and a forwarded kill wait for one peer. A kill waits half of it for its rollback. |
 | `cluster_activity_max_concurrent_fan_outs` | `8` | Maximum number of cluster forms in progress on one node at one time. `0` disables the cap. |
 
 All four are runtime settings. A change made with `SET CLUSTER SETTING` affects the next statement,
@@ -162,6 +283,10 @@ linked cancellation token. The statement text is not copied; it is masked and cu
 reads the list. The `kind` column comes from the parse that the statement does anyway. A read of the
 list parses no SQL.
 
+An explicit transaction costs one small object at its begin, for `SHOW TRANSACTIONS`, and one
+reference write per statement for `last_sql`. An autocommit statement pays nothing for it. A write
+checks for a kill once per batch it writes. These costs do not depend on `query_activity_enabled`.
+
 ## Limits
 
 - The typed row APIs (`/query`, `/insert`, `/update`, `/delete` and the gRPC `CamusRows` service)
@@ -169,5 +294,10 @@ list parses no SQL.
 - The span scans that a node performs for another node's distributed query are not listed on that
   node. The coordinator's statement is listed.
 - An explicit transaction that waits between statements is not running a statement. It does not
-  appear in `SHOW QUERIES`, and its connection shows a growing `idle_ms`.
+  appear in `SHOW QUERIES`; it appears in `SHOW TRANSACTIONS` with `state = 'idle'`.
+- A conflict error names the table and the keys, but not the transaction that holds them. Find it
+  with [Find and end a blocking transaction](#find-and-end-a-blocking-transaction).
+- `SHOW TRANSACTIONS` does not list which tables a transaction locks or which statements wait for it.
+- A kill record, which lets the killed client read `CADB0565`, is kept for one hour. After that, the
+  client's next request on the old handle gets "Unknown transaction".
 - There is no `KILL CONNECTION` yet.

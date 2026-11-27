@@ -132,6 +132,16 @@ public static class GrpcErrorMapper
         // The node that may own the statement did not answer; the same cancel can be tried again.
         CamusDBErrorCodes.QueryOwnerUnreachable => StatusCode.Unavailable,
 
+        // KILL TRANSACTION ended the transaction. It is not in the retryable ABORTED family: the
+        // client must decide whether to run the work again.
+        CamusDBErrorCodes.TransactionKilled => StatusCode.FailedPrecondition,
+        CamusDBErrorCodes.TransactionNotFound => StatusCode.NotFound,
+        CamusDBErrorCodes.TransactionOwnerUnreachable => StatusCode.Unavailable,
+
+        // The kill is in effect, and its rollback waits for a running statement to end. DEADLINE_EXCEEDED
+        // is gRPC's name for an operation that did not complete in time and may still complete.
+        CamusDBErrorCodes.TransactionKillPending => StatusCode.DeadlineExceeded,
+
         // The trigger's extension is missing here or differs from the one it was created with; a
         // node that deploys the right file can run the same statement.
         CamusDBErrorCodes.TriggerBindingMismatch => StatusCode.Unavailable,

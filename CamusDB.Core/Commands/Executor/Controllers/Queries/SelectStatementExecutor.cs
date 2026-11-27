@@ -585,6 +585,22 @@ internal sealed class SelectStatementExecutor
             return (null!, schemaQuerier.ShowConnections(rows));
         }
 
+        // SHOW [CLUSTER] TRANSACTIONS reports the open explicit transactions, idle ones included, that
+        // the host of this node, or of every member, tracks. Filtered to the caller where the rows are
+        // built, as above.
+        if (ast.nodeType is NodeType.ShowTransactions or NodeType.ShowClusterTransactions)
+        {
+            if (schemaOut is not null)
+                schemaOut.Schema = DerivedTableSchemaBuilder.ShowTransactionsSchema;
+
+            List<TransactionActivityRow> rows = await queryActivityService.ListTransactionsAsync(
+                ast.nodeType == NodeType.ShowClusterTransactions,
+                statementAuthorizer.ActivityViewerFor(ticket),
+                ticket.CancellationToken).ConfigureAwait(false);
+
+            return (null!, schemaQuerier.ShowTransactions(rows));
+        }
+
         // SHOW EXTENSIONS reports the C# extensions this engine loaded when it was constructed, and, when
         // the statement names a database, which of them that database installed and which installed
         // ones this node cannot run. Node-local: each node deploys its own files, and comparing the rows

@@ -134,6 +134,9 @@ public sealed class AbandonedTransactionReaper : BackgroundService
                         logger.LogWarning(
                             "Released {Count} key(s) held by abandoned transaction(s) whose coordinator session was unknown",
                             released);
+
+                    // The records that let a killed transaction's client read why it ended expire here.
+                    coordinator.PurgeKillRecords();
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                 {
