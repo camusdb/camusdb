@@ -1350,4 +1350,26 @@ public enum NodeType
     /// sends the member's number between nodes.
     /// </summary>
     IndexExpression,
+
+    /// <summary>
+    /// <c>SHOW TRANSACTIONS</c>. Lists the open explicit transactions this node tracks, idle ones
+    /// included, so an operator can find the one that holds locks other work waits for. Node-local and
+    /// dispatched before any database is opened. Each user sees only their own transactions unless they
+    /// are a superuser. The members from here to <see cref="KillTransaction"/> are appended at the end
+    /// because <see cref="NodeAstWireCodec"/> sends the member's number between nodes.
+    /// </summary>
+    ShowTransactions,
+
+    /// <summary>
+    /// <c>SHOW CLUSTER TRANSACTIONS</c>: <see cref="ShowTransactions"/> gathered from every cluster
+    /// member. A member that does not answer gives one row with its error.
+    /// </summary>
+    ShowClusterTransactions,
+
+    /// <summary>
+    /// <c>KILL TRANSACTION 'id'</c>. <c>leftAst</c> = the string node that holds the transaction id.
+    /// Rolls back an open explicit transaction on whichever member owns the id. Server-level: it opens
+    /// no database and no transaction, and returns no rows.
+    /// </summary>
+    KillTransaction,
 }

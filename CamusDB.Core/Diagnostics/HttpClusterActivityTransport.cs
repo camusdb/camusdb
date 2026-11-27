@@ -53,6 +53,23 @@ public sealed class HttpClusterActivityTransport : IClusterActivityTransport
         return response.Outcome;
     }
 
+    public async Task<List<TransactionActivityRow>> ListTransactionsAsync(string targetRaftEndpoint, ActivityViewer viewer, CancellationToken cancellationToken)
+        => await PostAsync<ClusterActivityWire.ListRequest, List<TransactionActivityRow>>(
+            targetRaftEndpoint, ClusterActivityWire.TransactionsPath, new ClusterActivityWire.ListRequest(viewer), cancellationToken).ConfigureAwait(false);
+
+    public async Task<TransactionKillOutcome> KillTransactionAsync(
+        string targetRaftEndpoint, string transactionId, ActivityViewer viewer, TransactionKiller killedBy, CancellationToken cancellationToken)
+    {
+        ClusterActivityWire.KillTransactionResponse response = await PostAsync<ClusterActivityWire.KillTransactionRequest, ClusterActivityWire.KillTransactionResponse>(
+            targetRaftEndpoint, ClusterActivityWire.KillTransactionPath,
+            new ClusterActivityWire.KillTransactionRequest(transactionId, viewer, killedBy), cancellationToken).ConfigureAwait(false);
+
+        if (response.ErrorCode is not null)
+            throw new CamusDBException(response.ErrorCode, response.ErrorMessage ?? "");
+
+        return response.Outcome;
+    }
+
     private async Task<TResponse> PostAsync<TRequest, TResponse>(
         string targetRaftEndpoint, string path, TRequest body, CancellationToken cancellationToken)
     {

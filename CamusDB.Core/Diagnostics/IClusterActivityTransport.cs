@@ -9,7 +9,8 @@ namespace CamusDB.Core.Diagnostics;
 
 /// <summary>
 /// Node-to-node channel for the cluster forms of the activity statements: it asks one peer for its
-/// running statements or its connections, and asks it to cancel one of its statements. The target is
+/// running statements, its connections or its open transactions, and asks it to cancel one of its
+/// statements or kill one of its transactions. The target is
 /// addressed by its Raft endpoint, as the other node-to-node channels do; each implementation owns
 /// the mapping to its own wire address.
 ///
@@ -20,7 +21,8 @@ namespace CamusDB.Core.Diagnostics;
 ///
 /// <para>Contract for implementations: no transparent retries, and every failure surfaces as a
 /// thrown exception. The caller decides what a failure means: a list reports it as an error row, a
-/// cancel as <see cref="CamusDBErrorCodes.QueryOwnerUnreachable"/>.</para>
+/// cancel as <see cref="CamusDBErrorCodes.QueryOwnerUnreachable"/>, a kill as
+/// <see cref="CamusDBErrorCodes.TransactionOwnerUnreachable"/>.</para>
 /// </summary>
 public interface IClusterActivityTransport
 {
@@ -32,4 +34,15 @@ public interface IClusterActivityTransport
 
     /// <summary>Asks <paramref name="targetRaftEndpoint"/> to cancel its statement <paramref name="queryId"/>.</summary>
     Task<QueryCancelOutcome> CancelAsync(string targetRaftEndpoint, string queryId, ActivityViewer viewer, CancellationToken cancellationToken);
+
+    /// <summary>The open explicit transactions of <paramref name="targetRaftEndpoint"/> that <paramref name="viewer"/> may see.</summary>
+    Task<List<TransactionActivityRow>> ListTransactionsAsync(string targetRaftEndpoint, ActivityViewer viewer, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Asks <paramref name="targetRaftEndpoint"/> to kill its transaction <paramref name="transactionId"/>.
+    /// A rollback that failed on the owner surfaces as a <see cref="CamusDBException"/> with the owner's
+    /// error code; any other failure means the owner did not answer.
+    /// </summary>
+    Task<TransactionKillOutcome> KillTransactionAsync(
+        string targetRaftEndpoint, string transactionId, ActivityViewer viewer, TransactionKiller killedBy, CancellationToken cancellationToken);
 }

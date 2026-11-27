@@ -429,6 +429,33 @@ internal static class DerivedTableSchemaBuilder
         new("error",          ColumnType.String),
     ];
 
+    // SHOW [CLUSTER] TRANSACTIONS: one row per open explicit transaction, oldest first. `transaction_id`
+    // is the id KILL TRANSACTION takes. `state` is idle, running, finalizing or killing; `idle_ms` is 0
+    // unless the state is idle. `query_id` is the SHOW QUERIES id of the oldest running statement, NULL
+    // when none runs. `last_sql` is NULL before the first statement. `error` follows the rule of
+    // SHOW QUERIES.
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowTransactionsSchema =
+    [
+        new("transaction_id", ColumnType.String),
+        new("node",           ColumnType.String),
+        new("database_name",  ColumnType.String),
+        new("user_name",      ColumnType.String),
+        new("client_address", ColumnType.String),
+        new("transport",      ColumnType.String),
+        new("isolation",      ColumnType.String),
+        new("locking",        ColumnType.String),
+        new("mode",           ColumnType.String),
+        new("started_at",     ColumnType.String),
+        new("age_ms",         ColumnType.Float64),
+        new("idle_ms",        ColumnType.Float64),
+        new("state",          ColumnType.String),
+        new("query_id",       ColumnType.String),
+        new("last_sql",       ColumnType.String),
+        new("modified_keys",  ColumnType.Integer64),
+        new("holds_ddl_lock", ColumnType.Bool),
+        new("error",          ColumnType.String),
+    ];
+
     // SHOW VARIABLES: one row per configuration setting this node resolved at startup. `value` and
     // `default` are rendered as strings rather than typed columns because the settings are a mix of
     // bool/int/double/string/enum and a single result set has one type per column; `type` carries the

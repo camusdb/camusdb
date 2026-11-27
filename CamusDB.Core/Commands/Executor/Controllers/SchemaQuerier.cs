@@ -1658,6 +1658,43 @@ internal sealed class SchemaQuerier
     }
 
     /// <summary>
+    /// Renders the rows of <c>SHOW [CLUSTER] TRANSACTIONS</c>. The rows arrive already filtered to what
+    /// the caller may see and with their SQL already redacted; see <see cref="QueryActivityService"/>.
+    /// An error row keeps only <c>node</c> and <c>error</c>.
+    /// </summary>
+    internal async IAsyncEnumerable<QueryResultRow> ShowTransactions(IReadOnlyList<TransactionActivityRow> rows)
+    {
+        await Task.CompletedTask;
+
+        foreach (TransactionActivityRow row in rows)
+        {
+            bool error = row.Error is not null;
+
+            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "transaction_id", error ? ColumnValue.Null : new ColumnValue(ColumnType.String, row.TransactionId) },
+                { "node",           new ColumnValue(ColumnType.String, row.Node) },
+                { "database_name",  error ? ColumnValue.Null : new ColumnValue(ColumnType.String, row.Database) },
+                { "user_name",      Text(row.UserName) },
+                { "client_address", Text(row.ClientAddress) },
+                { "transport",      error ? ColumnValue.Null : new ColumnValue(ColumnType.String, row.Transport) },
+                { "isolation",      error ? ColumnValue.Null : new ColumnValue(ColumnType.String, row.Isolation) },
+                { "locking",        error ? ColumnValue.Null : new ColumnValue(ColumnType.String, row.Locking) },
+                { "mode",           error ? ColumnValue.Null : new ColumnValue(ColumnType.String, row.Mode) },
+                { "started_at",     error ? ColumnValue.Null : new ColumnValue(ColumnType.String, row.StartedAt.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture)) },
+                { "age_ms",         error ? ColumnValue.Null : new ColumnValue(ColumnType.Float64, row.AgeMs) },
+                { "idle_ms",        error ? ColumnValue.Null : new ColumnValue(ColumnType.Float64, row.IdleMs) },
+                { "state",          error ? ColumnValue.Null : new ColumnValue(ColumnType.String, row.State) },
+                { "query_id",       Text(row.QueryId) },
+                { "last_sql",       Text(row.LastSql) },
+                { "modified_keys",  error ? ColumnValue.Null : new ColumnValue(ColumnType.Integer64, (long)row.ModifiedKeys) },
+                { "holds_ddl_lock", error ? ColumnValue.Null : ColumnValue.FromBool(row.HoldsDdlLock) },
+                { "error",          Text(row.Error) },
+            });
+        }
+    }
+
+    /// <summary>
     /// Renders the rows of <c>SHOW [CLUSTER] CONNECTIONS</c>. The rows arrive already filtered to
     /// what the caller may see.
     /// </summary>

@@ -127,6 +127,10 @@ public sealed class QueryActivityRegistry
         // stays available with the list off, and its visibility rule depends on that user.
         origin?.Connection?.NoteStatement(ticket.Principal?.UserName, ticket.Principal?.UserId);
 
+        // An explicit transaction records its last statement for SHOW TRANSACTIONS on the same terms.
+        // Every SQL statement of a transaction passes here, so this is the one place that sees them all.
+        ticket.TxnState?.Activity?.NoteStatement(ticket.Sql, ticket.Principal, Math.Max(1, options.QueryActivityMaxSqlLength));
+
         if (!options.QueryActivityEnabled)
             return null;
 
@@ -248,6 +252,28 @@ public sealed class QueryActivityRegistry
     public bool IsLocalId(string queryId) => queryId.StartsWith(ids.Prefix, StringComparison.Ordinal) &&
                                              queryId.Length > ids.Prefix.Length &&
                                              queryId[ids.Prefix.Length] == '-';
+
+    /// <summary>
+    /// The id of the oldest statement that runs now on each transaction, keyed by the transaction's
+    /// client handle, for the <c>query_id</c> column of <c>SHOW TRANSACTIONS</c>. One pass over the
+    /// running statements, made only when someone reads the list.
+    /// </summary>
+    internal Dictionary<HLCTimestamp, QueryActivityEntry> OldestStatementByTransaction()
+    {
+        Dictionary<HLCTimestamp, QueryActivityEntry> oldest = [];
+
+        foreach (KeyValuePair<long, QueryActivityEntry> pair in running)
+        {
+            QueryActivityEntry entry = pair.Value;
+            if (entry.TransactionClientId == HLCTimestamp.Zero)
+                continue;
+
+            if (!oldest.TryGetValue(entry.TransactionClientId, out QueryActivityEntry? current) || entry.Sequence < current.Sequence)
+                oldest[entry.TransactionClientId] = entry;
+        }
+
+        return oldest;
+    }
 }
 
 /// <summary>

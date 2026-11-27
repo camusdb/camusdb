@@ -800,6 +800,48 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string TooManyTablesInStatement = "CADB0564";
 
+    /// <summary>
+    /// <c>KILL TRANSACTION</c> ended this transaction. The transaction is rolled back, or is rolled back
+    /// as soon as its running statement ends, and accepts no further statement and no commit. A
+    /// <c>ROLLBACK</c> of it succeeds. The client must begin a new transaction; replaying the same work
+    /// at once can meet the same operator again, so it is not retried for the client. Maps to HTTP 409
+    /// and gRPC <c>FAILED_PRECONDITION</c>.
+    /// </summary>
+    public const string TransactionKilled = "CADB0565";
+
+    /// <summary>
+    /// <c>KILL TRANSACTION</c> named an id that no open explicit transaction holds: the transaction
+    /// already ended, the id is mistyped, or the transaction belongs to another user and the caller is
+    /// not a superuser. The last case reports the same code on purpose, as <see cref="QueryNotFound"/>
+    /// does. Maps to HTTP 404.
+    /// </summary>
+    public const string TransactionNotFound = "CADB0566";
+
+    /// <summary>
+    /// <c>KILL TRANSACTION</c> named a transaction on a peer node that did not answer in time, so the
+    /// transaction may still be open. The same kill can be sent again. Maps to HTTP 503.
+    /// </summary>
+    public const string TransactionOwnerUnreachable = "CADB0567";
+
+    /// <summary>
+    /// <c>KILL TRANSACTION</c> fenced the transaction, so it runs no further statement and cannot commit,
+    /// but its rollback had not ended when the kill stopped waiting: a statement of it still ran, or the
+    /// rollback itself was still in progress. The rollback runs, and the locks are released, when that
+    /// statement ends (a read stops at its next row, and a write stops at its next write) or when the
+    /// rollback completes. The same kill can be sent again to learn how the rollback ended. Maps to HTTP
+    /// 409 and gRPC <c>DEADLINE_EXCEEDED</c>.
+    /// </summary>
+    public const string TransactionKillPending = "CADB0568";
+
+    /// <summary>
+    /// <c>KILL TRANSACTION</c> fenced the transaction, but its rollback failed. The transaction accepts
+    /// no further statement and no commit, and the host no longer tracks it; the storage node releases
+    /// what the rollback did not when the transaction's session there expires. The same kill sent again
+    /// reports this code again, never success, because the release was not confirmed. Maps to HTTP 500
+    /// and gRPC <c>INTERNAL</c>.
+    /// </summary>
+    public const string TransactionKillRollbackFailed = "CADB0569";
+
     public const string InvalidConfig = "CADB0600";
 
     /// <summary>
@@ -1375,6 +1417,11 @@ public static class CamusDBErrorCodes
         QueryNotCancellable => 409,
         QueryOwnerUnreachable => 503,
         QueryCancelled => 409,
+        TransactionKilled => 409,
+        TransactionNotFound => 404,
+        TransactionOwnerUnreachable => 503,
+        TransactionKillPending => 409,
+        TransactionKillRollbackFailed => 500,
         LockNotAvailable => 409,
         SnapshotPrecedesContentsGeneration => 400,
         StatementNotAllowedInTransaction => 400,

@@ -51,7 +51,10 @@ public static class StatementScope
         NodeType.SetClusterSetting or NodeType.ResetClusterSetting or
         // A cancel acts on this process's running-statement list, or on a peer's. It names no
         // database, so a transport must open neither one nor a transaction for it.
-        NodeType.CancelQuery;
+        NodeType.CancelQuery or
+        // A kill acts on the host's list of open transactions, or on a peer's, and rolls the named
+        // transaction back through its own manager. It opens no database and no transaction itself.
+        NodeType.KillTransaction;
 
     /// <summary>
     /// True for schema DDL: statements that change what objects a database contains, run inside their
@@ -139,9 +142,10 @@ public static class StatementScope
         NodeType.ShowStatementStats or
         // The cluster-wide settings overlay; not read from any database either.
         NodeType.ShowClusterSettings or
-        // The statements and connections this process, or the cluster, serves now.
+        // The statements, connections and open transactions this process, or the cluster, serves now.
         NodeType.ShowQueries or NodeType.ShowClusterQueries or
-        NodeType.ShowConnections or NodeType.ShowClusterConnections;
+        NodeType.ShowConnections or NodeType.ShowClusterConnections or
+        NodeType.ShowTransactions or NodeType.ShowClusterTransactions;
 
     /// <summary>
     /// True for the statements that <c>CommandExecutor.ExecuteSQLQuery</c> answers with rows:
