@@ -694,7 +694,8 @@ public sealed class TestClusterTransactionalDdlFaults
 
     /// <summary>
     /// The schema leader dies while a driver on a follower is at each step. The survivors end the change set
-    /// as the rows did, and a node that joins afterwards gets the same schema.
+    /// as the rows did, and a node that joins afterwards gets the same schema. The leader can hold the session
+    /// of the transaction, so the COMMIT can end with an unknown outcome; the rows tell it then.
     /// </summary>
     [Test]
     public async Task SchemaLeaderDies_TheChangeEndsAsTheKvCommitDecided(
@@ -719,7 +720,7 @@ public sealed class TestClusterTransactionalDdlFaults
             await cluster.KillNodeAsync(scenario.Leader.Index);
         };
 
-        bool applied = await FinalizeAsync(driver, tx, step);
+        bool applied = await FinalizeAsync(driver, tx, step, cluster);
         Assert.IsTrue(died, $"the driver must reach {at}");
 
         await AssertEndsAsync(scenario, applied);
