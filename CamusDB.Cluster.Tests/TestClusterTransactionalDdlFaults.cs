@@ -430,6 +430,11 @@ public sealed class TestClusterTransactionalDdlFaults
     /// A COMMIT on a follower waits at the schema leader, whose DDL gate another statement holds, and then
     /// the leadership moves to the follower. The COMMIT must not wait for the gate of the old leader: the
     /// statement that holds it can now wait for the gate that the COMMIT holds.
+    ///
+    /// <para>The schema-log partition also holds rows that the migration writes. Its leader change drops the
+    /// locks and the write intents that the transaction holds there, so the KV commit is refused with
+    /// <c>LostLock</c>, a code the client can retry. The COMMIT ends either way, and the schema ends as the
+    /// rows did.</para>
     /// </summary>
     [Test]
     public async Task SchemaLeadershipMovesToTheDriver_WhileItWaitsAtTheOldLeader()
@@ -441,6 +446,8 @@ public sealed class TestClusterTransactionalDdlFaults
         KvTransaction tx = await BeginSessionAsync(driver);
         await RunMigrationAsync(driver, tx, scenario.Db);
 
+        bool applied;
+
         await scenario.Leader.Database!.SchemaDdlSemaphore.WaitAsync();
         try
         {
@@ -450,14 +457,14 @@ public sealed class TestClusterTransactionalDdlFaults
             Assert.IsFalse(commit.IsCompleted, "the COMMIT must wait at the schema leader");
 
             await cluster.TransferSchemaLeadershipAsync(scenario.Db, driver);
-            await commit.WaitAsync(TimeSpan.FromSeconds(30));
+            applied = await CommitAsClientAsync(driver.Database!.Transactions, tx, commit.WaitAsync(TimeSpan.FromSeconds(30)));
         }
         finally
         {
             scenario.Leader.Database!.SchemaDdlSemaphore.Release();
         }
 
-        await AssertEndsAsync(scenario, applied: true);
+        await AssertEndsAsync(scenario, applied);
     }
 
     /// <summary>
@@ -606,18 +613,29 @@ public sealed class TestClusterTransactionalDdlFaults
             return false;
         }
 
+        return await CommitAsClientAsync(transactions, tx);
+    }
+
+    /// <summary>
+    /// Ends a COMMIT as a client does and returns whether the transaction committed. A COMMIT whose outcome is
+    /// not resolved is retried on the same transaction; a refusal that the client can retry is a definite
+    /// non-commit. <paramref name="started"/> is a COMMIT that the caller already started, or null.
+    /// </summary>
+    private static async Task<bool> CommitAsClientAsync(KvTransactionsManager transactions, KvTransaction tx, Task? started = null)
+    {
         Stopwatch timer = Stopwatch.StartNew();
 
         while (true)
         {
             try
             {
-                await transactions.CommitAsync(tx).WaitAsync(StatementLimit);
+                await (started ?? transactions.CommitAsync(tx).WaitAsync(StatementLimit));
                 return true;
             }
             catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.TransactionFinalizeUnresolved && timer.ElapsedMilliseconds < EndsWithinMs)
             {
                 await TestContext.Progress.WriteLineAsync($"COMMIT is not resolved: {ex.Message}");
+                started = null;
                 await Task.Delay(500);
             }
             catch (CamusDBException ex) when (IsRetryable(ex))
