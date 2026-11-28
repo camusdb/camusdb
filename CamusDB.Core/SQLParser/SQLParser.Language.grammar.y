@@ -173,6 +173,7 @@ stat    : select_stmt { $$.n = $1.n; }
         | evict_cache_stmt { $$.n = $1.n; }
         | flush_stmt { $$.n = $1.n; }
         | cancel_stmt { $$.n = $1.n; }
+        | kill_stmt { $$.n = $1.n; }
         | comment_stmt { $$.n = $1.n; }
         | create_user_stmt { $$.n = $1.n; }
         | alter_user_stmt { $$.n = $1.n; }
@@ -1313,10 +1314,13 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
             else if (string.Equals($2.s, "cluster", System.StringComparison.OrdinalIgnoreCase) &&
                 string.Equals($3.s, "connections", System.StringComparison.OrdinalIgnoreCase))
                 $$.n = new(NodeType.ShowClusterConnections, null, null, null, null, null, null, null, null);
+            else if (string.Equals($2.s, "cluster", System.StringComparison.OrdinalIgnoreCase) &&
+                string.Equals($3.s, "transactions", System.StringComparison.OrdinalIgnoreCase))
+                $$.n = new(NodeType.ShowClusterTransactions, null, null, null, null, null, null, null, null);
             else
                 throw new CamusDB.Core.CamusDBException(
                     CamusDB.Core.CamusDBErrorCodes.InvalidInput,
-                    "Expected: SHOW ENGINE STATS [LIKE '<pattern>'], SHOW CLUSTER SETTINGS [LIKE '<pattern>'], SHOW SLOW QUERIES [LIKE '<pattern>'], SHOW STATEMENT STATS [LIKE '<pattern>'], SHOW CLUSTER QUERIES [LIKE '<pattern>'] or SHOW CLUSTER CONNECTIONS");
+                    "Expected: SHOW ENGINE STATS [LIKE '<pattern>'], SHOW CLUSTER SETTINGS [LIKE '<pattern>'], SHOW SLOW QUERIES [LIKE '<pattern>'], SHOW STATEMENT STATS [LIKE '<pattern>'], SHOW CLUSTER QUERIES [LIKE '<pattern>'], SHOW CLUSTER CONNECTIONS or SHOW CLUSTER TRANSACTIONS");
           }
           | TSHOW TIDENTIFIER TIDENTIFIER TLIKE string
           {
@@ -1338,9 +1342,9 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
             else
                 throw new CamusDB.Core.CamusDBException(
                     CamusDB.Core.CamusDBErrorCodes.InvalidInput,
-                    "Expected: SHOW ENGINE STATS [LIKE '<pattern>'], SHOW CLUSTER SETTINGS [LIKE '<pattern>'], SHOW SLOW QUERIES [LIKE '<pattern>'], SHOW STATEMENT STATS [LIKE '<pattern>'], SHOW CLUSTER QUERIES [LIKE '<pattern>'] or SHOW CLUSTER CONNECTIONS");
+                    "Expected: SHOW ENGINE STATS [LIKE '<pattern>'], SHOW CLUSTER SETTINGS [LIKE '<pattern>'], SHOW SLOW QUERIES [LIKE '<pattern>'], SHOW STATEMENT STATS [LIKE '<pattern>'], SHOW CLUSTER QUERIES [LIKE '<pattern>'], SHOW CLUSTER CONNECTIONS or SHOW CLUSTER TRANSACTIONS");
           }
-          /* VARIABLES, USERS, QUERIES, CONNECTIONS and PARTITIONS are likewise plain identifiers rather than
+          /* VARIABLES, USERS, QUERIES, CONNECTIONS, TRANSACTIONS and PARTITIONS are likewise plain identifiers rather than
              keywords, so all of these words stay usable as column and table names. "users" in particular is a table name in most
              schemas, so reserving it would be a real regression. The two statements share ONE
              production per token shape and are dispatched on the word, because a second production
@@ -1360,6 +1364,8 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
                 $$.n = new(NodeType.ShowQueries, null, null, null, null, null, null, null, null);
             else if (string.Equals($2.s, "connections", System.StringComparison.OrdinalIgnoreCase))
                 $$.n = new(NodeType.ShowConnections, null, null, null, null, null, null, null, null);
+            else if (string.Equals($2.s, "transactions", System.StringComparison.OrdinalIgnoreCase))
+                $$.n = new(NodeType.ShowTransactions, null, null, null, null, null, null, null, null);
             else if (string.Equals($2.s, "extensions", System.StringComparison.OrdinalIgnoreCase))
                 $$.n = new(NodeType.ShowExtensions, null, null, null, null, null, null, null, null);
             else if (string.Equals($2.s, "functions", System.StringComparison.OrdinalIgnoreCase))
@@ -1371,7 +1377,7 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
             else
                 throw new CamusDB.Core.CamusDBException(
                     CamusDB.Core.CamusDBErrorCodes.InvalidInput,
-                    "Expected: SHOW VARIABLES [LIKE '<pattern>'], SHOW USERS [LIKE '<pattern>'], SHOW QUERIES [LIKE '<pattern>'], SHOW CONNECTIONS, SHOW EXTENSIONS, SHOW FUNCTIONS, SHOW TRIGGERS [ON <table>] or SHOW PARTITIONS");
+                    "Expected: SHOW VARIABLES [LIKE '<pattern>'], SHOW USERS [LIKE '<pattern>'], SHOW QUERIES [LIKE '<pattern>'], SHOW CONNECTIONS, SHOW TRANSACTIONS, SHOW EXTENSIONS, SHOW FUNCTIONS, SHOW TRIGGERS [ON <table>] or SHOW PARTITIONS");
           }
           /* SHOW TRIGGERS ON <table>: TRIGGERS is a plain identifier, checked in the action. */
           | TSHOW TIDENTIFIER TON any_identifier { $$.n = ShowTriggersOnStatement($2.s, $4.n); }
@@ -1484,6 +1490,19 @@ cancel_stmt : TIDENTIFIER TIDENTIFIER string
               $$.n = new(NodeType.CancelQuery, $3.n, null, null, null, null, null, null, null);
             }
             ;
+
+/* KILL TRANSACTION '<id>'. "kill" stays a plain identifier and is validated in the action; TRANSACTION
+   is already a reserved token (START TRANSACTION, SET TRANSACTION). No other statement starts with an
+   identifier followed by TRANSACTION, so the shape cannot conflict with FLUSH or CANCEL QUERY. */
+kill_stmt : TIDENTIFIER TTRANSACTION string
+          {
+            if (!string.Equals($1.s, "kill", System.StringComparison.OrdinalIgnoreCase))
+                throw new CamusDB.Core.CamusDBException(
+                    CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                    "Expected: KILL TRANSACTION '<transaction_id>'");
+            $$.n = new(NodeType.KillTransaction, $3.n, null, null, null, null, null, null, null);
+          }
+          ;
 
 /* CREATE TRIGGER <name> ON <table> {BEFORE|AFTER} <event>[, <event>...] EXTERNAL NAME '<Type>', the
    same with LANGUAGE csharp AS $$ body $$ for a body of inline C#, and

@@ -108,6 +108,8 @@ public sealed class KahunaOptionsConfig
         "transaction_outcome_retention_max",
         "one_phase_apply_time_validation",
         "durable_materialize_on_resolve",
+        "durable_merge_adjacent_settles",
+        "durable_one_phase_bundle_entry",
         "staged_base_fence_retention_ms",
         "scan_page_retry_budget_ms",
         "persistent_revision_retention_count",
@@ -558,7 +560,7 @@ public sealed class KahunaOptionsConfig
 
     /// <summary>
     /// How long the write aggregator lets a partition's oldest queued item wait, in milliseconds, before
-    /// dispatching a batch while no batch is in flight (Kahuna default 1). With one batch in flight an
+    /// dispatching a batch while no batch is in flight (Kahuna default 1; 0 on a standalone node). With one batch in flight an
     /// item already waits about one Raft round (~2.6 ms measured on tmpfs), so 1 ms never fires; raising
     /// it trades write latency for denser batches. The measured round cost is ~1.4 ms fixed plus ~18 µs
     /// per item, so density is the lever at one partition — not depth (see
@@ -570,10 +572,12 @@ public sealed class KahunaOptionsConfig
 
     /// <summary>
     /// How long the write aggregator holds after a batch completes before dispatching the next one, in
-    /// milliseconds (CamusDB default 1; Kahuna's own default is 0 = dispatch at once). The linger never
+    /// milliseconds (CamusDB default 1 in cluster mode and 0 on a standalone node; Kahuna's own
+    /// default is 0 = dispatch at once). The linger never
     /// fires at full occupancy because completion re-dispatches whatever is queued; this hold adds batch
     /// density there, at the cost of that much write latency. See
-    /// <see cref="Storage.Kv.EmbeddedKahunaOptionsBuilder.DefaultKeyValueWritePostCompletionHoldMs"/>.
+    /// <see cref="Storage.Kv.EmbeddedKahunaOptionsBuilder.DefaultKeyValueWritePostCompletionHoldMs"/> and
+    /// <see cref="Storage.Kv.EmbeddedKahunaOptionsBuilder.DefaultStandaloneKeyValueWritePostCompletionHoldMs"/>.
     /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.KeyValueWritePostCompletionHoldMs"/>.
     /// </summary>
     public int? KeyValueWritePostCompletionHoldMs { get; set; }
@@ -843,7 +847,7 @@ public sealed class KahunaOptionsConfig
     /// (the one-phase bundle's three plus one settle), and about two scheduler submissions instead of
     /// four; followers apply fewer entries and a device writes fewer bytes per commit.
     ///
-    /// <para><b>On by default in CamusDB</b> (Kahuna's own default is off): the shape passed two consecutive
+    /// <para><b>On by default in CamusDB</b> (and in Kahuna since 1.19.0): the shape passed two consecutive
     /// clean two-hour fault soaks on two released Kahuna versions, and it is a per-group property, so the
     /// baseline turns it on for every node. Two rules:</para>
     /// <list type="bullet">
@@ -860,6 +864,42 @@ public sealed class KahunaOptionsConfig
     /// baseline (on); an explicit value, including <c>false</c>, always wins.
     /// </summary>
     public bool? DurableMaterializeOnResolve { get; set; }
+
+    /// <summary>
+    /// Merged settles: when on, the write scheduler of a partition writes one log entry for each run of
+    /// adjacent commit settles in a batch, where each settle otherwise has an entry of its own. The order
+    /// of the commands in the log is the same, and every Kahuna build that installs on a settle reads the
+    /// entry, so the key needs no upgrade order and can differ between nodes. Turning it off is safe at
+    /// any time. A merged entry carries the settles of several transactions, so the durability floor of
+    /// the partition moves in larger steps.
+    ///
+    /// Needs Kahuna.Core 1.19.0 or later. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.DurableMergeAdjacentSettles"/>; unset keeps Kahuna's
+    /// default (off).
+    /// </summary>
+    public bool? DurableMergeAdjacentSettles { get; set; }
+
+    /// <summary>
+    /// One-phase bundle entry: when on, a leader writes the record init, the prepares and the decision of
+    /// a one-phase commit as one log entry, where they otherwise take three. With merged settles a
+    /// two-row transaction then costs between one and two Raft entries on its partition.
+    ///
+    /// <para>Two rules:</para>
+    /// <list type="bullet">
+    /// <item><description><b>Every node first, then the key.</b> Every node of the group must run
+    /// Kahuna.Core 1.19.0 or later before any node has this on. An older node skips the entry with no
+    /// error, so it holds no record and no intent of the transaction. A leader asks its replicas whether
+    /// they apply the entry and writes three entries until all of them confirm, which catches a key set
+    /// too early; it does not cover an older node that joins later or reads the log after a downgrade.
+    /// </description></item>
+    /// <item><description><b>Off is safe at any time.</b> A node of a current build applies the entry
+    /// whatever its own value, so the key can differ between nodes during a change.</description></item>
+    /// </list>
+    ///
+    /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.DurableOnePhaseBundleEntry"/>; unset keeps Kahuna's
+    /// default (off).
+    /// </summary>
+    public bool? DurableOnePhaseBundleEntry { get; set; }
 
     /// <summary>
     /// Milliseconds the prepare-apply staged-base fence remembers a key's last transactionally committed

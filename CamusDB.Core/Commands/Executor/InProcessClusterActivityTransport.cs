@@ -36,4 +36,11 @@ public sealed class InProcessClusterActivityTransport : IClusterActivityTranspor
 
     public Task<QueryCancelOutcome> CancelAsync(string targetRaftEndpoint, string queryId, ActivityViewer viewer, CancellationToken cancellationToken)
         => Task.FromResult(nodes.Get(targetRaftEndpoint).Executor.QueryActivity.TryCancel(queryId, viewer));
+
+    public Task<List<TransactionActivityRow>> ListTransactionsAsync(string targetRaftEndpoint, ActivityViewer viewer, CancellationToken cancellationToken)
+        => nodes.Get(targetRaftEndpoint).Executor.QueryActivityService.ListTransactionsAsync(cluster: false, viewer, cancellationToken);
+
+    public Task<TransactionKillOutcome> KillTransactionAsync(
+        string targetRaftEndpoint, string transactionId, ActivityViewer viewer, TransactionKiller killedBy, CancellationToken cancellationToken)
+        => nodes.Get(targetRaftEndpoint).Executor.QueryActivityService.KillLocalTransactionAsync(transactionId, viewer, killedBy);
 }

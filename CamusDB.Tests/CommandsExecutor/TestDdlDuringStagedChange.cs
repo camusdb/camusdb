@@ -20,17 +20,19 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.Transactions;
+using Kahuna.Shared.KeyValue;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// DDL on one database while a staged schema change backfills a table of it. The backfill used to
-/// hold the database's DDL semaphore from its first row to its last, so a <c>CREATE TABLE</c> of an
-/// unrelated table waited for the whole build. Now the change holds only its table: DDL on another
-/// table runs at once, and DDL on the same table waits until the change is done, as before.
+/// DDL on one database while a staged schema change visits the rows of a table of it: an index build, a
+/// column fill, or the validation of a CHECK or a NOT NULL. Such a pass used to hold the database's DDL
+/// semaphore from its first row to its last, so a <c>CREATE TABLE</c> of an unrelated table waited for the
+/// whole pass. The change holds only its table: DDL on another table runs at once, and DDL on the same
+/// table waits until the change is done. A standalone node and a cluster-mode node behave the same.
 ///
-/// <para>The backfill is paused at a seam between two of its batches, so the test observes the
-/// other statements against a change that is provably in its long phase, with no timing guess.</para>
+/// <para>The pass is paused at a seam, so the test observes the other statements against a change that is
+/// provably in its long phase, with no timing guess.</para>
 /// </summary>
 [NonParallelizable]
 internal abstract class DdlDuringStagedChangeScenarios : SharedNodeBaseTest
@@ -98,14 +100,14 @@ internal abstract class DdlDuringStagedChangeScenarios : SharedNodeBaseTest
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
 
-        await ExecuteDdl(executor, dbname, "CREATE TABLE items (id INT64 PRIMARY KEY, val INT64 NOT NULL)");
+        await ExecuteDdl(executor, dbname, "CREATE TABLE items (id INT64 PRIMARY KEY, val INT64 NOT NULL, note STRING)");
 
         const int rowsPerStatement = 200;
         for (int start = 1; start <= Rows; start += rowsPerStatement)
         {
             int end = Math.Min(Rows, start + rowsPerStatement - 1);
-            string values = string.Join(", ", Enumerable.Range(start, end - start + 1).Select(i => $"({i}, {i})"));
-            await ExecuteNonQuery(executor, dbname, "INSERT INTO items (id, val) VALUES " + values);
+            string values = string.Join(", ", Enumerable.Range(start, end - start + 1).Select(i => $"({i}, {i}, 'n')"));
+            await ExecuteNonQuery(executor, dbname, "INSERT INTO items (id, val, note) VALUES " + values);
         }
 
         return (dbname, database, executor);
@@ -167,9 +169,6 @@ internal abstract class DdlDuringStagedChangeScenarios : SharedNodeBaseTest
     [Test]
     public async Task CreateTableRunsDuringAnIndexBackfillWhileSameTableDdlWaits()
     {
-        if (!ClusterMode)
-            Assert.Ignore("A standalone node builds an index in two phases under the DDL gate; only the staged cluster build releases it");
-
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTable();
 
         BackfillPause pause = new();
@@ -212,6 +211,151 @@ internal abstract class DdlDuringStagedChangeScenarios : SharedNodeBaseTest
         TableColumnSchema? tier = Column(database, "items", "tier");
         Assert.That(tier, Is.Not.Null);
         Assert.That(tier!.State, Is.EqualTo(SchemaElementState.Public));
+    }
+
+    /// <summary>
+    /// <c>CREATE INDEX</c> needs the lock of a row that an open transaction holds, and waits until that
+    /// transaction ends. A <c>CREATE TABLE</c> of another table completes meanwhile, and so do other
+    /// statements on that table. One forgotten COMMIT must not stop every DDL of the database.
+    /// </summary>
+    [Test]
+    public async Task CreateTableRunsWhileAnIndexBuildWaitsForAnOpenTransaction()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTable();
+
+        KvTransaction open = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite, locking: KeyValueTransactionLocking.Pessimistic);
+        Task createIndex;
+
+        try
+        {
+            await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(open, dbname, "UPDATE items SET note = 'z' WHERE id = 123", null));
+
+            createIndex = ExecuteDdl(executor, dbname, "CREATE INDEX items_val ON items (val)");
+            Assert.That(await CompletesWithin(createIndex, NotYet), Is.False, "the build waits for the open transaction's row");
+            Assert.That(database.DdlGate.IsTableHeld("items"), Is.True, "the build holds its table while it waits");
+            Assert.That(database.SchemaDdlSemaphore.CurrentCount, Is.EqualTo(1), "and not the DDL semaphore");
+
+            foreach (string other in new[]
+            {
+                "CREATE TABLE holds (id INT64 PRIMARY KEY, amount INT64 NOT NULL)",
+                "COMMENT ON TABLE holds IS 'unrelated'",
+                "CREATE INDEX holds_amount ON holds (amount)",
+                "ALTER TABLE holds ADD CONSTRAINT amount_positive CHECK (amount > 0)",
+                "TRUNCATE TABLE holds",
+                "DROP TABLE holds",
+            })
+            {
+                Task statement = ExecuteDdl(executor, dbname, other);
+                Assert.That(await CompletesWithin(statement, Soon), Is.True, $"{other} completes while the build waits");
+                await statement;
+            }
+
+            Assert.That(createIndex.IsCompleted, Is.False, "the build still waits");
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(open);
+        }
+
+        await createIndex.WaitAsync(Soon);
+
+        Assert.That(database.Schema.Tables["items"].Indexes!.First(ix => ix.Name == "items_val").State, Is.EqualTo(SchemaElementState.Public));
+        Assert.That(await CountIndexEntries(executor, dbname, database, "items_val"), Is.EqualTo(Rows), "one entry per row");
+        Assert.That(database.DdlGate.HeldTableCount, Is.EqualTo(0));
+        Assert.That(database.SchemaDdlSemaphore.CurrentCount, Is.EqualTo(1));
+    }
+
+    /// <summary>
+    /// <c>ADD CHECK</c> and <c>SET NOT NULL</c> are paused before they read the existing rows. A
+    /// <c>CREATE TABLE</c> of another table completes meanwhile. Each statement on the same table waits,
+    /// the ones that read no row included: they persist the whole table, as the staged change does.
+    /// </summary>
+    [TestCase("ALTER TABLE items ADD CONSTRAINT val_positive CHECK (val > 0)", "ALTER TABLE items ADD COLUMN tier INT64 NOT NULL DEFAULT (7)")]
+    [TestCase("ALTER TABLE items ADD CONSTRAINT val_positive CHECK (val > 0)", "ALTER TABLE items DROP CONSTRAINT val_positive")]
+    [TestCase("ALTER TABLE items ADD CONSTRAINT val_positive CHECK (val > 0)", "ALTER TABLE items ALTER COLUMN val DROP NOT NULL")]
+    [TestCase("ALTER TABLE items ADD CONSTRAINT val_positive CHECK (val > 0)", "ALTER TABLE items ALTER COLUMN note SET STORAGE EXTERNAL")]
+    [TestCase("ALTER TABLE items ALTER COLUMN note SET NOT NULL", "CREATE INDEX items_val ON items (val)")]
+    [TestCase("ALTER TABLE items ALTER COLUMN note SET NOT NULL", "ALTER TABLE items ALTER COLUMN note DROP NOT NULL")]
+    public async Task CreateTableRunsDuringAConstraintValidationWhileSameTableDdlWaits(string constraint, string sameTable)
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTable();
+
+        BackfillPause pause = new();
+        executor.TestInterceptBeforeRowConstraintValidation = pause.OnSeam;
+
+        Task addConstraint = ExecuteDdl(executor, dbname, constraint);
+        Task? sameTableStatement = null;
+
+        try
+        {
+            Assert.That(await CompletesWithin(pause.Reached, Soon), Is.True, "the statement reaches its row scan");
+            Assert.That(database.DdlGate.IsTableHeld("items"), Is.True, "the validation holds its table");
+            Assert.That(database.SchemaDdlSemaphore.CurrentCount, Is.EqualTo(1), "and not the DDL semaphore");
+
+            Task createOther = ExecuteDdl(executor, dbname, "CREATE TABLE holds (id INT64 PRIMARY KEY, amount INT64 NOT NULL)");
+            Assert.That(await CompletesWithin(createOther, Soon), Is.True, "CREATE TABLE of another table completes during the scan");
+            await createOther;
+
+            sameTableStatement = ExecuteDdl(executor, dbname, sameTable);
+            Assert.That(await CompletesWithin(sameTableStatement, NotYet), Is.False, $"{sameTable} waits for the scan");
+        }
+        finally
+        {
+            pause.Release();
+            executor.TestInterceptBeforeRowConstraintValidation = null;
+        }
+
+        await addConstraint.WaitAsync(Soon);
+        await sameTableStatement!.WaitAsync(Soon);
+
+        Assert.That(database.Schema.Tables.ContainsKey("holds"), Is.True);
+        Assert.That(database.DdlGate.HeldTableCount, Is.EqualTo(0));
+        Assert.That(database.SchemaDdlSemaphore.CurrentCount, Is.EqualTo(1));
+        Assert.That(await executor.Catalogs.LoadCoordinatorJobsAsync(database), Is.Empty, "no job is left behind");
+    }
+
+    /// <summary>
+    /// A foreign key with no index to serve it builds one. The build is paused; a <c>CREATE TABLE</c> of
+    /// another table completes meanwhile, and the constraint is there once the statement ends.
+    /// </summary>
+    [Test]
+    public async Task CreateTableRunsDuringTheIndexBuildOfAForeignKey()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTable();
+        await ExecuteDdl(executor, dbname, "CREATE TABLE parents (id INT64 PRIMARY KEY)");
+
+        for (int start = 1; start <= Rows; start += 200)
+        {
+            string values = string.Join(", ", Enumerable.Range(start, 200).Select(i => $"({i})"));
+            await ExecuteNonQuery(executor, dbname, "INSERT INTO parents (id) VALUES " + values);
+        }
+
+        BackfillPause pause = new();
+        executor.TestInterceptAfterBackfillCheckpoint = pause.OnSeam;
+
+        Task addForeignKey = ExecuteDdl(executor, dbname, "ALTER TABLE items ADD CONSTRAINT items_fk FOREIGN KEY (val) REFERENCES parents (id)");
+
+        try
+        {
+            Assert.That(await CompletesWithin(pause.Reached, Soon), Is.True, "the build of the backing index reaches its first checkpoint");
+
+            Task createOther = ExecuteDdl(executor, dbname, "CREATE TABLE holds (id INT64 PRIMARY KEY, amount INT64 NOT NULL)");
+            Assert.That(await CompletesWithin(createOther, Soon), Is.True, "CREATE TABLE of another table completes during the build");
+            await createOther;
+        }
+        finally
+        {
+            pause.Release();
+            executor.TestInterceptAfterBackfillCheckpoint = null;
+        }
+
+        await addForeignKey.WaitAsync(Soon);
+
+        TableSchema items = database.Schema.Tables["items"];
+        Assert.That(items.ForeignKeys!.Single(fk => fk.Name == "items_fk").State, Is.EqualTo(SchemaElementState.Public));
+        Assert.That(database.DdlGate.HeldTableCount, Is.EqualTo(0));
+        Assert.That(database.SchemaDdlSemaphore.CurrentCount, Is.EqualTo(1));
     }
 
     /// <summary>

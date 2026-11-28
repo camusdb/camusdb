@@ -161,7 +161,8 @@ CamusDB
 Kahuna — PREPARE phase
    │  3. For each key, acquire a lock and place a WRITE INTENT
    │     (the provisional new value, not yet visible to others).
-   │     If another transaction already holds the key → conflict.
+   │     If another transaction already holds the key → wait or
+   │     conflict (§6.1).
    ▼
 Kahuna — COMMIT phase
    │  4. Replicate the change through Raft to a majority of nodes,
@@ -177,8 +178,9 @@ Client: OK
 Key points for a newcomer:
 
 - **Write intents + per-key locks are how two writers are kept apart.** If transaction A and
-  transaction B both try to write the same row, one of them sees the other's intent/lock and fails,
-  so no write is silently overwritten. This is **write-write conflict detection**.
+  transaction B both try to write the same row, one of them meets the other's intent/lock. It waits
+  for the other to finish, or fails, by the rule in §6.1. Either way no write is silently overwritten.
+  This is **write-write conflict detection**.
 - **2PC makes the row and its indexes commit together.** You never observe a state where the row
   exists but its index entry doesn't.
 - **Locks are held until the transaction ends** (commit or rollback), then released. Kahuna's
@@ -198,7 +200,40 @@ There are two distinct lock mechanisms. Knowing which is taken when is most of t
 
 ### 6.1 Per-key locks & write intents — used by every write
 These are taken automatically during the PREPARE phase of any write (§5), one per key being modified.
-They serialize **conflicting writes to the same key**. They are *not* taken by reads.
+They serialize **conflicting writes to the same key**. They are *not* taken by reads, except by
+`SELECT … FOR UPDATE` (§6.6).
+
+**A held key lock is waited for under wait-die.** When a pessimistic `INSERT`, `UPDATE`, `DELETE` or
+`SELECT … FOR UPDATE` asks for the lock of a key that another transaction holds, Kahuna refuses it at
+once and names the holder. CamusDB then applies the rule the range locks use (§9.3), at every
+isolation level:
+
+- A transaction that started before the holder waits for it. It asks again with a short back-off
+  (1, 2, 4 … up to 50 ms) until the holder commits or rolls back, for at most `lock_wait_deadline_ms`
+  (500 ms by default).
+- A transaction that holds no lock and has staged no write yet also waits, whatever its age. No
+  transaction can be waiting for it, so its wait cannot close a cycle.
+- A transaction that started after the holder and already holds a lock or a write fails at once.
+- A wait that reaches the deadline fails.
+
+Each failure is `CADB0502` (`TransactionConflict`), retryable from `BEGIN`. A wait always points from
+an older transaction to a younger one, or starts from a transaction that holds nothing. So two
+transactions that lock two rows in opposite order never wait for each other: the younger one fails at
+once and the older one goes on when the younger rolls back. A row lock that `SELECT … FOR UPDATE`
+took counts as held, also before the row is written.
+
+An `UPDATE` or `DELETE` that waited reads the row again at its latest committed value after the lock,
+and checks its `WHERE` clause on that read (§9.2), so it never writes over the value the holder
+committed. `FOR UPDATE NOWAIT` and `FOR UPDATE SKIP LOCKED` never wait for a holder (§6.6), and an
+optimistic transaction takes no key lock, so it never waits here (§6.4).
+
+A holder that is only finishing its commit (its intent waits for replication or settlement) is not a
+held lock. Every acquire waits for it on the longer `replication_wait_deadline_ms`.
+
+The server retries an autocommit statement that fails with `CADB0502`, up to five attempts (see
+`serializable-retry-contract.md`). Each attempt starts as a transaction that holds nothing, so each
+one can wait up to the deadline. A row held for a long time therefore delays an autocommit `UPDATE`
+of it by up to about five times `lock_wait_deadline_ms` before the error reaches the client.
 
 ### 6.2 Range locks — phantom protection for scans
 A range lock reserves a whole *range* of keys at once, e.g. "all index entries between 10 and 50."
@@ -453,12 +488,15 @@ The statement locks first, then reads each row again at its latest committed val
 `WHERE` clause again, as the write phase of an `UPDATE` does (§5). It needs a pessimistic, read-write
 transaction. The options:
 
-- no option: a held row fails the statement with `CADB0502`, as an `UPDATE` fails;
-- `NOWAIT`: a held row fails the statement with `CADB0555`, which is not retried automatically;
-- `SKIP LOCKED`: a held row is left out. Read Committed only.
+- no option: the statement waits for a held row by the rule of §6.1, as an `UPDATE` does, and fails
+  with `CADB0502` when it may not wait or the wait runs out;
+- `NOWAIT`: a held row fails the statement at once with `CADB0555`, which is not retried
+  automatically;
+- `SKIP LOCKED`: a held row is left out at once. Read Committed only.
 
 At Serializable, the shared scan lock of §6.2 comes before the row locks. A full scan that covers a row
-another transaction holds fails at that lock with `CADB0502`, also under `NOWAIT`.
+another transaction holds meets the holder at that lock, waits by the same rule, and fails with
+`CADB0502` if the holder does not end in time, also under `NOWAIT`.
 
 The user-facing rules, the refused shapes and the autocommit behavior are in
 [select-for-update.md](select-for-update.md).
@@ -689,7 +727,8 @@ statement, because retroactively upgrading the level would skip locks the earlie
 Conflicts are detected and resolved **promptly** — a blocked writer or a deadlock fails fast (sub-second)
 rather than stalling on a lock timeout. Deadlocks have a **deterministic winner**: when two transactions
 contend, the older one waits and commits while the younger aborts and retries (a *wait-die* ordering), so
-two transactions can never both abort each other. One requester is exempt from the age rule: a transaction
+two transactions can never both abort each other. The per-key locks of every pessimistic write and of
+`SELECT … FOR UPDATE` follow the same rule, at every isolation level (§6.1). One requester is exempt from the age rule: a transaction
 that holds no lock and has staged no write yet is nobody's holder, so its wait can never close a cycle, and
 it waits out the lock-wait deadline whatever its age. That is what lets a fresh `SELECT`, or a DDL fence such
 as `TRUNCATE`, ride out a short in-flight writer instead of failing on its first lock. A staged write counts

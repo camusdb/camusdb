@@ -25,20 +25,16 @@ using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 
+/// <summary>
+/// The checks every index add makes (<see cref="Validate"/>, <see cref="ResolveKey"/>), and the build of an
+/// index on a table that the statement's own transaction created, under its private schema
+/// (<see cref="AddIndex"/>). Only that transaction can see such a table before its commit, so the build runs
+/// in the transaction, with no batch, lock pass or fence. An index on any other table is staged by the
+/// schema-change coordinator (<see cref="SchemaDdlService.ExecuteStagedAddIndexAsync"/>).
+/// </summary>
 internal sealed class TableIndexAdder
 {
     private readonly ILogger<ICamusDB> logger;
-
-    /// <summary>
-    /// Test-only seam fired once while a newly added index is still in
-    /// <see cref="SchemaElementState.WriteOnly"/> — after backfill has scanned the existing rows
-    /// and immediately before the index is published. Tests use it to perform a concurrent DML
-    /// write whose index maintenance must be routed into the index's immutable-id keyspace (the
-    /// same keyspace backfill and post-publish readers use), not the mutable-name keyspace. It is
-    /// always <c>null</c> in production; the field is cleared by the handler before invoking it so
-    /// it can never fire twice or re-enter.
-    /// </summary>
-    internal static Func<Task>? TestHookBeforePublish;
 
     public TableIndexAdder(ILogger<ICamusDB> logger)
     {
@@ -48,9 +44,9 @@ internal sealed class TableIndexAdder
     /// <summary>
     /// Checks an index add against <paramref name="table"/>: the name is free, the table stays below
     /// <see cref="CamusDBOptions.MaxIndexesPerTable"/>, and each key and INCLUDE column exists and has a
-    /// type that the index can hold. Every form of the statement calls it (the standalone build, the
-    /// cluster build and the staged build of an explicit transaction), so the rules and the messages are
-    /// the same in all of them.
+    /// type that the index can hold. Every form of the statement calls it (the staged build, the staged
+    /// build of an explicit transaction and the build over a transaction's own rows), so the rules and the
+    /// messages are the same in all of them.
     /// </summary>
     internal static void Validate(TableDescriptor table, AlterIndexTicket ticket, CamusDBOptions options)
     {
@@ -129,7 +125,7 @@ internal sealed class TableIndexAdder
     /// the names the write paths read, and each expression in its stored and bound form. Refuses an
     /// expression the index cannot hold (<see cref="CamusDBErrorCodes.InvalidIndexExpression"/>), an
     /// expression in a GIN index, and DESC on an expression whose type has no descending encoding.
-    /// Shared by the standalone and the cluster add paths.
+    /// Shared by every add path.
     /// </summary>
     internal static ResolvedIndexKey ResolveKey(TableDescriptor table, AlterIndexTicket ticket)
     {
@@ -174,15 +170,14 @@ internal sealed class TableIndexAdder
     /// exist and be public, must not duplicate another include column, and must not also be a key
     /// column of the same index (it would be stored twice with an ambiguous covered slot). Key-column
     /// existence/public checks already ran in <see cref="Validate"/>. Included columns are unordered
-    /// payload, so no direction/type-ordering restriction applies here. Runs on both the standalone and
-    /// the cluster add paths.
+    /// payload, so no direction/type-ordering restriction applies here. Runs on every add path.
     /// </summary>
     /// <summary>
     /// Enforces the combined key+include column ceiling (<see cref="CamusDBOptions.MaxIndexColumns"/>)
     /// for a single index. A covering index duplicates each included value into every entry, so an
     /// unbounded column count is a storage/replication amplification hazard. Disabled when the config
-    /// value is <c>&lt;= 0</c>. Shared by the standalone/cluster add paths and the inline
-    /// <c>CREATE TABLE</c> constraint builder.
+    /// value is <c>&lt;= 0</c>. Shared by the add paths and the inline <c>CREATE TABLE</c> constraint
+    /// builder.
     /// </summary>
     internal static void ValidateIndexColumnCount(string indexName, int keyColumnCount, int includeColumnCount, CamusDBOptions options)
     {
@@ -201,7 +196,7 @@ internal sealed class TableIndexAdder
     /// Checks the key column types against the index kind before anything is staged: an ordered index
     /// refuses a jsonb column (no ordered key form; <see cref="KeyEncoder"/> would refuse it during
     /// the backfill too, but by then the index is half-built), and a GIN index takes exactly one jsonb
-    /// column. Runs on both the standalone and the cluster add paths.
+    /// column. Runs on every add path.
     /// </summary>
     internal static void RejectUnorderedKeyColumns(TableDescriptor table, AlterIndexTicket ticket)
     {
@@ -261,6 +256,12 @@ internal sealed class TableIndexAdder
         }
     }
 
+    /// <summary>
+    /// Adds the index of <paramref name="ticket"/> to <paramref name="table"/>, which the transaction of the
+    /// statement created under its private schema, and builds it over the transaction's own rows. The
+    /// caller records the delta in the transaction's change set afterwards, so a ROLLBACK removes the index
+    /// with the rows.
+    /// </summary>
     internal async Task<int> AddIndex(
         CatalogsManager catalogs,
         KvTransaction tx,
@@ -270,6 +271,11 @@ internal sealed class TableIndexAdder
         AlterIndexTicket ticket
     )
     {
+        if (TransactionSchemaScope.OverlayFor(database) is not { } overlay || !overlay.CreatedTable(table.Id))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                $"Index '{ticket.IndexName}' of table '{table.Name}' cannot be built in the statement's transaction, which did not create the table");
+
         Validate(table, ticket, database.Options);
         ResolvedIndexKey key = ResolveKey(table, ticket);
 
@@ -322,11 +328,10 @@ internal sealed class TableIndexAdder
             keyExpressions: key.KeyExpressions
         );
 
-        // Kahuna must see a key space registered before the first write to it. Once the WriteOnly index
-        // is published below, every statement writes entries into its key space, so the space is
-        // registered here, while it is still empty. Left to the next table open, the registration would
-        // change the routing of a space whose entries and write intents were placed by hash routing,
-        // under writers that still hold those intents. The rule is the one TableOpener applies.
+        // Kahuna must see a key space registered before the first write to it. The build below writes the
+        // entries of the transaction's rows, so the space is registered here, while it is still empty. Left
+        // to the next table open, the registration would change the routing of a space whose entries and
+        // write intents were placed by hash routing. The rule is the one TableOpener applies.
         if (database.Options.KeyRangeShardingEnabled && table.Schema.Columns is { Count: > 0 } columns)
         {
             Dictionary<string, ColumnType> columnTypeById = columns.ToDictionary(c => c.Id, c => c.Type);
@@ -359,56 +364,18 @@ internal sealed class TableIndexAdder
     }
 
     /// <summary>
-    /// Writes one index entry for every existing row through <see cref="IndexBackfiller"/>: batches of
-    /// <see cref="IndexBackfiller.BatchRows"/> rows, each locked, read and committed in its own
-    /// transaction, and each retried until it wins its locks. A single transaction over the whole table
-    /// would accumulate every acquired lock and modified key for as long as the build runs — a memory
-    /// hazard, and a long-held-lock hazard for concurrent DML.
-    ///
-    /// <para>
-    /// The batches deliberately do <em>not</em> reuse the caller's DDL transaction, not even for the
-    /// first one: a later batch writing a unique key that an earlier batch already wrote would then
-    /// collide with that transaction's own uncommitted write intent and fail as a transaction conflict
-    /// instead of the duplicate-key error the statement owes the user. Committing each batch means the
-    /// next one validates against committed state, so <c>SetIfNotExists</c> reports a genuine duplicate.
-    /// </para>
-    ///
-    /// <para>
-    /// Committing early is safe because the index is <see cref="SchemaElementState.WriteOnly"/> for
-    /// the whole backfill: concurrent DML already maintains it, and no reader or planner can use it
-    /// until <see cref="PublishIndex"/> runs. If the DDL later aborts, the committed entries live under
-    /// an index id that is never published — unreachable, but not free, so the abort compensation
-    /// purges them (see <c>CommandExecutor.CompensateAbortedAddIndexAsync</c>).
-    /// </para>
+    /// Builds the index over the rows of the transaction: the rows are read through it, and the entries are
+    /// written in it (<see cref="IndexBackfiller.BuildInTransactionAsync"/>). No fence runs, because no other
+    /// transaction writes the table.
     /// </summary>
     private async Task<FluxAction> BackfillIndex(AddIndexFluxState state)
     {
         AlterIndexTicket ticket = state.Ticket;
         TableDescriptor table = state.Table;
-        DatabaseDescriptor database = state.Database;
 
-        bool unique = ticket.Operation is AlterIndexOperation.AddPrimaryKey or AlterIndexOperation.AddUniqueIndex;
         string indexId = state.IndexId
             ?? table.Schema.Indexes?.FirstOrDefault(ix => string.Equals(ix.Name, ticket.IndexName, StringComparison.OrdinalIgnoreCase))?.Id
             ?? throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Index '{ticket.IndexName}' was not found in schema");
-
-        if (TransactionSchemaScope.OverlayFor(database) is { } overlay && overlay.CreatedTable(table.Id))
-        {
-            state.ModifiedRows = await BuildOverOwnRowsAsync(state, indexId, unique).ConfigureAwait(false);
-            return FluxAction.Continue;
-        }
-
-        // The index is WriteOnly in the schema and in the descriptor, so every statement that starts
-        // now maintains it. A transaction that wrote the table before that did not, and the backfill
-        // reads committed rows only. The fence refuses the later commit of such a transaction, and
-        // waits for one whose commit is already in flight, so that its rows are either visible to the
-        // backfill or never exist. Without it such a row gets no entry and the index stays incomplete.
-        await database.FenceWritersAndWaitAsync(table.Schema, database.Kahuna.SchemaAckWaitTimeout).ConfigureAwait(false);
-
-        TableIndexSchema? schemaIndex = table.Schema.Indexes?.FirstOrDefault(ix => ix.Id == indexId);
-        ObjectIdValue? afterRowId = string.IsNullOrWhiteSpace(schemaIndex?.StartOffset)
-            ? null
-            : ObjectId.ToValue(schemaIndex.StartOffset!);
 
         // At an expression position the key name is the hidden one the write paths read.
         ResolvedIndexKey key = state.Key ?? ResolveKey(table, ticket);
@@ -419,51 +386,7 @@ internal sealed class TableIndexAdder
         IndexBackfiller.Target target = new(
             indexId,
             ticket.IndexName,
-            unique,
-            keyColumns,
-            ticket.IncludeColumns.Length > 0 ? ticket.IncludeColumns : null,
-            Inverted: ticket.Operation == AlterIndexOperation.AddInvertedIndex,
-            Expressions: key.Expressions);
-
-        // Background priority: the backfill is bulk, deferrable work that already runs in resumable
-        // batches, so on a saturated node it yields the door to user traffic. The backfill opens a
-        // coordinator session per batch, and each batch re-enters the admission gate.
-        IndexBackfiller.Result result = await IndexBackfiller.BackfillAsync(
-            database, table, target, afterRowId,
-            TransactionPriority.Background,
-            onCheckpoint: null,
-            logger,
-            database.Options,
-            CancellationToken.None).ConfigureAwait(false);
-
-        state.LastBackfilledRowId = result.LastRowId;
-        state.ModifiedRows = result.Rows;
-
-        Log.LogIndexRowsAdded(logger, result.Rows, ticket.IndexName);
-
-        return FluxAction.Continue;
-    }
-
-    /// <summary>
-    /// The build step for a table that the statement's transaction created, under its private schema. Only
-    /// that transaction can see the table before its commit, so every row is one it wrote: the rows are read
-    /// through the transaction, and the entries are written in it (<see cref="IndexBackfiller.BuildInTransactionAsync"/>).
-    /// A ROLLBACK removes them with the rows. No fence runs, because no other transaction writes the table.
-    /// </summary>
-    private async Task<int> BuildOverOwnRowsAsync(AddIndexFluxState state, string indexId, bool unique)
-    {
-        AlterIndexTicket ticket = state.Ticket;
-        TableDescriptor table = state.Table;
-
-        ResolvedIndexKey key = state.Key ?? ResolveKey(table, ticket);
-        string[] keyColumns = new string[ticket.Columns.Length];
-        for (int i = 0; i < ticket.Columns.Length; i++)
-            keyColumns[i] = key.Expressions?[i] is { } expression ? expression.KeyName : ticket.Columns[i].Name;
-
-        IndexBackfiller.Target target = new(
-            indexId,
-            ticket.IndexName,
-            unique,
+            Unique: ticket.Operation is AlterIndexOperation.AddPrimaryKey or AlterIndexOperation.AddUniqueIndex,
             keyColumns,
             ticket.IncludeColumns.Length > 0 ? ticket.IncludeColumns : null,
             Inverted: ticket.Operation == AlterIndexOperation.AddInvertedIndex,
@@ -483,35 +406,25 @@ internal sealed class TableIndexAdder
             parameters: null
         );
 
-        int built = await IndexBackfiller.BuildInTransactionAsync(
+        state.ModifiedRows = await IndexBackfiller.BuildInTransactionAsync(
             state.Tx, table, target,
             state.QueryExecutor.Query(state.Database, table, rows),
             state.Database.Options,
             CancellationToken.None).ConfigureAwait(false);
 
-        Log.LogIndexRowsAdded(logger, built, ticket.IndexName);
+        Log.LogIndexRowsAdded(logger, state.ModifiedRows, ticket.IndexName);
 
-        return built;
+        return FluxAction.Continue;
     }
 
     private async Task<FluxAction> PublishIndex(AddIndexFluxState state)
     {
-        // Test-only: drive a concurrent write while the index is still WriteOnly (pre-publish).
-        // Cleared before invoking so it fires at most once and cannot re-enter.
-        if (TestHookBeforePublish is { } hook)
-        {
-            TestHookBeforePublish = null;
-            await hook().ConfigureAwait(false);
-        }
-
         AlterIndexTicket ticket = state.Ticket;
         TableDescriptor table = state.Table;
         DatabaseDescriptor database = state.Database;
         string indexId = state.IndexId
             ?? table.Schema.Indexes?.FirstOrDefault(ix => string.Equals(ix.Name, ticket.IndexName, StringComparison.OrdinalIgnoreCase))?.Id
             ?? throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Index '{ticket.IndexName}' was not found in schema");
-        string finalOffset = state.LastBackfilledRowId ?? "";
-
         try
         {
             await database.SystemSchemaSemaphore.WaitAsync().ConfigureAwait(false);
@@ -530,7 +443,7 @@ internal sealed class TableIndexAdder
                         old.ColumnIds,
                         old.Type,
                         SchemaElementState.Public,
-                        finalOffset,
+                        startOffset: "",
                         columnDirections: old.ColumnDirections,
                         includeColumnIds: old.IncludeColumnIds,
                         comment: old.Comment,

@@ -55,7 +55,7 @@ internal readonly record struct ServerLevelOutcome(
 /// <summary>
 /// The statements whose target is the server or a database itself, dispatched <b>before</b> any
 /// database is opened: CREATE / DROP / RENAME / RELINK DATABASE, COMMENT ON DATABASE, user and grant
-/// administration, and cluster settings.
+/// administration, cluster settings, <c>CANCEL QUERY</c> and <c>KILL TRANSACTION</c>.
 ///
 /// <para><b>Opening first would be wrong, not merely wasteful.</b> Loading a descriptor for the
 /// database a statement is about to destroy or rename resurrects the very object being removed, and
@@ -245,6 +245,21 @@ internal sealed class ServerLevelStatementDispatcher
             case NodeType.CancelQuery:
                 await queryActivity
                     .CancelAsync(SqlStringLiteral.Decode(ast.leftAst!.yytext!), statementAuthorizer.ActivityViewerFor(ticket))
+                    .ConfigureAwait(false);
+                return ServerLevelOutcome.Succeeded();
+
+            // The kill acts on the host's open transactions, on this node or on the peer that owns the
+            // id, under the same ownership rule as the cancel. It rolls the transaction back through
+            // that transaction's own manager and opens no database here.
+            case NodeType.KillTransaction:
+                await queryActivity
+                    .KillTransactionAsync(
+                        SqlStringLiteral.Decode(ast.leftAst!.yytext!),
+                        statementAuthorizer.ActivityViewerFor(ticket),
+                        new Diagnostics.TransactionKiller(
+                            ticket.Principal?.UserName,
+                            Diagnostics.StatementOrigin.Current?.ClientAddress,
+                            queryActivity.Registry.NodeLabel))
                     .ConfigureAwait(false);
                 return ServerLevelOutcome.Succeeded();
 

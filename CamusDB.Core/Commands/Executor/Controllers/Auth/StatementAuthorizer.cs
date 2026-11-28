@@ -355,14 +355,15 @@ internal sealed class StatementAuthorizer
             return;
         }
 
-        // The running-statement and connection lists, and the cancel that acts on them, are open to
-        // any authenticated caller and filtered instead: each user sees and cancels only their own
-        // statements, and a superuser sees and cancels all of them. A refusal here would leave a user
-        // with no way to find and stop their own runaway query. The filter is applied where the rows
-        // are built, through ActivityViewerFor, so no row of another user's SQL text is ever read
-        // into the result.
+        // The running-statement, connection and open-transaction lists, and the cancel and kill that
+        // act on them, are open to any authenticated caller and filtered instead: each user sees,
+        // cancels and kills only their own, and a superuser all of them. A refusal here would leave a
+        // user with no way to find and stop their own runaway query or forgotten transaction. The
+        // filter is applied where the rows are built, through ActivityViewerFor, so no row of another
+        // user's SQL text is ever read into the result.
         if (ast.nodeType is NodeType.ShowQueries or NodeType.ShowClusterQueries
-            or NodeType.ShowConnections or NodeType.ShowClusterConnections or NodeType.CancelQuery)
+            or NodeType.ShowConnections or NodeType.ShowClusterConnections or NodeType.CancelQuery
+            or NodeType.ShowTransactions or NodeType.ShowClusterTransactions or NodeType.KillTransaction)
             return;
 
         // Server-level introspection: any authenticated caller may run these. SHOW TABLES FROM is

@@ -738,28 +738,31 @@ internal sealed class KvBranchReader
         ObjectIdValue RowId);
 
     /// <summary>
-    /// Batch form of <see cref="ResolveBranchUniqueFlagsAsync"/>: resolves the write flags for every
-    /// unique index entry of a branch batch write with one level-0 probe and one probe per ancestry
-    /// level, instead of one probe per entry per level. Returns the flags keyed by the level-0 KV key.
+    /// Resolves the <see cref="KeyValueFlags"/> of every unique index entry that a batch writes on a branch
+    /// database, with one level-0 probe and one probe per ancestry level for the whole batch. Returns the
+    /// flags keyed by the level-0 KV key.
     ///
-    /// <para>
-    /// The per-entry decisions are unchanged — level-0 tombstone → <see cref="KeyValueFlags.Set"/>,
-    /// level-0 live value for this same row → <see cref="KeyValueFlags.Set"/>, live value for another
-    /// row → <see cref="CamusDBErrorCodes.DuplicateUniqueKeyValue"/>, and otherwise a nearest-first
-    /// ancestry walk that stops at the first tombstone or value and ends in
-    /// <see cref="KeyValueFlags.SetIfNotExists"/> as the concurrent-insert fence.
-    /// </para>
+    /// <list type="bullet">
+    ///   <item>Level-0 tombstone → <see cref="KeyValueFlags.Set"/>: the slot was cleared in this branch and
+    ///     is free.</item>
+    ///   <item>Level-0 live value for the same row → <see cref="KeyValueFlags.Set"/>: an index build that
+    ///     visits a row an UPDATE already indexed, or a batch that runs again.</item>
+    ///   <item>Level-0 live value for another row →
+    ///     <see cref="CamusDBErrorCodes.DuplicateUniqueKeyValue"/>.</item>
+    ///   <item>Level-0 miss → a nearest-first ancestry walk that stops at the first tombstone or value. A
+    ///     live value for another row is a duplicate. Otherwise <see cref="KeyValueFlags.SetIfNotExists"/>,
+    ///     which refuses the second of two writers of the branch that race for the slot.</item>
+    /// </list>
     ///
-    /// <para><b>Call this after every lock of the batch is held</b>, for the same reason the per-entry
-    /// resolver documents: Kahuna builds the transaction's MVCC snapshot on first access, so a
-    /// post-lock probe reflects the state a competing writer left behind rather than a pre-contention
-    /// one. Both batch writers reject a repeated new unique key before reaching here, so every request
-    /// carries a distinct <see cref="BranchUniqueFlagRequest.KvKey"/> and no entry can be shadowed by
-    /// another entry of the same batch.</para>
+    /// <para><b>Call this after every lock of the batch is held.</b> Kahuna builds the transaction's MVCC
+    /// snapshot of a key on first access, so a probe after the lock sees the state a competing writer left
+    /// behind, and one before it can see an older state. Every batch writer rejects a repeated new unique
+    /// key before it calls this, so every request carries a distinct
+    /// <see cref="BranchUniqueFlagRequest.KvKey"/> and no entry can be shadowed by another entry of the
+    /// same batch.</para>
     ///
-    /// <para>A conflict is recorded per position and raised only after every position is resolved, so
-    /// the reported duplicate is the first one in write order — the entry the sequential resolver would
-    /// have failed on.</para>
+    /// <para>A conflict is recorded per position and raised only after every position is resolved, so the
+    /// reported duplicate is the first one in write order.</para>
     /// </summary>
     internal async Task<Dictionary<string, KeyValueFlags>> ResolveBranchUniqueFlagsBatchAsync(
         KvTransaction tx,
@@ -804,7 +807,7 @@ internal sealed class KvBranchReader
             if (existing.Kind == BranchKvKind.Value && existing.HasPayload)
             {
                 // Live value at level-0: an idempotent same-row write is allowed, another row is a conflict.
-                if (Encoding.UTF8.GetString(existing.Payload.Span) != request.RowId.ToString())
+                if (!BranchKvCodec.IndexEntryNamesRow(existing.Payload.Span, request.RowId))
                     conflicts[i] = request.IndexId;
                 else
                     resolved[request.KvKey] = KeyValueFlags.Set;
@@ -863,7 +866,7 @@ internal sealed class KvBranchReader
                 {
                     // A live ancestor entry for another row is a conflict; for this same row the branch
                     // simply shadows its own inherited entry. Either way the walk stops here.
-                    if (Encoding.UTF8.GetString(ancestor.Payload.Span) != request.RowId.ToString())
+                    if (!BranchKvCodec.IndexEntryNamesRow(ancestor.Payload.Span, request.RowId))
                         conflicts[position] = request.IndexId;
                     else
                         resolved[request.KvKey] = KeyValueFlags.SetIfNotExists;
@@ -890,97 +893,5 @@ internal sealed class KvBranchReader
         }
 
         return resolved;
-    }
-
-    /// <summary>
-    /// Resolves the <see cref="KeyValueFlags"/> to use when writing a unique index entry on a
-    /// branch database.
-    ///
-    /// <para>
-    /// This method MUST be called AFTER the exclusive lock for <paramref name="kvKey"/> has been
-    /// acquired.  Because Kahuna creates each transaction's MVCC snapshot lazily on first
-    /// access, probing <paramref name="kvKey"/> here — the first access for this transaction —
-    /// reflects the committed state that exists once the lock was acquired, not a stale snapshot
-    /// captured before lock contention resolved.
-    /// </para>
-    ///
-    /// Three cases:
-    /// <list type="bullet">
-    ///   <item>Level-0 tombstone → <see cref="KeyValueFlags.Set"/> (tombstone-replace: the slot was
-    ///     explicitly cleared in this branch and is available for re-use).</item>
-    ///   <item>Level-0 live value, same rowId → <see cref="KeyValueFlags.Set"/> (idempotent write).</item>
-    ///   <item>Level-0 live value, different rowId → throws <see cref="CamusDBErrorCodes.DuplicateUniqueKeyValue"/>.</item>
-    ///   <item>Level-0 miss → walks ancestor chain; ancestor live value for a different rowId → throws
-    ///     <see cref="CamusDBErrorCodes.DuplicateUniqueKeyValue"/>; otherwise → <see cref="KeyValueFlags.SetIfNotExists"/>
-    ///     (concurrent-insert fence for same-branch races).</item>
-    /// </list>
-    /// </summary>
-    internal async Task<KeyValueFlags> ResolveBranchUniqueFlagsAsync(
-        KvTransaction tx,
-        string indexId,
-        CompositeColumnValue key,
-        string kvKey,
-        ObjectIdValue rowId,
-        CancellationToken cancellationToken)
-    {
-        // Post-lock probe: first access to this key in the transaction, so Kahuna creates the
-        // MVCC snapshot from the current committed state — after any competing writer released
-        // the lock by committing or rolling back.
-        BranchKvValue existing = await ProbeRaw(
-            tx.TransactionId,
-            HLCTimestamp.Zero, 
-            kvKey,
-            cancellationToken
-        ).ConfigureAwait(false);
-
-        if (existing.Kind == BranchKvKind.Tombstone)
-            // Slot was explicitly cleared in this branch; replace the tombstone with the new value.
-            return KeyValueFlags.Set;
-
-        if (existing.Kind == BranchKvKind.Value && existing.HasPayload)
-        {
-            // Live value at level-0: idempotent same-row write (e.g. backfill resume or an UPDATE
-            // that touches non-indexed columns) is allowed; a different rowId is a conflict.
-            if (Encoding.UTF8.GetString(existing.Payload.Span) != rowId.ToString())
-                throw new CamusDBException(
-                    CamusDBErrorCodes.DuplicateUniqueKeyValue,
-                    $"Duplicate entry for key '{keys.DuplicateKeyLabel(indexId)}'");
-            
-            return KeyValueFlags.Set;
-        }
-
-        // Miss at level-0: walk ancestry to enforce uniqueness over the full union.
-        // Nearest ancestor first; stop on the first hit (tombstone or live value).
-        foreach ((KvKeyBuilder ancestorKeys, KvBranchReader ancestorReader, HLCTimestamp forkTimestamp) in levels)
-        {
-            string ancestorKvKey = ancestorKeys.BuildUniqueIndexKey(indexId, key);
-            
-            BranchKvValue ancestor = await ancestorReader.ProbeRaw(
-                HLCTimestamp.Zero, 
-                forkTimestamp, 
-                ancestorKvKey, 
-                cancellationToken
-            ).ConfigureAwait(false);
-
-            if (ancestor.Kind == BranchKvKind.Tombstone)
-                break;   // an ancestor branch cleared this slot; treat as available
-
-            if (ancestor.Kind == BranchKvKind.Value && ancestor.HasPayload)
-            {
-                if (Encoding.UTF8.GetString(ancestor.Payload.Span) != rowId.ToString())
-                    throw new CamusDBException(
-                        CamusDBErrorCodes.DuplicateUniqueKeyValue,
-                        $"Duplicate entry for key '{keys.DuplicateKeyLabel(indexId)}'");
-                break;   // same rowId in ancestor (branch shadows its own inherited entry); allow
-            }
-        }
-
-        // Slot absent from level-0 and all ancestors.  SetIfNotExists is a concurrent-insert
-        // fence: if two branch transactions race to insert the same unique key, one wins the
-        // lock and writes; the other, when it retries the lock and probes, sees the winner's
-        // committed value and throws DuplicateUniqueKeyValue above.  As an additional safety net,
-        // SetIfNotExists here ensures the second writer's set also fails if the MVCC snapshot
-        // somehow missed the intermediate commit.
-        return KeyValueFlags.SetIfNotExists;
     }
 }

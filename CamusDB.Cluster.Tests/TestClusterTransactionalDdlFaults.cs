@@ -652,6 +652,11 @@ public sealed class TestClusterTransactionalDdlFaults
     /// A COMMIT on a follower waits at the schema leader, whose DDL gate another statement holds, and then
     /// the leadership moves to the follower. The COMMIT must not wait for the gate of the old leader: the
     /// statement that holds it can now wait for the gate that the COMMIT holds.
+    ///
+    /// <para>The schema-log partition also holds rows that the migration writes. Its leader change drops the
+    /// locks and the write intents that the transaction holds there, so the KV commit is refused with
+    /// <c>LostLock</c>, a code the client can retry. The COMMIT ends either way, and the schema ends as the
+    /// rows did.</para>
     /// </summary>
     [Test]
     public async Task SchemaLeadershipMovesToTheDriver_WhileItWaitsAtTheOldLeader()
@@ -675,8 +680,8 @@ public sealed class TestClusterTransactionalDdlFaults
 
             await cluster.TransferSchemaLeadershipAsync(scenario.Db, driver);
 
-            // The transfer takes the locks that the old leader granted in the same partition. Kahuna then
-            // refuses the commit, and the change set must end absent.
+            // The transfer can take the locks that the old leader granted in the same partition. Kahuna then
+            // refuses the commit, which the client may retry, and the change set must end absent.
             applied = await commit.WaitAsync(TimeSpan.FromSeconds(30));
         }
         finally
@@ -939,7 +944,7 @@ public sealed class TestClusterTransactionalDdlFaults
             }
             catch (CamusDBException ex)
             {
-                await coordinator.TakeBackIndexAsync(leader, job, index, ex);
+                await coordinator.TakeBackIndexAsync(leader, job, index, coordinator.LeaderTerm, ex);
                 throw;
             }
             finally
@@ -988,11 +993,19 @@ public sealed class TestClusterTransactionalDdlFaults
         Assert.CatchAsync<CamusDBException>(async () => await coordinator.RunJobAsync(leader, job, indexBuildInfo: index));
         Assert.AreEqual(SchemaElementState.WriteOnly, IndexStateOn(scenario.Leader));
 
-        // A second hold of the table makes the take-back fail after it recorded its intent.
+        // A degraded schema subsystem refuses the drop after the take-back recorded its intent.
         await leader.DdlGate.EnterAsync("other", null);
-        using (leader.DdlGate.HoldTable(job.TableId, "other", "another change"))
-            await coordinator.TakeBackIndexAsync(leader, job, index, cause);
-        leader.DdlGate.Exit();
+        leader.MarkSchemaSubsystemDegraded();
+        try
+        {
+            await coordinator.TakeBackIndexAsync(leader, job, index, coordinator.LeaderTerm, cause);
+            Assert.AreEqual(SchemaElementState.WriteOnly, IndexStateOn(scenario.Leader), "the drop must be refused");
+        }
+        finally
+        {
+            leader.ClearSchemaSubsystemDegraded();
+            leader.DdlGate.Exit();
+        }
 
         // The resume of the sweeper can have run already, so only the end is checked.
         await AssertIndexEndsAsync(scenario, expected: null);
@@ -1181,18 +1194,33 @@ public sealed class TestClusterTransactionalDdlFaults
             return false;
         }
 
+        return await CommitAsClientAsync(transactions, tx, driver: driver, sessionCanBeLost: sessionCanBeLost);
+    }
+
+    /// <summary>
+    /// Ends a COMMIT as a client does and returns whether the transaction committed. A COMMIT whose outcome is
+    /// not resolved is retried on the same transaction; a refusal that the client can retry is a definite
+    /// non-commit. <paramref name="started"/> is a COMMIT that the caller already started, or null. With
+    /// <paramref name="sessionCanBeLost"/>, a COMMIT that answers that its session is gone ends with the
+    /// outcome that the rows on <paramref name="driver"/> show once the schema settled.
+    /// </summary>
+    private static async Task<bool> CommitAsClientAsync(
+        KvTransactionsManager transactions, KvTransaction tx, Task? started = null,
+        InProcessSchemaCluster.Node? driver = null, InProcessSchemaCluster? sessionCanBeLost = null)
+    {
         Stopwatch timer = Stopwatch.StartNew();
 
         while (true)
         {
             try
             {
-                await transactions.CommitAsync(tx).WaitAsync(StatementLimit);
+                await (started ?? transactions.CommitAsync(tx).WaitAsync(StatementLimit));
                 return true;
             }
             catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.TransactionFinalizeUnresolved && timer.ElapsedMilliseconds < EndsWithinMs)
             {
                 await TestContext.Progress.WriteLineAsync($"COMMIT is not resolved: {ex.Message}");
+                started = null;
                 await Task.Delay(500);
             }
             catch (CamusDBException ex) when (IsRetryable(ex))
@@ -1200,7 +1228,7 @@ public sealed class TestClusterTransactionalDdlFaults
                 await TestContext.Progress.WriteLineAsync($"COMMIT was refused: {ex.Code} {ex.Message}");
                 return false;
             }
-            catch (CamusDBException ex) when (sessionCanBeLost is not null && ex.Code == CamusDBErrorCodes.TransactionAlreadyCompleted)
+            catch (CamusDBException ex) when (sessionCanBeLost is not null && driver is not null && ex.Code == CamusDBErrorCodes.TransactionAlreadyCompleted)
             {
                 await TestContext.Progress.WriteLineAsync($"COMMIT has an unknown outcome: {ex.Code} {ex.Message}");
                 return await ReadOutcomeAsync(driver, sessionCanBeLost);

@@ -697,7 +697,7 @@ foreach (string warning in Http3StartupChecks.Inspect(config, quicSupported))
 // A node whose GC adapts its young generation to the load while the write aggregator runs short
 // cycles starts and serves, and under load its leader can spend a tenth to a quarter of its time in
 // collections. The build turns that GC mode off, so this reports a deployment that turned it back on.
-foreach (string warning in GcStartupChecks.Inspect(camusOptions.Kahuna, System.Runtime.GCSettings.IsServerGC, GcStartupChecks.ReadDynamicAdaptationMode()))
+foreach (string warning in GcStartupChecks.Inspect(camusOptions.Kahuna, config.IsClusterMode, System.Runtime.GCSettings.IsServerGC, GcStartupChecks.ReadDynamicAdaptationMode()))
     app.Logger.LogWarning("{GcWarning}", warning);
 
 if (config.IsClusterMode)

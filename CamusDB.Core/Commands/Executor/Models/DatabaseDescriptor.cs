@@ -341,31 +341,6 @@ public sealed record DatabaseDescriptor : IDisposable
         return Transactions.WaitForCommitsPlannedBeforeAsync(tables, epoch);
     }
 
-    /// <summary>
-    /// <see cref="FenceWritersPlannedBefore"/> for a schema change that this node runs by itself and
-    /// does not replicate first: the stamp, then a bounded wait for the commits in flight. Throws the
-    /// retryable <see cref="CamusDBErrorCodes.TransactionMustRetry"/> when a commit does not end in
-    /// time; the caller must then undo its change and must not read the table.
-    /// </summary>
-    internal async Task FenceWritersAndWaitAsync(Catalogs.Models.TableSchema table, TimeSpan timeout)
-    {
-        Task? drain = FenceWritersPlannedBefore([table]);
-        if (drain is null)
-            return;
-
-        try
-        {
-            await drain.WaitAsync(timeout).ConfigureAwait(false);
-        }
-        catch (TimeoutException)
-        {
-            throw new CamusDBException(
-                CamusDBErrorCodes.TransactionMustRetry,
-                $"The schema change on table '{table.Name}' of database '{Name}' waited {(long)timeout.TotalMilliseconds} ms for " +
-                "a commit that began before it and has no outcome yet; resolve that transaction and retry the statement");
-        }
-    }
-
     private readonly Lock appliedAckSync = new();
 
     // The last deferred acknowledgement, or a completed task. Guarded by appliedAckSync.
@@ -554,8 +529,10 @@ public sealed record DatabaseDescriptor : IDisposable
     /// <summary>
     /// 1 while a deferred purge record of this database may exist that no run on this node finished; see
     /// <see cref="Catalogs.Models.DeferredPurgeRecord"/>. Starts at 1, so the first run after an open looks
-    /// for records a crash left, and a publish of a change set sets it again on every node. A run scans the
-    /// meta bucket only while it is 1, so a database with no pending purge costs no scan.
+    /// for records a crash left. A publish of a change set sets it again on every node, and a node that wins
+    /// the schema leadership sets it for the record of a dropped index that the previous leader did not
+    /// finish. A run scans the meta bucket only while it is 1, so a database with no pending purge costs no
+    /// scan.
     /// </summary>
     private int deferredPurgesDue = 1;
 

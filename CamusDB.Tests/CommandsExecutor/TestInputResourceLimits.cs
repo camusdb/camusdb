@@ -392,6 +392,17 @@ internal sealed class TestInputResourceLimits : BaseTest
 
         public Task<QueryCancelOutcome> CancelAsync(string target, string queryId, ActivityViewer viewer, CancellationToken ct)
             => Task.FromResult(QueryCancelOutcome.NotFound);
+
+        public async Task<List<TransactionActivityRow>> ListTransactionsAsync(string target, ActivityViewer viewer, CancellationToken ct)
+        {
+            Entered.TrySetResult();
+            await Release.Task.WaitAsync(ct);
+            return [];
+        }
+
+        public Task<TransactionKillOutcome> KillTransactionAsync(
+            string target, string transactionId, ActivityViewer viewer, TransactionKiller killedBy, CancellationToken ct)
+            => Task.FromResult(TransactionKillOutcome.NotFound);
     }
 
     /// <summary>

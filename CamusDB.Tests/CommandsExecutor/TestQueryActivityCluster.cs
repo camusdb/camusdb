@@ -32,12 +32,15 @@ using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.Diagnostics;
 using CamusDB.Core.Storage.Kv;
+using CamusDB.Core.Transactions;
+using CamusDB.App.Services;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// <c>SHOW CLUSTER QUERIES</c>, <c>SHOW CLUSTER CONNECTIONS</c> and a <c>CANCEL QUERY</c> routed to
-/// the node that owns the statement, on a three-node in-process cluster. The peers are reached
+/// <c>SHOW CLUSTER QUERIES</c>, <c>SHOW CLUSTER CONNECTIONS</c>, <c>SHOW CLUSTER TRANSACTIONS</c>, and a
+/// <c>CANCEL QUERY</c> or <c>KILL TRANSACTION</c> routed to the node that owns the id, on a three-node
+/// in-process cluster. The peers are reached
 /// through <see cref="InProcessClusterActivityTransport"/>, which applies the same node-local list and
 /// viewer filter as the host's <c>/internal/activity/*</c> endpoints.
 ///
@@ -195,6 +198,75 @@ internal sealed class TestQueryActivityCluster
         Assert.That(row.Row["client_address"].StrValue, Is.EqualTo("198.51.100.3"));
 
         onNode3.Close();
+    }
+
+    /// <summary>
+    /// Begins an explicit transaction on node 1, through the host coordinator of node 1. The other nodes
+    /// have no coordinator, so whatever they report about it came over the activity channel.
+    /// </summary>
+    private async Task<(HttpTransactionCoordinator Coordinator, KvTransaction Tx)> BeginOnNode1Async()
+    {
+        string db = "kdb" + Guid.NewGuid().ToString("n")[..8];
+        await executors[0].CreateDatabase(new CreateDatabaseTicket(db, ifNotExists: false));
+
+        HttpTransactionCoordinator coordinator = new(executors[0]);
+        KvTransaction tx = await coordinator.StartAsync(db, isolationLevel: null, transactionMode: null, deferStart: true, sessionOwned: true);
+        return (coordinator, tx);
+    }
+
+    private static Task KillAsync(CommandExecutor executor, string id)
+        => executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(null!, "", $"KILL TRANSACTION '{id}'", null));
+
+    [Test]
+    public async Task OneNodeListsATransactionThatAnotherHolds_AndAThirdKillsIt()
+    {
+        (HttpTransactionCoordinator coordinator, KvTransaction tx) = await BeginOnNode1Async();
+        string node1 = nodes[0].Raft.GetLocalEndpoint();
+
+        Assert.That(await QueryAsync(executors[1], "SHOW TRANSACTIONS"), Is.Empty, "node 2 holds no transaction");
+
+        List<QueryResultRow> cluster = await QueryAsync(executors[1], "SHOW CLUSTER TRANSACTIONS");
+        QueryResultRow remote = cluster.Single();
+        Assert.That(remote.Row["node"].StrValue, Is.EqualTo(node1));
+        Assert.That(remote.Row["state"].StrValue, Is.EqualTo("idle"));
+        Assert.That(remote.Row["error"].Type, Is.EqualTo(ColumnType.Null));
+        string id = remote.Row["transaction_id"].StrValue!;
+
+        // The kill goes to node 1 by the node tag in the id.
+        await KillAsync(executors[2], id);
+
+        Assert.That(tx.Status, Is.EqualTo(KvTransactionStatus.RolledBack));
+        Assert.That(coordinator.ActiveCount, Is.EqualTo(0));
+        Assert.That(await QueryAsync(executors[1], "SHOW CLUSTER TRANSACTIONS"), Is.Empty);
+
+        // A repeated kill of the same id reports the rollback again; an unknown id is not found.
+        await KillAsync(executors[1], id);
+        string otherHandle = id[..(id.LastIndexOf('.') + 1)] + "4294967294";
+        CamusDBException? unknown = Assert.ThrowsAsync<CamusDBException>(() => KillAsync(executors[1], otherHandle));
+        Assert.That(unknown!.Code, Is.EqualTo(CamusDBErrorCodes.TransactionNotFound));
+    }
+
+    [Test]
+    public async Task KillOfATransactionOnAnUnreachableNode_SaysItMayBeOpen()
+    {
+        (HttpTransactionCoordinator coordinator, KvTransaction tx) = await BeginOnNode1Async();
+        string node1 = nodes[0].Raft.GetLocalEndpoint();
+        string id = (await QueryAsync(executors[1], "SHOW CLUSTER TRANSACTIONS")).Single().Row["transaction_id"].StrValue!;
+
+        // Node 1 leaves the address book and fails the way an unreachable host fails.
+        members.Unregister(node1);
+
+        CamusDBException? unreachable = Assert.ThrowsAsync<CamusDBException>(() => KillAsync(executors[1], id));
+        Assert.That(unreachable!.Code, Is.EqualTo(CamusDBErrorCodes.TransactionOwnerUnreachable));
+        Assert.That(unreachable.Message, Does.Contain("may still be open"));
+
+        QueryResultRow error = (await QueryAsync(executors[1], "SHOW CLUSTER TRANSACTIONS")).Single();
+        Assert.That(error.Row["node"].StrValue, Is.EqualTo(node1));
+        Assert.That(error.Row["transaction_id"].Type, Is.EqualTo(ColumnType.Null));
+        Assert.That(error.Row["error"].Type, Is.Not.EqualTo(ColumnType.Null));
+
+        Assert.That(tx.Status, Is.EqualTo(KvTransactionStatus.Active));
+        await coordinator.RollbackByIdAsync(tx.ClientId.L, (uint)tx.ClientId.C);
     }
 
     [Test]

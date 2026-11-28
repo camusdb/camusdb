@@ -22,14 +22,16 @@ using Microsoft.Extensions.Logging;
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 /// <summary>
-/// Does the work that published change sets left in their <see cref="DeferredPurgeRecord"/>s: the removal of
-/// data they made unreachable, and the change of a sequence's counter. Two paths call it:
+/// Does the work that schema changes left in their <see cref="DeferredPurgeRecord"/>s: the removal of data
+/// they made unreachable, and the change of a sequence's counter. The records come from published change
+/// sets and from <c>DROP INDEX</c> outside a transaction. Two paths call it:
 /// <list type="bullet">
-/// <item>The committing node, right after its publish, for the records of its own change set. This is the
-/// normal path. A removal runs behind the commit (<see cref="Schedule"/>): it takes time in proportion to
-/// the data, the record is durable already, and nobody can reach the data any more, so the client does not
-/// wait for it. A change of a counter runs before <c>COMMIT</c> returns (<see cref="RunNowAsync"/>), so the
-/// client's next draw follows the new definition.</item>
+/// <item>The node that made the change, right after it: the committing node after its publish, for the
+/// records of its own change set, and the schema leader after a dropped index left the schema of every
+/// node. This is the normal path. A removal runs behind the statement (<see cref="Schedule"/>): it takes
+/// time in proportion to the data, the record is durable already, and nobody can reach the data any more,
+/// so the client does not wait for it. A change of a counter runs before <c>COMMIT</c> returns
+/// (<see cref="RunNowAsync"/>), so the client's next draw follows the new definition.</item>
 /// <item>The coordinator-job sweep on the schema leader (<see cref="RunDueAsync"/>), for records that a
 /// crash, a lost connection or a failed run left behind. It survives a restart and a leader change,
 /// because the records are in KV and any node can finish them.</item>
@@ -87,9 +89,9 @@ internal sealed class DeferredPurgeRunner : IAsyncDisposable
     internal Task WaitForScheduledRunsForTestsAsync() => Task.WhenAll(scheduled.Keys);
 
     /// <summary>
-    /// Starts the removal of one record on the node that published its change set, and returns at once. A
-    /// record that is not done is left for the sweep, and the database is marked so the next sweep looks
-    /// for it.
+    /// Starts the removal of one record on the node that made its change, and returns at once: the node that
+    /// published the change set, or the schema leader that dropped an index. A record that is not done is
+    /// left for the sweep, and the database is marked so the next sweep looks for it.
     /// </summary>
     internal void Schedule(DatabaseDescriptor database, DeferredPurgeRecord record)
     {
@@ -236,12 +238,16 @@ internal sealed class DeferredPurgeRunner : IAsyncDisposable
     }
 
     /// <summary>
-    /// True once the change set of <paramref name="record"/> ended on this node; see
-    /// <see cref="DeferredPurgeRecord.BaseVersion"/>. A committed change set always ends in a publish, so
-    /// an ended one is a published one.
+    /// True once the change of <paramref name="record"/> ended on this node. A record of a change set is due
+    /// once the change set ended (<see cref="DeferredPurgeRecord.BaseVersion"/>); a committed change set
+    /// always ends in a publish, so an ended one is a published one. A record with no change set, which a
+    /// <c>DROP INDEX</c> outside a transaction writes, is due from <see cref="DeferredPurgeRecord.DueVersion"/> on.
     /// </summary>
     private static bool IsDue(DatabaseDescriptor database, DeferredPurgeRecord record)
     {
+        if (record.ChangeSetId.Length == 0)
+            return database.SharedSchema.SchemaVersion >= record.DueVersion;
+
         if (database.Schema.PendingChangeSet is { } pending
             && string.Equals(pending.ChangeSetId, record.ChangeSetId, StringComparison.Ordinal))
             return false;

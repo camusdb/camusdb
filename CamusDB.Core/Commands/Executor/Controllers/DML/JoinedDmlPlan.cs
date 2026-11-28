@@ -141,8 +141,9 @@ internal sealed class JoinedDmlPlan
             RefuseSecondUnaliasedTarget(relations, tableName, alias, statementName);
 
         // The primary key comes first: the read phase reads the key of each joined row by position.
-        if (!table.Indexes.TryGetValue(CamusDBConstants.PrimaryKeyInternalName, out TableIndexSchema? primaryKey))
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Table '{table.Name}' has no primary key");
+        // Only a public key: the write phase finds each joined row through it.
+        if (table.ReadablePrimaryKey is not { } primaryKey)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Table '{table.Name}' has no primary key that a statement can read");
 
         string[] keyColumns = new string[primaryKey.Columns.Length];
         for (int i = 0; i < keyColumns.Length; i++)

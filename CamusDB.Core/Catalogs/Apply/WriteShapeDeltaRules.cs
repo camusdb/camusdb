@@ -45,7 +45,8 @@ internal readonly record struct WriteShapeTargets(IReadOnlyList<TableSchema>? Ta
 ///
 /// <para><b>Resolve before the apply, stamp after it.</b> The answer needs the state the delta is
 /// about to replace: an index that the proposer already keeps in memory with the same write duty
-/// (the single-node build adds it locally and replicates afterwards) gains nothing from its delta.
+/// (the build inside a transaction adds it to the private schema and records the delta afterwards)
+/// gains nothing from its delta.
 /// Every table named here exists before the apply, and the apply mutates it in place, so the
 /// instance resolved early is the one to stamp.</para>
 /// </summary>

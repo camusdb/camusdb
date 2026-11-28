@@ -109,6 +109,20 @@ public static class BranchKvCodec
     public const int IndexRowIdPayloadLength = 24;
 
     /// <summary>
+    /// True when the payload of a secondary-index entry names <paramref name="rowId"/>. Only the row id
+    /// prefix is compared: a covering index stores its INCLUDE tuple after it.
+    /// </summary>
+    public static bool IndexEntryNamesRow(ReadOnlySpan<byte> payload, ObjectIdValue rowId)
+    {
+        if (payload.Length < IndexRowIdPayloadLength)
+            return false;
+
+        Span<byte> expected = stackalloc byte[IndexRowIdPayloadLength];
+        ObjectId.WriteHexAscii(expected, rowId.a, rowId.b, rowId.c);
+        return payload[..IndexRowIdPayloadLength].SequenceEqual(expected);
+    }
+
+    /// <summary>
     /// Peels the kind byte from <paramref name="data"/> and returns the remaining payload as a
     /// zero-copy <see cref="ReadOnlyMemory{T}"/> slice of the same array (<c>data.AsMemory(1)</c>) —
     /// envelope removal no longer allocates a payload-sized copy. The caller must keep

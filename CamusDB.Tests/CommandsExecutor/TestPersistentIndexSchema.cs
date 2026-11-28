@@ -646,7 +646,7 @@ internal sealed class TestPersistentIndexSchema : BaseTest
 
         // The seam fires while name_idx is WriteOnly, after backfill has scanned existing rows and
         // before publish. The insert here maintains the WriteOnly index via the live descriptor.
-        TableIndexAdder.TestHookBeforePublish = async () =>
+        executor.TestInterceptAfterIndexBackfill = async () =>
         {
             await InsertRobot(executor, dbname, database, "writeonly_robot", 2025);
         };
@@ -663,7 +663,7 @@ internal sealed class TestPersistentIndexSchema : BaseTest
         }
         finally
         {
-            TableIndexAdder.TestHookBeforePublish = null;
+            executor.TestInterceptAfterIndexBackfill = null;
         }
 
         // Force the index path so the lookup reads the index keyspace, not a table scan. The row

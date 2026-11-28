@@ -231,6 +231,13 @@ public sealed class KvTransaction
     /// rows by key keeps the first ones; the others are read again by a write, as before.
     /// </summary>
     private const int MaxRememberedPointReads = 64;
+
+    /// <summary>
+    /// True once Kahuna granted this transaction an exclusive key lock. Written under
+    /// <c>trackSync</c>, read under it by <see cref="HoldsNoLocksOrWrites"/>. See <see cref="MarkHoldsKeyLocks"/>.
+    /// </summary>
+    private bool holdsKeyLocks;
+
     private Dictionary<string, SchemaVersionPin>? schemaPins;
 
     // Write-shape fence state, guarded by trackSync. See PinWriteShape and TryEnterCommit. The first
@@ -835,6 +842,11 @@ public sealed class KvTransaction
                 CamusDBErrorCodes.ReadOnlyTransaction,
                 $"cannot write in a read-only transaction (transaction {UniqueId})");
 
+        // A killed transaction's running write stops here, before its next write reaches Kahuna, so the
+        // statement ends with a definite error and the kill's rollback can run. One field read per batch.
+        if (Volatile.Read(ref killReason) is not null)
+            throw KilledError();
+
         // Counted whatever the limit: the schema-fence retry reads it to tell an attempt that wrote
         // nothing from one that did. See WriteCount.
         Interlocked.Increment(ref writeBatches);
@@ -864,6 +876,19 @@ public sealed class KvTransaction
 
     /// <summary>Running total of mutations reserved so far in this transaction.</summary>
     public int MutationCount { get { lock (trackSync) return mutationCount; } }
+
+    /// <summary>
+    /// How many distinct keys the transaction has written so far, as its client-side mirror records them.
+    /// For diagnostics (<c>SHOW TRANSACTIONS</c>); it takes the tracking lock.
+    /// </summary>
+    public int ModifiedKeyCount { get { lock (trackSync) return modifiedKeys?.Count ?? 0; } }
+
+    /// <summary>
+    /// Origin, owner and last statement of an explicit transaction, for <c>SHOW TRANSACTIONS</c>. The host
+    /// sets it when a client begins an explicit transaction, before the handle is published; it is null
+    /// for every other transaction.
+    /// </summary>
+    public Diagnostics.TransactionActivity? Activity { get; set; }
 
     private long writeBatches;
 
@@ -920,10 +945,174 @@ public sealed class KvTransaction
     /// </summary>
     public void ThrowIfRollbackOnly()
     {
+        if (Volatile.Read(ref killReason) is not null)
+            throw KilledError();
+
         if (Volatile.Read(ref rollbackOnlyReason) is { } reason)
             throw new CamusDBException(
                 CamusDBErrorCodes.TransactionRollbackOnly,
                 $"Transaction {UniqueId} is aborted, commands are ignored until the end of the transaction block: {reason}");
+    }
+
+    private string? killReason;
+
+    /// <summary>Why <c>KILL TRANSACTION</c> ended this transaction, or null. Set by <see cref="MarkKilled"/>.</summary>
+    public string? KillReason => Volatile.Read(ref killReason);
+
+    /// <summary>
+    /// Marks the transaction killed by <c>KILL TRANSACTION</c>. From here a statement is refused at its
+    /// entry (<see cref="ThrowIfRollbackOnly"/>), a running write stops at its next write
+    /// (<see cref="ReserveMutations"/>), and a commit is refused, all with
+    /// <see cref="CamusDBErrorCodes.TransactionKilled"/>. It also marks the transaction rollback-only,
+    /// so a commit path that does not look at the kill still refuses.
+    ///
+    /// <para>It does not roll the transaction back. The host that tracks the transaction owns that, and
+    /// runs it once no statement runs on the transaction any more, because a rollback beside a running
+    /// write would race the write's own Kahuna calls. The first reason is kept.</para>
+    /// </summary>
+    public void MarkKilled(string reason)
+    {
+        Interlocked.CompareExchange(ref killReason, reason, null);
+        MarkRollbackOnly(reason);
+    }
+
+    // Created by the first read that watches for a kill; most transactions never run one, and they pay
+    // nothing. Never disposed: it has no timer, and the reads' linked sources unregister themselves.
+    private CancellationTokenSource? killSource;
+
+    /// <summary>
+    /// A token that fires when <c>KILL TRANSACTION</c> ends this transaction. A read of the transaction
+    /// links it into its own token, so the kill stops the read at its next token check whether or not
+    /// the read is on the running-statement list (<c>query_activity_enabled</c> off, or a read that had
+    /// not registered yet when the kill came).
+    ///
+    /// <para>The source and the kill reason are each published with a full fence, and each side reads
+    /// the other's field after its own write: a read that creates the source after the kill looked for
+    /// it sees the reason and cancels the source itself, and a kill that comes after the source exists
+    /// cancels it in <see cref="CancelKillToken"/>. So no read misses the kill.</para>
+    /// </summary>
+    public CancellationToken KillToken
+    {
+        get
+        {
+            CancellationTokenSource? source = Volatile.Read(ref killSource);
+            if (source is null)
+            {
+                CancellationTokenSource created = new();
+                source = Interlocked.CompareExchange(ref killSource, created, null) ?? created;
+            }
+
+            if (Volatile.Read(ref killReason) is not null)
+                source.Cancel();
+
+            return source.Token;
+        }
+    }
+
+    /// <summary>
+    /// Fires <see cref="KillToken"/> after <see cref="MarkKilled"/>. Separate from it because the
+    /// cancellation runs the reads' callbacks on the calling thread, and <see cref="MarkKilled"/> runs
+    /// under the host's lock of the transaction's entry. Call it outside that lock.
+    /// </summary>
+    public void CancelKillToken()
+    {
+        if (Volatile.Read(ref killReason) is not null)
+            Volatile.Read(ref killSource)?.Cancel();
+    }
+
+    /// <summary>The error a statement or a commit of a killed transaction reports.</summary>
+    public CamusDBException KilledError() => new(
+        CamusDBErrorCodes.TransactionKilled,
+        $"Transaction {UniqueId} was {Volatile.Read(ref killReason) ?? "killed by KILL TRANSACTION"}. " +
+        "It is rolled back and accepts no further statement; begin a new transaction");
+
+    /// <summary>
+    /// Wraps the lazy cursor of a read that runs under <paramref name="killWatch"/>, a token source
+    /// linked to the request's token and to <see cref="KillToken"/>. A cancellation that the kill caused
+    /// becomes <see cref="KilledError"/>, as it does while the statement plans, and the source is
+    /// disposed when the cursor is, which removes its registration on <see cref="KillToken"/>.
+    /// </summary>
+    public IAsyncEnumerable<T> StopOnKill<T>(IAsyncEnumerable<T> cursor, CancellationTokenSource killWatch, CancellationToken request) =>
+        new KillWatchingCursor<T>(this, cursor, killWatch, request);
+
+    /// <summary>
+    /// True when <paramref name="exception"/> is the cancellation that a kill caused, not one that the
+    /// client's request caused.
+    /// </summary>
+    public bool IsKillCancellation(Exception exception, CancellationToken request) =>
+        exception is OperationCanceledException && Volatile.Read(ref killReason) is not null && !request.IsCancellationRequested;
+
+    /// <summary>The enumerable half of <see cref="StopOnKill{T}"/>.</summary>
+    private sealed class KillWatchingCursor<T>(
+        KvTransaction tx, IAsyncEnumerable<T> rows, CancellationTokenSource killWatch, CancellationToken request) : IAsyncEnumerable<T>
+    {
+        public IAsyncEnumerator<T> GetAsyncEnumerator(CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                return new KillWatchingEnumerator<T>(tx, rows.GetAsyncEnumerator(cancellationToken), killWatch, request);
+            }
+            catch
+            {
+                killWatch.Dispose();
+                throw;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The enumerator half of <see cref="StopOnKill{T}"/>. Hand-written for the reason given on
+    /// <see cref="AbortOnFailure{T}"/>: it opens and disposes the inner enumerator together with its own.
+    /// </summary>
+    private sealed class KillWatchingEnumerator<T>(
+        KvTransaction tx, IAsyncEnumerator<T> inner, CancellationTokenSource killWatch, CancellationToken request) : IAsyncEnumerator<T>
+    {
+        public T Current => inner.Current;
+
+        public ValueTask<bool> MoveNextAsync()
+        {
+            // Checked before every row: a cursor whose rows are already in memory (a SHOW statement, a
+            // buffered sort) observes no token, and would otherwise run to its end after the kill.
+            if (Volatile.Read(ref tx.killReason) is not null)
+                throw tx.KilledError();
+
+            ValueTask<bool> step;
+
+            try
+            {
+                step = inner.MoveNextAsync();
+            }
+            catch (Exception ex) when (tx.IsKillCancellation(ex, request))
+            {
+                throw tx.KilledError();
+            }
+
+            return step.IsCompletedSuccessfully ? step : AwaitStep(step);
+        }
+
+        private async ValueTask<bool> AwaitStep(ValueTask<bool> step)
+        {
+            try
+            {
+                return await step.ConfigureAwait(false);
+            }
+            catch (Exception ex) when (tx.IsKillCancellation(ex, request))
+            {
+                throw tx.KilledError();
+            }
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            try
+            {
+                await inner.DisposeAsync().ConfigureAwait(false);
+            }
+            finally
+            {
+                killWatch.Dispose();
+            }
+        }
     }
 
     /// <summary>
@@ -1501,22 +1690,40 @@ public sealed class KvTransaction
     }
 
     /// <summary>
-    /// True while this transaction holds no range lock and has staged no write, so nothing of it can
-    /// be waited on by another transaction. Wait-die aborts a younger lock requester because a wait
-    /// from it could close a cycle through what it already holds; a requester that holds nothing
-    /// cannot be on any cycle, so it may wait for its deadline instead of aborting at once. The
-    /// exclusive key lock a write takes is not tracked separately, but a write path takes it and
-    /// records the key before it returns, so no range-lock acquire of this transaction ever runs
-    /// between the two.
+    /// True while this transaction holds no range lock, no exclusive key lock and has staged no write,
+    /// so nothing of it can be waited on by another transaction. Wait-die aborts a younger lock
+    /// requester because a wait from it could close a cycle through what it already holds; a
+    /// requester that holds nothing cannot be on any cycle, so it may wait for its deadline instead of
+    /// aborting at once. Range locks and key locks both wait under this rule, so a key lock counts as
+    /// a holding whether or not a write followed it: <c>SELECT … FOR UPDATE</c> holds row locks with no
+    /// write, and an <c>UPDATE</c> holds its row locks before it writes (<see cref="MarkHoldsKeyLocks"/>).
     /// </summary>
     public bool HoldsNoLocksOrWrites
     {
         get
         {
             lock (trackSync)
-                return (acquiredRangeLocks is null || acquiredRangeLocks.Count == 0)
+                return !holdsKeyLocks
+                    && (acquiredRangeLocks is null || acquiredRangeLocks.Count == 0)
                     && (modifiedKeys is null || modifiedKeys.Count == 0);
         }
+    }
+
+    /// <summary>
+    /// Records that Kahuna granted this transaction at least one exclusive key lock. Call it as soon as
+    /// a grant is seen, before the same acquire decides how to treat a key another transaction holds:
+    /// a batched acquire can be granted some keys and refused others in one answer, and from then on
+    /// the transaction is a holder for the wait-die rule (<see cref="HoldsNoLocksOrWrites"/>). The
+    /// coordinator owns the locks and releases them when the transaction ends, so only the fact is
+    /// kept here, not the keys. It never goes back to false.
+    /// </summary>
+    public void MarkHoldsKeyLocks()
+    {
+        if (Volatile.Read(ref holdsKeyLocks))
+            return;
+
+        lock (trackSync)
+            holdsKeyLocks = true;
     }
 
     /// <summary>True while this transaction holds at least one range lock, of any mode and any bounds.</summary>

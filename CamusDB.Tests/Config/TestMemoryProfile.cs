@@ -106,8 +106,49 @@ public sealed class TestMemoryProfile
 
         Assert.That(options.StorageSharedCacheMb, Is.EqualTo(819));   // 10% of RAM
         Assert.That(options.StorageSharedMemtableBudgetMb, Is.EqualTo(204)); // a quarter of the cache
-        Assert.That(options.MaxBytesPerActor, Is.EqualTo(16 * OneMb));       // 512 MiB layer / 32 actors
-        Assert.That(options.MaxEntriesPerActor, Is.EqualTo(32_768));         // bytes / 512
+        Assert.That(options.MaxBytesPerActor, Is.EqualTo(64 * OneMb));       // four shares of a 512 MiB layer over 32 actors
+        Assert.That(options.MaxEntriesPerActor, Is.EqualTo(131_072));        // bytes / 512
+    }
+
+    [Test]
+    public void AnActorMayCacheFourEvenSharesOnALargeHeap()
+    {
+        // All rows of a table are on one actor, so an even split leaves a table one share of the layer
+        // while most shares stay unused. From a 2 GiB heap an actor may cache four shares.
+        EmbeddedKahunaOptions options = new() { KeyValueWorkers = 64 };
+        EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(
+            options, new KahunaOptionsConfig(), machineMemoryBytes: 8192 * OneMb, managedHeapBytes: 2458 * OneMb);
+
+        long layer = 2458 * OneMb / 16;
+        Assert.That(options.MaxBytesPerActor, Is.EqualTo(layer * 4 / 64));    // 9.6 MiB, not the 2.4 MiB even share
+        Assert.That(options.MaxEntriesPerActor, Is.EqualTo((int)(layer * 4 / 64 / 512)));
+
+        // The caches together stay within four times the layer, a quarter of the heap.
+        Assert.That(options.MaxBytesPerActor * 64, Is.LessThanOrEqualTo(2458 * OneMb / 4));
+    }
+
+    [Test]
+    public void ASmallHeapKeepsTheEvenSplit()
+    {
+        // Just below 2 GiB the caches of all actors together must stay at the layer, 6.25% of the heap.
+        EmbeddedKahunaOptions below = new() { KeyValueWorkers = 32 };
+        EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(below, new KahunaOptionsConfig(), 2047 * OneMb);
+        Assert.That(below.MaxBytesPerActor, Is.EqualTo(2047 * OneMb / 16 / 32));
+        Assert.That(below.MaxBytesPerActor * 32, Is.LessThanOrEqualTo(2047 * OneMb / 16));
+
+        EmbeddedKahunaOptions at = new() { KeyValueWorkers = 32 };
+        EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(at, new KahunaOptionsConfig(), 2048 * OneMb);
+        Assert.That(at.MaxBytesPerActor, Is.EqualTo(2048 * OneMb / 16 * 4 / 32));
+    }
+
+    [Test]
+    public void OneActorNeverCachesMoreThanTheLayer()
+    {
+        // With fewer actors than shares the cap is the layer itself.
+        EmbeddedKahunaOptions options = new() { KeyValueWorkers = 2 };
+        EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(options, new KahunaOptionsConfig(), 8L * 1024 * OneMb);
+
+        Assert.That(options.MaxBytesPerActor, Is.EqualTo(512 * OneMb));
     }
 
     [Test]
@@ -121,7 +162,7 @@ public sealed class TestMemoryProfile
 
         Assert.That(options.StorageSharedCacheMb, Is.EqualTo(153));  // 10%, not the 320 floor
         Assert.That(options.StorageSharedMemtableBudgetMb, Is.EqualTo(38)); // a quarter, not the 128 floor
-        Assert.That(options.MaxBytesPerActor, Is.EqualTo(3 * OneMb));       // 96 MiB layer / 32, not 8 MiB
+        Assert.That(options.MaxBytesPerActor, Is.EqualTo(3 * OneMb));       // 96 MiB layer / 32, not 8 MiB, and one share below 2 GiB
         Assert.That(options.MaxEntriesPerActor, Is.EqualTo(6_144));         // derived, not the 10k floor
 
         // The invariant the shared-bundle builder enforces at boot must hold at every size.
@@ -158,7 +199,7 @@ public sealed class TestMemoryProfile
 
         Assert.That(options.StorageSharedCacheMb, Is.EqualTo(409));   // 10% of the container
         Assert.That(options.StorageSharedMemtableBudgetMb, Is.EqualTo(192)); // the flush unit, not 102 or 61
-        Assert.That(options.MaxBytesPerActor, Is.EqualTo(2458 * OneMb / 16 / 32)); // 6.25% of the HEAP, split
+        Assert.That(options.MaxBytesPerActor, Is.EqualTo(2458 * OneMb / 16 * 4 / 32)); // four shares of 6.25% of the HEAP
 
         // The exact comparison Kommander's RocksDbWAL makes at open; below it, it logs the warning.
         Assert.That((long)options.StorageSharedMemtableBudgetMb * OneMb,
@@ -327,10 +368,11 @@ public sealed class TestMemoryProfile
 
         EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(options, new KahunaOptionsConfig(), 8L * 1024 * OneMb);
 
-        // 512 MiB layer split across the actors Kahuna will run; the aggregate stays near the layer
-        // (per-actor floor rounding at most), never layer x actors.
-        Assert.That(options.MaxBytesPerActor, Is.EqualTo(Math.Max(512 * OneMb / actors, OneMb)));
-        Assert.That(options.MaxBytesPerActor * actors, Is.LessThanOrEqualTo(512 * OneMb + actors * OneMb));
+        // 512 MiB layer split across the actors Kahuna will run, four shares to an actor; the
+        // aggregate stays within four times the layer (per-actor floor rounding at most), never
+        // layer x actors.
+        Assert.That(options.MaxBytesPerActor, Is.EqualTo(Math.Max(512 * OneMb * 4 / actors, OneMb)));
+        Assert.That(options.MaxBytesPerActor * actors, Is.LessThanOrEqualTo(4 * 512 * OneMb + actors * OneMb));
     }
 
     [Test]

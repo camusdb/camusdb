@@ -34,8 +34,6 @@ internal sealed class AddIndexFluxState
 
     public string? IndexId { get; set; }
 
-    public string? LastBackfilledRowId { get; set; }
-
     /// <summary>
     /// The key of the new index resolved against the table: column ids, the names the write paths
     /// read (a hidden key name at an expression position) and the expressions. Set before the first

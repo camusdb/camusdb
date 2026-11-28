@@ -392,9 +392,8 @@ internal sealed class JoinedDmlExecutor
         bool refuseDuplicates,
         int maxChunk)
     {
-        TableIndexSchema primaryKey = table.Indexes.TryGetValue(CamusDBConstants.PrimaryKeyInternalName, out TableIndexSchema? pk)
-            ? pk
-            : throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Table '{table.Name}' has no primary key");
+        TableIndexSchema primaryKey = table.ReadablePrimaryKey
+            ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Table '{table.Name}' has no primary key that a statement can read");
 
         int keyCount = plan.KeyColumns.Length;
         int chunkSize = Math.Max(1, maxChunk);

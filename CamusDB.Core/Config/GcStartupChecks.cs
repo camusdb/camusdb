@@ -33,15 +33,19 @@ public static class GcStartupChecks
     /// Empty otherwise. Workstation GC has no dynamic adaptation, whatever the setting reports.
     /// </summary>
     /// <param name="kahuna">The node's Kahuna settings, with unset keys left null.</param>
+    /// <param name="isClusterMode">Whether the node runs in cluster mode. An unset hold is 1 ms there and 0 on a standalone node.</param>
     /// <param name="isServerGc">Whether the process runs the server GC.</param>
     /// <param name="dynamicAdaptationMode">The mode the GC reports, or null when it reports none.</param>
-    public static IReadOnlyList<string> Inspect(KahunaOptionsConfig kahuna, bool isServerGc, long? dynamicAdaptationMode)
+    public static IReadOnlyList<string> Inspect(KahunaOptionsConfig kahuna, bool isClusterMode, bool isServerGc, long? dynamicAdaptationMode)
     {
         if (!isServerGc || dynamicAdaptationMode is null or 0)
             return [];
 
         bool preciseWake = kahuna.KeyValueWritePreciseWake ?? EmbeddedKahunaOptionsBuilder.DefaultKeyValueWritePreciseWake;
-        int holdMs = kahuna.KeyValueWritePostCompletionHoldMs ?? EmbeddedKahunaOptionsBuilder.DefaultKeyValueWritePostCompletionHoldMs;
+        int holdMs = kahuna.KeyValueWritePostCompletionHoldMs
+            ?? (isClusterMode
+                ? EmbeddedKahunaOptionsBuilder.DefaultKeyValueWritePostCompletionHoldMs
+                : EmbeddedKahunaOptionsBuilder.DefaultStandaloneKeyValueWritePostCompletionHoldMs);
 
         if (!preciseWake && holdMs > 0)
             return [];

@@ -67,9 +67,21 @@ Note the following two effects of this order.
 
 | Option | Result |
 | --- | --- |
-| none | The statement returns `CADB0502` (`TransactionConflict`), as an `UPDATE` of the same row does. The code is retryable. |
-| `NOWAIT` | The statement returns `CADB0555` (`LockNotAvailable`). |
-| `SKIP LOCKED` | The row is left out of the result. It does not count toward `LIMIT` or `OFFSET`. |
+| none | The statement waits for the holder, as an `UPDATE` of the same row does (see below). When it may not wait, or the holder keeps the row past `lock_wait_deadline_ms`, it returns `CADB0502` (`TransactionConflict`). The code is retryable. |
+| `NOWAIT` | The statement returns `CADB0555` (`LockNotAvailable`) at once. |
+| `SKIP LOCKED` | The row is left out of the result at once. It does not count toward `LIMIT` or `OFFSET`. |
+
+With no option, the wait follows the wait-die rule of every row lock (see
+[transactions-locking-and-isolation.md](transactions-locking-and-isolation.md) §6.1):
+
+- A transaction that started before the holder waits, for at most `lock_wait_deadline_ms` (500 ms by
+  default).
+- A transaction that holds no lock and no write yet also waits, whatever its age.
+- A transaction that started after the holder and already holds a lock returns `CADB0502` at once. A
+  row that an earlier `FOR UPDATE` of the same transaction locked counts as held.
+
+When the holder ends in time, the statement locks the row, reads it again and checks the `WHERE`
+clause on that read, so a row the holder changed or deleted is handled as in step 5 above.
 
 In all three cases, a holder that is only finishing its commit (its intent waits for replication or
 settlement) is not a held lock. The statement waits for it a short time, and then continues.
@@ -86,8 +98,9 @@ statement ends its transaction. CamusDB does not support savepoints.
   queue both get that lock. As a result, the later `UPDATE` that each worker makes to the job it took
   conflicts with the other worker's lock. That defeats `SKIP LOCKED`.
 - **Serializable, full scans.** The shared range lock of the scan comes before the row locks. If the
-  scanned range covers a row that another transaction has locked, the scan returns `CADB0502` at that
-  lock, also with `NOWAIT`. A lookup by key goes directly to the row locks.
+  scanned range covers a row that another transaction has locked, the scan meets the holder at that
+  lock and waits by the same rule. If the holder does not end in time, the scan returns `CADB0502`,
+  also with `NOWAIT`. A lookup by key goes directly to the row locks.
 - **Optimistic transactions** (`SET TRANSACTION LOCKING OPTIMISTIC`) take no locks. The statement
   returns `CADB0400` with the message "FOR UPDATE requires LOCKING PESSIMISTIC".
 - **Read-only transactions** cannot own a lock. The statement returns `CADB0400`.

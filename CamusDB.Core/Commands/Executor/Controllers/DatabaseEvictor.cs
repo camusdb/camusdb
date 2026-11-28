@@ -272,6 +272,11 @@ internal sealed class DatabaseEvictor : IAsyncDisposable
         if (descriptor.SchemaDdlSemaphore.CurrentCount == 0)
             return DatabaseEvictionOutcome.InUse;
 
+        // A staged change backfills or validates a table with the semaphore released and the table held. A
+        // job that a resume drives runs with no statement, and so with no reference to the descriptor.
+        if (descriptor.DdlGate.HeldTableCount > 0)
+            return DatabaseEvictionOutcome.InUse;
+
         if (IsAncestorOfAnOpenBranch(descriptor.Id))
             return DatabaseEvictionOutcome.BranchAncestor;
 

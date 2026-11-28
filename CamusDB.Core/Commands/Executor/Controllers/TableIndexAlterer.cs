@@ -21,14 +21,11 @@ internal sealed class TableIndexAlterer
 
     private readonly TableIndexAdder tableIndexAdder;
 
-    private readonly TableIndexDropper tableIndexDropper;
-
     public TableIndexAlterer(CatalogsManager catalogsManager, ILogger<ICamusDB> logger)
     {
         catalogs = catalogsManager;
 
         tableIndexAdder = new(logger);
-        tableIndexDropper = new(logger);
     }
 
     public async Task<bool> Alter(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterIndexTicket ticket, KvTransaction tx)
@@ -38,8 +35,13 @@ internal sealed class TableIndexAlterer
             AlterIndexOperation.AddIndex or AlterIndexOperation.AddUniqueIndex or AlterIndexOperation.AddPrimaryKey or AlterIndexOperation.AddInvertedIndex
                 => await AddIndex(catalogs, queryExecutor, database, table, ticket, tx).ConfigureAwait(false),
 
-            AlterIndexOperation.DropIndex or AlterIndexOperation.DropPrimaryKey
-                => await DropIndex(catalogs, queryExecutor, database, table, ticket, tx).ConfigureAwait(false),
+            // A drop has no local work: outside a transaction the coordinator steps the index down on every
+            // node (SchemaDdlService.DropIndexStagedWithinGateAsync), and inside one it leaves the private
+            // schema only.
+            AlterIndexOperation.DropIndex or AlterIndexOperation.DropPrimaryKey =>
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    $"Index '{ticket.IndexName}' of table '{table.Name}' is dropped by the staged coordinator, not by local work"),
 
             AlterIndexOperation.RenameIndex
                 => await RenameIndex(database, ticket, tx).ConfigureAwait(false),
@@ -55,18 +57,6 @@ internal sealed class TableIndexAlterer
             return false;
 
         await tableIndexAdder.AddIndex(catalogs, tx, queryExecutor, database, table, ticket).ConfigureAwait(false);
-        return true;
-    }
-
-    private async Task<bool> DropIndex(CatalogsManager catalogs, QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterIndexTicket ticket, KvTransaction tx)
-    {
-        // Checked here, inside the DDL work under the DDL gate, and not by the caller: a concurrent drop
-        // of the same index then makes this one a no-op instead of an error. Returning false also stops
-        // the caller before it replicates a schema change.
-        if (ticket.IfExists && !table.AllIndexes.ContainsKey(ticket.IndexName))
-            return false;
-
-        await tableIndexDropper.DropIndex(catalogs, tx, queryExecutor, database, table, ticket).ConfigureAwait(false);
         return true;
     }
 

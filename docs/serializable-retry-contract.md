@@ -1,8 +1,12 @@
 # Serializable isolation: retry contract
 
 Serializable is the **default isolation level** in CamusDB. Serializable+ReadWrite transactions use
-**strict two-phase locking** (S2PL). When two transactions conflict, one is aborted immediately. The
-aborted transaction must be **replayed from `BEGIN`** — retrying a single statement in the same
+**strict two-phase locking** (S2PL). When two transactions conflict on a lock, the wait-die rule
+decides: an older requester, or one that holds nothing yet, waits up to `lock_wait_deadline_ms` for
+the holder to finish; a younger requester that already holds a lock is aborted at once. The same rule
+covers the row locks of pessimistic writes at Read Committed (see
+[transactions-locking-and-isolation.md](transactions-locking-and-isolation.md) §6.1). An aborted
+transaction must be **replayed from `BEGIN`** — retrying a single statement in the same
 transaction is not safe.
 
 For single-statement (autocommit) operations, CamusDB automatically retries on your behalf. This

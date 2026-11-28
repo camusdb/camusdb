@@ -191,8 +191,8 @@ trigger. INCLUDE values come from the row itself.
   gives `1` for one and `1.0` for the other. The INCLUDE values of a covering index use the same test.
 - `DELETE` and the row-level TTL sweep evaluate the expression on the old row to find its entry.
 - The backfill of `CREATE INDEX` (`IndexBackfiller`) decodes the columns the expressions read and
-  evaluates them the same way. The standalone and the cluster add paths share it, with concurrent
-  writers.
+  evaluates them the same way. It runs beside concurrent writers, on a standalone node and in a
+  cluster alike.
 
 An error that the expression raises for a row fails the statement, as the same error in a `SET` or a
 `CHECK` does. A value whose type differs from the stored result type also fails the statement, except
@@ -272,10 +272,10 @@ cannot read an expression as an identifier. It stops with an error on such an in
 
 ## Cluster mode
 
-On a cluster, `CREATE INDEX` goes through the schema-change coordinator, as for any index. The index
-moves from `DeleteOnly` to `WriteOnly`, the backfill is done, and then the index becomes `Public`.
+`CREATE INDEX` goes through the schema-change coordinator, as for any index, also on a standalone
+node. The index moves from `DeleteOnly` to `WriteOnly`, the backfill is done, and then the index becomes `Public`.
 `IndexBuildInfo` and the persisted coordinator job carry the stored expressions. This means that a job
-that a new leader resumes builds the same keys. A follower forwards the statement to the schema leader with the expression text
+that a new leader, or a restarted node, resumes builds the same keys. A follower forwards the statement to the schema leader with the expression text
 in `ColumnIndexInfoRequest.Expression`.
 
 The definition that the coordinator stages is built on the table opened under the DDL gate. A
@@ -318,8 +318,8 @@ write entries over the wrong values.
 | Validation, stored form, binding, canonical text | `Controllers/DDL/IndexExpressionBinder.cs` |
 | Immutable function list | `Controllers/Functions/ScalarFunctionRegistry.cs` |
 | Persisted and in-memory models | `Catalogs/Models/IndexKeyExpression.cs`, `BoundIndexExpression.cs`, `TableIndexSchema.cs` |
-| Standalone add path | `Controllers/DDL/TableIndexAdder.cs` |
-| Cluster add path and resume | `Controllers/DDL/SchemaDdlService.cs`, `Catalogs/SchemaChangeCoordinator.cs` |
+| Checks, and the build inside a transaction | `Controllers/DDL/TableIndexAdder.cs` |
+| Staged add path and resume | `Controllers/DDL/SchemaDdlService.cs`, `Catalogs/SchemaChangeCoordinator.cs` |
 | Inline `KEY` of `CREATE TABLE` | `Catalogs/Replication/SchemaChangeEntryFactory.BuildInlineIndexes` |
 | Key values for the write paths | `Controllers/IndexKeyRows.cs` |
 | WHERE matching | `Controllers/Queries/ExpressionIndexPredicates.cs` |

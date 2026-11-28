@@ -15,7 +15,7 @@ namespace CamusDB.Core.Storage.Kv;
 /// <see cref="KvTableStore"/> because they are that type's published vocabulary; the code that acts
 /// on them lives in <see cref="KvBatchWriter"/>.
 ///
-/// <para>All five are <see langword="readonly struct"/>s so a per-row descriptor lives in the batch
+/// <para>All of them are <see langword="readonly struct"/>s so a per-row descriptor lives in the batch
 /// list's backing array rather than as its own heap object. Every index-entry collection is nullable
 /// rather than empty, so a row with no applicable index allocates no per-row collection at all. A
 /// producer builds such a list lazily and must never mutate it afterwards — these are value types,
@@ -69,6 +69,13 @@ public sealed partial class KvTableStore
     /// </para>
     /// </summary>
     public readonly record struct IndexWrite(string IndexId, CompositeColumnValue Key, bool Unique, byte[]? IncludeTuple = null, bool Overwrite = false);
+
+    /// <summary>
+    /// One entry of an index build: the key and the row it names, with the INCLUDE payload of a covering
+    /// index. The row itself is not written, so the entry carries its row id; see
+    /// <see cref="KvBatchWriter.PutIndexEntriesBatch"/>.
+    /// </summary>
+    public readonly record struct IndexEntryWrite(CompositeColumnValue Key, ObjectIdValue RowId, byte[]? IncludeTuple = null);
 
     /// <summary>
     /// A single row update: the new row data plus index entries to remove (old) and to add (new).

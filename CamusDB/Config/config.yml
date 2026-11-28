@@ -696,8 +696,8 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 #
 #   # Write aggregator.
 #   key_value_write_max_in_flight_batches_per_partition: 1  # batches a partition may have waiting on Raft; raise only after an A/B
-#   key_value_write_linger_ms: 1                  # how long the oldest queued write waits before a batch is sent while nothing is in flight
-#   key_value_write_post_completion_hold_ms: 1    # hold after a batch completes, so the next batch is denser; CamusDB baseline (Kahuna's own is 0)
+#   key_value_write_linger_ms: 1                  # how long the oldest queued write waits before a batch is sent while nothing is in flight; 1 in cluster mode, 0 on a standalone node
+#   key_value_write_post_completion_hold_ms: 1    # hold after a batch completes, so the next batch is denser; 1 in cluster mode, 0 on a standalone node (Kahuna's own is 0)
 #   key_value_write_precise_wake: true            # fire hold/linger/queue-age wakes from a dedicated timer thread so the hold lands on its deadline
 #   key_value_write_fill_target_trigger: true     # dispatch a held buffer once it reaches the learned fill target instead of waiting out the hold; CamusDB baseline (Kahuna's own is false)
 #   key_value_write_max_batch_items: 512          # items per batch
@@ -708,12 +708,17 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 #   #   memtable budget  = a quarter of the block cache, at most 1 GiB, raised to the Raft-log flush
 #   #                      unit (192 MiB at the wal_shard_* defaults) but never past half the block cache
 #   #   actor caches     = 6.25% of the managed heap budget (at least 64 MiB for the layer), divided
-#   #                      across the key/value actors, at most 2 GiB each; entries at ~512 B each
+#   #                      across the key/value actors, at most 2 GiB each; entries at ~512 B each.
+#   #                      From a 2 GiB heap budget one actor may hold four of those shares, because
+#   #                      a table's rows are all on one actor; the caches together can then reach
+#   #                      a quarter of the heap budget
 #   # Machine memory is the container's cgroup limit, else physical RAM. The managed heap budget is
 #   # the .NET heap hard limit when one is set, else machine memory. The RocksDB budgets sit OUTSIDE a
 #   # heap limit and count against the container beside it — leave room for both.
-#   # Example, 8 GiB / 8 cores, no heap limit: 819 MiB block cache, 204 MiB memtables, and 512 MiB of
-#   # actor caches (16 MiB x 32 actors) => ~1.5 GiB. Adding cores splits the same actor budget further. The node logs the values it chose once at startup ("RocksDB shared memory:
+#   # Example, 8 GiB / 8 cores, no heap limit: 819 MiB block cache, 204 MiB memtables, and a 512 MiB
+#   # actor layer with a cap of 64 MiB for each of 32 actors (four shares of 16 MiB) => ~1.5 GiB when
+#   # the data sits on a few actors, up to ~3 GiB when every actor fills its cap. Adding cores splits
+#   # the same actor budget further. The node logs the values it chose once at startup ("RocksDB shared memory:
 #   # ..."). A dedicated server should set all four, for example on an 8 GiB machine:
 #   #   rocksdb_shared_memory_budget_mb: 3584
 #   #   rocksdb_shared_memtable_budget_mb: 896
@@ -803,6 +808,15 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 #   # removes the key. Turning it off is safe at any time. Give every node the same value. See
 #   # docs/configuration.md.
 #   durable_materialize_on_resolve: true
+#   # Fewer Raft entries per commit (Kahuna.Core 1.19.0 or later). Both are off by default.
+#   # durable_merge_adjacent_settles writes one entry for each run of adjacent settles in a batch. It
+#   # needs no upgrade order and can differ between nodes.
+#   # durable_one_phase_bundle_entry writes the record init, the prepares and the decision of a
+#   # one-phase commit as one entry. Every node must run Kahuna.Core 1.19.0 or later before any node
+#   # has it on: an older node skips the entry with no error. Turning either key off is safe at any
+#   # time. See docs/configuration.md.
+#   durable_merge_adjacent_settles: true
+#   durable_one_phase_bundle_entry: true
 #
 #   # MVCC revision retention. Every version of every row is a physical row; without pruning, history
 #   # grows without bound. Unset: prune by age, aligned with the effective PITR window, so a restore

@@ -206,13 +206,15 @@ public static class EmbeddedKahunaOptionsBuilder
             // every key on that actor. See KahunaOptionsConfig.RocksdbDirectReads for the measurement.
             // Override with kahuna.rocksdb_direct_reads.
             RocksDbDirectReads = false,
-            // Hold 1 ms after a batch completes before dispatching the next (Kahuna's default is 0),
-            // so a round carries more items. The hold ends on the aggregator's timer thread, at its
-            // deadline, and a buffer that reaches the learned fill target is dispatched before the
-            // hold ends. The measurements are on the three Default* constants. Override with
-            // kahuna.key_value_write_post_completion_hold_ms, kahuna.key_value_write_precise_wake
-            // and kahuna.key_value_write_fill_target_trigger.
-            KeyValueWritePostCompletionHoldMs = DefaultKeyValueWritePostCompletionHoldMs,
+            // No hold after a batch completes and no linger before the first one: a partition sends a
+            // batch as soon as its log is free. The node has one voter, so a round is a local log
+            // write and a wait before it adds its length to every commit. The measurements are on
+            // DefaultStandaloneKeyValueWritePostCompletionHoldMs. The timer thread and the fill
+            // trigger stay on for a deployment that sets a hold. Override with
+            // kahuna.key_value_write_post_completion_hold_ms, kahuna.key_value_write_linger_ms,
+            // kahuna.key_value_write_precise_wake and kahuna.key_value_write_fill_target_trigger.
+            KeyValueWritePostCompletionHoldMs = DefaultStandaloneKeyValueWritePostCompletionHoldMs,
+            KeyValueWriteLingerMs = DefaultStandaloneKeyValueWriteLingerMs,
             KeyValueWritePreciseWake = DefaultKeyValueWritePreciseWake,
             KeyValueWriteFillTargetTrigger = DefaultKeyValueWriteFillTargetTrigger,
             // Materialize on resolve: the commit's settle installs the committed values on every replica and no
@@ -272,13 +274,15 @@ public static class EmbeddedKahunaOptionsBuilder
             // every key on that actor. See KahunaOptionsConfig.RocksdbDirectReads for the measurement.
             // Override with kahuna.rocksdb_direct_reads.
             RocksDbDirectReads = false,
-            // Hold 1 ms after a batch completes before dispatching the next (Kahuna's default is 0),
-            // so a round carries more items. The hold ends on the aggregator's timer thread, at its
-            // deadline, and a buffer that reaches the learned fill target is dispatched before the
-            // hold ends. The measurements are on the three Default* constants. Override with
-            // kahuna.key_value_write_post_completion_hold_ms, kahuna.key_value_write_precise_wake
-            // and kahuna.key_value_write_fill_target_trigger.
-            KeyValueWritePostCompletionHoldMs = DefaultKeyValueWritePostCompletionHoldMs,
+            // No hold after a batch completes and no linger before the first one: a partition sends a
+            // batch as soon as its log is free. The node has one voter, so a round is a local log
+            // write and a wait before it adds its length to every commit. The measurements are on
+            // DefaultStandaloneKeyValueWritePostCompletionHoldMs. The timer thread and the fill
+            // trigger stay on for a deployment that sets a hold. Override with
+            // kahuna.key_value_write_post_completion_hold_ms, kahuna.key_value_write_linger_ms,
+            // kahuna.key_value_write_precise_wake and kahuna.key_value_write_fill_target_trigger.
+            KeyValueWritePostCompletionHoldMs = DefaultStandaloneKeyValueWritePostCompletionHoldMs,
+            KeyValueWriteLingerMs = DefaultStandaloneKeyValueWriteLingerMs,
             KeyValueWritePreciseWake = DefaultKeyValueWritePreciseWake,
             KeyValueWriteFillTargetTrigger = DefaultKeyValueWriteFillTargetTrigger,
             // Materialize on resolve: the commit's settle installs the committed values on every replica and no
@@ -564,6 +568,16 @@ public static class EmbeddedKahunaOptionsBuilder
         if (kahuna.DurableMaterializeOnResolve is bool materializeOnResolve)
             baseline.DurableMaterializeOnResolve = materializeOnResolve;
 
+        // The two commit-shape switches that cut log entries per commit. CamusDB keeps Kahuna's defaults
+        // (both off) and passes on what the operator states. The bundle entry is read only by
+        // Kahuna.Core 1.19.0 or later, so a CamusDB baseline would decide it for a cluster that may
+        // still have an older node.
+        if (kahuna.DurableMergeAdjacentSettles is bool mergeAdjacentSettles)
+            baseline.DurableMergeAdjacentSettles = mergeAdjacentSettles;
+
+        if (kahuna.DurableOnePhaseBundleEntry is bool onePhaseBundleEntry)
+            baseline.DurableOnePhaseBundleEntry = onePhaseBundleEntry;
+
         // Per-page scan retry budget. Kahuna's default already sits below the shipped client command
         // deadline (5 s vs 10 s) so the named failure is observable; a deployment that raises its client
         // deadline may raise this with it, keeping the budget strictly below the deadline.
@@ -797,7 +811,8 @@ public static class EmbeddedKahunaOptionsBuilder
     /// WriteBufferManager (<see cref="RaftLogFlushUnitFloorMb"/>, gated by
     /// <see cref="RaftWalFlushUnitFloorEnabled"/>, on since Kommander 1.6.6); key/value actor caches = 6.25% of
     /// the managed heap budget (at least 64 MB for the layer as a whole) divided across the shard
-    /// actors, with the per-actor entry cap derived at an assumed ~512 B/entry. Ceilings: 2 GB block
+    /// actors, four shares to an actor from a 2 GiB heap (<see cref="ActorCacheCapBytes"/>), with the
+    /// per-actor entry cap derived at an assumed ~512 B/entry. Ceilings: 2 GB block
     /// cache, 1 GB memtables, 2 GB per actor, 4M entries. Roughly 16% of memory across both cache
     /// layers at the defaults, and never more than 4 GB in total however large the machine is. The
     /// fractions and the ceilings are deliberately modest: an unconfigured node is far more often a
@@ -857,19 +872,46 @@ public static class EmbeddedKahunaOptionsBuilder
     internal static bool RaftWalFlushUnitFloorEnabled = true;
 
     /// <summary>
-    /// CamusDB's post-completion hold for Kahuna's key/value write aggregator, in milliseconds
+    /// The cluster baseline's post-completion hold for Kahuna's key/value write aggregator, in milliseconds
     /// (Kahuna's own default is 0). The aggregator keeps one Raft batch in flight per partition and
     /// dispatches the next when a batch completes, so at full occupancy a batch carries what arrived
     /// during one round; the hold lets more items accumulate per round. It lasts its configured time
     /// with <see cref="DefaultKeyValueWritePreciseWake"/>, and a buffer that fills early leaves before
     /// it ends with <see cref="DefaultKeyValueWriteFillTargetTrigger"/>. A hold of 0 with a linger of
-    /// 0 is faster on one node (1.18x at 64 workers on the bank shape) and is not the default: on
-    /// three nodes at 8 workers it used 2.2 times the CPU per transaction for less throughput than
-    /// the exact hold, it wrote 16% to 47% more to the device per transaction, and on a three-node
-    /// NVMe cluster four runs ranged from 6,526 to 9,850 transactions a second. An explicit
+    /// 0 is the standalone default (<see cref="DefaultStandaloneKeyValueWritePostCompletionHoldMs"/>)
+    /// and is not the cluster default: on three nodes at 8 workers it used 2.2 times the CPU per
+    /// transaction for less throughput than the exact hold, it wrote 16% to 47% more to the device
+    /// per transaction, and on a three-node NVMe cluster four runs ranged from 6,526 to 9,850
+    /// transactions a second. A cluster of one node keeps this hold, because its configuration
+    /// stays in force when other nodes join it. An explicit
     /// <c>kahuna.key_value_write_post_completion_hold_ms</c> (including 0) always wins.
     /// </summary>
     internal const int DefaultKeyValueWritePostCompletionHoldMs = 1;
+
+    /// <summary>
+    /// The standalone baselines' post-completion hold, in milliseconds: 0, with
+    /// <see cref="DefaultStandaloneKeyValueWriteLingerMs"/> also 0. A standalone node has one voter,
+    /// so a Raft round is a local log write and a partition's log is idle for most of a held cycle.
+    /// Kahuna sends a batch at once from an idle partition only when the hold and the linger are
+    /// both 0. Measured on the bank shape in standalone mode against the 1 ms hold and 1 ms linger,
+    /// Serializable, three runs each on a memory-backed store: at 8 workers the commit call fell
+    /// from 0.87 to 0.35 ms and throughput rose 14.5% for 26% more CPU per transaction; at 64 and
+    /// 256 workers the commit call fell 26% and 10%, throughput stayed level, and CPU per
+    /// transaction rose 7% and 2%, because the node ran three times as many, smaller rounds. On an
+    /// NVMe drive a round is a device sync of 3 to 20 ms, batches kept their size within 13%, and
+    /// the drive's own variation between runs was larger than any difference between the settings.
+    /// A node that is short of CPU at high concurrency can set
+    /// <c>kahuna.key_value_write_post_completion_hold_ms: 1</c> and
+    /// <c>kahuna.key_value_write_linger_ms: 1</c>.
+    /// </summary>
+    internal const int DefaultStandaloneKeyValueWritePostCompletionHoldMs = 0;
+
+    /// <summary>
+    /// The standalone baselines' write linger, in milliseconds: 0 (Kahuna's own default is 1). The
+    /// linger is how long the oldest queued write waits before a batch leaves an idle partition. See
+    /// <see cref="DefaultStandaloneKeyValueWritePostCompletionHoldMs"/> for the measurement.
+    /// </summary>
+    internal const int DefaultStandaloneKeyValueWriteLingerMs = 0;
 
     /// <summary>
     /// CamusDB's baseline for <c>kahuna.key_value_write_precise_wake</c>: on, which is also Kahuna's
@@ -974,7 +1016,8 @@ public static class EmbeddedKahunaOptionsBuilder
             // size that cannot hold a useful working set at all.
             long actorLayerBytes = Math.Max(managedHeapBytes / 16, 64L * OneMb);
             baseline.MaxBytesPerActor = ClampWithYieldingFloor(
-                actorLayerBytes / actorCount, historicFloor: 8L * OneMb, degenerateFloor: OneMb, ceiling: 2048L * OneMb);
+                ActorCacheCapBytes(actorLayerBytes, actorCount, managedHeapBytes),
+                historicFloor: 8L * OneMb, degenerateFloor: OneMb, ceiling: 2048L * OneMb);
         }
 
         // Kahuna evicts when *either* cap is exceeded, so the smaller of the two binds. The entry cap
@@ -984,6 +1027,44 @@ public static class EmbeddedKahunaOptionsBuilder
         if (kahuna.MaxEntriesPerActor is null)
             baseline.MaxEntriesPerActor = (int)ClampWithYieldingFloor(
                 baseline.MaxBytesPerActor / 512, historicFloor: 10_000, degenerateFloor: 2_000, ceiling: 4_000_000);
+    }
+
+    /// <summary>
+    /// How many even shares of the actor layer one actor may cache when the heap is large enough
+    /// (<see cref="ActorCacheSharesMinHeapBytes"/>). See <see cref="ActorCacheCapBytes"/>.
+    /// </summary>
+    internal const int ActorCacheSharesPerActor = 4;
+
+    /// <summary>
+    /// The managed heap budget from which an actor may cache more than its even share of the layer.
+    /// Below it every actor keeps the even share, so the caches of a small node cannot grow past
+    /// 6.25% of its heap.
+    /// </summary>
+    internal const long ActorCacheSharesMinHeapBytes = 2048L * 1024 * 1024;
+
+    /// <summary>
+    /// The byte cap of one actor's cache before the floors and the ceiling apply.
+    ///
+    /// <para>The key spaces of a table are spread unevenly over the actors: all rows of a table are
+    /// on one actor and each index on one more, and the other actors hold little. With an even
+    /// split, a table's rows get one share of the layer however many shares stay unused. On a node
+    /// with a 2,458 MiB heap limit and 64 actors the share is 2.4 MiB, which does not hold a
+    /// 2,000-row table under write load: Kahuna evicted its rows about 1,600 times a second, and
+    /// each evicted row's next read went through the actor and back to the store. A cap of four
+    /// shares kept the table in memory; on the bank shape it removed those reads, shortened an
+    /// UPDATE by a third at 64 workers and raised throughput by 1.5% to 2.7%, for one to two more
+    /// points of GC pause.</para>
+    ///
+    /// <para>Kahuna enforces the cap per actor and has no budget shared between actors, so the
+    /// caches together can reach <see cref="ActorCacheSharesPerActor"/> times the layer, a quarter
+    /// of the heap, when that many times the layer is cached on every actor. A node below
+    /// <see cref="ActorCacheSharesMinHeapBytes"/> keeps the even split for that reason. One actor
+    /// never gets more than the whole layer.</para>
+    /// </summary>
+    internal static long ActorCacheCapBytes(long actorLayerBytes, int actorCount, long managedHeapBytes)
+    {
+        int shares = managedHeapBytes >= ActorCacheSharesMinHeapBytes ? ActorCacheSharesPerActor : 1;
+        return Math.Min(actorLayerBytes, actorLayerBytes * shares / actorCount);
     }
 
     /// <summary>

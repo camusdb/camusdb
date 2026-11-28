@@ -313,15 +313,15 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     public void DurableMaterializeOnResolve_UnsetDefaultsOnOnBothBaselines()
     {
         // The record shape passed two consecutive clean two-hour fault soaks on two released Kahuna
-        // versions, so CamusDB's baselines turn it on; Kahuna's own default stays off, which is what a
-        // node built against an older Kahuna would run with, and why the rolling-upgrade rule pins false.
+        // versions, so CamusDB's baselines turn it on. Kahuna's own default is on since 1.19.0; the
+        // baselines state it so the shape does not depend on the pinned Kahuna version.
         ConfigDefinition config = new() { DataDir = "/data/camus", Mode = "cluster", InitialPartitions = 3 };
 
         EmbeddedKahunaOptions cluster = EmbeddedKahunaOptionsBuilder.BuildCluster(config, CamusDBOptions.Default);
         EmbeddedKahunaOptions standalone =
             EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/materialize-db", new KahunaOptionsConfig(), CamusDBOptions.Default);
 
-        Assert.That(new EmbeddedKahunaOptions().DurableMaterializeOnResolve, Is.False, "Kahuna's own default, which CamusDB's baseline overrides");
+        Assert.That(new EmbeddedKahunaOptions().DurableMaterializeOnResolve, Is.True, "Kahuna's own default since 1.19.0");
         Assert.That(cluster.DurableMaterializeOnResolve, Is.True);
         Assert.That(standalone.DurableMaterializeOnResolve, Is.True);
     }
@@ -346,6 +346,53 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         Assert.That(EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/materialize-db", on.Kahuna, CamusDBOptions.Default).DurableMaterializeOnResolve, Is.True);
         Assert.That(EmbeddedKahunaOptionsBuilder.BuildCluster(off, CamusDBOptions.Default).DurableMaterializeOnResolve, Is.False);
         Assert.That(EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/materialize-db", off.Kahuna, CamusDBOptions.Default).DurableMaterializeOnResolve, Is.False);
+    }
+
+    // ── Log entries per commit ───────────────────────────────────────────────
+
+    [Test]
+    public void CommitShapeSwitches_UnsetStayOffOnEveryBaseline()
+    {
+        // The bundle entry is read only by Kahuna.Core 1.19.0 or later, so no baseline turns it on for a
+        // cluster that may still have an older node. The merged settles stay off with it until the
+        // shape has run under faults.
+        ConfigDefinition config = new() { DataDir = "/data/camus", Mode = "cluster", InitialPartitions = 3 };
+
+        EmbeddedKahunaOptions cluster = EmbeddedKahunaOptionsBuilder.BuildCluster(config, CamusDBOptions.Default);
+        EmbeddedKahunaOptions standaloneRocksDb =
+            EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/commit-shape-db", new KahunaOptionsConfig(), CamusDBOptions.Default);
+        EmbeddedKahunaOptions standalone =
+            EmbeddedKahunaOptionsBuilder.BuildStandalone("/tmp/commit-shape-db", new KahunaOptionsConfig(), CamusDBOptions.Default);
+
+        foreach (EmbeddedKahunaOptions options in new[] { cluster, standaloneRocksDb, standalone })
+        {
+            Assert.That(options.DurableMergeAdjacentSettles, Is.False);
+            Assert.That(options.DurableOnePhaseBundleEntry, Is.False);
+        }
+    }
+
+    [Test]
+    public void CommitShapeSwitches_FlowThroughOneAtATime()
+    {
+        // Each key reaches its own Kahuna option and leaves the other one alone, on the cluster and on
+        // the standalone baseline. An explicit false is a value too.
+        KahunaOptionsConfig mergeOnly = new() { DurableMergeAdjacentSettles = true };
+        KahunaOptionsConfig bundleOnly = new() { DurableOnePhaseBundleEntry = true };
+        KahunaOptionsConfig bothOff = new() { DurableMergeAdjacentSettles = false, DurableOnePhaseBundleEntry = false };
+
+        foreach (Func<KahunaOptionsConfig, EmbeddedKahunaOptions> build in new Func<KahunaOptionsConfig, EmbeddedKahunaOptions>[]
+        {
+            kahuna => EmbeddedKahunaOptionsBuilder.BuildCluster(new ConfigDefinition { DataDir = "/data/camus", Kahuna = kahuna }, CamusDBOptions.Default),
+            kahuna => EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/commit-shape-db", kahuna, CamusDBOptions.Default),
+        })
+        {
+            Assert.That(build(mergeOnly).DurableMergeAdjacentSettles, Is.True);
+            Assert.That(build(mergeOnly).DurableOnePhaseBundleEntry, Is.False);
+            Assert.That(build(bundleOnly).DurableMergeAdjacentSettles, Is.False);
+            Assert.That(build(bundleOnly).DurableOnePhaseBundleEntry, Is.True);
+            Assert.That(build(bothOff).DurableMergeAdjacentSettles, Is.False);
+            Assert.That(build(bothOff).DurableOnePhaseBundleEntry, Is.False);
+        }
     }
 
     [Test]
@@ -630,9 +677,9 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         Assert.That(built.KeyValueWritePostCompletionHoldMs, Is.EqualTo(2));
 
         EmbeddedKahunaOptions defaults = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/lg-unset", unset, CamusDBOptions.Default);
-        Assert.That(defaults.KeyValueWriteLingerMs, Is.EqualTo(new EmbeddedKahunaOptions().KeyValueWriteLingerMs));
+        Assert.That(defaults.KeyValueWriteLingerMs, Is.EqualTo(EmbeddedKahunaOptionsBuilder.DefaultStandaloneKeyValueWriteLingerMs));
         Assert.That(defaults.KeyValueWriteMaxBatchItems, Is.EqualTo(new EmbeddedKahunaOptions().KeyValueWriteMaxBatchItems));
-        Assert.That(defaults.KeyValueWritePostCompletionHoldMs, Is.EqualTo(EmbeddedKahunaOptionsBuilder.DefaultKeyValueWritePostCompletionHoldMs));
+        Assert.That(defaults.KeyValueWritePostCompletionHoldMs, Is.EqualTo(EmbeddedKahunaOptionsBuilder.DefaultStandaloneKeyValueWritePostCompletionHoldMs));
     }
 
     [Test]
@@ -658,18 +705,38 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     // ── Post-completion hold ─────────────────────────────────────────────────
 
     [Test]
-    public void Baselines_HoldOneMsAfterABatchCompletes_ByDefault()
+    public void ClusterBaseline_HoldsOneMsAfterABatchCompletes_ByDefault()
     {
-        // Kahuna's own default is 0 (dispatch the next batch the instant one completes); CamusDB ships
-        // 1 ms so a fully occupied aggregator packs more items per Raft round. Every baseline carries it.
-        string dataPath = "/tmp/hold-test";
-        ConfigDefinition config = new() { DataDir = dataPath };
+        // Kahuna's own default is 0 (dispatch the next batch when one completes). The cluster baseline
+        // holds 1 ms so a round to the peers carries more items, and keeps Kahuna's linger.
+        ConfigDefinition config = new() { DataDir = "/tmp/hold-test" };
+        EmbeddedKahunaOptions cluster = EmbeddedKahunaOptionsBuilder.ClusterBaseline(config, CamusDBOptions.Default);
 
         Assert.That(EmbeddedKahunaOptionsBuilder.DefaultKeyValueWritePostCompletionHoldMs, Is.EqualTo(1));
-        Assert.That(EmbeddedKahunaOptionsBuilder.StandaloneBaseline(dataPath).KeyValueWritePostCompletionHoldMs, Is.EqualTo(1));
-        Assert.That(EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline(dataPath).KeyValueWritePostCompletionHoldMs, Is.EqualTo(1));
-        Assert.That(EmbeddedKahunaOptionsBuilder.ClusterBaseline(config, CamusDBOptions.Default).KeyValueWritePostCompletionHoldMs, Is.EqualTo(1));
+        Assert.That(cluster.KeyValueWritePostCompletionHoldMs, Is.EqualTo(1));
+        Assert.That(cluster.KeyValueWriteLingerMs, Is.EqualTo(new EmbeddedKahunaOptions().KeyValueWriteLingerMs));
         Assert.That(new EmbeddedKahunaOptions().KeyValueWritePostCompletionHoldMs, Is.EqualTo(0), "the Kahuna default this baseline deliberately departs from");
+    }
+
+    [Test]
+    public void StandaloneBaselines_SendABatchAsSoonAsTheLogIsFree_ByDefault()
+    {
+        // One voter: a round is a local log write, so neither a hold after a batch nor a linger
+        // before the first one is configured. Kahuna dispatches at once from idle only when both are 0.
+        string dataPath = "/tmp/hold-test";
+        EmbeddedKahunaOptions[] baselines =
+        [
+            EmbeddedKahunaOptionsBuilder.StandaloneBaseline(dataPath),
+            EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline(dataPath),
+        ];
+
+        foreach (EmbeddedKahunaOptions baseline in baselines)
+        {
+            Assert.That(baseline.KeyValueWritePostCompletionHoldMs, Is.EqualTo(0));
+            Assert.That(baseline.KeyValueWriteLingerMs, Is.EqualTo(0));
+        }
+
+        Assert.That(new EmbeddedKahunaOptions().KeyValueWriteLingerMs, Is.GreaterThan(0), "the Kahuna default these baselines depart from");
     }
 
     [Test]
@@ -698,13 +765,17 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     }
 
     [Test]
-    public void PostCompletionHold_ExplicitZero_RestoresImmediateDispatch()
+    public void PostCompletionHold_ExplicitValue_WinsOverEitherBaseline()
     {
-        // An operator who wants Kahuna's dispatch-at-once behaviour sets the key to 0 explicitly; 0 is a
-        // value, so the shipped 1 must not replace it.
-        KahunaOptionsConfig zero = new() { KeyValueWritePostCompletionHoldMs = 0 };
+        // 0 is a value: on a cluster node it must replace the shipped 1.
+        ConfigDefinition cluster = new() { DataDir = "/tmp/hold-zero", Kahuna = new KahunaOptionsConfig { KeyValueWritePostCompletionHoldMs = 0 } };
+        Assert.That(EmbeddedKahunaOptionsBuilder.BuildCluster(cluster, CamusDBOptions.Default).KeyValueWritePostCompletionHoldMs, Is.EqualTo(0));
 
-        Assert.That(EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/hold-zero", zero, CamusDBOptions.Default).KeyValueWritePostCompletionHoldMs, Is.EqualTo(0));
+        // A standalone node that asks for a hold and a linger gets them.
+        KahunaOptionsConfig held = new() { KeyValueWritePostCompletionHoldMs = 1, KeyValueWriteLingerMs = 1 };
+        EmbeddedKahunaOptions standalone = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/hold-one", held, CamusDBOptions.Default);
+        Assert.That(standalone.KeyValueWritePostCompletionHoldMs, Is.EqualTo(1));
+        Assert.That(standalone.KeyValueWriteLingerMs, Is.EqualTo(1));
     }
 
     [Test]
@@ -794,12 +865,15 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         // with one actor per CPU, a many-core machine claimed 64 MB x cores however little RAM it
         // had — 1 GB of a 4 GB container, four times the share the layer was meant to take. The
         // floor now bounds the layer as a whole, so raising the actor count splits a fixed budget
-        // instead of growing it.
+        // instead of growing it. From a 2 GiB heap one actor may cache four even shares, so the bound
+        // of the caches together is four times the layer there.
         const long OneMb = 1024L * 1024;
         long totalRam = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
         Assume.That(totalRam, Is.GreaterThan(0), "memory-proportional sizing needs a known RAM size");
 
         long expectedLayerBytes = Math.Max(totalRam / 16, 64L * OneMb);
+        long boundBytes = expectedLayerBytes
+            * (totalRam >= EmbeddedKahunaOptionsBuilder.ActorCacheSharesMinHeapBytes ? EmbeddedKahunaOptionsBuilder.ActorCacheSharesPerActor : 1);
 
         EmbeddedKahunaOptions few = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb(
             "/tmp/actor-floor-few", new KahunaOptionsConfig { KeyValueWorkers = 4 }, CamusDBOptions.Default);
@@ -807,11 +881,12 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         EmbeddedKahunaOptions many = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb(
             "/tmp/actor-floor-many", new KahunaOptionsConfig { KeyValueWorkers = 32 }, CamusDBOptions.Default);
 
-        Assert.That(few.MaxBytesPerActor * 4, Is.LessThanOrEqualTo(expectedLayerBytes));
+        Assert.That(few.MaxBytesPerActor, Is.LessThanOrEqualTo(expectedLayerBytes));
+        Assert.That(few.MaxBytesPerActor * 4, Is.LessThanOrEqualTo(boundBytes));
 
-        // At 32 actors the layer may only exceed its budget through the 8 MB per-actor minimum, which
+        // At 32 actors the caches may only exceed their bound through the 8 MB per-actor minimum, which
         // exists so an individual cache stays large enough to be worth having.
-        Assert.That(many.MaxBytesPerActor * 32, Is.LessThanOrEqualTo(Math.Max(expectedLayerBytes, 32 * 8L * OneMb)));
+        Assert.That(many.MaxBytesPerActor * 32, Is.LessThanOrEqualTo(Math.Max(boundBytes, 32 * 8L * OneMb)));
 
         // More actors must never hand each actor more memory.
         Assert.That(many.MaxBytesPerActor, Is.LessThanOrEqualTo(few.MaxBytesPerActor));

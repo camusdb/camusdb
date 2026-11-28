@@ -163,7 +163,7 @@ open no session and are never deferred.
 | Work | Priority | Reason |
 |---|---|---|
 | User statements | `Normal` | The default. |
-| Index backfill | `Background` | Bulk, batched, deferrable — the best fit for the gate, since it re-enters admission per batch. |
+| Index backfill on a standalone node | `Background` | Bulk, batched, deferrable — the best fit for the gate, since it re-enters admission per batch. In a cluster it runs at the server default. |
 | Statistics flush / analyze publish | `Background` | Maintenance; a deferred flush costs only optimizer freshness. |
 | Schema checkpoint persist | `High` | A stalled checkpoint blocks DDL cluster-wide, and its commit is already deadline-bounded. |
 | Database-registry cache-miss lookup | `High` | It is part of an already-admitted user request. Queueing it would stall work the gate has already let in. |

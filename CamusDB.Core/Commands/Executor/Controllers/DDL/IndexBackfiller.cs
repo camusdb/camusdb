@@ -17,15 +17,15 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 
 /// <summary>
 /// Writes the entries of a newly added index for every row that exists, one committed batch at a
-/// time. The standalone flux (<see cref="TableIndexAdder"/>) and the coordinator-driven cluster path
-/// (<see cref="SchemaDdlService.BackfillIndexEntriesAsync"/>) both run this, so the two build an index
-/// the same way. The index is <c>WriteOnly</c> while this runs: every statement that starts now
-/// maintains it, and this fills in the rows written before that.
+/// time. The schema-change coordinator runs it through
+/// <see cref="SchemaDdlService.BackfillIndexEntriesAsync"/>, on a standalone node and in a cluster alike.
+/// The index is <c>WriteOnly</c> while this runs: every statement that starts now maintains it, and this
+/// fills in the rows written before that.
 ///
 /// <para><b>Each batch locks its rows before it reads them.</b> A batch scans a run of row ids without
 /// a lock, takes an exclusive lock on each row
 /// (<see cref="KvTableStore.LockAndReadRowsForMutationAsync"/>), reads the rows under the lock,
-/// writes one entry per row and commits. The lock refuses every other writer's write of the row
+/// writes the entries of the batch and commits. The lock refuses every other writer's write of the row
 /// until the batch is done: a pessimistic writer at its own lock, an optimistic one at its row
 /// write, which is the only write of its statement the lock meets. So an entry always matches a
 /// committed row, provided a writer's other writes are ordered after its row write; see
@@ -44,24 +44,30 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// row waits or retries its own statement. A batch that loses its locks is retried without limit by
 /// <see cref="BackfillBatchRunner"/>, so a table under sustained writes is still indexed.</para>
 ///
+/// <para><b>The entries of a batch go out together.</b> The batch decodes its rows first and then locks
+/// and sets the entries of all of them in two round trips
+/// (<see cref="KvTableStore.PutIndexEntriesBatch"/>), and more only for an index with many entries per
+/// row. The rows stay locked for that many round trips, whatever the size of the batch, so a writer that
+/// wants one of them waits for the batch and not for one round trip per row of it.</para>
+///
 /// <para><b>A row's entry may already exist.</b> An UPDATE that committed while the index was
 /// <c>WriteOnly</c> wrote the row's entry before this backfill reached the row. The write is therefore
-/// the idempotent form of <see cref="KvTableStore.PutIndexEntry"/> (<c>backfillMode</c>): on a unique
-/// index, an existing entry that names the same row is accepted, and one that names another row is
-/// the duplicate it looks like. A resumed cluster backfill re-runs at most its last batch for the same
+/// the idempotent form of <see cref="KvTableStore.PutIndexEntriesBatch"/> (<c>backfillMode</c>): on a
+/// unique index, an existing entry that names the same row is accepted, and one that names another row
+/// is the duplicate it looks like. A resumed backfill re-runs at most its last batch for the same
 /// reason.</para>
 ///
 /// <para>After each full batch commits, the checkpoint callback receives the last row id, which the
-/// cluster coordinator persists so a leader-change resume skips the rows already indexed. The trailing
+/// coordinator persists so a resume skips the rows already indexed. The trailing
 /// short batch does not checkpoint: the element reaching <c>Public</c> signals completion.</para>
 /// </summary>
 internal static class IndexBackfiller
 {
     /// <summary>
     /// Rows scanned per backfill batch. It bounds the row locks one batch holds and the entries one
-    /// transaction writes. On the cluster path it is also the resume-checkpoint granularity, so raising
-    /// it makes a leader change replay more work. It is a ceiling, not a fixed size: a batch that loses
-    /// its locks is halved by <see cref="BackfillBatchRunner"/>.
+    /// transaction writes. It is also the resume-checkpoint granularity, so raising it makes a resume
+    /// replay more work. It is a ceiling, not a fixed size: a batch that loses its locks is halved by
+    /// <see cref="BackfillBatchRunner"/>.
     /// </summary>
     internal const int BatchRows = 500;
 
@@ -112,17 +118,12 @@ internal static class IndexBackfiller
     }
 
     /// <summary>
-    /// What a backfill did: the rows it visited under their locks, and the id of the last row the
-    /// scan reached (null for an empty table).
-    /// </summary>
-    internal readonly record struct Result(int Rows, string? LastRowId);
-
-    /// <summary>
     /// Builds <paramref name="target"/> over every row of <paramref name="table"/> after
-    /// <paramref name="afterRowId"/>, as the class summary describes. <paramref name="priority"/> is
-    /// the admission priority of each batch transaction, or null for the engine default.
+    /// <paramref name="afterRowId"/>, as the class summary describes, and returns the rows it visited under
+    /// their locks. <paramref name="priority"/> is the admission priority of each batch transaction, or null
+    /// for the engine default.
     /// </summary>
-    internal static async Task<Result> BackfillAsync(
+    internal static async Task<int> BackfillAsync(
         DatabaseDescriptor database,
         TableDescriptor table,
         Target target,
@@ -150,7 +151,6 @@ internal static class IndexBackfiller
         string element = $"index '{target.IndexName}' of table '{table.Name}'";
 
         int totalRows = 0;
-        string? lastRowId = null;
 
         while (true)
         {
@@ -167,8 +167,6 @@ internal static class IndexBackfiller
                 element,
                 cancellationToken).ConfigureAwait(false);
 
-            lastRowId = rowIds[^1].ToString();
-
             // A short batch means the scan reached the end of the table.
             if (rowIds.Count < BatchRows)
                 break;
@@ -177,15 +175,15 @@ internal static class IndexBackfiller
             // is committed, so a resume from the checkpoint re-runs nothing it must not.
             afterRowId = rowIds[^1];
             if (onCheckpoint is not null)
-                await onCheckpoint(lastRowId).ConfigureAwait(false);
+                await onCheckpoint(rowIds[^1].ToString()).ConfigureAwait(false);
         }
 
-        return new Result(totalRows, lastRowId);
+        return totalRows;
     }
 
     /// <summary>
-    /// One attempt over one batch: locks the rows, reads them under the lock, writes one entry per
-    /// row that still exists and commits. Returns the rows that still existed. A retryable refusal
+    /// One attempt over one batch: locks the rows, reads them under the lock, writes the entries of the
+    /// rows that still exist and commits. Returns the rows that still existed. A retryable refusal
     /// (a lock a writer holds, a commit the coordinator refused) propagates to the runner, which
     /// retries the batch; everything else ends the build.
     /// </summary>
@@ -225,6 +223,7 @@ internal static class IndexBackfiller
             // Per-batch decode-plan cache; the visibility version is re-read from the live schema
             // for each batch.
             RowEncoder.DictionaryDecodeState decodeState = new();
+            List<KvTableStore.IndexEntryWrite> entries = new(rowIds.Count);
             int present = 0;
 
             for (int i = 0; i < rowIds.Count; i++)
@@ -242,8 +241,13 @@ internal static class IndexBackfiller
                     visibilitySchemaVersion: table.Schema.Version,
                     decodeState: decodeState).ConfigureAwait(false);
 
-                await WriteRowEntriesAsync(tx, table, target, keyShape, rowId, row, backfillMode: true, options, cancellationToken).ConfigureAwait(false);
+                AddRowEntries(entries, target, keyShape, rowId, row, tx.MutationLimit, options);
+
+                if (entries.Count >= KvStoreConstants.IndexEntryBatchMaxEntries)
+                    await FlushAsync(tx, table, target, entries, backfillMode: true, cancellationToken).ConfigureAwait(false);
             }
+
+            await FlushAsync(tx, table, target, entries, backfillMode: true, cancellationToken).ConfigureAwait(false);
 
             await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
 
@@ -263,9 +267,9 @@ internal static class IndexBackfiller
     /// through it, and no other writer can touch them. No batch, lock pass or fence is needed. The entries
     /// count against the limits of <paramref name="tx"/>, as the rows did.
     ///
-    /// <para>The write is the plain form of <see cref="KvTableStore.PutIndexEntry"/>: Kahuna checks a unique
-    /// entry against the transaction's own staged copy of the key, so a second row with the same key fails
-    /// with <see cref="CamusDBErrorCodes.DuplicateUniqueKeyValue"/>, as a second INSERT of it would.</para>
+    /// <para>The write is the plain form of <see cref="KvTableStore.PutIndexEntriesBatch"/>: a second row with
+    /// the same unique key fails with <see cref="CamusDBErrorCodes.DuplicateUniqueKeyValue"/>, in the same
+    /// batch or against the transaction's own staged copy of the key, as a second INSERT of it would.</para>
     /// </summary>
     internal static async Task<int> BuildInTransactionAsync(
         KvTransaction tx,
@@ -276,6 +280,7 @@ internal static class IndexBackfiller
         CancellationToken cancellationToken)
     {
         TableIndexSchema keyShape = target.KeyShape;
+        List<KvTableStore.IndexEntryWrite> entries = [];
         int count = 0;
 
         await foreach (QueryResultRow result in rows.WithCancellation(cancellationToken).ConfigureAwait(false))
@@ -284,29 +289,48 @@ internal static class IndexBackfiller
             Dictionary<string, ColumnValue> row = result.Row as Dictionary<string, ColumnValue>
                 ?? new(result.Row, StringComparer.OrdinalIgnoreCase);
 
-            await WriteRowEntriesAsync(tx, table, target, keyShape, result.RowId, row, backfillMode: false, options, cancellationToken).ConfigureAwait(false);
+            AddRowEntries(entries, target, keyShape, result.RowId, row, tx.MutationLimit, options);
             count++;
+
+            if (entries.Count >= KvStoreConstants.IndexEntryBatchMaxEntries)
+                await FlushAsync(tx, table, target, entries, backfillMode: false, cancellationToken).ConfigureAwait(false);
         }
+
+        await FlushAsync(tx, table, target, entries, backfillMode: false, cancellationToken).ConfigureAwait(false);
 
         return count;
     }
 
     /// <summary>
-    /// Writes the entries of <paramref name="target"/> for one decoded row: one key for an ordered index
-    /// (none on a unique index when a key column is NULL), one entry per distinct document entry for a GIN
-    /// index. <paramref name="backfillMode"/> selects the idempotent write of a backfill that runs beside
-    /// other writers; see the class summary.
+    /// Writes the collected entries and empties <paramref name="entries"/> for the next rows.
+    /// <paramref name="backfillMode"/> selects the idempotent write of a backfill that runs beside other
+    /// writers; see the class summary.
     /// </summary>
-    private static async Task WriteRowEntriesAsync(
+    private static async Task FlushAsync(
         KvTransaction tx,
         TableDescriptor table,
+        Target target,
+        List<KvTableStore.IndexEntryWrite> entries,
+        bool backfillMode,
+        CancellationToken cancellationToken)
+    {
+        await table.Store.PutIndexEntriesBatch(tx, target.IndexId, entries, target.Unique, backfillMode, cancellationToken).ConfigureAwait(false);
+        entries.Clear();
+    }
+
+    /// <summary>
+    /// Adds the entries of <paramref name="target"/> for one decoded row to <paramref name="entries"/>: one
+    /// key for an ordered index (none on a unique index when a key column is NULL), one entry per distinct
+    /// document entry for a GIN index.
+    /// </summary>
+    private static void AddRowEntries(
+        List<KvTableStore.IndexEntryWrite> entries,
         Target target,
         TableIndexSchema keyShape,
         ObjectIdValue rowId,
         Dictionary<string, ColumnValue> row,
-        bool backfillMode,
-        CamusDBOptions options,
-        CancellationToken cancellationToken)
+        int mutationLimit,
+        CamusDBOptions options)
     {
         // The values of the expression key parts, under their hidden key names. A row decoded here holds
         // every column the index reads, so an absent one is a bug, not a NULL.
@@ -323,14 +347,12 @@ internal static class IndexBackfiller
         // path builds the same entries, so a backfilled index matches one built row by row.
         if (target.Inverted)
         {
-            if (JsonbGinIndexKeys.EntriesOf(target.KeyColumns[0], row) is { } entries)
+            if (JsonbGinIndexKeys.EntriesOf(target.KeyColumns[0], row) is { } documentEntries)
             {
-                JsonbGinIndexKeys.CheckEntryWrites(target.IndexName, target.KeyColumns[0], entries.Count, tx.MutationLimit);
+                JsonbGinIndexKeys.CheckEntryWrites(target.IndexName, target.KeyColumns[0], documentEntries.Count, mutationLimit);
                 ColumnValue rowIdValue = JsonbGinIndexKeys.RowIdValue(rowId);
-                foreach (string entry in entries)
-                    await table.Store.PutIndexEntry(
-                        tx, target.IndexId, JsonbGinIndexKeys.Key(entry, rowIdValue), rowId, unique: false,
-                        backfillMode: backfillMode, includeTuple: null, cancellationToken: cancellationToken).ConfigureAwait(false);
+                foreach (string entry in documentEntries)
+                    entries.Add(new(JsonbGinIndexKeys.Key(entry, rowIdValue), rowId));
             }
             return;
         }
@@ -362,9 +384,7 @@ internal static class IndexBackfiller
             ? IndexIncludeValueCodec.EncodeTupleChecked(includeColumns, row, target.IndexName, options)
             : null;
 
-        await table.Store.PutIndexEntry(
-            tx, target.IndexId, compositeKey, rowId, target.Unique,
-            backfillMode: backfillMode, includeTuple: includeTuple, cancellationToken: cancellationToken).ConfigureAwait(false);
+        entries.Add(new(compositeKey, rowId, includeTuple));
     }
 
     /// <summary>

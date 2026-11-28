@@ -156,8 +156,9 @@ The slow-query-log knobs are YAML-only too. The log is **off by default**; see
 [slow-query-log.md](slow-query-log.md) for sizing guidance and for which of the four take effect
 while the node is running.
 
-The query-activity knobs are YAML-only as well, and all three take effect while the node is running.
-For more information, see [query-activity.md](query-activity.md).
+The query-activity knobs are YAML-only as well, and all four take effect while the node is running.
+They also govern `SHOW TRANSACTIONS` and `KILL TRANSACTION`. For more information, see
+[query-activity.md](query-activity.md).
 
 ### HTTP/3 on the HTTPS API port
 
@@ -430,7 +431,7 @@ a ledger.
 
 ### Materialize on resolve
 
-`kahuna.durable_materialize_on_resolve` (default **on** in CamusDB; Kahuna's own default is off) sets the record shape of
+`kahuna.durable_materialize_on_resolve` (default **on** in CamusDB, and in Kahuna since 1.19.0) sets the record shape of
 a committed durable transaction. The commit's settle installs each committed value from the prepared
 intent on each replica. This means that Kahuna writes no materialization record per key. On the anchor
 partition, a two-row transaction then costs about four Raft entries where it would cost six (the
@@ -450,6 +451,34 @@ Two operating rules apply. The record shape enforces both, and CamusDB does not 
   `durable_materialize_on_resolve: false` on all nodes until the last one is upgraded. Then remove the
   key.
 - **Same value on all nodes of the group**, for the same reason as the one-phase gate above.
+
+### Log entries per commit
+
+Two keys reduce the Raft entries that a committed transaction writes on its partition. Both are off by
+default and need Kahuna.Core 1.19.0 or later. With materialize on resolve, a two-row transaction that
+commits in one phase writes four entries: three for the bundle (record init, prepare, decision) and one
+for the settle.
+
+`kahuna.durable_merge_adjacent_settles` (default **off**) writes one entry for each run of adjacent
+settles in a batch of the partition's write scheduler. The commands keep their order in the log, and
+each build that installs on a settle reads the entry. The key needs no upgrade order, it can differ
+between nodes, and turning it off is safe at any time. A merged entry carries the settles of several
+transactions, so the durability floor of the partition moves in larger steps.
+
+`kahuna.durable_one_phase_bundle_entry` (default **off**) writes the bundle of a one-phase commit as one
+entry. Two operating rules apply:
+
+- **Upgrade all nodes before you turn on the key.** All nodes of the group must run Kahuna.Core 1.19.0
+  or later before any node has this on. An older node skips the entry with no error, and it then holds
+  no record and no intent of the transaction. A leader asks its replicas whether they apply the entry,
+  and it writes three entries until all of them confirm. This check catches a key that is set too
+  early. It does not cover an older node that joins later, or a node that starts again on an older
+  build and reads a log that holds bundle entries.
+- **Turning it off is safe at any time.** A node of a current build applies the entry whatever its own
+  value, so the key can differ between nodes while you change it.
+
+With both keys on, a two-row transaction writes between one and two entries: one for the bundle and a
+share of a merged settle entry.
 
 ### Persistent MVCC revision retention
 
@@ -486,7 +515,7 @@ and how often from disk.
 
 | Profile | Block cache | Memtable sub-budget | Actor caches | Total |
 |---------|-------------|---------------------|--------------|-------|
-| `prod` (default) | 10% of machine memory, ≤ 2 GiB | ¼ of it, raised to the Raft-log flush unit (≤ half the cache), ≤ 1 GiB — see below | 6.25% of the managed heap budget, ≥ 64 MiB | ~16% of memory (~1.5 GiB on an 8 GiB box) |
+| `prod` (default) | 10% of machine memory, ≤ 2 GiB | ¼ of it, raised to the Raft-log flush unit (≤ half the cache), ≤ 1 GiB — see below | 6.25% of the managed heap budget, ≥ 64 MiB; up to four times that when every actor fills its cap (from a 2 GiB heap budget) | ~16% of memory (~1.5 GiB on an 8 GiB box), up to ~37% when every actor fills its cap |
 | `dev` | 64 MiB | 16 MiB | 32 MiB | ~96 MiB, on any machine |
 
 `dev` is for a node sharing a developer machine with the application being built against it. The
@@ -551,7 +580,7 @@ reads this value from the environment only.
 
 `DOTNET_GCDynamicAdaptationMode=1` in the environment turns the mode back on. The node then logs a
 warning at startup when the write aggregator uses short cycles (`kahuna.key_value_write_precise_wake`
-on, or `kahuna.key_value_write_post_completion_hold_ms` 0). To run with the mode on, set
+on, or `kahuna.key_value_write_post_completion_hold_ms` 0, which is the standalone default). To run with the mode on, set
 `kahuna.key_value_write_precise_wake: false` and keep the hold at 1 ms or more. Workstation GC, which
 the `dev` profile selects, does not use dynamic adaptation.
 
@@ -584,7 +613,7 @@ cache). Leave room for the budgets beside the heap when you pick the heap percen
 |-----|---------------------|-------|
 | `rocksdb_shared_memory_budget_mb` | 10% of machine memory | 64 MiB – 2 GiB (320 MiB floor if 10% reaches it) |
 | `rocksdb_shared_memtable_budget_mb` | a quarter of the block cache, raised to the Raft-log flush unit (at most half the cache) | 16 MiB – 1 GiB (128 MiB floor if a quarter reaches it) |
-| `max_bytes_per_actor` | 6.25% of the managed heap budget (≥ 64 MiB for the layer) ÷ the key/value actor count | 1 MiB – 2 GiB per actor (8 MiB floor if the share reaches it) |
+| `max_bytes_per_actor` | 6.25% of the managed heap budget (≥ 64 MiB for the layer) ÷ the key/value actor count, times 4 from a 2 GiB heap budget (at most the whole layer) | 1 MiB – 2 GiB per actor (8 MiB floor if the share reaches it) |
 | `max_entries_per_actor` | `max_bytes_per_actor` ÷ ~512 B | 2k – 4M (10k floor if the share reaches it) |
 
 A floor applies only if the computed value reaches it.
@@ -642,7 +671,9 @@ is far more often a developer workstation or a CI container sharing the box with
 IDE than a dedicated database server. An explicit value always wins over the computed one. Take an
 8 GiB, 8-core machine where none of them is set and no heap limit applies. It gets an 819 MiB block
 cache, a 204 MiB memtable sub-budget (above the 192 MiB flush unit before any floor applies), and
-512 MiB of actor caches split across 32 actors (16 MiB each). That is about 1.5 GiB.
+a 512 MiB actor-cache layer over 32 actors, with a cap of 64 MiB per actor (four shares of 16 MiB).
+That is about 1.5 GiB while the data sits on a few actors, and up to about 3 GiB when all 32 actors
+fill their cap.
 
 A dedicated server should raise all four explicitly. The sizing above is a floor to build from.
 
@@ -650,7 +681,9 @@ The 6.25% share and its 64 MiB floor bound the *complete* actor-cache layer, and
 then divided by the key/value actor count (`kahuna.key_value_workers`, or max(32, 4 × CPU cores)
 when unset); only the 8 MiB per-actor minimum is per actor. Adding cores
 therefore splits the same budget more ways and does not grow it — a machine with many cores
-relative to its RAM does not end up with a multiple of the intended share.
+relative to its RAM does not end up with a multiple of the intended share. From a 2 GiB heap budget
+one actor may hold four of those shares (see `max_bytes_per_actor` below), so the layer is the
+expected size of the caches and four times the layer is their upper bound.
 
 The RocksDB pair is shared: `rocksdb_shared_memory` (default on, and a no-op unless `storage` and
 `wal_storage` are both `rocksdb`) makes one block cache and one write-buffer manager serve both the
@@ -671,6 +704,13 @@ sets both budgets explicitly.
 `max_bytes_per_actor` is **per actor**: multiply by the actor count (`key_value_workers`,
 default max(32, 4 × CPU cores)) to get the total.
 
+All rows of a table are cached by one actor, and each of its indexes by one more, so the actors fill
+unevenly. From a 2 GiB heap budget the computed cap is therefore four even shares of the layer: with
+a 2,458 MiB heap limit and 64 actors, 9.6 MiB per actor where the even share is 2.4 MiB. The cap is
+enforced per actor, so the actor caches together can reach four times the layer, a quarter of the
+heap budget, on a node where every actor fills its cap. Below a 2 GiB heap budget the cap stays at
+the even share. Set `max_bytes_per_actor` and `max_entries_per_actor` to choose another size.
+
 `kahuna.key_value_write_max_in_flight_batches_per_partition` (default **1**, Kahuna 1.7.1) is how many
 write-aggregator batches a partition may have waiting on Raft at once. At 1, the next batch is dispatched
 after the previous one completes. This means that a partition's batch rate is bounded by
@@ -679,8 +719,8 @@ until an interleaved A/B on the soak harness shows the gain for your shape. Meas
 `bank` candidate arm with the device held constant: 2 and 4 in flight lowered throughput 15-20% — the
 Raft round stretched with the in-flight count while batches got smaller.
 
-`kahuna.key_value_write_linger_ms` (default **1**) and `kahuna.key_value_write_max_batch_items` (default
-**512**) shape the write aggregator's batches. The linger is how long the oldest queued item may wait before
+`kahuna.key_value_write_linger_ms` (default **1** in cluster mode, **0** on a standalone node) and
+`kahuna.key_value_write_max_batch_items` (default **512**) shape the write aggregator's batches. The linger is how long the oldest queued item may wait before
 a batch is dispatched while no batch is in flight. The cap bounds a batch's items. The measured round
 costs ~1.4 ms fixed plus ~18 µs per item. This means that denser batches are the lever at one
 partition. A linger above the ~2.6 ms that an item already waits trades write latency for density.
@@ -689,14 +729,24 @@ cross-partition WAL group commit, inert at one partition). Measured 2026-09-09: 
 inert at full occupancy (1, 3 and 5 ms all gave the same batches). A completing batch re-dispatches
 whatever is queued.
 
-`kahuna.key_value_write_post_completion_hold_ms` (default **1** in CamusDB; Kahuna's own default is 0)
-adds density at full occupancy. After a batch completes, the aggregator waits this long before
+`kahuna.key_value_write_post_completion_hold_ms` (default **1** in cluster mode and **0** on a
+standalone node; Kahuna's own default is 0) adds density at full occupancy. After a batch completes, the aggregator waits this long before
 dispatching the next one. This means that more items accumulate per batch. The aggregator has one Raft
 round in flight per partition. At full load, a round carries only what arrived during the previous
 round. The hold
 applies after a completion only: a write that arrives at an idle partition waits for the linger. Set
 `0` to dispatch each round as soon as the one before it completes; an explicit value always wins over
 the shipped default.
+
+A standalone node runs with no hold and no linger. It has one voter, so a round is a local log write
+and a partition sends a batch as soon as its log is free. Measured on the bank shape in standalone
+mode on a memory-backed store against a 1 ms hold and a 1 ms linger, Serializable, three runs each:
+at 8 workers the commit call fell from 0.87 to 0.35 ms and throughput rose 14.5% for 26% more CPU
+per transaction; at 64 and 256 workers throughput stayed level and CPU per transaction rose 7% and
+2%. On an NVMe drive a round is a device sync of 3 to 20 ms and the two settings did not differ
+beyond the drive's variation between runs. A standalone node that is short of CPU at high concurrency
+can set both keys to `1`. A cluster of one node keeps the cluster defaults, because its configuration
+stays in force when other nodes join it.
 
 `kahuna.key_value_write_precise_wake` (default **true**) fires the aggregator's hold, linger and
 queue-age wakes from one dedicated timer thread per node. The .NET timer queue measures a delay with a

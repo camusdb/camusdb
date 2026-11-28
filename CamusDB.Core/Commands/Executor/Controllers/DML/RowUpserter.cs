@@ -507,6 +507,7 @@ internal sealed class RowUpserter
             if (!indexes.TryGetValue(CamusDBConstants.PrimaryKeyInternalName, out TableIndexSchema? primaryKey))
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Table '{table.Name}' has no primary key for UPSERT");
 
+            RequireBuilt(table, primaryKey);
             arbiters.Add(primaryKey);
             return arbiters;
         }
@@ -533,6 +534,7 @@ internal sealed class RowUpserter
             if (string.Equals(constraintName, string.Concat(table.Name, "_pkey"), StringComparison.OrdinalIgnoreCase) &&
                 indexes.TryGetValue(CamusDBConstants.PrimaryKeyInternalName, out TableIndexSchema? namedPrimaryKey))
             {
+                RequireBuilt(table, namedPrimaryKey);
                 arbiters.Add(namedPrimaryKey);
                 return arbiters;
             }
@@ -586,7 +588,7 @@ internal sealed class RowUpserter
         if (!SchemaElementStateRules.IsReadableIndex(table.Schema, index))
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
-                $"Unique index '{index.Name}' of table '{table.Name}' is still being built, so it cannot decide an ON CONFLICT yet");
+                $"Unique index '{index.Name}' of table '{table.Name}' is not public (it is being built or dropped), so it cannot decide an ON CONFLICT");
     }
 
     /// <summary>

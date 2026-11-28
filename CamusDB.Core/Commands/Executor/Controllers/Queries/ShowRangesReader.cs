@@ -141,7 +141,8 @@ internal sealed class ShowRangesReader
     /// decide whether the transaction it runs inside commits.</para>
     /// </summary>
     /// <exception cref="CamusDBException">
-    /// When the table has no primary key, or when no row carries the given primary key. A missing
+    /// When the table has no primary key, or its primary key is not <c>Public</c>
+    /// (<see cref="TableDescriptor.ReadablePrimaryKey"/>), or when no row carries the given primary key. A missing
     /// row raises rather than returning no rows, because an empty result is indistinguishable from a
     /// filter that matched nothing — and inventing a key would be worse than either.
     /// </exception>
@@ -150,10 +151,12 @@ internal sealed class ShowRangesReader
         IReadOnlyList<ColumnValue> values,
         CancellationToken cancellationToken)
     {
-        if (!table.Indexes.TryGetValue(CamusDBConstants.PrimaryKeyInternalName, out TableIndexSchema? primary))
+        // Only a public key: one that a staged change is adding or dropping misses the entries of some
+        // rows, and the probe would report a row that exists as missing.
+        if (table.ReadablePrimaryKey is not { } primary)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
-                $"Table '{table.Name}' has no primary key, so FOR ROW cannot locate a row in it");
+                $"Table '{table.Name}' has no primary key that a statement can read, so FOR ROW cannot locate a row in it");
 
         ColumnType[] keyTypes = KeyColumnTypes(table, primary);
         CompositeColumnValue composite = CoerceProbeValues(

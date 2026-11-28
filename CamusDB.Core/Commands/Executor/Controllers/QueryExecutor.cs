@@ -1892,11 +1892,11 @@ internal sealed class QueryExecutor
         QueryByIdTicket ticket
     )
     {
-        if (!table.Indexes.TryGetValue(CamusDBConstants.PrimaryKeyInternalName, out TableIndexSchema? index))
+        if (table.ReadablePrimaryKey is not { } index)
         {
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,
-                "Table doesn't have a primary key index"
+                "Table doesn't have a primary key index that a statement can read"
             );
         }
 

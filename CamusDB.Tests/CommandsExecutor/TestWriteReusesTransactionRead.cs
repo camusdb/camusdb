@@ -275,6 +275,33 @@ public sealed class TestWriteReusesTransactionRead : BaseTest
         Assert.That(await CommittedBalance(database, executor, dbname, 1), Is.EqualTo(8));
     }
 
+    /// <summary>
+    /// A SELECT by key of a row the transaction deleted returns no row, and the transaction reads
+    /// other rows and commits afterwards. The store answers that read from the transaction's own
+    /// staged delete; it must not count as a read of a key another transaction changed.
+    /// </summary>
+    [TestCase(true, true)]
+    [TestCase(true, false)]
+    [TestCase(false, true)]
+    [TestCase(false, false)]
+    public async Task ASelectOfARowTheTransactionDeletedReturnsNoRow(bool reuse, bool readBeforeDelete)
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor, TableDescriptor _) =
+            await SetupAccounts(Options with { TransactionReadReuseEnabled = reuse });
+
+        KvTransaction tx = await Begin(database);
+        if (readBeforeDelete)
+            Assert.That(await Balance(executor, tx, dbname, 1), Is.EqualTo(100));
+
+        Assert.That((await Write(executor, tx, dbname, "DELETE FROM accounts WHERE id = 1")).ModifiedRows, Is.EqualTo(1));
+        Assert.That(await Balance(executor, tx, dbname, 1), Is.Null);
+        Assert.That(await Balance(executor, tx, dbname, 2), Is.EqualTo(200));
+
+        await database.Transactions.CommitAsync(tx);
+        Assert.That(await CommittedBalance(database, executor, dbname, 1), Is.Null);
+        Assert.That(await CommittedBalance(database, executor, dbname, 2), Is.EqualTo(200));
+    }
+
     // -----------------------------------------------------------------------
     // Rows the reuse must leave whole
     // -----------------------------------------------------------------------

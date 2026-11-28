@@ -84,6 +84,7 @@ public static class PreparedStatementBinder
 
         NodeType.ShowQueries or NodeType.ShowClusterQueries or
         NodeType.ShowConnections or NodeType.ShowClusterConnections or
+        NodeType.ShowTransactions or NodeType.ShowClusterTransactions or
         // Preparable specifically so FOR ROW (@id) can be: the value list is an ordinary expression
         // list, so its placeholders bind like any other statement's.
         NodeType.ShowRanges;

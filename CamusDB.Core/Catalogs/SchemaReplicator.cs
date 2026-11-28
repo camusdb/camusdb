@@ -141,6 +141,11 @@ public sealed class SchemaReplicator
                 database.Id,
                 async () =>
                 {
+                    // The previous leader can have written the purge record of a dropped index and
+                    // stopped before the purge ended. Only the node that wrote it knew; the next purge
+                    // run of this node looks for it.
+                    database.MarkDeferredPurgesDue();
+
                     try
                     {
                         await coordinator.ResumeJobsAsync(database, CoordinatorResumeTrigger.LeaderElected).ConfigureAwait(false);

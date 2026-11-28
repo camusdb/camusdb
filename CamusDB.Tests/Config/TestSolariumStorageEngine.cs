@@ -171,7 +171,7 @@ public sealed class TestSolariumStorageEngine
 
         Assert.That(solarium.StorageSharedCacheMb, Is.EqualTo(409));
         Assert.That(solarium.StorageSharedMemtableBudgetMb, Is.EqualTo(204));
-        Assert.That(solarium.MaxBytesPerActor, Is.EqualTo(2458 * OneMb / 16 / 32));
+        Assert.That(solarium.MaxBytesPerActor, Is.EqualTo(2458 * OneMb / 16 * 4 / 32));
 
         // A Solarium store beside a RocksDB WAL: the same cache, and no Raft-log floor (an unshared RocksDB
         // WAL has its own memtables), leaving the proportional quarter.
